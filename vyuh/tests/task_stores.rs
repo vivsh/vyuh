@@ -474,6 +474,6 @@ async fn memory_task_store_contract() -> Result<(), vyuh::tasks::TaskError> {
 
 #[sqlx::test]
 async fn database_task_store_contract(pool: vyuh::db::Pool) -> Result<(), vyuh::tasks::TaskError> {
-    let store = vyuh::tasks::TaskStore::new(pool, 10, Duration::from_secs(300));
+    let store = vyuh::tasks::TaskStore::new(10);
     run_store_contract(store).await
 }

@@ -2,7 +2,7 @@ use std::any::TypeId;
 
 use crate::{
     Error, Site,
-    callables::{self, ArgPart, Callable},
+    callables::{self, Callable},
 };
 
 use super::args::{self, CommandArg};
@@ -61,6 +61,7 @@ impl callables::HasSite for CommandContext {
 
 // ── command ───────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub(crate) struct Command {
     pub(crate) handler: CommandHandlerIn,
     pub(crate) options: CommandConf,
@@ -110,19 +111,12 @@ where
     Args: callables::IntoArgSpecs,
 {
     let specs = Args::into_arg_specs();
-    let Some(spec) = specs
-        .iter()
-        .rev()
-        .find(|spec| matches!(spec.part, ArgPart::Body(_, _)))
-    else {
+    let Some(schema) = specs.iter().rev().find_map(|spec| spec.part.body_schema()) else {
         return Err(CommandError::UnsupportedSchema(
             "command handlers must contain Data<T> or Valid<Data<T>>".into(),
         ));
     };
 
-    let ArgPart::Body(schema, _) = &spec.part else {
-        unreachable!("body arg was selected above");
-    };
     let mut settings = schemars::generate::SchemaSettings::default();
     settings.inline_subschemas = true;
     let mut generator = schemars::SchemaGenerator::new(settings);

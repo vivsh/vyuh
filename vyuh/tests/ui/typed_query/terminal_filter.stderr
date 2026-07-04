@@ -1,0 +1,19 @@
+error[E0599]: `All<Post>` is not an iterator
+  --> tests/ui/typed_query/terminal_filter.rs:14:10
+   |
+12 |       let _ = db::from(&posts)
+   |  _____________-
+13 | |         .all::<Post>()
+14 | |         .filter(posts.id.eq(db::val(1_i64)));
+   | |         -^^^^^^ `All<Post>` is not an iterator
+   | |_________|
+   |
+   |
+  ::: src/db/queries/typed_queries/executables.rs
+   |
+   |   pub struct All<T> {
+   |   ----------------- doesn't satisfy `All<Post>: Iterator`
+   |
+   = note: the following trait bounds were not satisfied:
+           `All<Post>: Iterator`
+           which is required by `&mut All<Post>: Iterator`

@@ -38,19 +38,28 @@ static VALIDATE_KEYS: &[&str] = &[
 
 static COLUMN_KEYS: &[&str] = &[
     "name",
+    "type",
+    "nullable",
     "primary_key",
     "serial",
     "skip",
     "flatten",
     "json",
     "reference",
+    "read_only",
+    "skip_bind",
     "selectable",
     "insertable",
     "updatable",
     "default",
+    "references",
+    "references_name",
+    "check",
     "index",
+    "index_name",
     "index_type",
     "unique",
+    "unique_name",
     "unique_group",
 ];
 
@@ -65,7 +74,8 @@ fn parse_ns_list(attr: &Attribute, ns: &str) -> Result<Option<Vec<darling::ast::
 
     let nested = match &attr.meta {
         syn::Meta::List(list) => {
-            darling::ast::NestedMeta::parse_meta_list(list.tokens.clone()).map_err(|e| {
+            let tokens = normalize_attr_keywords(list.tokens.clone());
+            darling::ast::NestedMeta::parse_meta_list(tokens).map_err(|e| {
                 augment_darling_error(e.into(), &format!("Error parsing #[{ns}(...)]"))
             })? // preserves spans
         }
@@ -79,6 +89,26 @@ fn parse_ns_list(attr: &Attribute, ns: &str) -> Result<Option<Vec<darling::ast::
     };
 
     Ok(Some(nested))
+}
+
+fn normalize_attr_keywords(tokens: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, Ident, TokenTree};
+
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(ident) if ident == "type" => {
+                TokenTree::Ident(Ident::new_raw("type", ident.span()))
+            }
+            TokenTree::Group(group) => {
+                let mut out =
+                    Group::new(group.delimiter(), normalize_attr_keywords(group.stream()));
+                out.set_span(group.span());
+                TokenTree::Group(out)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 fn top_level_key(nm: &darling::ast::NestedMeta) -> Option<&syn::Path> {
@@ -103,7 +133,7 @@ fn enforce_namespace(
         let Some(ident) = path.get_ident() else {
             continue;
         };
-        let key = ident.to_string();
+        let key = ident.to_string().trim_start_matches("r#").to_string();
 
         if !allowed.iter().any(|a| *a == key) {
             // "belongs to ..." hint (best-effort)
@@ -151,6 +181,7 @@ impl FromMeta for EnumWrapper {
 pub struct ReferenceSpec {
     pub from: Option<String>,
     pub to: Option<String>,
+    pub join: Option<String>,
 }
 
 impl FromMeta for ReferenceSpec {
@@ -158,6 +189,7 @@ impl FromMeta for ReferenceSpec {
         Ok(ReferenceSpec {
             from: None,
             to: None,
+            join: None,
         })
     }
 
@@ -168,14 +200,44 @@ impl FromMeta for ReferenceSpec {
             from: Option<LitStr>,
             #[darling(default)]
             to: Option<LitStr>,
+            #[darling(default)]
+            join: Option<LitStr>,
         }
 
         let params = RefParams::from_list(items)?;
         Ok(ReferenceSpec {
             from: params.from.map(|lit| lit.value()),
             to: params.to.map(|lit| lit.value()),
+            join: params.join.map(|lit| lit.value()),
         })
     }
+}
+
+/// Table-level primary key metadata from `#[table(primary_key(...))]`.
+#[derive(Debug, Clone, Default, FromMeta)]
+#[allow(dead_code)]
+pub struct PrimaryKeySpec {
+    #[darling(default)]
+    pub name: Option<String>,
+    pub columns: Vec<LitStr>,
+}
+
+/// Target side of a table-level composite foreign key.
+#[derive(Debug, Clone, FromMeta)]
+#[allow(dead_code)]
+pub struct ForeignKeyTargetSpec {
+    pub table: String,
+    pub columns: Vec<LitStr>,
+}
+
+/// Table-level foreign key metadata from `#[table(foreign_key(...))]`.
+#[derive(Debug, Clone, FromMeta)]
+#[allow(dead_code)]
+pub struct ForeignKeySpec {
+    #[darling(default)]
+    pub name: Option<String>,
+    pub columns: Vec<LitStr>,
+    pub references: ForeignKeyTargetSpec,
 }
 
 // -------------------------------------------------------------------------------------
@@ -187,7 +249,15 @@ impl FromMeta for ReferenceSpec {
 #[allow(dead_code)]
 pub struct ContainerAttrs {
     #[darling(default)]
+    pub name: Option<LitStr>,
+    #[darling(default)]
     pub table: Option<LitStr>,
+    #[darling(default)]
+    pub schema: Option<LitStr>,
+    #[darling(default)]
+    pub primary_key: Option<PrimaryKeySpec>,
+    #[darling(default, multiple, rename = "foreign_key")]
+    pub foreign_keys: Vec<ForeignKeySpec>,
 }
 
 /// Field-level validation attributes from #[validate(...)]
@@ -334,6 +404,11 @@ pub struct ColumnAttrs {
     #[darling(default)]
     pub name: Option<LitStr>,
 
+    #[darling(default, rename = "r#type")]
+    pub sql_type: Option<LitStr>,
+    #[darling(default)]
+    pub nullable: Option<bool>,
+
     #[darling(default)]
     pub primary_key: bool,
     #[darling(default)]
@@ -349,6 +424,11 @@ pub struct ColumnAttrs {
     pub reference: Option<ReferenceSpec>,
 
     #[darling(default)]
+    pub read_only: bool,
+    #[darling(default)]
+    pub skip_bind: bool,
+
+    #[darling(default)]
     pub selectable: Option<bool>,
     #[darling(default)]
     pub insertable: Option<bool>,
@@ -357,14 +437,24 @@ pub struct ColumnAttrs {
 
     #[darling(default)]
     pub default: Option<LitStr>,
+    #[darling(default)]
+    pub references: Option<LitStr>,
+    #[darling(default)]
+    pub references_name: Option<LitStr>,
+    #[darling(default)]
+    pub check: Option<LitStr>,
 
     #[darling(default)]
     pub index: bool,
+    #[darling(default)]
+    pub index_name: Option<LitStr>,
     #[darling(default)]
     pub index_type: Option<LitStr>,
 
     #[darling(default)]
     pub unique: bool,
+    #[darling(default)]
+    pub unique_name: Option<LitStr>,
 
     #[darling(default, multiple, rename = "unique_group")]
     pub unique_groups: Vec<LitStr>,
@@ -447,15 +537,37 @@ impl FieldMeta {
 
 impl ContainerAttrs {
     pub fn from_attrs(attrs: &[Attribute]) -> Result<Self> {
+        let mut out = Self::default();
         for attr in attrs {
+            if let Some(nested) = parse_ns_list(attr, "table")? {
+                out = ContainerAttrs::from_list(&nested)
+                    .map_err(|e| augment_darling_error(e, "Error decoding #[table]"))?;
+            }
             if let Some(nested) = parse_ns_list(attr, "schema")? {
-                // no allowlist here because schema is tiny; keep behavior and avoid extra maintenance
-                return ContainerAttrs::from_list(&nested)
+                let legacy = ContainerAttrs::from_list(&nested)
                     .map_err(|e| augment_darling_error(e, "Error decoding #[schema]"));
+                let legacy = legacy?;
+                if out.name.is_none() {
+                    out.name = legacy.name.or(legacy.table);
+                }
+                if out.schema.is_none() {
+                    out.schema = legacy.schema;
+                }
             }
         }
-        Ok(Self::default())
+        Ok(out)
     }
+}
+
+pub fn to_snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() && i != 0 {
+            out.push('_');
+        }
+        out.push(ch.to_lowercase().next().unwrap_or(ch));
+    }
+    out
 }
 
 /// Parsed struct information ready for codegen

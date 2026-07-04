@@ -80,6 +80,7 @@
       <nav class="vyuh-console-tabs is-compact" role="tablist" data-console-tabs aria-label="Operation detail sections">
         <button type="button" role="tab" id="operation-request-tab" aria-controls="operation-request-panel" aria-selected="true">Request</button>
         <button type="button" role="tab" id="operation-response-tab" aria-controls="operation-response-panel" aria-selected="false" tabindex="-1">Response</button>
+        <button type="button" role="tab" id="operation-middleware-tab" aria-controls="operation-middleware-panel" aria-selected="false" tabindex="-1">Middleware</button>
         <button type="button" role="tab" id="operation-metadata-tab" aria-controls="operation-metadata-panel" aria-selected="false" tabindex="-1">Metadata</button>
       </nav>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="operation-request-panel" aria-labelledby="operation-request-tab">
@@ -95,6 +96,56 @@
         {% include "console/partials/schema_card.html" %}
         {% else %}
         <article class="vyuh-console-muted-panel"><strong>Response</strong><code>No response schema registered.</code></article>
+        {% endfor %}
+      </section>
+      <section class="vyuh-console-tab-panel" role="tabpanel" id="operation-middleware-panel" aria-labelledby="operation-middleware-tab" hidden>
+        {% for mw in selected_operation.middleware %}
+        <article class="vyuh-console-schema-card">
+          <header>
+            <div>
+              <strong>{{ mw.name }}</strong>
+              <span>{{ mw.scope }} middleware</span>
+            </div>
+            <code>{{ mw.scope }}</code>
+          </header>
+          {% if mw.description %}
+          <p>{{ mw.description }}</p>
+          {% endif %}
+          {% if mw.settings %}
+          <table class="vyuh-console-schema-table">
+            <caption>Policy settings</caption>
+            <thead><tr><th>Setting</th><th>Value</th><th>Kind</th></tr></thead>
+            <tbody>
+              {% for setting in mw.settings %}
+              <tr>
+                <td><strong>{{ setting.key }}</strong></td>
+                <td><code>{{ setting.value }}</code></td>
+                <td><span class="vyuh-console-badge">policy</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+          {% if mw.request_parts %}
+          <table class="vyuh-console-schema-table">
+            <caption>API-visible request metadata</caption>
+            <thead><tr><th>Name</th><th>Location</th><th>Type</th></tr></thead>
+            <tbody>
+              {% for part in mw.request_parts %}
+              <tr>
+                <td><strong>{{ part.display_name }}</strong>{% if part.description %}<small>{{ part.description }}</small>{% endif %}</td>
+                <td><code>{{ part.location }}</code></td>
+                <td><code>{{ part.schema_type }}</code></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% elif not mw.settings %}
+          <div class="vyuh-console-muted-panel"><strong>Operational policy</strong><code>No request inputs registered.</code></div>
+          {% endif %}
+        </article>
+        {% else %}
+        <article class="vyuh-console-muted-panel"><strong>Middleware</strong><code>No middleware metadata registered.</code></article>
         {% endfor %}
       </section>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="operation-metadata-panel" aria-labelledby="operation-metadata-tab" hidden>

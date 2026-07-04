@@ -1,0 +1,11 @@
+error[E0599]: no method named `cols_for` found for struct `ModelTable<Post>` in the current scope
+  --> tests/ui/typed_query/cols_for.rs:18:19
+   |
+18 |     let _ = posts.cols_for::<PostRow>();
+   |                   ^^^^^^^^
+   |
+help: there is a method `cols` with a similar name
+   |
+18 -     let _ = posts.cols_for::<PostRow>();
+18 +     let _ = posts.cols::<PostRow>();
+   |

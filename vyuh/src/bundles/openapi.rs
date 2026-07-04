@@ -4,8 +4,8 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 use crate::Site;
-use crate::apidocs::{ApiDocGenerator, ApiMeta, DocViewer};
-use crate::auth::AuthUser;
+use crate::apidocs::{ApiDocGenerator, ApiMeta, DocViewer, OpenApiVersion};
+use crate::auth::{AuthConf, AuthUser};
 use crate::callables::{Operation, OperationKind};
 use crate::routes::AxumRouter;
 
@@ -21,6 +21,7 @@ pub struct OpenApiConf {
     /// Path where the OpenAPI JSON spec is served (e.g. `"/api/openapi.json"`).
     pub spec_path: String,
     pub meta: ApiMeta,
+    pub openapi_version: OpenApiVersion,
     pub viewer: Option<OpenApiViewerConf>,
     /// Optional auth predicate for OpenAPI endpoints.
     /// When `Some(f)`, the request must carry a valid JWT; the extracted
@@ -57,6 +58,7 @@ impl Default for OpenApiConf {
         Self {
             spec_path: "/openapi.json".to_string(),
             meta: ApiMeta::default(),
+            openapi_version: OpenApiVersion::V30,
             viewer: None,
             auth: None,
         }
@@ -91,6 +93,12 @@ impl OpenApiConf {
     /// Set the API version string.
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.meta.version = version.into();
+        self
+    }
+
+    /// Set the OpenAPI document version.
+    pub fn openapi_version(mut self, version: OpenApiVersion) -> Self {
+        self.openapi_version = version;
         self
     }
 
@@ -129,6 +137,7 @@ pub(super) struct DocNode {
     /// UUIDs of the visible operations to include in the generated spec.
     operation_ids: Vec<Uuid>,
     meta: ApiMeta,
+    openapi_version: OpenApiVersion,
     viewer: DocViewer,
     auth: Option<fn(&AuthUser) -> bool>,
 }
@@ -162,6 +171,7 @@ impl DocEngine {
         &self,
         router: &mut AxumRouter<Site>,
         ops: &BTreeMap<Uuid, Operation>,
+        auth: &AuthConf,
     ) -> Result<(), BundleError> {
         for node in &self.nodes {
             let spec_path = ops
@@ -175,7 +185,7 @@ impl DocEngine {
                 .filter_map(|id| ops.get(id))
                 .collect();
 
-            let spec_bytes = generate_spec(&views, &node.meta)?;
+            let spec_bytes = generate_spec(&views, &node.meta, node.openapi_version, auth)?;
 
             // Both captures are plain Bytes / String — cheap clones on each request.
             let auth_pred = node.auth;
@@ -297,6 +307,7 @@ impl Bundle {
             doc_op_id,
             operation_ids,
             meta: conf.meta,
+            openapi_version: conf.openapi_version,
             viewer: viewer
                 .as_ref()
                 .map(|viewer| viewer.viewer)
@@ -311,8 +322,15 @@ impl Bundle {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-fn generate_spec(views: &[&Operation], meta: &ApiMeta) -> Result<Bytes, BundleError> {
-    let doc_gen = ApiDocGenerator::new(meta.clone());
+fn generate_spec(
+    views: &[&Operation],
+    meta: &ApiMeta,
+    openapi_version: OpenApiVersion,
+    auth: &AuthConf,
+) -> Result<Bytes, BundleError> {
+    let doc_gen = ApiDocGenerator::new(meta.clone())
+        .with_auth(auth.clone())
+        .with_version(openapi_version);
     let api = doc_gen
         .generate(views)
         .map_err(|e| BundleError::DocGen(e.to_string()))?;
@@ -339,6 +357,8 @@ mod tests {
             name: name.to_string(),
             description: None,
             summary: None,
+            operation_id: None,
+            deprecated: false,
             path: path.to_string(),
             kind,
             methods: Methods::GET,

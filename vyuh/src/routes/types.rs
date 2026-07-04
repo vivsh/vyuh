@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 use std::ops::Deref;
 
+use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{FromRequest, FromRequestParts, Request};
-use axum::http::{HeaderValue, header, request::Parts};
+use axum::http::{HeaderValue, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -193,6 +194,152 @@ impl IntoResponse for JsonStr {
             HeaderValue::from_static("application/json"),
         );
         res
+    }
+}
+
+/// JSON response with HTTP `201 Created`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Created<T>(pub T);
+
+impl<T> Created<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> IntoResponse for Created<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        (StatusCode::CREATED, Json(self.0)).into_response()
+    }
+}
+
+/// JSON response with HTTP `202 Accepted`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Accepted<T>(pub T);
+
+impl<T> Accepted<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> IntoResponse for Accepted<T>
+where
+    T: Serialize,
+{
+    fn into_response(self) -> Response {
+        (StatusCode::ACCEPTED, Json(self.0)).into_response()
+    }
+}
+
+/// Redirect response using `307 Temporary Redirect`.
+#[derive(Debug, Clone)]
+pub struct TemporaryRedirect {
+    location: Cow<'static, str>,
+}
+
+impl TemporaryRedirect {
+    pub fn to(location: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            location: location.into(),
+        }
+    }
+}
+
+impl IntoResponse for TemporaryRedirect {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::TEMPORARY_REDIRECT,
+            [(header::LOCATION, self.location.into_owned())],
+        )
+            .into_response()
+    }
+}
+
+/// Redirect response using `308 Permanent Redirect`.
+#[derive(Debug, Clone)]
+pub struct PermanentRedirect {
+    location: Cow<'static, str>,
+}
+
+impl PermanentRedirect {
+    pub fn to(location: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            location: location.into(),
+        }
+    }
+}
+
+impl IntoResponse for PermanentRedirect {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::PERMANENT_REDIRECT,
+            [(header::LOCATION, self.location.into_owned())],
+        )
+            .into_response()
+    }
+}
+
+/// Redirect response constructors using Vyuh's 307/308 redirect types.
+pub mod redirect {
+    use super::{PermanentRedirect, TemporaryRedirect};
+
+    /// Creates a `307 Temporary Redirect` response.
+    pub fn to(location: impl Into<std::borrow::Cow<'static, str>>) -> TemporaryRedirect {
+        TemporaryRedirect::to(location)
+    }
+
+    /// Creates a `308 Permanent Redirect` response.
+    pub fn permanent(location: impl Into<std::borrow::Cow<'static, str>>) -> PermanentRedirect {
+        PermanentRedirect::to(location)
+    }
+}
+
+/// Binary file response with a known content type.
+pub struct FileResponse {
+    body: Body,
+    content_type: Cow<'static, str>,
+}
+
+impl FileResponse {
+    pub fn new(body: Body, content_type: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            body,
+            content_type: content_type.into(),
+        }
+    }
+}
+
+impl IntoResponse for FileResponse {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, self.content_type.into_owned())],
+            self.body,
+        )
+            .into_response()
+    }
+}
+
+/// Streaming response with a known content type.
+pub struct StreamResponse {
+    inner: FileResponse,
+}
+
+impl StreamResponse {
+    pub fn new(body: Body, content_type: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            inner: FileResponse::new(body, content_type),
+        }
+    }
+}
+
+impl IntoResponse for StreamResponse {
+    fn into_response(self) -> Response {
+        self.inner.into_response()
     }
 }
 

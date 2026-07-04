@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vyuh::routes::IntoResponse;
 use vyuh::{
-    SiteConf, Validate, bundles,
+    Error, SiteConf, Validate, bundles,
     errors::{ErrorConf, HttpErrorRenderMode},
-    routes::{Html, Json, Path, Query, StatusCode, Valid},
+    routes::{Form, Html, Json, Path, Query, StatusCode, Valid},
     testing::TestClient,
 };
 
@@ -84,6 +84,11 @@ async fn valid_json(Valid(Json(input)): Valid<Json<CreateUser>>) -> Json<CreateU
     Json(input)
 }
 
+#[bundles::route(path = "/valid-form", method = "POST")]
+async fn valid_form(Valid(Form(input)): Valid<Form<CreateUser>>) -> Json<CreateUser> {
+    Json(input)
+}
+
 #[bundles::route(path = "/search")]
 async fn valid_query(Valid(Query(input)): Valid<Query<SearchUsers>>) -> Json<SearchUsers> {
     Json(input)
@@ -104,10 +109,16 @@ async fn valid_schema_rules(Valid(Json(input)): Valid<Json<SchemaRules>>) -> Jso
     Json(input)
 }
 
+#[bundles::route(path = "/bad-html")]
+async fn bad_html() -> Result<Json<()>, Error> {
+    Err(Error::bad_request("<script>alert(1)</script>"))
+}
+
 async fn validation_site(openapi: bool) -> vyuh::Site {
     let bundle = bundles::bundle! {
         parse_only,
         valid_json,
+        valid_form,
         valid_query,
         valid_path,
         valid_custom,
@@ -184,6 +195,7 @@ async fn valid_query_and_path_share_error_shape() {
 
     let query_body: Value = client
         .get("/search?q=x")
+        .header("accept", "application/json")
         .send()
         .await
         .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -194,6 +206,7 @@ async fn valid_query_and_path_share_error_shape() {
 
     let path_body: Value = client
         .get("/users/0")
+        .header("accept", "application/json")
         .send()
         .await
         .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -223,6 +236,113 @@ async fn parse_errors_return_400_error_report() {
     assert_eq!(body["source"], "parse");
     assert_eq!(body["code"], "bad_request");
 
+    site.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn auto_error_rendering_uses_json_for_json_requests() {
+    let site = validation_site(false).await;
+    let client = TestClient::new(site.clone());
+
+    let json_body: Value = client
+        .post("/valid")
+        .json(&serde_json::json!({
+            "email": "not-an-email",
+            "name": "x"
+        }))
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .json()
+        .await;
+    assert_eq!(json_body["source"], "validation");
+
+    let api_body: Value = client
+        .post("/parse")
+        .header("content-type", "application/vnd.api+json")
+        .body(axum::body::Body::from("{bad json"))
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .json()
+        .await;
+    assert_eq!(api_body["code"], "bad_request");
+
+    site.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn auto_error_rendering_uses_json_for_json_accept() {
+    let site = validation_site(false).await;
+    let client = TestClient::new(site.clone());
+
+    let body: Value = client
+        .get("/search?q=x")
+        .header("accept", "application/vnd.api+json")
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .json()
+        .await;
+
+    assert_eq!(body["code"], "validation_error");
+    site.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn auto_error_rendering_uses_html_without_json_signal() {
+    let site = validation_site(false).await;
+    let client = TestClient::new(site.clone());
+
+    let response = client
+        .post("/valid-form")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from("email=bad&name=x"))
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    let content_type = response
+        .header("content-type")
+        .and_then(|value| value.to_str().ok());
+    assert!(content_type.is_some_and(|value| value.starts_with("text/html")));
+    let html = response.text().await;
+    assert!(html.contains("validation_error"));
+
+    let wildcard = client
+        .get("/search?q=x")
+        .header("accept", "*/*")
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .text()
+        .await;
+    assert!(wildcard.contains("<!doctype html>"));
+
+    site.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn auto_error_rendering_escapes_default_html() {
+    let site = vyuh::Site::build(
+        test_conf(),
+        bundles::bundle! {
+            bad_html,
+        },
+    )
+    .await
+    .unwrap();
+    let client = TestClient::new(site.clone());
+
+    let html = client
+        .get("/bad-html")
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .text()
+        .await;
+
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!html.contains("<script>"));
     site.shutdown_and_wait().await;
 }
 
@@ -317,6 +437,7 @@ async fn custom_error_handler_can_replace_response() {
         conf,
         bundles::bundle! {
             valid_json,
+            valid_form,
         },
     )
     .await
@@ -356,7 +477,7 @@ async fn custom_json_and_html_error_renderers_can_replace_messages() {
                     .into_response()
             })
             .html(|ctx, view| async move {
-                assert_eq!(ctx.path, "/valid");
+                assert_eq!(ctx.path, "/valid-form");
                 (
                     view.status,
                     Html(format!(
@@ -371,6 +492,7 @@ async fn custom_json_and_html_error_renderers_can_replace_messages() {
         conf,
         bundles::bundle! {
             valid_json,
+            valid_form,
         },
     )
     .await
@@ -391,13 +513,25 @@ async fn custom_json_and_html_error_renderers_can_replace_messages() {
     assert_eq!(json_body["message"], "json validation message");
     assert_eq!(json_body["has_errors"], true);
 
-    let html_body = client
+    let json_wins: Value = client
         .post("/valid")
         .header("accept", "text/html")
         .json(&serde_json::json!({
             "email": "not-an-email",
             "name": "x"
         }))
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .json()
+        .await;
+    assert_eq!(json_wins["message"], "json validation message");
+
+    let html_body = client
+        .post("/valid-form")
+        .header("accept", "text/html")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from("email=bad&name=x"))
         .send()
         .await
         .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
@@ -439,6 +573,34 @@ async fn html_error_renderer_can_be_forced_by_config() {
         .text()
         .await;
     assert_eq!(html_body, "html:validation_error");
+
+    site.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn json_error_renderer_can_be_forced_by_config() {
+    let conf = test_conf().errors(ErrorConf::default().http_mode(HttpErrorRenderMode::Json));
+    let site = vyuh::Site::build(
+        conf,
+        bundles::bundle! {
+            valid_form,
+        },
+    )
+    .await
+    .unwrap();
+    let client = TestClient::new(site.clone());
+
+    let body: Value = client
+        .post("/valid-form")
+        .header("accept", "text/html")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from("email=bad&name=x"))
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+        .json()
+        .await;
+    assert_eq!(body["code"], "validation_error");
 
     site.shutdown_and_wait().await;
 }

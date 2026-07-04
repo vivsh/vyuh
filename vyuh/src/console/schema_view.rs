@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use crate::{
     Operation, OperationKind,
     callables::{ArgPart, ArgSpec, ReturnPart, ReturnSpec, TypeSchema},
+    console::middleware::{MiddlewareInfo, MiddlewareSetting, operation_middleware},
 };
 
 #[derive(Debug, Serialize)]
@@ -20,11 +21,12 @@ pub(crate) struct OperationView {
     pub owner: Option<String>,
     pub hidden: bool,
     pub args: Vec<SchemaView>,
+    pub middleware: Vec<MiddlewareView>,
     pub returns: Vec<SchemaView>,
 }
 
 impl OperationView {
-    pub(crate) fn from_operation(op: &Operation) -> Self {
+    pub(crate) fn from_operation(op: &Operation, site: &crate::Site) -> Self {
         Self {
             id: op.id.to_string(),
             name: op.name.clone(),
@@ -36,8 +38,39 @@ impl OperationView {
             tags: op.tags.iter().map(|tag| tag.to_string()).collect(),
             owner: op.owner.clone(),
             hidden: op.hidden,
-            args: op.args.iter().map(SchemaView::from_arg).collect(),
-            returns: op.returns.iter().map(SchemaView::from_return).collect(),
+            args: op.args.iter().flat_map(SchemaView::from_arg).collect(),
+            middleware: operation_middleware(site, op)
+                .iter()
+                .map(MiddlewareView::from_info)
+                .collect(),
+            returns: operation_returns(op),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct MiddlewareView {
+    pub name: String,
+    pub scope: String,
+    pub description: Option<String>,
+    pub request_parts: Vec<SchemaView>,
+    pub settings: Vec<MiddlewareSetting>,
+}
+
+impl MiddlewareView {
+    fn from_info(info: &MiddlewareInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            scope: info.scope.to_string(),
+            description: info.description.clone(),
+            request_parts: info
+                .request_parts
+                .iter()
+                .flat_map(|part| {
+                    SchemaView::from_part(&part.name, part.description.clone(), &part.part)
+                })
+                .collect(),
+            settings: info.settings.clone(),
         }
     }
 }
@@ -66,16 +99,44 @@ pub(crate) struct PropertyView {
 }
 
 impl SchemaView {
-    fn from_arg(arg: &ArgSpec) -> Self {
-        let (location, schema, content_type) = arg_part(&arg.part);
-        Self::from_schema(
-            arg.name.clone(),
-            location,
-            arg.description.clone(),
-            None,
-            content_type,
-            schema,
-        )
+    fn from_arg(arg: &ArgSpec) -> Vec<Self> {
+        flatten_arg_part(&arg.part)
+            .into_iter()
+            .filter_map(|flat| {
+                if matches!(flat.part, ArgPart::Response(_)) {
+                    return None;
+                }
+                let (location, schema, content_type) = arg_part(flat.part);
+                Some(Self::from_schema(
+                    arg.name.clone(),
+                    location_label(location, flat),
+                    arg.description.clone(),
+                    None,
+                    content_type,
+                    schema,
+                ))
+            })
+            .collect()
+    }
+
+    fn from_part(name: &str, description: Option<String>, part: &ArgPart) -> Vec<Self> {
+        flatten_arg_part(part)
+            .into_iter()
+            .filter_map(|flat| {
+                if matches!(flat.part, ArgPart::Response(_)) {
+                    return None;
+                }
+                let (location, schema, content_type) = arg_part(flat.part);
+                Some(Self::from_schema(
+                    name.to_string(),
+                    location_label(location, flat),
+                    description.clone(),
+                    None,
+                    content_type,
+                    schema,
+                ))
+            })
+            .collect()
     }
 
     fn from_return(ret: &ReturnSpec) -> Self {
@@ -159,7 +220,16 @@ fn arg_part(part: &ArgPart) -> (String, Option<&TypeSchema>, Option<String>) {
         ArgPart::Body(schema, content_type) => {
             ("body".into(), Some(schema), Some(content_type.to_string()))
         }
+        ArgPart::BodyWith {
+            schema,
+            content_type,
+            ..
+        } => ("body".into(), Some(schema), Some(content_type.to_string())),
         ArgPart::Security { scheme, .. } => (format!("security: {scheme}"), None, None),
+        ArgPart::Response(_) => ("response".into(), None, None),
+        ArgPart::Composite(_) => ("composite".into(), None, None),
+        ArgPart::Optional(_) => ("optional".into(), None, None),
+        ArgPart::Fallible(_) => ("fallible".into(), None, None),
         ArgPart::Zone => ("zone".into(), None, None),
         ArgPart::Ignore => ("runtime".into(), None, None),
     }
@@ -171,8 +241,93 @@ fn return_part(part: &ReturnPart) -> (String, Option<&TypeSchema>, Option<String
         ReturnPart::Body(schema, content_type) => {
             ("body".into(), Some(schema), Some(content_type.to_string()))
         }
+        ReturnPart::Created(schema, content_type) => (
+            "created".into(),
+            Some(schema),
+            Some(content_type.to_string()),
+        ),
+        ReturnPart::Accepted(schema, content_type) => (
+            "accepted".into(),
+            Some(schema),
+            Some(content_type.to_string()),
+        ),
         ReturnPart::Empty => ("empty".into(), None, None),
+        ReturnPart::Redirect { status_code } => (
+            format!("redirect {status_code}"),
+            None,
+            Some("Location".into()),
+        ),
+        ReturnPart::Binary(content_type) => ("binary".into(), None, Some(content_type.to_string())),
         ReturnPart::Unknown => ("unknown".into(), None, None),
+    }
+}
+
+fn operation_returns(op: &Operation) -> Vec<SchemaView> {
+    let mut returns = op
+        .returns
+        .iter()
+        .map(SchemaView::from_return)
+        .collect::<Vec<_>>();
+    for arg in &op.args {
+        for part in flatten_arg_part(&arg.part) {
+            if part.suppresses_responses() {
+                continue;
+            }
+            if let ArgPart::Response(specs) = part.part {
+                returns.extend(specs.iter().map(SchemaView::from_return));
+            }
+        }
+    }
+    returns
+}
+
+#[derive(Clone, Copy)]
+struct FlatArgPart<'a> {
+    part: &'a ArgPart,
+    optional: bool,
+    fallible: bool,
+}
+
+impl FlatArgPart<'_> {
+    fn suppresses_responses(self) -> bool {
+        self.optional || self.fallible
+    }
+}
+
+fn flatten_arg_part(part: &ArgPart) -> Vec<FlatArgPart<'_>> {
+    let mut output = Vec::new();
+    push_flattened_arg_part(part, false, false, &mut output);
+    output
+}
+
+fn push_flattened_arg_part<'a>(
+    part: &'a ArgPart,
+    optional: bool,
+    fallible: bool,
+    output: &mut Vec<FlatArgPart<'a>>,
+) {
+    match part {
+        ArgPart::Composite(parts) => {
+            for nested in parts {
+                push_flattened_arg_part(nested, optional, fallible, output);
+            }
+        }
+        ArgPart::Optional(nested) => push_flattened_arg_part(nested, true, fallible, output),
+        ArgPart::Fallible(nested) => push_flattened_arg_part(nested, optional, true, output),
+        other => output.push(FlatArgPart {
+            part: other,
+            optional,
+            fallible,
+        }),
+    }
+}
+
+fn location_label(location: String, part: FlatArgPart<'_>) -> String {
+    match (part.optional, part.fallible) {
+        (true, true) => format!("optional fallible {location}"),
+        (true, false) => format!("optional {location}"),
+        (false, true) => format!("fallible {location}"),
+        (false, false) => location,
     }
 }
 

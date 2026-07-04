@@ -1,0 +1,30 @@
+error[E0277]: the trait bound `PostRow: IntoTableSource` is not satisfied
+  --> tests/ui/typed_query/from_record.rs:23:22
+   |
+23 |     let _ = db::from(row);
+   |             -------- ^^^ unsatisfied trait bound
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `IntoTableSource` is not implemented for `PostRow`
+  --> tests/ui/typed_query/from_record.rs:11:1
+   |
+11 | struct PostRow {
+   | ^^^^^^^^^^^^^^
+   = help: the following other types implement trait `IntoTableSource`:
+             &ModelTable<M>
+             &vyuh::db::typed::Cte<T>
+             &vyuh::db::typed::Subquery<T>
+             &vyuh::db::typed::__private::Table
+             ModelTable<M>
+             vyuh::db::typed::Cte<T>
+             vyuh::db::typed::Subquery<T>
+             vyuh::db::typed::__private::Table
+note: required by a bound in `vyuh::db::from`
+  --> src/db/queries/typed_queries/api.rs
+   |
+   | pub fn from<S>(source: S) -> QueryScope
+   |        ---- required by a bound in this function
+   | where
+   |     S: IntoTableSource,
+   |        ^^^^^^^^^^^^^^^ required by this bound in `from`

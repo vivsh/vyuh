@@ -94,18 +94,24 @@ body {
 }
 
 .chapter li.chapter-item a {
+  border-left: 3px solid transparent;
   border-radius: $vyuh-radius-sm;
   color: rgba($vyuh-ink, 0.74);
   font-size: $vyuh-text-sm;
-  line-height: 1.45;
-  padding-block: $vyuh-space-2;
-  padding-inline: $vyuh-space-3;
+  line-height: $vyuh-line-compact;
+  padding-block: $vyuh-space-1;
+  padding-inline: $vyuh-space-3 $vyuh-space-2;
 }
 
 .chapter li.chapter-item a.active,
 .chapter li.chapter-item a:hover {
   background: rgba($vyuh-ember, 0.08);
+  border-left-color: rgba($vyuh-ember, 0.72);
   color: $vyuh-ember;
+}
+
+.chapter li.chapter-item a.active {
+  font-weight: $vyuh-label-weight;
 }
 
 .chapter li.part-title {
@@ -146,72 +152,94 @@ body {
   color: rgba($vyuh-ink, 0.72);
 }
 
-#content main {
-  @include vyuh-surface(base, soft, lg);
-  font-size: $vyuh-text-lg;
-  line-height: $vyuh-line-body;
-  margin-inline: auto;
-  margin-block: $vyuh-space-9;
-  max-width: $vyuh-doc-content-width;
-  padding: $vyuh-space-9;
+.content {
+  padding-top: $vyuh-space-6;
 }
 
-#content main > :first-child {
+#content main,
+#mdbook-content main {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  font-size: $vyuh-text-md;
+  line-height: 1.78;
+  margin-block: 0;
+  max-width: var(--content-max-width);
+  padding: 0;
+}
+
+#content main > :first-child,
+#mdbook-content main > :first-child {
   margin-top: 0;
 }
 
-#content main > :last-child {
+#content main > :last-child,
+#mdbook-content main > :last-child {
   margin-bottom: 0;
 }
 
-#content h1 {
+#content h1,
+#mdbook-content h1 {
   font-family: $vyuh-font-display;
   font-size: $vyuh-text-5xl;
   line-height: $vyuh-line-tight;
+  color: $vyuh-ink;
 }
 
-#content h2 {
+#content h2,
+#mdbook-content h2 {
   border-bottom: 1px solid $vyuh-line;
+  color: $vyuh-ink;
   margin-top: 2.5rem;
   padding-bottom: 0.5rem;
 }
 
-#content h3 {
+#content h3,
+#mdbook-content h3 {
+  color: $vyuh-ink;
   margin-top: 2rem;
 }
 
 #content p,
-#content li {
+#content li,
+#mdbook-content p,
+#mdbook-content li {
   color: rgba($vyuh-ink, 0.76);
 }
 
-#content p {
-  margin-bottom: 1rem;
+#content p,
+#mdbook-content p {
+  margin-bottom: $vyuh-space-5;
 }
 
-#content li {
+#content li,
+#mdbook-content li {
   margin-block: $vyuh-space-1;
 }
 
-#content a {
+#content a,
+#mdbook-content a {
   color: $vyuh-ember;
   text-decoration-color: rgba($vyuh-ember, 0.28);
   text-underline-offset: 0.18em;
 }
 
-#content a:hover {
+#content a:hover,
+#mdbook-content a:hover {
   color: $vyuh-ember;
 }
 
-#content code {
-  background: rgba($vyuh-ember, 0.08);
-  border: 1px solid rgba($vyuh-ember, 0.12);
+#content :not(pre) > code,
+#mdbook-content :not(pre) > code {
+  background: rgba($vyuh-saffron, 0.16);
+  border: 1px solid rgba($vyuh-ember, 0.2);
   border-radius: $vyuh-radius-xs;
   color: $vyuh-ember;
-  padding: 0 $vyuh-space-1;
+  padding: $vyuh-space-half $vyuh-space-1;
 }
 
-#content pre {
+#content pre,
+#mdbook-content pre {
   background: $vyuh-ink;
   border: 1px solid rgba($vyuh-ink, 0.14);
   border-radius: $vyuh-radius-md;
@@ -219,17 +247,95 @@ body {
   color: $vyuh-paper;
   font-size: $vyuh-text-code;
   line-height: $vyuh-line-code;
+  max-height: 34rem;
+  overflow: auto;
   padding: $vyuh-space-4;
+  scrollbar-color: rgba($vyuh-paper, 0.32) transparent;
 }
 
-#content pre code {
+#content pre code,
+#mdbook-content pre code {
   background: transparent;
   border: 0;
   color: inherit;
   padding: 0;
 }
 
-#content blockquote {
+#content pre .hljs,
+#mdbook-content pre .hljs {
+  background: transparent;
+  color: rgba($vyuh-paper, 0.92);
+}
+
+#content pre .hljs-comment,
+#content pre .hljs-quote,
+#mdbook-content pre .hljs-comment,
+#mdbook-content pre .hljs-quote {
+  color: rgba($vyuh-paper, 0.58);
+}
+
+#content pre .hljs-keyword,
+#content pre .hljs-selector-tag,
+#content pre .hljs-title,
+#content pre .hljs-section,
+#mdbook-content pre .hljs-keyword,
+#mdbook-content pre .hljs-selector-tag,
+#mdbook-content pre .hljs-title,
+#mdbook-content pre .hljs-section {
+  color: #f8c66a;
+}
+
+#content pre .hljs-string,
+#content pre .hljs-symbol,
+#content pre .hljs-bullet,
+#mdbook-content pre .hljs-string,
+#mdbook-content pre .hljs-symbol,
+#mdbook-content pre .hljs-bullet {
+  color: #9ed8a3;
+}
+
+#content pre .hljs-number,
+#content pre .hljs-meta,
+#content pre .hljs-built_in,
+#content pre .hljs-builtin-name,
+#content pre .hljs-literal,
+#content pre .hljs-type,
+#content pre .hljs-params,
+#mdbook-content pre .hljs-number,
+#mdbook-content pre .hljs-meta,
+#mdbook-content pre .hljs-built_in,
+#mdbook-content pre .hljs-builtin-name,
+#mdbook-content pre .hljs-literal,
+#mdbook-content pre .hljs-type,
+#mdbook-content pre .hljs-params {
+  color: #ffb27a;
+}
+
+#content pre .hljs-variable,
+#content pre .hljs-template-variable,
+#content pre .hljs-attribute,
+#content pre .hljs-attr,
+#content pre .hljs-tag,
+#content pre .hljs-name,
+#content pre .hljs-regexp,
+#content pre .hljs-link,
+#content pre .hljs-selector-id,
+#content pre .hljs-selector-class,
+#mdbook-content pre .hljs-variable,
+#mdbook-content pre .hljs-template-variable,
+#mdbook-content pre .hljs-attribute,
+#mdbook-content pre .hljs-attr,
+#mdbook-content pre .hljs-tag,
+#mdbook-content pre .hljs-name,
+#mdbook-content pre .hljs-regexp,
+#mdbook-content pre .hljs-link,
+#mdbook-content pre .hljs-selector-id,
+#mdbook-content pre .hljs-selector-class {
+  color: #f08a69;
+}
+
+#content blockquote,
+#mdbook-content blockquote {
   background: rgba($vyuh-ember, 0.08);
   border-left: 4px solid $vyuh-ember;
   border-radius: 0 $vyuh-radius-sm $vyuh-radius-sm 0;
@@ -237,17 +343,21 @@ body {
   padding: $vyuh-space-3 $vyuh-space-4;
 }
 
-#content table {
+#content table,
+#mdbook-content table {
   @include vyuh-surface(base, none, md);
   overflow: hidden;
 }
 
-#content th {
+#content th,
+#mdbook-content th {
   color: $vyuh-muted;
 }
 
 #content td,
-#content th {
+#content th,
+#mdbook-content td,
+#mdbook-content th {
   border-color: $vyuh-line;
 }
 
@@ -271,6 +381,10 @@ body {
 }
 
 @media (max-width: 768px) {
+  .content {
+    padding-top: $vyuh-space-5;
+  }
+
   .page-wrapper::before {
     height: 18rem;
     left: 50%;
@@ -281,7 +395,8 @@ body {
     width: 18rem;
   }
 
-  #content main {
+  #content main,
+  #mdbook-content main {
     border-inline: 0;
     border-radius: 0;
     font-size: 1rem;

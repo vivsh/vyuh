@@ -4,9 +4,10 @@ use crate::db::DbError;
 use crate::validation::{PathSeg, ValidationError, ValidationReport};
 use axum::{
     Json,
-    http::{HeaderMap, Method, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 use smallvec::SmallVec;
 use std::fmt;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use std::{borrow::Cow, error::Error as StdError};
 
 /// Transport-facing source category for rendered error reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorSourceKind {
     Framework,
@@ -33,8 +34,9 @@ pub enum ErrorSourceKind {
 ///
 /// `ErrorReport` is intentionally transport-oriented. Application errors can
 /// convert into it, but should not use it as their domain error type.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ErrorReport {
+    #[schemars(skip)]
     #[serde(skip_serializing)]
     pub status: StatusCode,
     pub source: ErrorSourceKind,
@@ -42,6 +44,21 @@ pub struct ErrorReport {
     pub detail: Cow<'static, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<ErrorDebug>,
+}
+
+/// Optional diagnostic payload for development error responses.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ErrorDebug {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Cow<'static, str>>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub context: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub causes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backtrace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +211,7 @@ impl ErrorConf {
                 if let Some(handler) = &self.html_handler {
                     return handler(ctx, view).await;
                 }
+                return default_html_error(ctx, view);
             }
             ErrorRenderTarget::Json => {
                 if let Some(handler) = &self.json_handler {
@@ -216,20 +234,69 @@ impl ErrorConf {
         match self.http_mode {
             HttpErrorRenderMode::Json => ErrorRenderTarget::Json,
             HttpErrorRenderMode::Html => ErrorRenderTarget::Html,
-            HttpErrorRenderMode::Auto => {
-                if ctx
-                    .headers
-                    .get(axum::http::header::ACCEPT)
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|value| value.contains("text/html"))
-                {
-                    ErrorRenderTarget::Html
-                } else {
-                    ErrorRenderTarget::Json
-                }
-            }
+            HttpErrorRenderMode::Auto => http_auto_target(&ctx.headers),
         }
     }
+}
+
+fn http_auto_target(headers: &HeaderMap) -> ErrorRenderTarget {
+    if is_json_content_type(headers) || accepts_json(headers) {
+        ErrorRenderTarget::Json
+    } else {
+        ErrorRenderTarget::Html
+    }
+}
+
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(media_header_has_json)
+}
+
+fn accepts_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(media_header_has_json)
+}
+
+fn media_header_has_json(value: &str) -> bool {
+    value.split(',').any(|part| {
+        let media = part.split(';').next().unwrap_or("").trim();
+        media_type_is_json(media)
+    })
+}
+
+fn media_type_is_json(media: &str) -> bool {
+    let media = media.to_ascii_lowercase();
+    media == "application/json" || media == "application/*+json" || media.ends_with("+json")
+}
+
+fn default_html_error(ctx: ErrorRequestContext, view: ErrorView) -> Response {
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{status} {code}</title></head><body><main><h1>{status}</h1><p>{message}</p><p><code>{method} {path}</code></p></main></body></html>",
+        status = view.status.as_u16(),
+        code = escape_html(view.code.as_ref()),
+        message = escape_html(view.message.as_ref()),
+        method = escape_html(ctx.method.as_str()),
+        path = escape_html(&ctx.path),
+    );
+    (
+        view.status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 impl ErrorReport {
@@ -245,6 +312,7 @@ impl ErrorReport {
             code: code.into(),
             detail: detail.into(),
             errors: None,
+            debug: None,
         }
     }
 
@@ -264,6 +332,7 @@ impl ErrorReport {
             code: Cow::Borrowed("validation_error"),
             detail: Cow::Borrowed("Validation failed."),
             errors: Some(report.to_nested_errors()),
+            debug: None,
         }
     }
 
@@ -661,19 +730,65 @@ impl IntoResponse for Error {
 
 impl From<Error> for ErrorReport {
     fn from(err: Error) -> Self {
-        let include_context = cfg!(debug_assertions) && !err.context.is_empty();
-        let context = err
-            .context
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>();
+        let debug = debug_error_payload(&err);
         let mut report = ErrorView::from_error(&err).to_report();
-        if include_context {
-            report.errors = Some(serde_json::json!({
-                "context": context
-            }));
+        if let Some(debug) = debug {
+            report.debug = Some(debug);
         }
         report
+    }
+}
+
+fn debug_error_payload(err: &Error) -> Option<ErrorDebug> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+
+    let context = err
+        .context
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>();
+    let mut causes = Vec::new();
+    if let Some(source) = &err.source {
+        collect_error_source_chain(source, &mut causes);
+    }
+
+    if context.is_empty() && causes.is_empty() {
+        return None;
+    }
+
+    Some(ErrorDebug {
+        details: None,
+        context,
+        causes,
+        backtrace: None,
+    })
+}
+
+fn collect_error_source_chain(source: &ErrorSource, causes: &mut Vec<String>) {
+    match source {
+        ErrorSource::Validation(report) => {
+            if !report.is_empty() {
+                causes.push(format!(
+                    "Validation failed with {} error(s)",
+                    report.issues.len()
+                ));
+            }
+        }
+        ErrorSource::Database(err) => collect_std_error_chain(err, causes),
+        ErrorSource::Auth(err) => collect_std_error_chain(err, causes),
+        ErrorSource::Sqlx(err) => collect_std_error_chain(err, causes),
+        ErrorSource::Other(err) => collect_std_error_chain(err.as_ref(), causes),
+    }
+}
+
+fn collect_std_error_chain(err: &(dyn StdError + 'static), causes: &mut Vec<String>) {
+    causes.push(err.to_string());
+    let mut current = err.source();
+    while let Some(source) = current {
+        causes.push(source.to_string());
+        current = source.source();
     }
 }
 

@@ -63,6 +63,8 @@ pub struct FnSpec {
     pub args: Vec<FnArg>,
     pub returns: Vec<FnReturn>,
     pub description: Option<String>,
+    pub operation_id: Option<String>,
+    pub deprecated: bool,
     pub method: bool,
     pub receiver: Option<ReceiverSpec>,
 }
@@ -196,6 +198,8 @@ fn build_spec_from_signature(sig: &syn::Signature, description: Option<String>) 
         args: extract_args(sig),
         returns: extract_returns(sig),
         description,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver,
     }
@@ -304,6 +308,8 @@ pub(crate) fn parse_and_apply_overrides<T: FromMeta + Default>(
     let mut arg_overrides = Vec::new();
     let mut return_overrides = Vec::new();
     let mut description = None;
+    let mut operation_id = None;
+    let mut deprecated = false;
 
     for item in items {
         match item {
@@ -335,6 +341,20 @@ pub(crate) fn parse_and_apply_overrides<T: FromMeta + Default>(
                     description = Some(lit_str.value());
                 }
             }
+            darling::ast::NestedMeta::Meta(syn::Meta::NameValue(nv))
+                if nv.path.is_ident("operation_id") =>
+            {
+                if let syn::Expr::Lit(expr_lit) = &nv.value
+                    && let syn::Lit::Str(lit_str) = &expr_lit.lit
+                {
+                    operation_id = Some(lit_str.value());
+                }
+            }
+            darling::ast::NestedMeta::Meta(syn::Meta::Path(path))
+                if path.is_ident("deprecated") =>
+            {
+                deprecated = true;
+            }
             _ => conf_items.push(item.clone()),
         }
     }
@@ -345,6 +365,12 @@ pub(crate) fn parse_and_apply_overrides<T: FromMeta + Default>(
 
     if let Some(desc) = description {
         spec.description = Some(desc);
+    }
+    if let Some(id) = operation_id {
+        spec.operation_id = Some(id);
+    }
+    if deprecated {
+        spec.deprecated = true;
     }
 
     let conf = if conf_items.is_empty() {
@@ -537,10 +563,22 @@ pub(crate) fn build_patch_chain(spec: &FnSpec) -> proc_macro2::TokenStream {
     } else {
         quote! {}
     };
+    let id_patch = if let Some(operation_id) = &spec.operation_id {
+        quote! { .operation_id(#operation_id) }
+    } else {
+        quote! {}
+    };
+    let deprecated_patch = if spec.deprecated {
+        quote! { .deprecated(true) }
+    } else {
+        quote! {}
+    };
 
     quote! {
         .patch(::vyuh::callables::PatchOp::new()
             #desc_patch
+            #id_patch
+            #deprecated_patch
             #(#arg_patches)*
             #(#return_patches)*
         )

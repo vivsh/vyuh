@@ -1,12 +1,12 @@
-pub(crate) mod delete;
-pub(crate) mod insert;
-pub(crate) mod select;
-pub(crate) mod update;
+pub(crate) mod raw;
+pub mod typed_queries;
 
-pub use delete::DeleteQuery;
-pub use insert::InsertQuery;
-pub use select::SelectQuery;
-pub use update::UpdateQuery;
+pub use raw::RawQuery;
+pub use typed_queries as typed;
+pub use typed_queries::{
+    DbExpression, DbFunction, Expr, ExprRenderCtx, FunctionArgs, ParamSource, ParamSpec, QueryPlan,
+    SourceKind, SourceMeta, count, custom, from, func, meta, now, val, var,
+};
 
 use crate::db::argvalue::ArgValue;
 use crate::db::commons::{Arguments, Database};
@@ -65,6 +65,21 @@ pub enum QueryError {
     BindError(String),
     #[error("source not set")]
     SourceNotSet,
+    #[error("table metadata not set for {0}")]
+    TableNotSet(&'static str),
+    #[error("query source table mismatch: expected {expected}, got {got}")]
+    TableMismatch { expected: String, got: String },
+    #[error("unknown query alias or logical prefix '{0}'")]
+    UnknownAlias(String),
+    #[error("invalid projection field '{0}'")]
+    InvalidProjection(String),
+    #[error("reference '{reference}' is missing {field}")]
+    MissingReference {
+        reference: &'static str,
+        field: &'static str,
+    },
+    #[error("unsupported filter operator '{0}' for this value")]
+    UnsupportedFilter(&'static str),
     #[error("placeholder error: {0}")]
     PlaceholderError(#[from] crate::db::placeholders::PlaceholderError),
     #[error("missing binding for {0}")]
@@ -96,21 +111,30 @@ pub enum LockMode {
     Share,
 }
 
-/// Trait for query builders that support filtering and argument binding.
-pub trait FilteredBuilder: Sized {
-    fn filter(self, cond: impl Into<std::borrow::Cow<'static, str>>) -> Self;
-    fn bind_dyn(self, val: ArgValue) -> Self;
-    fn bind_named_dyn(self, name: &str, val: ArgValue) -> Self;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Like,
+    ILike,
+    In,
 }
 
-/// Validate that a SQL identifier contains only safe characters.
-/// Allows alphanumerics, underscores, dots, and spaces (for "table alias" style).
-pub(crate) fn validate_ident(s: &str) -> Result<(), QueryError> {
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ' ')
-    {
-        Ok(())
-    } else {
-        Err(QueryError::InvalidIdentifier(s.to_string()))
-    }
+pub enum FilterValue {
+    One(ArgValue),
+    Many(Vec<ArgValue>),
+}
+
+pub struct FilterPredicate {
+    pub column: &'static str,
+    pub op: FilterOp,
+    pub value: FilterValue,
+}
+
+pub trait Filterable {
+    fn filters(&self) -> Vec<FilterPredicate>;
 }

@@ -36,10 +36,17 @@ impl CommandArgType {
 #[derive(Debug, Clone)]
 pub(crate) struct CommandArg {
     pub(crate) name: String,
+    pub(crate) flag: String,
     pub(crate) arg_type: CommandArgType,
     pub(crate) required: bool,
     pub(crate) description: Option<String>,
     pub(crate) hints: Vec<String>,
+}
+
+impl CommandArg {
+    pub(crate) fn flag_name(&self) -> &str {
+        &self.flag
+    }
 }
 
 // ── schema parsing ────────────────────────────────────────────────────────────
@@ -90,6 +97,7 @@ pub(super) fn parse_schema_to_args(
 
         args.push(CommandArg {
             name: prop.to_string(),
+            flag: to_flag_name(prop),
             arg_type,
             required,
             description,
@@ -174,8 +182,18 @@ fn collect_hints(prop_obj: &Map<String, Value>) -> Vec<String> {
             hints.push(format!("validators: {}", names.join(", ")));
         }
     }
+    if let Some(default) = prop_obj.get("default") {
+        hints.push(format!("default: {}", format_default(default)));
+    }
 
     hints
+}
+
+fn format_default(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
 
 fn resolve_root_schema_object(
@@ -279,8 +297,7 @@ pub(super) fn parse_args<T: DeserializeOwned + 'static>(
     args: &[&str],
     arg_defs: &[CommandArg],
 ) -> Result<T, CommandError> {
-    let arg_map: IndexMap<&str, &CommandArg> =
-        arg_defs.iter().map(|a| (a.name.as_str(), a)).collect();
+    let arg_map = build_arg_map(arg_defs);
     let store = parse_flag_args(command_name, args, &arg_map)?;
 
     let mut obj = Map::new();
@@ -291,9 +308,9 @@ pub(super) fn parse_args<T: DeserializeOwned + 'static>(
                 command: command_name.to_string(),
                 flag: key.clone(),
             })?;
-        validate_arg_values(key, values, &arg_def.arg_type)?;
-        let json_value = convert_value(key, values, &arg_def.arg_type)?;
-        obj.insert(key.clone(), json_value);
+        validate_arg_values(arg_def.flag_name(), values, &arg_def.arg_type)?;
+        let json_value = convert_value(arg_def.flag_name(), values, &arg_def.arg_type)?;
+        obj.insert(arg_def.name.clone(), json_value);
     }
 
     check_required_args(arg_defs, &obj)?;
@@ -308,6 +325,15 @@ pub(super) fn parse_args<T: DeserializeOwned + 'static>(
 
     serde_json::from_value(Value::Object(obj))
         .map_err(|e| CommandError::DeserializeError(e.to_string()))
+}
+
+fn build_arg_map<'a>(arg_defs: &'a [CommandArg]) -> IndexMap<&'a str, &'a CommandArg> {
+    let mut arg_map = IndexMap::new();
+    for arg in arg_defs {
+        arg_map.insert(arg.name.as_str(), arg);
+        arg_map.insert(arg.flag.as_str(), arg);
+    }
+    arg_map
 }
 
 fn parse_flag_args(
@@ -348,12 +374,16 @@ fn handle_flag(
     store: &mut IndexMap<String, Vec<String>>,
     arg_map: &IndexMap<&str, &CommandArg>,
 ) -> Result<(usize, Option<String>), CommandError> {
-    let key = flag.trim_start_matches("--");
+    let raw_key = flag.trim_start_matches("--");
+    let (key, inline_value) = match raw_key.split_once('=') {
+        Some((key, value)) => (key, Some(value)),
+        None => (raw_key, None),
+    };
 
     if let Some(stripped) = key.strip_prefix("no-") {
         if let Some(arg_def) = arg_map.get(stripped) {
             if matches!(arg_def.arg_type, CommandArgType::Boolean) {
-                store.insert(stripped.to_string(), vec!["false".to_string()]);
+                insert_flag_value(command_name, store, arg_def, "false".to_string())?;
                 return Ok((i + 1, None));
             }
         }
@@ -364,8 +394,12 @@ fn handle_flag(
     }
 
     if let Some(arg_def) = arg_map.get(key) {
+        if let Some(value) = inline_value {
+            insert_flag_value(command_name, store, arg_def, value.to_string())?;
+            return Ok((i + 1, None));
+        }
         if matches!(arg_def.arg_type, CommandArgType::Boolean) {
-            return handle_bool_flag(key, args, i, store);
+            return handle_bool_flag(command_name, arg_def, args, i, store);
         }
     } else {
         return Err(CommandError::UnknownFlag {
@@ -374,12 +408,18 @@ fn handle_flag(
         });
     }
 
-    store.entry(key.to_string()).or_insert_with(Vec::new);
-    Ok((i + 1, Some(key.to_string())))
+    let arg_def = arg_map.get(key).ok_or_else(|| CommandError::UnknownFlag {
+        command: command_name.to_string(),
+        flag: key.to_string(),
+    })?;
+    ensure_flag_can_start(command_name, store, arg_def)?;
+    store.entry(arg_def.name.clone()).or_insert_with(Vec::new);
+    Ok((i + 1, Some(arg_def.name.clone())))
 }
 
 fn handle_bool_flag(
-    key: &str,
+    command_name: &str,
+    arg_def: &CommandArg,
     args: &[&str],
     i: usize,
     store: &mut IndexMap<String, Vec<String>>,
@@ -391,16 +431,41 @@ fn handle_bool_flag(
 
     if next_is_bool_value {
         if let Some(next_val) = args.get(i + 1) {
-            store.insert(key.to_string(), vec![next_val.to_string()]);
+            insert_flag_value(command_name, store, arg_def, next_val.to_string())?;
             Ok((i + 2, None))
         } else {
-            store.insert(key.to_string(), vec!["true".to_string()]);
+            insert_flag_value(command_name, store, arg_def, "true".to_string())?;
             Ok((i + 1, None))
         }
     } else {
-        store.insert(key.to_string(), vec!["true".to_string()]);
+        insert_flag_value(command_name, store, arg_def, "true".to_string())?;
         Ok((i + 1, None))
     }
+}
+
+fn insert_flag_value(
+    command_name: &str,
+    store: &mut IndexMap<String, Vec<String>>,
+    arg_def: &CommandArg,
+    value: String,
+) -> Result<(), CommandError> {
+    ensure_flag_can_start(command_name, store, arg_def)?;
+    store.entry(arg_def.name.clone()).or_default().push(value);
+    Ok(())
+}
+
+fn ensure_flag_can_start(
+    command_name: &str,
+    store: &IndexMap<String, Vec<String>>,
+    arg_def: &CommandArg,
+) -> Result<(), CommandError> {
+    if !matches!(arg_def.arg_type, CommandArgType::Array(_)) && store.contains_key(&arg_def.name) {
+        return Err(CommandError::DuplicateFlag {
+            command: command_name.to_string(),
+            flag: arg_def.flag.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_arg_values(
@@ -452,7 +517,7 @@ fn check_required_args(
         }
         if arg_def.required && !obj.contains_key(&arg_def.name) {
             return Err(CommandError::MissingRequired {
-                flag: arg_def.name.clone(),
+                flag: arg_def.flag.clone(),
             });
         }
     }
@@ -535,4 +600,8 @@ fn convert_single_value(
             "cannot convert single value to array".into(),
         )),
     }
+}
+
+fn to_flag_name(name: &str) -> String {
+    name.replace('_', "-")
 }

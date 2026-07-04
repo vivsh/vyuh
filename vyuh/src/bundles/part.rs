@@ -25,6 +25,11 @@ pub(super) enum BundlePartInner {
     AssetDir(embed::Dir),
     Command(commands::Command),
     Service(ServiceHandler),
+    UrlInfo(crate::collectors::UrlInfoProvider),
+    #[cfg(feature = "migrations")]
+    Migrations(crate::db::MigrationSource),
+    #[cfg(feature = "migrations")]
+    Schema(crate::db::SchemaSource),
 }
 
 /// A single registerable piece of a bundle: a route, emitter, signal, service, etc.
@@ -94,6 +99,21 @@ impl Bundle {
             BundlePartInner::Command(cmd) => {
                 if let Err(e) = self.commands.register(cmd) {
                     self.errors.push(BundleError::Command(Arc::new(e)));
+                }
+            }
+            BundlePartInner::UrlInfo(provider) => {
+                self.url_info.register(provider);
+            }
+            #[cfg(feature = "migrations")]
+            BundlePartInner::Migrations(source) => {
+                if let Err(e) = self.migrations.register(source) {
+                    self.errors.push(BundleError::Migration(Arc::new(e)));
+                }
+            }
+            #[cfg(feature = "migrations")]
+            BundlePartInner::Schema(source) => {
+                if let Err(e) = self.migrations.register_schema(source) {
+                    self.errors.push(BundleError::Migration(Arc::new(e)));
                 }
             }
         }
@@ -305,11 +325,47 @@ where
     }
 }
 
+/// Creates a URL info provider part.
+pub fn url_info<H, Args>(handler: H) -> BundlePart
+where
+    H: callables::Specable<Args, Output = Result<Vec<crate::collectors::UrlInfo>, Error>>
+        + Send
+        + Sync
+        + 'static,
+    Args: callables::FromContext<crate::collectors::UrlInfoContext>
+        + callables::IntoArgSpecs
+        + Send
+        + 'static,
+{
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::UrlInfo(crate::collectors::url_info_provider(handler)),
+    }
+}
+
 /// Creates a static asset directory part.
 pub fn asset_dir(dir: embed::Dir) -> BundlePart {
     BundlePart {
         operation: None,
         part: BundlePartInner::AssetDir(dir),
+    }
+}
+
+/// Creates a crate-owned migration source part.
+#[cfg(feature = "migrations")]
+pub fn migrations(source: crate::db::MigrationSource) -> BundlePart {
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::Migrations(source),
+    }
+}
+
+/// Creates a database schema contribution part.
+#[cfg(feature = "migrations")]
+pub fn schema(source: crate::db::SchemaSource) -> BundlePart {
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::Schema(source),
     }
 }
 

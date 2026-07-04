@@ -9,7 +9,7 @@ use std::borrow::Cow;
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     /// Emitted when `--help` or a parse error causes early exit; output is in the message.
-    #[error("Argument parsing exit: {0}")]
+    #[error("{0}")]
     Exit(String),
 
     #[error("Command not found: {0}")]
@@ -41,6 +41,9 @@ pub enum CommandError {
 
     #[error("--{flag} expects exactly one value, got {count}")]
     TooManyValues { flag: String, count: usize },
+
+    #[error("Duplicate flag for command '{command}': --{flag}")]
+    DuplicateFlag { command: String, flag: String },
 
     #[error("Failed to parse --{flag} value '{value}' as {expected_type}: {error}")]
     ParseError {
@@ -94,6 +97,7 @@ impl CommandError {
             | CommandError::MissingRequired { .. }
             | CommandError::MissingValue { .. }
             | CommandError::TooManyValues { .. }
+            | CommandError::DuplicateFlag { .. }
             | CommandError::ParseError { .. }
             | CommandError::DeserializeError(_)
             | CommandError::UnsupportedSchema(_)

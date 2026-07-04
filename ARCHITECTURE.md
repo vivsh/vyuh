@@ -10,8 +10,9 @@ be registered with direct APIs or macros.
 
 - `vyuh/` contains the runtime framework crate.
 - `vyuh-macros/` contains procedural macros used by the runtime crate.
-- `docs/` contains subsystem-level documentation, one independent markdown file
-  per subsystem, plus `docs/book/` for the styled mdBook entrypoint.
+- `docs/book/src/` contains the canonical documentation source for subsystem
+  and product docs. `docs/book/` contains mdBook configuration and generated
+  book support.
 - `vyuh/web/` contains package-owned shared web assets, landing-page source,
   and built-in console templates.
 - `llms.txt` is the compact documentation routing entrypoint for LLMs and
@@ -33,8 +34,10 @@ The `vyuh` crate is organized around these subsystems:
   built-in route behavior.
 - `callables` provides the type-erased invocation model used by routes,
   commands, signals, emitters, and tasks.
-- `db` provides backend-selected SQLx aliases, query builders, sessions,
-  placeholder handling, mock sessions, and database errors.
+- `db` provides backend-selected SQLx aliases, source-first typed query
+  builders, dialect-specific SQL rendering and validation, typed function and
+  expression extension hooks, sessions, placeholder handling, mock sessions,
+  and database errors.
 - `auth` and `roles` provide JWT authentication and bit-mask role support.
 - `validation` and `validators` provide typed validation primitives and
   extractor integration.
@@ -49,6 +52,13 @@ The `vyuh` crate is organized around these subsystems:
 - `assets`, `templates`, and `embed` provide embedded assets, server-side
   templates, private bundle resources, and the shared web asset surface used by
   the built-in console.
+- `collectors` provides URL metadata, asset collection, and selected page
+  collection built on normal bundles and routes.
+- `db::migrations` provides backend-aware crate-owned migration registration,
+  Gaman schema integration, and migration command support. Postgres is the
+  richest backend, and SQLite is supported for Gaman's native safe subset.
+  Migration files live in a crate-level `migrations/` directory, not under
+  assets.
 - `logging` configures structured tracing output.
 
 ## Macro Crate
@@ -58,7 +68,7 @@ compact while feeding metadata into the runtime:
 
 - Route, command, signal, emitter, task, cron, periodic, and asset macros
   generate bundle parts.
-- `Bindable`, `Scannable`, `Filterable`, `Validate`, and role/schema macros
+- `Record`, `Filterable`, `Validate`, and role/schema macros
   generate database, validation, schema, and auth integration code.
 - Macro implementation should keep parsing, validation, diagnostics, and code
   generation separated.
@@ -106,7 +116,7 @@ the client-facing event type uses the payload schema name.
 ## Request Flow
 
 1. A bundle registers routes, commands, emitters, services, schema contributors,
-   templates, assets, signals, and optional migrations.
+   templates, assets, signals, and optional crate-owned migration sources.
 2. `Site::build` validates `SiteConf` and bundle metadata.
 3. `SiteBuilder` creates the database pool, router, template engine,
    authenticator, command registry, channel backend, signal engine, emitter

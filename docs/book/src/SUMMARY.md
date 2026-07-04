@@ -2,6 +2,7 @@
 
 - [Introduction](introduction.md)
 - [Overview](overview.md)
+- [Why Vyuh](comparison.md)
 - [Getting Started](getting-started.md)
 
 # Application Model
@@ -33,10 +34,12 @@
 
 - [Templates](templates.md)
 - [Assets](assets.md)
+- [Collectors](collectors.md)
 - [Uploads](uploads.md)
 
 # Operations
 
 - [Database](db.md)
+- [Migrations](migrations.md)
 - [Logging](logging.md)
 - [Console](console.md)

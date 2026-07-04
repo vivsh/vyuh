@@ -27,8 +27,8 @@ This file is for coding agents working in the Vyuh repository.
 - Update [ARCHITECTURE.md](ARCHITECTURE.md) when changing major module
   ownership, backend feature boundaries, request flow, or subsystem wiring.
 - Update [CONTRIBUTING.md](CONTRIBUTING.md) when coding conventions change.
-- Keep subsystem documentation under `docs/` as one independent markdown file
-  per subsystem.
+- Keep subsystem documentation under `docs/book/src/` as book chapters. Do not
+  add new top-level subsystem docs under `docs/`.
 - Treat macros as sugar over direct APIs in docs. When a subsystem has macros,
   document the macro path and equivalent code registration together.
 

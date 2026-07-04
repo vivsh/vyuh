@@ -24,21 +24,25 @@ use crate::{
 
 use openapi::DocEngine;
 
+pub use crate::apidocs::{DocViewer, OpenApiVersion};
 pub use error::BundleError;
 pub use openapi::{OpenApiConf, OpenApiViewerConf};
 pub use part::{
     BundlePart, asset_dir, bundle, command, cron, periodic, pgnotify, route, service, signal, task,
+    url_info,
 };
+#[cfg(feature = "migrations")]
+pub use part::{migrations, schema};
 
-pub use vyuh_macros::{asset_dir, bundle, cron, periodic, pgnotify, route, service, signal, task};
+pub use vyuh_macros::{
+    asset_dir, bundle, cron, periodic, pgnotify, route, service, signal, task, url_info,
+};
+#[cfg(feature = "migrations")]
+pub use vyuh_macros::{migrations, schema};
 
 pub use {
-    crate::apidocs::{ApiMeta, DocViewer},
-    crate::routes::RouteConf,
-    emitters::CronConf,
-    emitters::PeriodicConf,
-    emitters::PgNotifyConf,
-    signals::SignalConf,
+    crate::apidocs::ApiMeta, crate::routes::RouteConf, emitters::CronConf, emitters::PeriodicConf,
+    emitters::PgNotifyConf, signals::SignalConf,
 };
 
 // ---------------------------------------------------------------------------
@@ -95,9 +99,12 @@ pub struct Bundle {
     pub(super) errors: Vec<BundleError>,
     pub(crate) tasks: TaskRegistry,
     pub(crate) asset_dirs: Vec<embed::Dir>,
+    pub(crate) url_info: crate::collectors::UrlInfoRegistry,
     pub(crate) services: ServiceRegistry,
     pub(crate) commands: CommandRegistry,
     pub(crate) doc_engine: DocEngine,
+    #[cfg(feature = "migrations")]
+    pub(crate) migrations: crate::db::MigrationRegistry,
 }
 
 impl Bundle {
@@ -114,9 +121,12 @@ impl Bundle {
             errors: Vec::new(),
             tasks: TaskRegistry::new(),
             asset_dirs: Vec::new(),
+            url_info: crate::collectors::UrlInfoRegistry::new(),
             services: ServiceRegistry::new(),
             commands: CommandRegistry::new(),
             doc_engine: DocEngine::new(),
+            #[cfg(feature = "migrations")]
+            migrations: crate::db::MigrationRegistry::new(),
         }
     }
 
@@ -225,6 +235,7 @@ impl Bundle {
         for op in self.ops.values_mut() {
             op.nest(path);
         }
+        self.url_info.with_prefix(path);
         self.inner_router = routes::AxumRouter::new().nest(path, self.inner_router);
         self
     }
@@ -320,6 +331,7 @@ impl Bundle {
         self.name_index.extend(other.name_index);
         self.signals.merge(other.signals);
         self.asset_dirs.extend(other.asset_dirs);
+        self.url_info.merge(other.url_info);
         if let Err(e) = self.emitters.merge(other.emitters) {
             return Err(BundleError::Emitter(Arc::new(e)));
         }
@@ -331,6 +343,10 @@ impl Bundle {
         }
         if let Err(e) = self.commands.merge(other.commands) {
             return Err(BundleError::Command(Arc::new(e)));
+        }
+        #[cfg(feature = "migrations")]
+        if let Err(e) = self.migrations.merge(other.migrations) {
+            return Err(BundleError::Migration(Arc::new(e)));
         }
         self.doc_engine.merge(other.doc_engine);
         Ok(other.inner_router)
@@ -427,6 +443,8 @@ mod tests {
             name: name.to_string(),
             description: None,
             summary: None,
+            operation_id: None,
+            deprecated: false,
             path: path.to_string(),
             kind: OperationKind::Route,
             methods,

@@ -8,6 +8,8 @@ use std::borrow::Cow;
 pub struct PatchOp {
     name: Option<String>,
     description: Option<String>,
+    operation_id: Option<String>,
+    deprecated: Option<bool>,
     arg_patches: Vec<ArgPatchData>,
     return_patch: Option<ReturnPatchData>,
     append_returns: Vec<ReturnPatchData>,
@@ -65,6 +67,9 @@ impl ReturnPatchData {
             part: self.part.clone().unwrap_or_else(|| {
                 ReturnPart::Body(super::TypeSchema::wrap::<()>(), "application/json".into())
             }),
+            headers: Vec::new(),
+            examples: Vec::new(),
+            schema_name: None,
         }
     }
 }
@@ -84,6 +89,18 @@ impl PatchOp {
     /// Sets the handler description (documentation).
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Sets a stable OpenAPI operation id.
+    pub fn operation_id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
+    }
+
+    /// Marks the operation as deprecated or active.
+    pub fn deprecated(mut self, deprecated: bool) -> Self {
+        self.deprecated = Some(deprecated);
         self
     }
 
@@ -148,6 +165,12 @@ impl PatchOp {
         }
         if let Some(description) = self.description {
             op.description = Some(description);
+        }
+        if let Some(operation_id) = self.operation_id {
+            op.operation_id = Some(operation_id);
+        }
+        if let Some(deprecated) = self.deprecated {
+            op.deprecated = deprecated;
         }
         if let Some(tags) = self.tags {
             op.tags = tags;

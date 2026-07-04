@@ -1,19 +1,23 @@
 mod assets;
-mod bindable;
 mod bitrole;
 mod bundle;
 mod bundlepart;
 mod cron;
+mod filterable;
+mod migrations;
+mod model;
 mod multipart;
 mod openapi;
 mod periodic;
 mod pgnotify;
 mod route;
 mod scannable;
+mod schema;
 mod schemable;
 mod service;
 mod signal;
 mod task;
+mod url_info;
 mod validate;
 
 use proc_macro::TokenStream;
@@ -154,14 +158,19 @@ pub fn bundle(input: TokenStream) -> TokenStream {
     bundle::parse_bundle(input)
 }
 
-#[proc_macro_derive(Bindable, attributes(field, column))]
-pub fn derive_bindable(input: TokenStream) -> TokenStream {
-    bindable::derive_bindable(input)
+#[proc_macro_derive(Record, attributes(field, column, table))]
+pub fn derive_record(input: TokenStream) -> TokenStream {
+    scannable::derive_record(input)
 }
 
-#[proc_macro_derive(Scannable, attributes(field, column))]
-pub fn derive_scannable(input: TokenStream) -> TokenStream {
-    scannable::derive_scannable(input)
+#[proc_macro_derive(Model, attributes(field, column, table))]
+pub fn derive_model(input: TokenStream) -> TokenStream {
+    model::derive_model(input)
+}
+
+#[proc_macro_derive(Filterable, attributes(filter))]
+pub fn derive_filterable(input: TokenStream) -> TokenStream {
+    filterable::derive_filterable(input)
 }
 
 /// Derives the BitRole trait for role-based access control.
@@ -394,4 +403,19 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn asset_dir(attr: TokenStream, item: TokenStream) -> TokenStream {
     assets::parse_asset_dir(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn migrations(attr: TokenStream, item: TokenStream) -> TokenStream {
+    migrations::parse_migrations(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn schema(attr: TokenStream, item: TokenStream) -> TokenStream {
+    schema::parse_schema(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn url_info(attr: TokenStream, item: TokenStream) -> TokenStream {
+    url_info::parse_url_info(attr, item)
 }

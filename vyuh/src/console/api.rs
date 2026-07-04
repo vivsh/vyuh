@@ -76,7 +76,10 @@ pub async fn operations(
         conf.page_size_max,
     );
     Json(Page {
-        items: items.into_iter().map(OperationOut::from).collect(),
+        items: items
+            .into_iter()
+            .map(|op| OperationOut::from_operation(op, &site))
+            .collect(),
         next_cursor,
     })
 }
@@ -90,7 +93,7 @@ pub async fn operation_detail(
     let console_bundle_id = console_bundle_id(&site);
     site.iter_operations()
         .find(|op| op.id == id && !is_console_operation(op, console_bundle_id))
-        .map(OperationOut::from)
+        .map(|op| OperationOut::from_operation(op, &site))
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }

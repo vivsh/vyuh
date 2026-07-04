@@ -77,7 +77,7 @@ pub async fn operations(
     let page = Page {
         items: items
             .into_iter()
-            .map(OperationOut::from)
+            .map(|op| OperationOut::from_operation(op, &site))
             .collect::<Vec<_>>(),
         next_cursor,
     };
@@ -107,7 +107,7 @@ pub async fn operation_detail(
     let Some(operation) = site
         .iter_operations()
         .find(|op| op.id == id)
-        .map(OperationOut::from)
+        .map(|op| OperationOut::from_operation(op, &site))
     else {
         return not_found(&site);
     };
@@ -424,7 +424,7 @@ fn selected_operation(
     let id = uuid::Uuid::parse_str(id).ok()?;
     site.iter_operations()
         .find(|op| op.id == id && !is_console_operation(op, console_bundle_id))
-        .map(OperationView::from_operation)
+        .map(|op| OperationView::from_operation(op, site))
 }
 
 fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {

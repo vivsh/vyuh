@@ -98,7 +98,12 @@ pub struct TemplateEngine {
 
 impl TemplateEngine {
     pub fn new() -> Self {
-        let env = minijinja::Environment::new();
+        Self::from_conf(&TemplateConf::default(), chrono_tz::Tz::UTC)
+    }
+
+    pub(crate) fn from_conf(conf: &TemplateConf, timezone: chrono_tz::Tz) -> Self {
+        let mut env = minijinja::Environment::new();
+        register_builtin_helpers(&mut env, conf, timezone);
         TemplateEngine { env }
     }
 
@@ -203,6 +208,134 @@ impl TemplateEngine {
     pub fn manager<'a>(&'a self) -> TemplateManager<'a> {
         TemplateManager { engine: self }
     }
+}
+
+fn register_builtin_helpers(
+    env: &mut minijinja::Environment<'static>,
+    conf: &TemplateConf,
+    timezone: chrono_tz::Tz,
+) {
+    env.add_global(
+        "STATIC_URL",
+        minijinja::Value::from_safe_string(crate::assets::public_asset_url("")),
+    );
+    env.add_function("asset", |path: String| {
+        minijinja::Value::from_safe_string(crate::assets::public_asset_url(&path))
+    });
+    env.add_function("now", || chrono::Utc::now().to_rfc3339());
+    env.add_filter("linebreaksbr", linebreaksbr_filter);
+
+    let date_format = conf.date_formats.date.clone();
+    env.add_filter("date", move |value: minijinja::Value| {
+        format_template_datetime_value(value, timezone, &date_format)
+    });
+
+    let date_format = conf.date_formats.date.clone();
+    env.add_filter(
+        "format_date",
+        move |value: minijinja::Value, pattern: Option<String>| {
+            format_template_datetime_value(
+                value,
+                timezone,
+                pattern.as_deref().unwrap_or(&date_format),
+            )
+        },
+    );
+
+    let time_format = conf.date_formats.time.clone();
+    env.add_filter("time", move |value: minijinja::Value| {
+        format_template_datetime_value(value, timezone, &time_format)
+    });
+
+    let time_format = conf.date_formats.time.clone();
+    env.add_filter(
+        "format_time",
+        move |value: minijinja::Value, pattern: Option<String>| {
+            format_template_datetime_value(
+                value,
+                timezone,
+                pattern.as_deref().unwrap_or(&time_format),
+            )
+        },
+    );
+
+    let datetime_format = conf.date_formats.datetime.clone();
+    env.add_filter("datetime", move |value: minijinja::Value| {
+        format_template_datetime_value(value, timezone, &datetime_format)
+    });
+
+    let datetime_format = conf.date_formats.datetime.clone();
+    env.add_filter(
+        "format_datetime",
+        move |value: minijinja::Value, pattern: Option<String>| {
+            format_template_datetime_value(
+                value,
+                timezone,
+                pattern.as_deref().unwrap_or(&datetime_format),
+            )
+        },
+    );
+
+    let local_date_format = conf.date_formats.date.clone();
+    env.add_function("localdate", move || {
+        Ok::<_, minijinja::Error>(minijinja::Value::from_safe_string(
+            chrono::Utc::now()
+                .with_timezone(&timezone)
+                .format(&local_date_format)
+                .to_string(),
+        ))
+    });
+
+    let local_datetime_format = conf.date_formats.datetime.clone();
+    env.add_function("localdatetime", move || {
+        Ok::<_, minijinja::Error>(minijinja::Value::from_safe_string(
+            chrono::Utc::now()
+                .with_timezone(&timezone)
+                .format(&local_datetime_format)
+                .to_string(),
+        ))
+    });
+}
+
+fn format_template_datetime_value(
+    value: minijinja::Value,
+    timezone: chrono_tz::Tz,
+    pattern: &str,
+) -> Result<minijinja::Value, minijinja::Error> {
+    let value = value.as_str().ok_or_else(|| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            format!("expected RFC3339 date/time string, got {}", value.kind()),
+        )
+    })?;
+    let datetime = chrono::DateTime::parse_from_rfc3339(value).map_err(|err| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            format!("invalid RFC3339 date/time string: {err}"),
+        )
+    })?;
+    Ok(minijinja::Value::from_safe_string(
+        datetime
+            .with_timezone(&timezone)
+            .format(pattern)
+            .to_string(),
+    ))
+}
+
+fn linebreaksbr_filter(
+    state: &minijinja::State,
+    value: minijinja::Value,
+) -> Result<minijinja::Value, minijinja::Error> {
+    let escaped = minijinja::filters::escape(state, &value)?;
+    let text = escaped
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| escaped.to_string());
+    let html = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "<br>\n");
+    Ok(minijinja::Value::from_safe_string(html))
 }
 
 pub trait IntoTemplateDateTime {
@@ -572,6 +705,77 @@ mod tests {
                 )
                 .unwrap(),
             "Dashboard operations"
+        );
+    }
+
+    #[test]
+    fn builtin_asset_helpers_use_public_asset_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path().join("templates/page.html").as_path(),
+            r#"{{ STATIC_URL }}|{{ asset("css/app.css") }}|{{ asset("/img/logo.png") }}"#,
+        );
+        let bundle = bundles::bundle([bundles::asset_dir(embed::Dir::new(rust_silos::Silo::new(
+            dir.path().to_str().unwrap(),
+        )))]);
+        let mut engine = TemplateEngine::new();
+        engine.inject_templates(&bundle).unwrap();
+
+        assert_eq!(
+            engine.render("page.html", &serde_json::json!({})).unwrap(),
+            "/assets/|/assets/css/app.css|/assets/img/logo.png"
+        );
+    }
+
+    #[test]
+    fn builtin_datetime_filters_use_template_conf_and_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path().join("templates/page.html").as_path(),
+            "{{ value|date }}|{{ value|time }}|{{ value|datetime }}|{{ value|format_datetime(\"%d %b %Y\") }}",
+        );
+        let bundle = bundles::bundle([bundles::asset_dir(embed::Dir::new(rust_silos::Silo::new(
+            dir.path().to_str().unwrap(),
+        )))]);
+        let mut conf = TemplateConf::default();
+        conf.date_formats.date = "%Y/%m/%d".to_string();
+        conf.date_formats.time = "%H:%M".to_string();
+        conf.date_formats.datetime = "%Y/%m/%d %H:%M".to_string();
+        let mut engine = TemplateEngine::from_conf(&conf, chrono_tz::Asia::Kolkata);
+        engine.inject_templates(&bundle).unwrap();
+
+        assert_eq!(
+            engine
+                .render(
+                    "page.html",
+                    &serde_json::json!({ "value": "2026-06-30T00:30:00Z" }),
+                )
+                .unwrap(),
+            "2026/06/30|06:00|2026/06/30 06:00|30 Jun 2026"
+        );
+    }
+
+    #[test]
+    fn builtin_linebreaksbr_filter_escapes_text_and_preserves_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path().join("templates/page.html").as_path(),
+            "{{ body|linebreaksbr }}",
+        );
+        let bundle = bundles::bundle([bundles::asset_dir(embed::Dir::new(rust_silos::Silo::new(
+            dir.path().to_str().unwrap(),
+        )))]);
+        let mut engine = TemplateEngine::new();
+        engine.inject_templates(&bundle).unwrap();
+
+        assert_eq!(
+            engine
+                .render(
+                    "page.html",
+                    &serde_json::json!({ "body": "<strong>Hello</strong>\nWorld" }),
+                )
+                .unwrap(),
+            "&lt;strong&gt;Hello&lt;&#x2f;strong&gt;<br>\nWorld"
         );
     }
 

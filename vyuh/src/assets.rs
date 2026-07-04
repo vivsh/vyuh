@@ -20,6 +20,19 @@ use tower::Service;
 
 use crate::embed;
 
+pub const PUBLIC_ASSETS_FOLDER: &str = "public";
+pub const PUBLIC_ASSETS_URL_PREFIX: &str = "/assets";
+
+pub fn public_asset_url(path: &str) -> String {
+    let prefix = PUBLIC_ASSETS_URL_PREFIX.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        format!("{prefix}/")
+    } else {
+        format!("{prefix}/{path}")
+    }
+}
+
 // Add these deps (recommended):
 // percent-encoding = "2"
 // mime_guess = "2"

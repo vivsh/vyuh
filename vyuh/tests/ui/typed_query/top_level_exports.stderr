@@ -1,0 +1,99 @@
+error[E0412]: cannot find type `QueryScope` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:11:39
+   |
+11 |     let _ = std::any::type_name::<db::QueryScope>();
+   |                                       ^^^^^^^^^^ not found in `db`
+   |
+help: consider importing one of these structs
+   |
+ 1 + use crate::db::typed::QueryScope;
+   |
+ 1 + use vyuh::db::typed::QueryScope;
+   |
+help: if you import `QueryScope`, refer to it directly
+   |
+11 -     let _ = std::any::type_name::<db::QueryScope>();
+11 +     let _ = std::any::type_name::<QueryScope>();
+   |
+
+error[E0412]: cannot find type `All` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:12:39
+   |
+12 |     let _ = std::any::type_name::<db::All<Post>>();
+   |                                       ^^^ not found in `db`
+   |
+help: consider importing one of these structs
+   |
+ 1 + use crate::db::typed::All;
+   |
+ 1 + use futures::stream::All;
+   |
+ 1 + use vyuh::db::typed::All;
+   |
+help: if you import `All`, refer to it directly
+   |
+12 -     let _ = std::any::type_name::<db::All<Post>>();
+12 +     let _ = std::any::type_name::<All<Post>>();
+   |
+
+error[E0412]: cannot find type `ModelTable` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:13:39
+   |
+13 |     let _ = std::any::type_name::<db::ModelTable<Post>>();
+   |                                       ^^^^^^^^^^ not found in `db`
+   |
+help: consider importing one of these structs
+   |
+ 1 + use crate::db::typed::ModelTable;
+   |
+ 1 + use vyuh::db::typed::ModelTable;
+   |
+help: if you import `ModelTable`, refer to it directly
+   |
+13 -     let _ = std::any::type_name::<db::ModelTable<Post>>();
+13 +     let _ = std::any::type_name::<ModelTable<Post>>();
+   |
+
+error[E0412]: cannot find type `Predicate` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:14:39
+   |
+14 |     let _ = std::any::type_name::<db::Predicate>();
+   |                                       ^^^^^^^^^ not found in `db`
+   |
+help: consider importing one of these items
+   |
+ 1 + use crate::db::typed::Predicate;
+   |
+ 1 + use tower_http::compression::Predicate;
+   |
+ 1 + use vyuh::db::typed::Predicate;
+   |
+help: if you import `Predicate`, refer to it directly
+   |
+14 -     let _ = std::any::type_name::<db::Predicate>();
+14 +     let _ = std::any::type_name::<Predicate>();
+   |
+
+error[E0412]: cannot find type `Projectable` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:15:39
+   |
+15 |     let _ = std::any::type_name::<db::Projectable>();
+   |                                       ^^^^^^^^^^^ not found in `db`
+   |
+help: consider importing one of these traits
+   |
+ 1 + use crate::db::typed::Projectable;
+   |
+ 1 + use vyuh::db::typed::Projectable;
+   |
+help: if you import `Projectable`, refer to it directly
+   |
+15 -     let _ = std::any::type_name::<db::Projectable>();
+15 +     let _ = std::any::type_name::<Projectable>();
+   |
+
+error[E0433]: failed to resolve: could not find `__private` in `db`
+  --> tests/ui/typed_query/top_level_exports.rs:16:17
+   |
+16 |     let _ = db::__private::table("posts");
+   |                 ^^^^^^^^^ could not find `__private` in `db`

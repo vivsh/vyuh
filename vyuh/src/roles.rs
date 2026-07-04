@@ -119,11 +119,17 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> crate::callables::IntoArgPart
                 (MASK & role_bit != 0).then(|| Cow::Borrowed(*name))
             })
             .collect();
-        crate::callables::ArgPart::Security {
-            scheme: Cow::Borrowed("bearerAuth"),
-            scopes,
-            join_all: O::join_all(),
-        }
+        crate::callables::ArgPart::Composite(vec![
+            crate::callables::ArgPart::Security {
+                scheme: Cow::Borrowed("bearerAuth"),
+                scopes,
+                join_all: O::join_all(),
+            },
+            crate::callables::ArgPart::Response(vec![
+                crate::callables::ReturnSpec::error(401, "Unauthorized."),
+                crate::callables::ReturnSpec::error(403, "Forbidden."),
+            ]),
+        ])
     }
 }
 

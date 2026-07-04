@@ -184,13 +184,13 @@ one central setup file.
 
 - [Website](https://vyuh-rs.github.io/)
 - [Full docs](https://vyuh-rs.github.io/docs/)
-- [Documentation index](docs/index.md)
-- [Site and lifecycle](docs/site.md)
-- [Bundles](docs/bundles.md)
-- [OpenAPI](docs/openapi.md)
-- [Tasks](docs/tasks.md)
-- [Channels](docs/channels.md)
-- [Console](docs/console.md)
+- [Source docs](docs/book/src/SUMMARY.md)
+- [Site and lifecycle](docs/book/src/site.md)
+- [Bundles](docs/book/src/bundles.md)
+- [OpenAPI](docs/book/src/openapi.md)
+- [Tasks](docs/book/src/tasks.md)
+- [Channels](docs/book/src/channels.md)
+- [Console](docs/book/src/console.md)
 
 ## Backend Support
 

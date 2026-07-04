@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
 use openapiv3::ReferenceOr;
@@ -27,11 +27,18 @@ pub enum SchemaConversionError {
 pub struct ComponentRegistry {
     components: IndexMap<String, openapiv3::Schema>,
     generator: schemars::SchemaGenerator,
-    security_schemes: HashSet<String>,
-    operation_scopes: HashSet<String>,
-    pub(crate) operation_scope_join_all: bool,
-    operation_security: HashSet<String>,
-    pub(crate) tags: HashSet<String>,
+    security_schemes: BTreeSet<String>,
+    operation_security: Vec<SecurityRequirement>,
+    pub(crate) tags: BTreeSet<String>,
+}
+
+/// Security requirement collected while building one operation.
+#[derive(Debug, Clone)]
+pub struct SecurityRequirement {
+    pub scheme: String,
+    pub scopes: Vec<String>,
+    pub join_all: bool,
+    pub optional: bool,
 }
 
 impl std::fmt::Debug for ComponentRegistry {
@@ -39,8 +46,6 @@ impl std::fmt::Debug for ComponentRegistry {
         f.debug_struct("ComponentRegistry")
             .field("components", &self.components)
             .field("security_schemes", &self.security_schemes)
-            .field("operation_scopes", &self.operation_scopes)
-            .field("operation_scope_join_all", &self.operation_scope_join_all)
             .field("operation_security", &self.operation_security)
             .field("tags", &self.tags)
             .finish_non_exhaustive()
@@ -53,11 +58,9 @@ impl ComponentRegistry {
         Self {
             components: IndexMap::new(),
             generator: schemars::SchemaGenerator::default(),
-            security_schemes: HashSet::new(),
-            operation_scopes: HashSet::new(),
-            operation_security: HashSet::new(),
-            operation_scope_join_all: false,
-            tags: HashSet::new(),
+            security_schemes: BTreeSet::new(),
+            operation_security: Vec::new(),
+            tags: BTreeSet::new(),
         }
     }
 
@@ -68,11 +71,20 @@ impl ComponentRegistry {
         ref_path
     }
 
-    pub fn register_security(&mut self, name: String, scopes: &[String], join_all: bool) {
+    pub fn register_security(
+        &mut self,
+        name: String,
+        scopes: &[String],
+        join_all: bool,
+        optional: bool,
+    ) {
         self.security_schemes.insert(name.clone());
-        self.operation_security.insert(name);
-        self.operation_scope_join_all = join_all;
-        self.operation_scopes.extend(scopes.iter().cloned());
+        self.operation_security.push(SecurityRequirement {
+            scheme: name,
+            scopes: scopes.to_vec(),
+            join_all,
+            optional,
+        });
     }
 
     pub fn has_security_schemes(&self) -> bool {
@@ -83,12 +95,8 @@ impl ComponentRegistry {
         self.security_schemes.iter().cloned().collect()
     }
 
-    pub fn drain_operation_scopes(&mut self) -> impl Iterator<Item = String> + '_ {
-        self.operation_scopes.drain()
-    }
-
-    pub fn drain_operation_security(&mut self) -> impl Iterator<Item = String> + '_ {
-        self.operation_security.drain()
+    pub fn drain_operation_security(&mut self) -> Vec<SecurityRequirement> {
+        std::mem::take(&mut self.operation_security)
     }
 
     pub fn has_operation_security(&self) -> bool {
@@ -163,7 +171,19 @@ fn convert_json_value_to_openapi(
 /// Transform JSON Schema to OpenAPI 3.0 in-place.
 /// Main conversion: type arrays like `["integer", "null"]` → `"type": "integer", "nullable": true`
 fn transform_for_openapi(val: &mut serde_json::Value) {
+    if val.as_bool() == Some(true) {
+        *val = serde_json::json!({});
+        return;
+    }
+
+    if val.as_bool() == Some(false) {
+        *val = serde_json::json!({"not": {}});
+        return;
+    }
+
     if let serde_json::Value::Object(map) = val {
+        rewrite_schema_ref(map);
+
         // Transform type arrays to nullable
         if let Some(type_val) = map.get("type").and_then(|v| v.as_array()).cloned() {
             transform_type_array(map, &type_val);
@@ -203,6 +223,16 @@ fn transform_for_openapi(val: &mut serde_json::Value) {
             transform_for_openapi(item);
         }
     }
+}
+
+fn rewrite_schema_ref(map: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(reference) = map.get_mut("$ref").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let openapi_ref = reference
+        .replace("#/$defs/", "#/components/schemas/")
+        .replace("#/definitions/", "#/components/schemas/");
+    map.insert("$ref".to_string(), serde_json::Value::String(openapi_ref));
 }
 
 /// Transform type array to OpenAPI nullable format

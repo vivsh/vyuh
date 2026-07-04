@@ -94,6 +94,8 @@ pub struct TypeSchema {
     pub(crate) type_id: fn() -> TypeId,
 
     pub(crate) type_name: fn() -> &'static str,
+
+    pub(crate) validated: bool,
 }
 
 impl std::fmt::Debug for TypeSchema {
@@ -125,6 +127,7 @@ impl TypeSchema {
             type_schema: converter::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
+            validated: false,
         }
     }
 
@@ -140,6 +143,7 @@ impl TypeSchema {
             type_schema: converter,
             type_id: || TypeId::of::<axum::body::Bytes>(),
             type_name: || "axum::body::Bytes",
+            validated: false,
         }
     }
 
@@ -158,6 +162,7 @@ impl TypeSchema {
             type_schema: converter::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
+            validated: false,
         }
     }
 
@@ -182,6 +187,7 @@ impl TypeSchema {
             type_schema: converter::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
+            validated: true,
         }
     }
 
@@ -193,6 +199,11 @@ impl TypeSchema {
     /// Returns runtime `TypeId` for type checking.
     pub fn type_id(&self) -> TypeId {
         (self.type_id)()
+    }
+
+    /// Returns true when this schema came from a validated extractor.
+    pub fn is_validated(&self) -> bool {
+        self.validated
     }
 }
 
@@ -234,6 +245,7 @@ fn strip_validation_keywords(value: &mut serde_json::Value) {
 /// Describes how a handler argument is extracted from requests.
 #[derive(Debug, Clone, Serialize)]
 pub enum ArgPart {
+    /// Runtime-injected argument (e.g. `Site`, `State<T>`); not visible in OpenAPI.
     Ignore,
     /// Extracted from HTTP headers
     Header(TypeSchema),
@@ -250,6 +262,13 @@ pub enum ArgPart {
     /// Extracted from request body with specified content type
     Body(TypeSchema, Cow<'static, str>),
 
+    /// Extracted from a request body with additional body-specific metadata.
+    BodyWith {
+        schema: TypeSchema,
+        content_type: Cow<'static, str>,
+        multipart: Option<MultipartApiSpec>,
+    },
+
     /// Security credentials (API key, OAuth token, etc.)
     Security {
         scheme: Cow<'static, str>,
@@ -257,8 +276,73 @@ pub enum ArgPart {
         join_all: bool,
     },
 
+    /// Response metadata implied by an argument extractor or wrapper.
+    Response(Vec<ReturnSpec>),
+
+    /// Multiple metadata parts contributed by one argument type.
+    Composite(Vec<ArgPart>),
+
+    /// Optional wrapper around an argument part.
+    Optional(Box<ArgPart>),
+
+    /// Fallible wrapper around an argument part.
+    Fallible(Box<ArgPart>),
+
     /// Multi-tenancy zone identifier
     Zone,
+}
+
+impl ArgPart {
+    /// Returns the first request-body schema carried by this part.
+    pub fn body_schema(&self) -> Option<&TypeSchema> {
+        match self {
+            Self::Body(schema, _) => Some(schema),
+            Self::BodyWith { schema, .. } => Some(schema),
+            Self::Composite(parts) => parts.iter().find_map(Self::body_schema),
+            Self::Optional(part) | Self::Fallible(part) => part.body_schema(),
+            _ => None,
+        }
+    }
+}
+
+/// OpenAPI-safe metadata derived from a typed multipart upload contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct MultipartApiSpec {
+    /// Multipart fields known to the typed parser.
+    pub fields: Vec<MultipartApiField>,
+    /// Whether fields outside the declared contract are accepted.
+    pub allow_unknown: bool,
+}
+
+/// Multipart field kind used for request-body documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MultipartApiFieldKind {
+    Text,
+    File,
+}
+
+/// OpenAPI-safe metadata for one multipart field.
+#[derive(Debug, Clone, Serialize)]
+pub struct MultipartApiField {
+    /// Multipart field name.
+    pub name: String,
+    /// Whether this is a text or file field.
+    pub kind: MultipartApiFieldKind,
+    /// Whether at least one value is required.
+    pub required: bool,
+    /// Whether repeated values are accepted.
+    pub multiple: bool,
+    /// Maximum text length in Unicode scalar values.
+    pub max_length: Option<usize>,
+    /// Maximum accepted field or file size in bytes.
+    pub max_bytes: Option<u64>,
+    /// Allowed declared file content types.
+    pub content_types: Vec<String>,
+    /// Allowed file name extensions without leading dots.
+    pub extensions: Vec<String>,
+    /// Optional sniffing rule name.
+    pub sniff: Option<String>,
 }
 
 /// Describes how a handler return value is serialized into responses.
@@ -270,9 +354,22 @@ pub enum ReturnPart {
     /// Serialized to response body with specified content type
     Body(TypeSchema, Cow<'static, str>),
 
+    /// Response body for a 201 Created reply; defaults the status code to 201 without needing an explicit `ReturnSpec::status_code`.
+    Created(TypeSchema, Cow<'static, str>),
+
+    /// Response body for a 202 Accepted reply.
+    Accepted(TypeSchema, Cow<'static, str>),
+
     /// No content (e.g., 204 No Content)
     Empty,
 
+    /// Redirect response with a `Location` header.
+    Redirect { status_code: u16 },
+
+    /// Binary or streaming response body with the given content type.
+    Binary(Cow<'static, str>),
+
+    /// Return type could not be statically described (e.g. raw `axum::response::Response`).
     Unknown,
 }
 
@@ -423,16 +520,88 @@ pub struct ReturnSpec {
     pub status_code: Option<u16>,
     /// Response specification.
     pub part: ReturnPart,
+    /// Response headers documented for this response.
+    pub headers: Vec<ReturnHeaderSpec>,
+    /// Example payloads for this response.
+    pub examples: Vec<ReturnExample>,
+    /// Stable component-name hint for generated schemas.
+    pub schema_name: Option<Cow<'static, str>>,
+}
+
+/// Header metadata attached to a response.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReturnHeaderSpec {
+    /// Header name.
+    pub name: Cow<'static, str>,
+    /// Optional header description.
+    pub description: Option<Cow<'static, str>>,
+    /// Header value schema.
+    pub schema: TypeSchema,
+    /// Whether the header is always present for this response.
+    pub required: bool,
+}
+
+/// Example payload metadata attached to a response.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReturnExample {
+    /// Example name.
+    pub name: Cow<'static, str>,
+    /// Optional example summary.
+    pub summary: Option<Cow<'static, str>>,
+    /// Example JSON value.
+    pub value: serde_json::Value,
 }
 
 impl ReturnSpec {
+    /// Creates return spec from a response part.
+    pub fn new(part: ReturnPart) -> Self {
+        Self {
+            description: None,
+            status_code: None,
+            part,
+            headers: Vec::new(),
+            examples: Vec::new(),
+            schema_name: None,
+        }
+    }
+
     /// Creates return spec with type, optional documentation, and status code.
     pub fn from_type<T: IntoReturnPart>(doc: Option<String>, status_code: Option<u16>) -> Self {
         Self {
             description: doc,
             status_code,
             part: T::into_return_part(),
+            headers: Vec::new(),
+            examples: Vec::new(),
+            schema_name: None,
         }
+    }
+
+    /// Creates a JSON error response using Vyuh's public error body.
+    pub fn error(status_code: u16, description: impl Into<String>) -> Self {
+        Self {
+            description: Some(description.into()),
+            status_code: Some(status_code),
+            part: ReturnPart::Body(
+                TypeSchema::wrap::<crate::errors::ErrorReport>(),
+                Cow::Borrowed("application/json"),
+            ),
+            headers: Vec::new(),
+            examples: Vec::new(),
+            schema_name: Some(Cow::Borrowed("ErrorReport")),
+        }
+    }
+
+    /// Adds a response header to this spec.
+    pub fn with_header(mut self, header: ReturnHeaderSpec) -> Self {
+        self.headers.push(header);
+        self
+    }
+
+    /// Adds a response example to this spec.
+    pub fn with_example(mut self, example: ReturnExample) -> Self {
+        self.examples.push(example);
+        self
     }
 }
 
@@ -478,6 +647,9 @@ impl CallSpec {
                 description: None,
                 status_code: None,
                 part: H::Output::into_return_part(),
+                headers: Vec::new(),
+                examples: Vec::new(),
+                schema_name: None,
             }],
         }
     }
@@ -489,13 +661,10 @@ impl CallSpec {
 
     /// Returns `TypeId` of body argument, if present.
     pub fn payload_type(&self) -> Option<TypeId> {
-        self.args.iter().rev().find_map(|arg| {
-            if let ArgPart::Body(t, ..) = &arg.part {
-                Some(t.type_id())
-            } else {
-                None
-            }
-        })
+        self.args
+            .iter()
+            .rev()
+            .find_map(|arg| arg.part.body_schema().map(TypeSchema::type_id))
     }
 
     /// Updates argument at position. Used by proc macros.

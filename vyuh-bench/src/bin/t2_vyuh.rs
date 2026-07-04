@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use vyuh::{db, db::DbConf, db::FilteredBuilder, emitters::IterCount, prelude::*};
+use vyuh::{db, db::DbConf, emitters::IterCount, prelude::*};
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct ProjectIn {
@@ -12,12 +12,12 @@ struct EventIn {
     value: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, vyuh::db::Bindable)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, vyuh::db::Record)]
 struct NewProject {
     name: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, vyuh::db::Bindable)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, vyuh::db::Record)]
 struct NewEvent {
     project_id: i64,
     value: i64,
@@ -33,24 +33,24 @@ struct Health {
     ok: bool,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Scannable)]
+#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Record)]
 struct ProjectOut {
     id: i64,
     name: String,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Scannable)]
+#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Record)]
 struct IdOut {
     id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Scannable)]
+#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Record)]
 struct EventOut {
     id: i64,
     value: i64,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Scannable)]
+#[derive(Debug, Clone, Serialize, JsonSchema, vyuh::db::Record)]
 struct RollupRow {
     project_id: i64,
     event_count: i64,
@@ -88,9 +88,9 @@ async fn create_project(
     Json(input): Json<ProjectIn>,
 ) -> Result<Json<ProjectOut>, Error> {
     let mut session = site.db();
-    let project = db::insert("projects")
-        .row(&NewProject { name: input.name })
-        .one::<ProjectOut, _>(&mut session)
+    let project = db::query("INSERT INTO projects (name) VALUES (:name) RETURNING id, name")
+        .bind("name", input.name)
+        .one::<ProjectOut>(&mut session)
         .await?;
     Ok(Json(project))
 }
@@ -102,13 +102,13 @@ async fn create_event(
     Json(input): Json<EventIn>,
 ) -> Result<Json<IdOut>, Error> {
     let mut session = site.db();
-    let saved = db::insert("events")
-        .row(&NewEvent {
-            project_id: id,
-            value: input.value,
-        })
-        .one::<IdOut, _>(&mut session)
-        .await?;
+    let saved = db::query(
+        "INSERT INTO events (project_id, value) VALUES (:project_id, :value) RETURNING id",
+    )
+    .bind("project_id", id)
+    .bind("value", input.value)
+    .one::<IdOut>(&mut session)
+    .await?;
     let event = LiveEvent {
         project_id: id,
         kind: "event".to_string(),
@@ -125,11 +125,11 @@ async fn summary(
     Path(ProjectPath { id }): Path<ProjectPath>,
 ) -> Result<Json<SummaryOut>, Error> {
     let mut session = site.db();
-    let row = db::select("rollups")
-        .filter("project_id = :id")
-        .bind_as("id", id)
-        .first::<RollupRow, _>(&mut session)
-        .await?;
+    let row =
+        db::query("SELECT project_id, event_count, event_sum FROM rollups WHERE project_id = :id")
+            .bind("id", id)
+            .first::<RollupRow>(&mut session)
+            .await?;
     Ok(Json(row.map_or(
         SummaryOut {
             project_id: id,
@@ -150,13 +150,11 @@ async fn events(
     Path(ProjectPath { id }): Path<ProjectPath>,
 ) -> Result<Json<Vec<EventOut>>, Error> {
     let mut session = site.db();
-    let events = db::select("events")
-        .filter("project_id = :id")
-        .bind_as("id", id)
-        .order_by("id", false)
-        .slice(0, 100)
-        .all::<EventOut, _>(&mut session)
-        .await?;
+    let events =
+        db::query("SELECT id, value FROM events WHERE project_id = :id ORDER BY id DESC LIMIT 100")
+            .bind("id", id)
+            .all::<EventOut>(&mut session)
+            .await?;
     Ok(Json(events))
 }
 

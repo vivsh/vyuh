@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::routes::{Accepted, Created, Json, Query, TemporaryRedirect};
     use crate::{Valid, Validate};
     use schemars::JsonSchema;
     use std::future::Future;
@@ -154,7 +155,7 @@ mod tests {
 
         let spec = callable.inspect();
         assert_eq!(spec.arity(), 1);
-        assert!(matches!(spec.args[0].part, ArgPart::Body(_, _)));
+        assert!(spec.args[0].part.body_schema().is_some());
 
         // Check data type tracking
         let payload_type = spec.payload_type();
@@ -174,7 +175,7 @@ mod tests {
         let spec = callable.inspect();
         assert_eq!(spec.arity(), 2);
         assert!(matches!(spec.args[0].part, ArgPart::Query(_)));
-        assert!(matches!(spec.args[1].part, ArgPart::Body(_, _)));
+        assert!(spec.args[1].part.body_schema().is_some());
 
         let ctx = TestContext { id: 1 };
         let result = callable.call(ctx).await;
@@ -373,6 +374,50 @@ mod tests {
         assert_eq!(spec.description.as_deref(), Some("Success response"));
         assert_eq!(spec.status_code, Some(200));
         assert!(matches!(spec.part, ReturnPart::Body(_, _)));
+    }
+
+    /// Verifies optional argument wrappers preserve the inner argument contract.
+    #[test]
+    fn option_arg_part_wraps_inner_metadata() {
+        let part = <Option<Query<TestPayload>> as IntoArgPart>::into_arg_part();
+        let ArgPart::Optional(inner) = part else {
+            panic!("expected optional argument part");
+        };
+
+        assert!(matches!(*inner, ArgPart::Composite(_)));
+        assert!(inner.body_schema().is_none());
+    }
+
+    /// Verifies fallible argument wrappers preserve the inner argument contract.
+    #[test]
+    fn result_arg_part_wraps_inner_metadata() {
+        let part = <Result<Json<TestPayload>, crate::Error> as IntoArgPart>::into_arg_part();
+        let ArgPart::Fallible(inner) = part else {
+            panic!("expected fallible argument part");
+        };
+
+        assert!(inner.body_schema().is_some());
+    }
+
+    /// Verifies optional and fallible return wrappers preserve response metadata.
+    #[test]
+    fn wrapper_return_parts_delegate_to_inner_type() {
+        assert!(matches!(
+            <Option<Created<TestResponse>> as IntoReturnPart>::into_return_part(),
+            ReturnPart::Created(_, _)
+        ));
+        assert!(matches!(
+            <Result<Accepted<TestResponse>, crate::Error> as IntoReturnPart>::into_return_part(),
+            ReturnPart::Accepted(_, _)
+        ));
+        assert!(matches!(
+            <Result<TemporaryRedirect, crate::Error> as IntoReturnPart>::into_return_part(),
+            ReturnPart::Redirect { status_code: 307 }
+        ));
+        assert!(matches!(
+            <Option<()> as IntoReturnPart>::into_return_part(),
+            ReturnPart::Empty
+        ));
     }
 
     #[test]

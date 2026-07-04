@@ -11,3 +11,8 @@ additional-css = [
 ]
 git-repository-url = "https://github.com/vyuh-rs/vyuh"
 edit-url-template = "https://github.com/vyuh-rs/vyuh/edit/main/docs/book/{path}"
+
+[output.html.playground]
+runnable = false
+editable = false
+copyable = true

@@ -587,41 +587,23 @@ a {
 }
 
 .landing-stack-grid {
-  border: $vyuh-border-subtle;
-  border-radius: $vyuh-radius-sm;
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  margin-top: $vyuh-space-7;
-  overflow: hidden;
+  margin-top: $vyuh-space-6;
 }
 
 .landing-stack-item {
-  background: rgba($vyuh-white, 0.5);
-  border-right: $vyuh-border-subtle;
-  padding: $vyuh-space-4;
+  display: grid;
+  min-height: 4.5rem;
+  place-items: center;
+  padding: $vyuh-space-4 $vyuh-space-3;
   text-align: center;
-
-  &:last-child {
-    border-right: 0;
-  }
-
-  h3 {
-    font-size: $vyuh-text-sm;
-    line-height: $vyuh-line-heading;
-    margin: $vyuh-space-2 0 0;
-  }
-
-  p {
-    color: rgba($vyuh-ink, 0.58);
-    font-size: $vyuh-text-xs;
-    margin: $vyuh-space-1 0 0;
-  }
 }
 
 .landing-stack-logo {
   display: block;
   font-family: $vyuh-font-mono;
-  font-size: $vyuh-text-md;
+  font-size: $vyuh-text-xl;
   font-weight: $vyuh-label-weight;
   line-height: $vyuh-line-heading;
 }

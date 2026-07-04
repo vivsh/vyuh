@@ -1,0 +1,17 @@
+error[E0599]: no function or associated item named `cols` found for struct `PostRow` in the current scope
+  --> tests/ui/typed_query/record_cols.rs:17:22
+   |
+11 | struct PostRow {
+   | -------------- function or associated item `cols` not found for this struct
+...
+17 |     let _ = PostRow::cols();
+   |                      ^^^^ function or associated item not found in `PostRow`
+
+error[E0599]: no function or associated item named `pick` found for struct `PostRow` in the current scope
+  --> tests/ui/typed_query/record_cols.rs:18:22
+   |
+11 | struct PostRow {
+   | -------------- function or associated item `pick` not found for this struct
+...
+18 |     let _ = PostRow::pick;
+   |                      ^^^^ function or associated item not found in `PostRow`

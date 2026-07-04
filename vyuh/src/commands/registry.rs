@@ -24,6 +24,7 @@ pub struct CommandArgInfo {
 }
 
 /// Registry of named CLI commands.
+#[derive(Clone)]
 pub struct CommandRegistry {
     banner: Option<String>,
     commands: IndexMap<String, Command>,
@@ -73,6 +74,9 @@ impl CommandRegistry {
     }
 
     pub fn generate_help(&self, command_name: &str) -> Result<String, CommandError> {
+        if command_name == "help" {
+            return Ok(help_command_help());
+        }
         let command = self
             .commands
             .get(command_name)
@@ -82,9 +86,18 @@ impl CommandRegistry {
         if let Some(description) = command_summary(command) {
             help.push_str(&format!("\n{}\n", description));
         }
+        if command.args.is_empty() {
+            help.push_str("\nNo arguments.\n");
+            return Ok(help);
+        }
         help.push_str("\nOptions:\n");
         let mut args = command.args.iter().collect::<Vec<_>>();
-        args.sort_by(|a, b| a.name.cmp(&b.name));
+        args.sort_by(|a, b| a.flag_name().cmp(b.flag_name()));
+        let width = args
+            .iter()
+            .map(|arg| option_usage(arg).len())
+            .max()
+            .unwrap_or(0);
         for arg in args {
             let required_str = if arg.required { " (required)" } else { "" };
             let desc_str = arg
@@ -97,22 +110,14 @@ impl CommandRegistry {
             } else {
                 format!(" [{}]", arg.hints.join("; "))
             };
-            let line = if matches!(arg.arg_type, CommandArgType::Boolean) {
-                format!(
-                    "  --{} / --no-{}{}{}{}\n",
-                    arg.name, arg.name, required_str, hints_str, desc_str
-                )
-            } else {
-                let value = if matches!(arg.arg_type, CommandArgType::Array(_)) {
-                    format!("<{}>...", arg.arg_type.type_name())
-                } else {
-                    format!("<{}>", arg.arg_type.type_name())
-                };
-                format!(
-                    "  --{} {}{}{}{}\n",
-                    arg.name, value, required_str, hints_str, desc_str
-                )
-            };
+            let usage = option_usage(arg);
+            let line = format!(
+                "  {usage:<width$}{}{}{}\n",
+                required_str,
+                hints_str,
+                desc_str,
+                width = width
+            );
             help.push_str(&line);
         }
         Ok(help)
@@ -148,15 +153,48 @@ impl CommandRegistry {
             help.push_str("\n\n");
         }
         help.push_str("Available commands:\n\n");
-        let mut commands = self.commands.iter().collect::<Vec<_>>();
-        commands.sort_by(|(left, _), (right, _)| left.cmp(right));
-        for (name, cmd) in commands {
-            let summary =
-                command_summary(cmd).unwrap_or_else(|| "No description available".to_string());
-            help.push_str(&format!("  {:<20} {}\n", name, summary));
+        let mut entries = self
+            .commands
+            .iter()
+            .map(|(name, cmd)| {
+                (
+                    name.as_str(),
+                    command_summary(cmd).unwrap_or_else(|| "No description available".to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.push((
+            "help",
+            "Show available commands or help for one command.".to_string(),
+        ));
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let width = entries
+            .iter()
+            .map(|(name, _)| name.len())
+            .max()
+            .unwrap_or(0);
+        for (name, summary) in entries {
+            help.push_str(&format!("  {:<width$} {}\n", name, summary, width = width));
         }
         help.push_str("\nUse '<command> --help' for more information on a specific command.\n");
         help
+    }
+
+    pub(crate) fn early_output(
+        &self,
+        command_name: &str,
+        args: &[&str],
+    ) -> Option<Result<String, CommandError>> {
+        if command_name == "help" {
+            return Some(self.help_output(args));
+        }
+        if has_help_flag(args) {
+            return Some(self.generate_help(command_name));
+        }
+        if !self.commands.contains_key(command_name) {
+            return Some(Err(CommandError::UnknownCommand(command_name.to_string())));
+        }
+        None
     }
 
     pub async fn execute(
@@ -166,10 +204,10 @@ impl CommandRegistry {
         site: Site,
     ) -> Result<(), CommandError> {
         if command_name == "help" {
-            println!("{}", self.execute_help());
+            println!("{}", self.help_output(args)?);
             return Ok(());
         }
-        if args.contains(&"--help") {
+        if has_help_flag(args) {
             println!("{}", self.generate_help(command_name)?);
             return Ok(());
         }
@@ -204,4 +242,38 @@ fn command_summary(command: &Command) -> Option<String> {
             .as_ref()
             .and_then(|d| d.lines().next().map(|s| s.to_string()))
     })
+}
+
+fn option_usage(arg: &super::args::CommandArg) -> String {
+    if matches!(arg.arg_type, CommandArgType::Boolean) {
+        format!("--{} / --no-{}", arg.flag_name(), arg.flag_name())
+    } else {
+        let value = if matches!(arg.arg_type, CommandArgType::Array(_)) {
+            format!("<{}>...", arg.arg_type.type_name())
+        } else {
+            format!("<{}>", arg.arg_type.type_name())
+        };
+        format!("--{} {}", arg.flag_name(), value)
+    }
+}
+
+fn has_help_flag(args: &[&str]) -> bool {
+    args.iter().any(|arg| *arg == "--help" || *arg == "-h")
+}
+
+fn help_command_help() -> String {
+    "Usage: help [COMMAND]\n\nShow available commands or help for one command.\n".to_string()
+}
+
+impl CommandRegistry {
+    fn help_output(&self, args: &[&str]) -> Result<String, CommandError> {
+        match args {
+            [] => Ok(self.execute_help()),
+            [command] => self.generate_help(command),
+            [_, extra, ..] => Err(CommandError::UnexpectedArgument {
+                command: "help".to_string(),
+                argument: (*extra).to_string(),
+            }),
+        }
+    }
 }

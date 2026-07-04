@@ -1,0 +1,11 @@
+dependencies:
+- 0001_initial
+operations:
+- type: add_column
+  table_name: blog_posts
+  column:
+    name: image_url
+    type: text
+    nullable: true
+    primary_key: false
+atomic: true

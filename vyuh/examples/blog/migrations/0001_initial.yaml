@@ -1,0 +1,137 @@
+operations:
+- type: create_table
+  table:
+    name: blog_users
+    columns:
+    - name: id
+      type: bigserial
+      nullable: false
+      primary_key: true
+    - name: username
+      type: text
+      nullable: false
+      primary_key: false
+    - name: display_name
+      type: text
+      nullable: false
+      primary_key: false
+    - name: password_hash
+      type: text
+      nullable: false
+      primary_key: false
+    - name: is_admin
+      type: boolean
+      nullable: false
+      default: 'false'
+      primary_key: false
+    - name: created_at
+      type: timestamp with time zone
+      nullable: false
+      default: now()
+      primary_key: false
+    constraints:
+    - kind: unique
+      name: blog_users_username_key
+      columns:
+      - username
+- type: create_table
+  table:
+    name: blog_posts
+    columns:
+    - name: id
+      type: bigserial
+      nullable: false
+      primary_key: true
+    - name: title
+      type: text
+      nullable: false
+      primary_key: false
+    - name: slug
+      type: text
+      nullable: false
+      primary_key: false
+    - name: excerpt
+      type: text
+      nullable: false
+      primary_key: false
+    - name: body
+      type: text
+      nullable: false
+      primary_key: false
+    - name: author_id
+      type: bigint
+      nullable: false
+      primary_key: false
+    - name: published
+      type: boolean
+      nullable: false
+      default: 'false'
+      primary_key: false
+    - name: created_at
+      type: timestamp with time zone
+      nullable: false
+      default: now()
+      primary_key: false
+    - name: updated_at
+      type: timestamp with time zone
+      nullable: false
+      default: now()
+      primary_key: false
+    foreign_keys:
+    - name: blog_posts_author_id_fkey
+      from_column: author_id
+      to_table: blog_users
+      to_column: id
+    indexes:
+    - name: blog_posts_author_idx
+      columns:
+      - author_id
+      unique: false
+    constraints:
+    - kind: unique
+      name: blog_posts_slug_key
+      columns:
+      - slug
+- type: create_table
+  table:
+    name: blog_comments
+    columns:
+    - name: id
+      type: bigserial
+      nullable: false
+      primary_key: true
+    - name: post_id
+      type: bigint
+      nullable: false
+      primary_key: false
+    - name: author_id
+      type: bigint
+      nullable: false
+      primary_key: false
+    - name: body
+      type: text
+      nullable: false
+      primary_key: false
+    - name: created_at
+      type: timestamp with time zone
+      nullable: false
+      default: now()
+      primary_key: false
+    foreign_keys:
+    - name: blog_comments_post_id_fkey
+      from_column: post_id
+      to_table: blog_posts
+      to_column: id
+    - name: blog_comments_author_id_fkey
+      from_column: author_id
+      to_table: blog_users
+      to_column: id
+    indexes:
+    - name: blog_comments_post_idx
+      columns:
+      - post_id
+      unique: false
+    - name: blog_comments_author_idx
+      columns:
+      - author_id
+      unique: false

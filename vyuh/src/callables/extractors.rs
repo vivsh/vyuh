@@ -2,9 +2,12 @@
 
 use super::callables::{DataBox, FromContext, FromContextParts, IntoDataBox, IntoOutput};
 use super::specs::{
-    ArgPart, CallError, DataValue, IntoArgPart, IntoReturnPart, ReturnPart, TypeSchema,
+    ArgPart, CallError, DataValue, IntoArgPart, IntoReturnPart, ReturnPart, ReturnSpec, TypeSchema,
 };
-use crate::routes::{BodyBytes, Form, Json, JsonStr, Path, Query};
+use crate::routes::{
+    Accepted, BodyBytes, Created, FileResponse, Form, Json, JsonStr, Path, PermanentRedirect,
+    Query, StreamResponse, TemporaryRedirect,
+};
 use crate::validation::{Valid, Validate, ValidationSchema};
 use crate::{
     Site,
@@ -14,6 +17,26 @@ use crate::{
 use schemars::JsonSchema;
 use std::borrow::Cow;
 use std::sync::Arc;
+
+fn bad_request_response() -> ArgPart {
+    ArgPart::Response(vec![ReturnSpec::error(400, "Bad request.")])
+}
+
+fn unauthorized_response() -> ArgPart {
+    ArgPart::Response(vec![ReturnSpec::error(401, "Unauthorized.")])
+}
+
+fn validation_response() -> ArgPart {
+    ArgPart::Response(vec![ReturnSpec::error(422, "Validation failed.")])
+}
+
+fn request_part_with_bad_request(part: ArgPart) -> ArgPart {
+    ArgPart::Composite(vec![part, bad_request_response()])
+}
+
+fn validated_request_part(part: ArgPart) -> ArgPart {
+    ArgPart::Composite(vec![part, bad_request_response(), validation_response()])
+}
 
 /// Trait for context types that provide access to a `Site` instance.
 pub trait HasSite {
@@ -114,10 +137,10 @@ where
 
 impl<T: DataValue> IntoArgPart for Data<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        request_part_with_bad_request(ArgPart::Body(
             TypeSchema::wrap_unvalidated::<T>(),
             "application/json".into(),
-        )
+        ))
     }
 }
 
@@ -183,40 +206,40 @@ where
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for Path<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Path(TypeSchema::wrap_unvalidated::<T>())
+        request_part_with_bad_request(ArgPart::Path(TypeSchema::wrap_unvalidated::<T>()))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for Query<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Query(TypeSchema::wrap_unvalidated::<T>())
+        request_part_with_bad_request(ArgPart::Query(TypeSchema::wrap_unvalidated::<T>()))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for Form<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        request_part_with_bad_request(ArgPart::Body(
             TypeSchema::wrap_unvalidated::<T>(),
             Cow::Borrowed("application/x-www-form-urlencoded"),
-        )
+        ))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for Json<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        request_part_with_bad_request(ArgPart::Body(
             TypeSchema::wrap_unvalidated::<T>(),
             Cow::Borrowed("application/json"),
-        )
+        ))
     }
 }
 
 impl IntoArgPart for BodyBytes {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        request_part_with_bad_request(ArgPart::Body(
             TypeSchema::binary_body(),
             Cow::Borrowed("application/octet-stream"),
-        )
+        ))
     }
 }
 
@@ -225,7 +248,7 @@ where
     T: JsonSchema + Validate + ValidationSchema + Send + 'static,
 {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Path(TypeSchema::wrap_valid::<T>())
+        validated_request_part(ArgPart::Path(TypeSchema::wrap_valid::<T>()))
     }
 }
 
@@ -234,7 +257,7 @@ where
     T: JsonSchema + Validate + ValidationSchema + Send + 'static,
 {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Query(TypeSchema::wrap_valid::<T>())
+        validated_request_part(ArgPart::Query(TypeSchema::wrap_valid::<T>()))
     }
 }
 
@@ -243,10 +266,10 @@ where
     T: JsonSchema + Validate + ValidationSchema + Send + 'static,
 {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        validated_request_part(ArgPart::Body(
             TypeSchema::wrap_valid::<T>(),
             Cow::Borrowed("application/x-www-form-urlencoded"),
-        )
+        ))
     }
 }
 
@@ -255,10 +278,10 @@ where
     T: JsonSchema + Validate + ValidationSchema + Send + 'static,
 {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        validated_request_part(ArgPart::Body(
             TypeSchema::wrap_valid::<T>(),
             Cow::Borrowed("application/json"),
-        )
+        ))
     }
 }
 
@@ -267,34 +290,37 @@ where
     T: DataValue + Validate + ValidationSchema,
 {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(
+        validated_request_part(ArgPart::Body(
             TypeSchema::wrap_valid::<T>(),
             Cow::Borrowed("application/json"),
-        )
+        ))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for axum::extract::Path<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Path(TypeSchema::wrap::<T>())
+        request_part_with_bad_request(ArgPart::Path(TypeSchema::wrap::<T>()))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for axum::extract::Query<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Query(TypeSchema::wrap::<T>())
+        request_part_with_bad_request(ArgPart::Query(TypeSchema::wrap::<T>()))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for axum_extra::extract::Query<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Query(TypeSchema::wrap::<T>())
+        request_part_with_bad_request(ArgPart::Query(TypeSchema::wrap::<T>()))
     }
 }
 
 impl<T: JsonSchema + Send + 'static> IntoArgPart for axum::extract::Json<T> {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Body(TypeSchema::wrap::<T>(), Cow::Borrowed("application/json"))
+        request_part_with_bad_request(ArgPart::Body(
+            TypeSchema::wrap::<T>(),
+            Cow::Borrowed("application/json"),
+        ))
     }
 }
 
@@ -319,6 +345,48 @@ impl<T: JsonSchema + Send + 'static> IntoReturnPart for axum::extract::Json<T> {
 impl<T: JsonSchema + Send + 'static> IntoReturnPart for Json<T> {
     fn into_return_part() -> ReturnPart {
         ReturnPart::Body(TypeSchema::wrap::<T>(), Cow::Borrowed("application/json"))
+    }
+}
+
+impl<T: JsonSchema + Send + 'static> IntoReturnPart for Created<T> {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Created(TypeSchema::wrap::<T>(), Cow::Borrowed("application/json"))
+    }
+}
+
+impl<T: JsonSchema + Send + 'static> IntoReturnPart for Accepted<T> {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Accepted(TypeSchema::wrap::<T>(), Cow::Borrowed("application/json"))
+    }
+}
+
+impl IntoReturnPart for axum::response::NoContent {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Empty
+    }
+}
+
+impl IntoReturnPart for TemporaryRedirect {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Redirect { status_code: 307 }
+    }
+}
+
+impl IntoReturnPart for PermanentRedirect {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Redirect { status_code: 308 }
+    }
+}
+
+impl IntoReturnPart for FileResponse {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Binary(Cow::Borrowed("application/octet-stream"))
+    }
+}
+
+impl IntoReturnPart for StreamResponse {
+    fn into_return_part() -> ReturnPart {
+        ReturnPart::Binary(Cow::Borrowed("application/octet-stream"))
     }
 }
 
@@ -379,21 +447,45 @@ impl<'a> IntoReturnPart for JsonStr {
 
 impl IntoArgPart for AuthUser {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Security {
-            scheme: "bearerAuth".into(),
-            join_all: true,
-            scopes: Vec::new(),
-        }
+        ArgPart::Composite(vec![
+            ArgPart::Security {
+                scheme: "bearerAuth".into(),
+                join_all: true,
+                scopes: Vec::new(),
+            },
+            unauthorized_response(),
+        ])
     }
 }
 
 impl IntoArgPart for ApiKey {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Security {
-            scheme: "apiKeyAuth".into(),
-            join_all: true,
-            scopes: Vec::new(),
-        }
+        ArgPart::Composite(vec![
+            ArgPart::Security {
+                scheme: "apiKeyAuth".into(),
+                join_all: true,
+                scopes: Vec::new(),
+            },
+            unauthorized_response(),
+        ])
+    }
+}
+
+impl<T> IntoArgPart for Option<T>
+where
+    T: IntoArgPart,
+{
+    fn into_arg_part() -> ArgPart {
+        ArgPart::Optional(Box::new(T::into_arg_part()))
+    }
+}
+
+impl<T, E> IntoArgPart for Result<T, E>
+where
+    T: IntoArgPart,
+{
+    fn into_arg_part() -> ArgPart {
+        ArgPart::Fallible(Box::new(T::into_arg_part()))
     }
 }
 

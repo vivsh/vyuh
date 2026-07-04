@@ -30,6 +30,8 @@ struct ParserArgs {
     age: i32,
     #[serde(default)]
     verbose: bool,
+    #[serde(default)]
+    dry_run: bool,
     tags: Vec<String>,
 }
 
@@ -101,9 +103,55 @@ fn test_parse_arrays_booleans_and_scalars() {
             name: "Alice".to_string(),
             age: 30,
             verbose: false,
+            dry_run: false,
             tags: vec!["api".to_string(), "web".to_string(), "admin".to_string()],
         }
     );
+}
+
+#[test]
+fn test_parse_equals_negative_and_kebab_aliases() {
+    let args = command_arg_defs::<ParserArgs>();
+    let parsed = parse_args::<ParserArgs>(
+        "parse",
+        &[
+            "--name=Alice",
+            "--age=-1",
+            "--tags=api",
+            "--tags",
+            "web",
+            "--dry-run",
+        ],
+        &args,
+    )
+    .unwrap();
+
+    assert_eq!(
+        parsed,
+        ParserArgs {
+            name: "Alice".to_string(),
+            age: -1,
+            verbose: false,
+            dry_run: true,
+            tags: vec!["api".to_string(), "web".to_string()],
+        }
+    );
+
+    let parsed = parse_args::<ParserArgs>(
+        "parse",
+        &[
+            "--name",
+            "Alice",
+            "--age",
+            "30",
+            "--tags",
+            "api",
+            "--dry_run",
+        ],
+        &args,
+    )
+    .unwrap();
+    assert!(parsed.dry_run);
 }
 
 #[test]
@@ -125,6 +173,46 @@ fn test_parse_no_bool_flag() {
     .unwrap();
 
     assert!(!parsed.verbose);
+}
+
+#[test]
+fn test_duplicate_scalar_and_bool_flags_error() {
+    let args = command_arg_defs::<ParserArgs>();
+
+    let err = parse_args::<ParserArgs>(
+        "parse",
+        &[
+            "--name", "Alice", "--name", "Ada", "--age", "30", "--tags", "api",
+        ],
+        &args,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        CommandError::DuplicateFlag { command, flag }
+            if command == "parse" && flag == "name"
+    ));
+
+    let err = parse_args::<ParserArgs>(
+        "parse",
+        &[
+            "--name",
+            "Alice",
+            "--age",
+            "30",
+            "--tags",
+            "api",
+            "--verbose",
+            "--no-verbose",
+        ],
+        &args,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        CommandError::DuplicateFlag { command, flag }
+            if command == "parse" && flag == "verbose"
+    ));
 }
 
 #[test]
@@ -221,6 +309,41 @@ fn test_help_is_sorted_and_uses_descriptions() {
     let command_help = registry.generate_help("alpha").unwrap();
     assert!(command_help.find("--age").unwrap() < command_help.find("--name").unwrap());
     assert!(command_help.contains("Alpha command."));
+}
+
+#[test]
+fn test_help_lists_pseudo_help_and_command_help_forms() {
+    async fn greet(_args: Data<TestArgs>) -> Result<(), Error> {
+        Ok(())
+    }
+
+    let mut registry = CommandRegistry::new();
+    registry
+        .register(
+            command::<TestArgs, _, _>(
+                greet,
+                CommandConf::new("greet").description("Print a greeting."),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let help = registry.execute_help();
+    assert!(help.contains("help"));
+    assert!(help.contains("greet"));
+
+    let direct = registry.generate_help("greet").unwrap();
+    let via_help = registry.early_output("help", &["greet"]).unwrap().unwrap();
+    let via_flag = registry.early_output("greet", &["-h"]).unwrap().unwrap();
+    assert_eq!(direct, via_help);
+    assert_eq!(direct, via_flag);
+}
+
+#[test]
+fn test_no_arg_command_help_says_no_arguments() {
+    let registry = super::registry::builtin_registry().unwrap();
+    let help = registry.generate_help("serve").unwrap();
+    assert!(help.contains("No arguments."));
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]

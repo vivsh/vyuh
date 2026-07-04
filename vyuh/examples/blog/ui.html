@@ -1,0 +1,851 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Vyuh Blog</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+      :root {
+        --ink: #172033;
+        --muted: #667085;
+        --line: #d9dee8;
+        --page: #f4f6fa;
+        --panel: #ffffff;
+        --navy: #182846;
+        --blue: #2457d6;
+        --green: #16845f;
+        --amber: #b7791f;
+        --red: #b42318;
+      }
+
+      body {
+        min-height: 100vh;
+        color: var(--ink);
+        background: var(--page);
+      }
+
+      .app-shell {
+        min-height: 100vh;
+      }
+
+      .app-nav {
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand-mark {
+        width: 2.25rem;
+        height: 2.25rem;
+        display: inline-grid;
+        place-items: center;
+        color: #fff;
+        background: var(--navy);
+        border-radius: .5rem;
+      }
+
+      .hero {
+        color: #fff;
+        background: var(--navy);
+        border-bottom: 1px solid #0f1a2e;
+      }
+
+      .hero-panel {
+        background: #223556;
+        border: 1px solid #365078;
+      }
+
+      .content-panel,
+      .post-card,
+      .metric-card,
+      .empty-state {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: .75rem;
+        box-shadow: 0 .75rem 2rem rgba(23, 32, 51, .06);
+      }
+
+      .post-card {
+        overflow: hidden;
+      }
+
+      .post-image {
+        aspect-ratio: 16 / 10;
+        object-fit: cover;
+        background: #e7ebf2;
+      }
+
+      .article-hero-image {
+        max-height: 28rem;
+        object-fit: cover;
+        background: #e7ebf2;
+      }
+
+      .article-body {
+        white-space: pre-wrap;
+        line-height: 1.8;
+      }
+
+      .icon-tile {
+        width: 2.5rem;
+        height: 2.5rem;
+        display: inline-grid;
+        place-items: center;
+        border-radius: .625rem;
+      }
+
+      .tile-blue {
+        color: #fff;
+        background: var(--blue);
+      }
+
+      .tile-green {
+        color: #fff;
+        background: var(--green);
+      }
+
+      .tile-amber {
+        color: #fff;
+        background: var(--amber);
+      }
+
+      .btn-primary-solid {
+        --bs-btn-color: #fff;
+        --bs-btn-bg: var(--blue);
+        --bs-btn-border-color: var(--blue);
+        --bs-btn-hover-color: #fff;
+        --bs-btn-hover-bg: #1d49b6;
+        --bs-btn-hover-border-color: #1d49b6;
+      }
+
+      .text-muted-strong {
+        color: var(--muted);
+      }
+
+      .status-draft {
+        color: #7a4d0b;
+        background: #fff4d6;
+      }
+
+      .status-published {
+        color: #0b5d43;
+        background: #dff7ed;
+      }
+
+      .image-preview {
+        max-height: 14rem;
+        object-fit: cover;
+      }
+
+      .loading-scrim {
+        z-index: 1080;
+        place-items: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <nav class="navbar navbar-expand-lg sticky-top app-nav">
+        <div class="container py-2">
+          <router-link class="navbar-brand d-flex align-items-center gap-2 fw-bold" to="/">
+            <span class="brand-mark"><i class="bi bi-journal-text"></i></span>
+            <span>Vyuh Blog</span>
+          </router-link>
+          <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#blogNav">
+            <span class="navbar-toggler-icon"></span>
+          </button>
+          <div class="collapse navbar-collapse" id="blogNav">
+            <div class="navbar-nav ms-auto align-items-lg-center gap-lg-2">
+              <router-link class="nav-link" to="/"><i class="bi bi-house me-1"></i>Stories</router-link>
+              <router-link class="nav-link" to="/admin" v-if="isAdmin"><i class="bi bi-speedometer2 me-1"></i>Admin</router-link>
+              <router-link class="nav-link" to="/users" v-if="isAdmin"><i class="bi bi-people me-1"></i>Users</router-link>
+              <a class="nav-link" href="/docs"><i class="bi bi-braces me-1"></i>OpenAPI</a>
+              <a class="nav-link" href="/console"><i class="bi bi-terminal me-1"></i>Console</a>
+              <router-link class="btn btn-sm btn-outline-dark" to="/login" v-if="!session.user">
+                <i class="bi bi-box-arrow-in-right me-1"></i>Sign in
+              </router-link>
+              <div class="dropdown" v-else>
+                <button class="btn btn-sm btn-dark dropdown-toggle" data-bs-toggle="dropdown">
+                  <i class="bi bi-person-circle me-1"></i>{{ session.user.display_name }}
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                  <li><button class="dropdown-item" type="button" @click="logout"><i class="bi bi-box-arrow-right me-2"></i>Logout</button></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </nav>
+
+      <router-view></router-view>
+
+      <div class="toast-container position-fixed bottom-0 end-0 p-3">
+        <div class="toast show border-0 shadow" v-if="toast" :class="toast.kind === 'error' ? 'text-bg-danger' : 'text-bg-success'">
+          <div class="toast-body">{{ toast.message }}</div>
+        </div>
+      </div>
+
+      <div class="modal fade" tabindex="-1" ref="validationModal">
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h2 class="modal-title h5"><i class="bi bi-exclamation-circle text-danger me-2"></i>{{ validationDialog.title }}</h2>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted-strong" v-if="validationDialog.detail">{{ validationDialog.detail }}</p>
+              <ul class="list-group list-group-flush" v-if="validationDialog.errors.length">
+                <li class="list-group-item px-0" v-for="(error, index) in validationDialog.errors" :key="index">
+                  <div class="fw-semibold" v-if="error.field">{{ error.field }}</div>
+                  <div>{{ error.message }}</div>
+                </li>
+              </ul>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-primary-solid" data-bs-dismiss="modal">Review fields</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="position-fixed top-0 start-0 w-100 h-100 d-grid loading-scrim bg-white bg-opacity-75" v-if="loading">
+        <div class="spinner-border text-primary" role="status"></div>
+      </div>
+    </div>
+
+    <script type="text/x-template" id="home-template">
+      <main>
+        <section class="hero py-5">
+          <div class="container py-4">
+            <div class="row align-items-center g-4">
+              <div class="col-lg-8">
+                <span class="badge text-bg-light mb-3"><i class="bi bi-lightning-charge-fill text-warning me-1"></i>Postgres, REST, Vue Router, OpenAPI</span>
+                <h1 class="display-5 fw-bold mb-3">A clean JSON blog built on Vyuh.</h1>
+                <p class="lead mb-4">Typed Rust APIs, cookie auth, uploads, comments, migrations, and a console-backed admin workflow in a single-file Vue UI.</p>
+                <div class="d-flex flex-wrap gap-2">
+                  <button class="btn btn-primary-solid btn-lg" type="button" @click="$root.scrollToPosts">
+                    <i class="bi bi-arrow-down-circle me-2"></i>Read stories
+                  </button>
+                  <router-link class="btn btn-light btn-lg" to="/admin" v-if="$root.isAdmin">
+                    <i class="bi bi-pencil-square me-2"></i>Write a post
+                  </router-link>
+                </div>
+              </div>
+              <div class="col-lg-4">
+                <aside class="hero-panel rounded-3 p-4">
+                  <div class="d-flex gap-3 mb-3">
+                    <span class="icon-tile tile-blue"><i class="bi bi-database-check"></i></span>
+                    <div><div class="fw-semibold">Typed persistence</div><div class="small opacity-75">Models, queries, migrations</div></div>
+                  </div>
+                  <div class="d-flex gap-3 mb-3">
+                    <span class="icon-tile tile-green"><i class="bi bi-shield-lock"></i></span>
+                    <div><div class="fw-semibold">Cookie auth</div><div class="small opacity-75">Admin tools and comments</div></div>
+                  </div>
+                  <div class="d-flex gap-3">
+                    <span class="icon-tile tile-amber"><i class="bi bi-cloud-upload"></i></span>
+                    <div><div class="fw-semibold">Uploads</div><div class="small opacity-75">Multipart REST endpoint</div></div>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="container py-5" id="posts">
+          <div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-4">
+            <div>
+              <span class="badge text-bg-dark mb-2">Latest</span>
+              <h2 class="h1 fw-bold mb-1">Published stories</h2>
+              <p class="text-muted-strong mb-0">A reader experience backed entirely by JSON APIs.</p>
+            </div>
+            <button class="btn btn-outline-dark" type="button" @click="$root.loadPosts">
+              <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+          </div>
+
+          <div class="row g-4" v-if="$root.posts.length">
+            <div class="col-md-6 col-xl-4" v-for="post in $root.posts" :key="post.id">
+              <article class="post-card h-100">
+                <img v-if="post.image_url" class="w-100 post-image" :src="post.image_url" alt="">
+                <div class="p-4">
+                  <div class="d-flex justify-content-between gap-3 small text-muted-strong mb-3">
+                    <span><i class="bi bi-person me-1"></i>{{ post.author.display_name }}</span>
+                    <span>{{ $root.formatDate(post.created_at) }}</span>
+                  </div>
+                  <h3 class="h4 fw-bold">{{ post.title }}</h3>
+                  <p class="text-muted-strong">{{ post.excerpt }}</p>
+                  <router-link class="btn btn-sm btn-primary-solid" :to="'/posts/' + post.slug">Read post</router-link>
+                </div>
+              </article>
+            </div>
+          </div>
+
+          <pagination-bar v-if="$root.postsPage.total_pages > 1" :page="$root.postsPage" @change="$root.changePostsPage"></pagination-bar>
+          <empty-state v-if="!$root.posts.length" icon="bi-journal-plus" title="No posts yet" text="Create an admin user, sign in, and publish the first story."></empty-state>
+        </section>
+      </main>
+    </script>
+
+    <script type="text/x-template" id="post-template">
+      <main class="container py-5">
+        <button class="btn btn-link px-0 mb-3" type="button" @click="$router.push('/')">
+          <i class="bi bi-arrow-left me-1"></i>Back to stories
+        </button>
+        <article v-if="$root.postDetail" class="row justify-content-center">
+          <div class="col-lg-9">
+            <div class="content-panel overflow-hidden">
+              <img v-if="$root.postDetail.post.image_url" class="w-100 article-hero-image" :src="$root.postDetail.post.image_url" alt="">
+              <div class="p-4 p-lg-5">
+                <span class="badge rounded-pill mb-3" :class="$root.postDetail.post.published ? 'status-published' : 'status-draft'">
+                  {{ $root.postDetail.post.published ? "Published" : "Draft" }}
+                </span>
+                <h1 class="display-5 fw-bold">{{ $root.postDetail.post.title }}</h1>
+                <p class="lead text-muted-strong">{{ $root.postDetail.post.excerpt }}</p>
+                <div class="d-flex flex-wrap gap-3 small text-muted-strong mb-4">
+                  <span><i class="bi bi-person me-1"></i>{{ $root.postDetail.post.author.display_name }}</span>
+                  <span><i class="bi bi-calendar3 me-1"></i>{{ $root.formatDate($root.postDetail.post.created_at) }}</span>
+                </div>
+                <div class="article-body fs-5">{{ $root.postDetail.post.body }}</div>
+              </div>
+            </div>
+
+            <section class="mt-5">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <h2 class="h3 fw-bold mb-0">Comments</h2>
+                <span class="badge text-bg-light">{{ $root.postDetail.comments.length }}</span>
+              </div>
+              <div class="vstack gap-3 mb-4" v-if="$root.postDetail.comments.length">
+                <article class="content-panel p-4" v-for="comment in $root.postDetail.comments" :key="comment.id">
+                  <div class="d-flex justify-content-between gap-3">
+                    <strong>{{ comment.author.display_name }}</strong>
+                    <span class="small text-muted-strong">{{ $root.formatDate(comment.created_at) }}</span>
+                  </div>
+                  <p class="mb-3 mt-2">{{ comment.body }}</p>
+                  <button class="btn btn-sm btn-outline-danger" type="button" v-if="comment.can_delete" @click="$root.deleteComment(comment.id)">
+                    <i class="bi bi-trash me-1"></i>Delete
+                  </button>
+                </article>
+              </div>
+              <empty-state v-else icon="bi-chat-left-text" title="No comments yet" text="Start the conversation."></empty-state>
+
+              <form class="content-panel p-4" @submit.prevent="$root.createComment" v-if="$root.session.user">
+                <label class="form-label fw-semibold">Add a comment</label>
+                <textarea class="form-control mb-3" rows="4" v-model.trim="$root.commentBody" required></textarea>
+                <button class="btn btn-primary-solid" type="submit"><i class="bi bi-send me-1"></i>Post comment</button>
+              </form>
+              <div class="alert alert-light border" v-else>
+                <router-link class="btn btn-sm btn-dark me-2" to="/login">Sign in</router-link>
+                to comment on this story.
+              </div>
+            </section>
+          </div>
+        </article>
+      </main>
+    </script>
+
+    <script type="text/x-template" id="login-template">
+      <main class="container py-5">
+        <div class="row justify-content-center">
+          <div class="col-md-7 col-lg-5">
+            <form class="content-panel p-4 p-lg-5" @submit.prevent="$root.login">
+              <span class="icon-tile tile-blue mb-3"><i class="bi bi-shield-lock"></i></span>
+              <h1 class="h2 fw-bold mb-2">Welcome back</h1>
+              <p class="text-muted-strong mb-4">Sign in to comment or manage the blog.</p>
+              <label class="form-label">Username</label>
+              <input class="form-control mb-3" v-model.trim="$root.loginForm.username" autocomplete="username" required>
+              <label class="form-label">Password</label>
+              <input class="form-control mb-4" type="password" v-model="$root.loginForm.password" autocomplete="current-password" required>
+              <button class="btn btn-primary-solid w-100" type="submit">Sign in</button>
+            </form>
+          </div>
+        </div>
+      </main>
+    </script>
+
+    <script type="text/x-template" id="admin-template">
+      <main class="container py-5" v-if="$root.isAdmin">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+          <div>
+            <span class="badge text-bg-dark mb-2">Admin</span>
+            <h1 class="h2 fw-bold mb-1">Editorial dashboard</h1>
+            <p class="text-muted-strong mb-0">Write, publish, and curate the blog.</p>
+          </div>
+          <button class="btn btn-primary-solid" type="button" @click="$root.newPost"><i class="bi bi-plus-circle me-1"></i>New post</button>
+        </div>
+
+        <div class="row g-3 mb-4" v-if="$root.summary">
+          <div class="col-md-4" v-for="metric in $root.metrics" :key="metric.label">
+            <div class="metric-card p-4">
+              <div class="d-flex align-items-center gap-3">
+                <span class="icon-tile" :class="metric.class"><i :class="metric.icon"></i></span>
+                <div>
+                  <div class="text-muted-strong small">{{ metric.label }}</div>
+                  <div class="fs-2 fw-bold">{{ metric.value }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row g-4">
+          <div class="col-xl-7">
+            <div class="content-panel overflow-hidden">
+              <div class="p-4 border-bottom">
+                <h2 class="h5 fw-bold mb-1">Posts</h2>
+                <p class="small text-muted-strong mb-0">Publish drafts or edit existing stories.</p>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                  <thead><tr><th>Title</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+                  <tbody>
+                    <tr v-for="post in $root.adminPosts" :key="post.id">
+                      <td><div class="fw-semibold">{{ post.title }}</div><div class="small text-muted-strong">{{ post.excerpt }}</div></td>
+                      <td><span class="badge" :class="post.published ? 'status-published' : 'status-draft'">{{ post.published ? "Published" : "Draft" }}</span></td>
+                      <td class="text-end">
+                        <button class="btn btn-sm btn-outline-secondary me-1" type="button" @click="$root.editPost(post)">Edit</button>
+                        <button class="btn btn-sm btn-outline-primary me-1" type="button" @click="$root.toggleStatus(post)">{{ post.published ? "Draft" : "Publish" }}</button>
+                        <button class="btn btn-sm btn-outline-danger" type="button" @click="$root.deletePost(post.id)">Delete</button>
+                      </td>
+                    </tr>
+                    <tr v-if="!$root.adminPosts.length"><td colspan="3" class="text-muted-strong">No posts yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <pagination-bar v-if="$root.adminPostsPage.total_pages > 1" :page="$root.adminPostsPage" size="sm" @change="$root.changeAdminPostsPage"></pagination-bar>
+            </div>
+          </div>
+
+          <div class="col-xl-5">
+            <form class="content-panel p-4" @submit.prevent="$root.savePost">
+              <h2 class="h5 fw-bold mb-3">{{ $root.postForm.id ? "Edit post" : "Create post" }}</h2>
+              <label class="form-label">Title</label>
+              <input class="form-control mb-3" v-model.trim="$root.postForm.title" required>
+              <label class="form-label">Excerpt</label>
+              <textarea class="form-control mb-3" rows="3" v-model.trim="$root.postForm.excerpt" required></textarea>
+              <label class="form-label">Body</label>
+              <textarea class="form-control mb-3" rows="8" v-model.trim="$root.postForm.body" required></textarea>
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" v-model="$root.postForm.published" id="published">
+                <label class="form-check-label" for="published">Published</label>
+              </div>
+              <label class="form-label">Hero image</label>
+              <input class="form-control mb-3" type="file" accept="image/png,image/jpeg,image/webp" @change="$root.selectImage">
+              <img v-if="$root.postForm.preview" class="img-fluid rounded-3 image-preview mb-3" :src="$root.postForm.preview" alt="">
+              <div class="d-flex gap-2">
+                <button class="btn btn-primary-solid" type="submit"><i class="bi bi-save me-1"></i>Save post</button>
+                <button class="btn btn-outline-secondary" type="button" @click="$root.newPost">Reset</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </main>
+      <main class="container py-5" v-else>
+        <empty-state icon="bi-shield-lock" title="Admin access required" text="Sign in as an administrator to manage posts."></empty-state>
+      </main>
+    </script>
+
+    <script type="text/x-template" id="users-template">
+      <main class="container py-5" v-if="$root.isAdmin">
+        <div class="row g-4">
+          <div class="col-lg-7">
+            <div class="content-panel overflow-hidden">
+              <div class="p-4 border-bottom">
+                <h1 class="h3 fw-bold mb-1">Users</h1>
+                <p class="text-muted-strong mb-0">Create editors and manage access.</p>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                  <thead><tr><th>User</th><th>Role</th><th class="text-end">Actions</th></tr></thead>
+                  <tbody>
+                    <tr v-for="user in $root.users" :key="user.id">
+                      <td><div class="fw-semibold">{{ user.display_name }}</div><div class="small text-muted-strong">{{ user.username }}</div></td>
+                      <td><span class="badge" :class="user.is_admin ? 'text-bg-dark' : 'text-bg-light'">{{ user.is_admin ? "Admin" : "Writer" }}</span></td>
+                      <td class="text-end"><button class="btn btn-sm btn-outline-danger" type="button" @click="$root.deleteUser(user.id)" :disabled="$root.session.user && $root.session.user.id === user.id">Delete</button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <pagination-bar v-if="$root.usersPage.total_pages > 1" :page="$root.usersPage" size="sm" @change="$root.changeUsersPage"></pagination-bar>
+            </div>
+          </div>
+          <div class="col-lg-5">
+            <form class="content-panel p-4" @submit.prevent="$root.createUser">
+              <h2 class="h5 fw-bold mb-3">Create user</h2>
+              <input class="form-control mb-3" placeholder="Username" v-model.trim="$root.userForm.username" required>
+              <input class="form-control mb-3" placeholder="Display name" v-model.trim="$root.userForm.display_name" required>
+              <input class="form-control mb-3" type="password" placeholder="Password" v-model="$root.userForm.password" required>
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" v-model="$root.userForm.is_admin" id="user-admin">
+                <label class="form-check-label" for="user-admin">Admin</label>
+              </div>
+              <button class="btn btn-primary-solid" type="submit">Create user</button>
+            </form>
+          </div>
+        </div>
+      </main>
+      <main class="container py-5" v-else>
+        <empty-state icon="bi-shield-lock" title="Admin access required" text="Sign in as an administrator to manage users."></empty-state>
+      </main>
+    </script>
+
+    <script type="text/x-template" id="empty-state-template">
+      <div class="empty-state p-5 text-center">
+        <span class="icon-tile tile-blue mb-3"><i :class="'bi ' + icon"></i></span>
+        <h2 class="h4 fw-bold">{{ title }}</h2>
+        <p class="text-muted-strong mb-0">{{ text }}</p>
+      </div>
+    </script>
+
+    <script type="text/x-template" id="pagination-template">
+      <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 border-top p-3 mt-4">
+        <div class="small text-muted-strong">{{ summary }}</div>
+        <div class="btn-group" :class="size === 'sm' ? 'btn-group-sm' : ''">
+          <button class="btn btn-outline-secondary" type="button" :disabled="page.page <= 1" @click="$emit('change', page.page - 1)">
+            <i class="bi bi-arrow-left"></i>
+          </button>
+          <button class="btn btn-outline-secondary" type="button" disabled>{{ page.page }} / {{ page.total_pages }}</button>
+          <button class="btn btn-outline-secondary" type="button" :disabled="page.page >= page.total_pages" @click="$emit('change', page.page + 1)">
+            <i class="bi bi-arrow-right"></i>
+          </button>
+        </div>
+      </div>
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.4.38/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vue-router@4.4.3/dist/vue-router.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      const { createApp } = Vue;
+      const { createRouter, createWebHashHistory } = VueRouter;
+
+      axios.defaults.withCredentials = true;
+
+      const EmptyState = {
+        props: ["icon", "title", "text"],
+        template: "#empty-state-template",
+      };
+
+      const PaginationBar = {
+        props: ["page", "size"],
+        emits: ["change"],
+        template: "#pagination-template",
+        computed: {
+          summary() {
+            if (!this.page.total) return "No results";
+            const start = (this.page.page - 1) * this.page.per_page + 1;
+            const end = Math.min(this.page.total, this.page.page * this.page.per_page);
+            return `${start}-${end} of ${this.page.total}`;
+          },
+        },
+      };
+
+      const Home = {
+        template: "#home-template",
+        async mounted() {
+          await this.$root.loadPosts();
+        },
+      };
+
+      const PostDetail = {
+        template: "#post-template",
+        async mounted() {
+          await this.$root.ensureSession();
+          await this.$root.loadPost(this.$route.params.slug);
+        },
+        async beforeRouteUpdate(to) {
+          await this.$root.ensureSession();
+          await this.$root.loadPost(to.params.slug);
+        },
+      };
+
+      const Login = { template: "#login-template" };
+
+      const Admin = {
+        template: "#admin-template",
+        async mounted() {
+          await this.$root.ensureSession();
+          if (!this.$root.requireAdmin()) return;
+          await this.$root.loadAdmin();
+        },
+      };
+
+      const Users = {
+        template: "#users-template",
+        async mounted() {
+          await this.$root.ensureSession();
+          if (!this.$root.requireAdmin()) return;
+          await this.$root.loadUsers();
+        },
+      };
+
+      const NotFound = {
+        template: '<main class="container py-5"><empty-state icon="bi-compass" title="Page not found" text="That route is not part of the blog UI."></empty-state></main>',
+      };
+
+      const router = createRouter({
+        history: createWebHashHistory(),
+        routes: [
+          { path: "/", component: Home },
+          { path: "/posts/:slug", component: PostDetail },
+          { path: "/login", component: Login },
+          { path: "/admin", component: Admin },
+          { path: "/users", component: Users },
+          { path: "/:pathMatch(.*)*", component: NotFound },
+        ],
+      });
+
+      const app = createApp({
+        data() {
+          return {
+            loading: false,
+            toast: null,
+            validationDialog: { title: "Validation error", detail: "", errors: [] },
+            sessionLoaded: false,
+            session: { user: null },
+            posts: [],
+            postsPage: this.emptyPage(9),
+            postDetail: null,
+            summary: null,
+            users: [],
+            usersPage: this.emptyPage(10),
+            adminPostsPage: this.emptyPage(8),
+            commentBody: "",
+            loginForm: { username: "", password: "" },
+            userForm: { username: "", display_name: "", password: "", is_admin: false },
+            postForm: this.emptyPostForm(),
+          };
+        },
+        computed: {
+          isAdmin() {
+            return !!(this.session.user && this.session.user.is_admin);
+          },
+          adminPosts() {
+            return this.summary ? this.summary.posts.items : [];
+          },
+          metrics() {
+            const summary = this.summary || { post_count: 0, user_count: 0, comment_count: 0 };
+            return [
+              { label: "Posts", value: summary.post_count, icon: "bi bi-journal-text", class: "tile-blue" },
+              { label: "Users", value: summary.user_count, icon: "bi bi-people", class: "tile-green" },
+              { label: "Comments", value: summary.comment_count, icon: "bi bi-chat-dots", class: "tile-amber" },
+            ];
+          },
+        },
+        async mounted() {
+          await this.ensureSession();
+        },
+        methods: {
+          emptyPostForm() {
+            return { id: null, title: "", excerpt: "", body: "", published: false, image: null, preview: null };
+          },
+          emptyPage(perPage) {
+            return { items: [], total: 0, page: 1, per_page: perPage, total_pages: 1 };
+          },
+          async api(task, quiet = false) {
+            this.loading = !quiet;
+            try {
+              return await task();
+            } catch (error) {
+              this.showError(error);
+              throw error;
+            } finally {
+              this.loading = false;
+            }
+          },
+          async loadSession() {
+            const response = await axios.get("/api/session");
+            this.session = response.data;
+            this.sessionLoaded = true;
+          },
+          async ensureSession() {
+            if (!this.sessionLoaded) await this.loadSession();
+          },
+          async loadPosts() {
+            await this.api(async () => {
+              const response = await axios.get("/api/posts", { params: { page: this.postsPage.page, per_page: this.postsPage.per_page } });
+              this.postsPage = response.data;
+              this.posts = response.data.items;
+            });
+          },
+          async loadPost(slug) {
+            await this.api(async () => {
+              const response = await axios.get(`/api/posts/${encodeURIComponent(slug)}`);
+              this.postDetail = response.data;
+            });
+          },
+          async loadAdmin() {
+            await this.api(async () => {
+              const response = await axios.get("/api/admin/summary", { params: { page: this.adminPostsPage.page, per_page: this.adminPostsPage.per_page } });
+              this.summary = response.data;
+              this.adminPostsPage = response.data.posts;
+            });
+          },
+          async loadUsers() {
+            await this.api(async () => {
+              const response = await axios.get("/api/users", { params: { page: this.usersPage.page, per_page: this.usersPage.per_page } });
+              this.usersPage = response.data;
+              this.users = response.data.items;
+            });
+          },
+          async login() {
+            await this.api(async () => {
+              const response = await axios.post("/api/session", this.loginForm);
+              this.session = response.data;
+              this.loginForm = { username: "", password: "" };
+              this.notice("Signed in.");
+              this.$router.push(this.isAdmin ? "/admin" : "/");
+            });
+          },
+          async logout() {
+            await axios.delete("/api/session");
+            this.session = { user: null };
+            this.summary = null;
+            this.users = [];
+            this.usersPage = this.emptyPage(10);
+            this.adminPostsPage = this.emptyPage(8);
+            this.notice("Signed out.");
+            this.$router.push("/");
+          },
+          async createComment() {
+            const slug = this.postDetail.post.slug;
+            await this.api(async () => {
+              const response = await axios.post(`/api/posts/${encodeURIComponent(slug)}/comments`, { body: this.commentBody });
+              this.postDetail = response.data;
+              this.commentBody = "";
+              this.notice("Comment posted.");
+            });
+          },
+          async deleteComment(id) {
+            await this.api(async () => {
+              await axios.delete(`/api/comments/${id}`);
+              await this.loadPost(this.postDetail.post.slug);
+              this.notice("Comment deleted.");
+            });
+          },
+          newPost() {
+            this.postForm = this.emptyPostForm();
+          },
+          editPost(post) {
+            this.postForm = { ...post, image: null, preview: post.image_url };
+          },
+          selectImage(event) {
+            const file = event.target.files[0];
+            this.postForm.image = file || null;
+            this.postForm.preview = file ? URL.createObjectURL(file) : this.postForm.preview;
+          },
+          formData() {
+            const data = new FormData();
+            for (const key of ["title", "excerpt", "body"]) data.append(key, this.postForm[key]);
+            data.append("published", this.postForm.published ? "true" : "false");
+            if (this.postForm.image) data.append("image", this.postForm.image);
+            return data;
+          },
+          async savePost() {
+            await this.api(async () => {
+              if (this.postForm.id) {
+                await axios.put(`/api/admin/posts/${this.postForm.id}`, this.formData());
+              } else {
+                await axios.post("/api/posts", this.formData());
+              }
+              this.newPost();
+              this.adminPostsPage.page = 1;
+              await this.loadAdmin();
+              this.notice("Post saved.");
+            });
+          },
+          async toggleStatus(post) {
+            await this.api(async () => {
+              await axios.patch(`/api/admin/posts/${post.id}/status`, { published: !post.published });
+              await this.loadAdmin();
+            });
+          },
+          async deletePost(id) {
+            if (!confirm("Delete this post?")) return;
+            await this.api(async () => {
+              if (this.adminPosts.length === 1 && this.adminPostsPage.page > 1) this.adminPostsPage.page -= 1;
+              await axios.delete(`/api/admin/posts/${id}`);
+              await this.loadAdmin();
+              this.notice("Post deleted.");
+            });
+          },
+          async createUser() {
+            await this.api(async () => {
+              await axios.post("/api/users", this.userForm);
+              this.userForm = { username: "", display_name: "", password: "", is_admin: false };
+              this.usersPage.page = 1;
+              await this.loadUsers();
+              this.notice("User created.");
+            });
+          },
+          async deleteUser(id) {
+            if (!confirm("Delete this user?")) return;
+            await this.api(async () => {
+              if (this.users.length === 1 && this.usersPage.page > 1) this.usersPage.page -= 1;
+              await axios.delete(`/api/users/${id}`);
+              await this.loadUsers();
+              this.notice("User deleted.");
+            });
+          },
+          async changePostsPage(page) {
+            this.postsPage.page = page;
+            await this.loadPosts();
+            this.scrollToPosts();
+          },
+          async changeAdminPostsPage(page) {
+            this.adminPostsPage.page = page;
+            await this.loadAdmin();
+          },
+          async changeUsersPage(page) {
+            this.usersPage.page = page;
+            await this.loadUsers();
+          },
+          requireAdmin() {
+            if (this.isAdmin) return true;
+            this.$router.push("/login");
+            return false;
+          },
+          scrollToPosts() {
+            document.getElementById("posts")?.scrollIntoView({ behavior: "smooth" });
+          },
+          formatDate(value) {
+            return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
+          },
+          notice(message) {
+            this.toast = { kind: "ok", message };
+            setTimeout(() => { this.toast = null; }, 2500);
+          },
+          showError(error) {
+            const body = error.response?.data;
+            if (this.isValidationError(body)) {
+              this.showValidationDialog(body);
+              return;
+            }
+            const detail = body?.detail || error.message || "Something went wrong.";
+            this.toast = { kind: "error", message: detail };
+            setTimeout(() => { this.toast = null; }, 4000);
+          },
+          isValidationError(body) {
+            return !!(body && Array.isArray(body.errors) && body.errors.length);
+          },
+          showValidationDialog(body) {
+            this.validationDialog = {
+              title: body.code || "Validation error",
+              detail: body.detail || "Please correct the highlighted request fields.",
+              errors: body.errors.map((error) => ({
+                field: error.field || error.path || error.name || "",
+                message: error.message || error.detail || String(error),
+              })),
+            };
+            bootstrap.Modal.getOrCreateInstance(this.$refs.validationModal).show();
+          },
+        },
+      });
+
+      app.component("empty-state", EmptyState);
+      app.component("pagination-bar", PaginationBar);
+      app.use(router).mount("#app");
+    </script>
+  </body>
+</html>

@@ -12,6 +12,7 @@ use tempfile::TempPath;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
+use crate::callables::{MultipartApiField, MultipartApiFieldKind, MultipartApiSpec};
 use crate::errors::{ErrorReport, ErrorSourceKind};
 use crate::file_storage::UploadConf;
 use crate::validation::{Path as ValidationPath, ValidationError, ValidationReport};
@@ -224,6 +225,10 @@ impl MultipartMap {
             .ok_or_else(|| MultipartError::missing_field(name))
     }
 
+    pub fn file_opt(&self, name: &str) -> Option<&UploadedFile> {
+        self.files.get(name).and_then(|values| values.first())
+    }
+
     pub fn files(&self, name: &str) -> &[UploadedFile] {
         self.files.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -254,6 +259,21 @@ impl MultipartSpec {
     pub fn allow_unknown(mut self, allow: bool) -> Self {
         self.allow_unknown = allow;
         self
+    }
+
+    /// Returns declared text field rules keyed by multipart field name.
+    pub fn text_fields(&self) -> &BTreeMap<String, FieldRule> {
+        &self.text
+    }
+
+    /// Returns declared file field rules keyed by multipart field name.
+    pub fn file_fields(&self) -> &BTreeMap<String, FileRule> {
+        &self.files
+    }
+
+    /// Returns whether undeclared multipart fields are accepted.
+    pub fn allows_unknown(&self) -> bool {
+        self.allow_unknown
     }
 
     fn rule_for(&self, name: &str, is_file: bool) -> Option<RuleRef<'_>> {
@@ -300,6 +320,43 @@ impl MultipartSpec {
     }
 }
 
+impl From<&MultipartSpec> for MultipartApiSpec {
+    fn from(spec: &MultipartSpec) -> Self {
+        let text = spec
+            .text_fields()
+            .iter()
+            .map(|(name, rule)| MultipartApiField {
+                name: name.clone(),
+                kind: MultipartApiFieldKind::Text,
+                required: rule.is_required(),
+                multiple: rule.is_multiple(),
+                max_length: rule.max_length_value(),
+                max_bytes: rule.max_bytes_value(),
+                content_types: Vec::new(),
+                extensions: Vec::new(),
+                sniff: None,
+            });
+        let files = spec
+            .file_fields()
+            .iter()
+            .map(|(name, rule)| MultipartApiField {
+                name: name.clone(),
+                kind: MultipartApiFieldKind::File,
+                required: rule.is_required(),
+                multiple: rule.is_multiple(),
+                max_length: None,
+                max_bytes: rule.max_size_value(),
+                content_types: rule.allowed_content_types(),
+                extensions: rule.allowed_extensions(),
+                sniff: rule.sniff_rule().map(ToOwned::to_owned),
+            });
+        Self {
+            fields: text.chain(files).collect(),
+            allow_unknown: spec.allows_unknown(),
+        }
+    }
+}
+
 enum RuleRef<'a> {
     Text(&'a FieldRule),
     File(&'a FileRule),
@@ -336,6 +393,26 @@ impl FieldRule {
     pub fn multiple(mut self) -> Self {
         self.multiple = true;
         self
+    }
+
+    /// Returns whether the text field is required.
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// Returns the maximum text length in Unicode scalar values.
+    pub fn max_length_value(&self) -> Option<usize> {
+        self.max_length
+    }
+
+    /// Returns the maximum accepted text size in bytes.
+    pub fn max_bytes_value(&self) -> Option<u64> {
+        self.max_bytes
+    }
+
+    /// Returns whether repeated text values are accepted.
+    pub fn is_multiple(&self) -> bool {
+        self.multiple
     }
 
     fn validate_values(&self, name: &str, values: &[String], report: &mut ValidationReport) {
@@ -441,6 +518,36 @@ impl FileRule {
     pub fn multiple(mut self) -> Self {
         self.multiple = true;
         self
+    }
+
+    /// Returns whether the file field is required.
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// Returns the maximum accepted file size in bytes.
+    pub fn max_size_value(&self) -> Option<u64> {
+        self.max_size
+    }
+
+    /// Returns allowed declared file content types.
+    pub fn allowed_content_types(&self) -> Vec<String> {
+        self.content_types.iter().cloned().collect()
+    }
+
+    /// Returns allowed file name extensions without leading dots.
+    pub fn allowed_extensions(&self) -> Vec<String> {
+        self.extensions.iter().cloned().collect()
+    }
+
+    /// Returns the configured sniffing rule name, if any.
+    pub fn sniff_rule(&self) -> Option<&'static str> {
+        self.sniff.as_ref().map(SniffRule::as_api_name)
+    }
+
+    /// Returns whether repeated files are accepted.
+    pub fn is_multiple(&self) -> bool {
+        self.multiple
     }
 
     fn max_size_or(&self, fallback: u64) -> u64 {
@@ -558,6 +665,14 @@ impl SniffRule {
                 .map(|value| value.into().to_ascii_lowercase())
                 .collect(),
         )
+    }
+
+    /// Returns a stable name for OpenAPI vendor metadata.
+    pub fn as_api_name(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Mime(_) => "mime",
+        }
     }
 
     fn validate(&self, field_name: &str, sniffed: Option<&str>) -> Result<(), MultipartError> {
@@ -741,6 +856,9 @@ async fn parse_multipart(
                 map.texts.entry(name).or_default().push(text);
             }
             Some(RuleRef::File(rule)) => {
+                if is_empty_optional_file(field.file_name(), rule) {
+                    continue;
+                }
                 file_count += 1;
                 if file_count > conf.max_files {
                     return Err(MultipartError::too_large(
@@ -798,6 +916,10 @@ async fn parse_multipart(
         spec.validate_map(&map)?;
     }
     Ok(map)
+}
+
+fn is_empty_optional_file(file_name: Option<&str>, rule: &FileRule) -> bool {
+    !rule.required && file_name.is_some_and(str::is_empty)
 }
 
 async fn read_text_field(
@@ -969,37 +1091,60 @@ async fn create_temp_file(
 
 impl<T> crate::callables::IntoArgPart for MultipartForm<T>
 where
-    T: JsonSchema + Send + 'static,
+    T: JsonSchema + MultipartData + Send + 'static,
 {
     fn into_arg_part() -> crate::callables::ArgPart {
-        crate::callables::ArgPart::Body(
-            crate::callables::TypeSchema::wrap_unvalidated::<T>(),
-            Cow::Borrowed("multipart/form-data"),
-        )
+        let spec = T::multipart_spec();
+        crate::callables::ArgPart::Composite(vec![
+            crate::callables::ArgPart::BodyWith {
+                schema: crate::callables::TypeSchema::wrap_unvalidated::<T>(),
+                content_type: Cow::Borrowed("multipart/form-data"),
+                multipart: Some(MultipartApiSpec::from(&spec)),
+            },
+            crate::callables::ArgPart::Response(vec![crate::callables::ReturnSpec::error(
+                400,
+                "Bad request.",
+            )]),
+        ])
     }
 }
 
 impl<T> crate::callables::IntoArgPart for Valid<MultipartForm<T>>
 where
     T: JsonSchema
+        + MultipartData
         + crate::validation::Validate
         + crate::validation::ValidationSchema
         + Send
         + 'static,
 {
     fn into_arg_part() -> crate::callables::ArgPart {
-        crate::callables::ArgPart::Body(
-            crate::callables::TypeSchema::wrap_valid::<T>(),
-            Cow::Borrowed("multipart/form-data"),
-        )
+        let spec = T::multipart_spec();
+        crate::callables::ArgPart::Composite(vec![
+            crate::callables::ArgPart::BodyWith {
+                schema: crate::callables::TypeSchema::wrap_valid::<T>(),
+                content_type: Cow::Borrowed("multipart/form-data"),
+                multipart: Some(MultipartApiSpec::from(&spec)),
+            },
+            crate::callables::ArgPart::Response(vec![
+                crate::callables::ReturnSpec::error(400, "Bad request."),
+                crate::callables::ReturnSpec::error(422, "Validation failed."),
+            ]),
+        ])
     }
 }
 
 impl crate::callables::IntoArgPart for MultipartMap {
     fn into_arg_part() -> crate::callables::ArgPart {
-        crate::callables::ArgPart::Body(
-            crate::callables::TypeSchema::binary_body(),
-            Cow::Borrowed("multipart/form-data"),
-        )
+        crate::callables::ArgPart::Composite(vec![
+            crate::callables::ArgPart::Body(
+                crate::callables::TypeSchema::binary_body(),
+                Cow::Borrowed("multipart/form-data"),
+            ),
+            crate::callables::ArgPart::Response(vec![crate::callables::ReturnSpec::error(
+                400,
+                "Bad request.",
+            )]),
+        ])
     }
 }

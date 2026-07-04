@@ -1,0 +1,5 @@
+error[E0599]: no method named `cte` found for struct `vyuh::db::typed::Update<'a, T>` in the current scope
+  --> tests/ui/typed_query/write_cte.rs:21:45
+   |
+21 |     let _ = db::from(&posts).update(&patch).cte();
+   |                                             ^^^ method not found in `vyuh::db::typed::Update<'_, PostPatch>`

@@ -9,6 +9,7 @@ pub mod auth;
 pub mod bundles;
 pub mod callables;
 pub mod channels;
+pub mod collectors;
 pub mod commands;
 pub mod console;
 pub mod db;
@@ -24,6 +25,7 @@ pub(crate) mod roles;
 pub(crate) mod schedulers;
 pub mod services;
 pub mod signals;
+
 pub mod tasks;
 pub mod templates;
 pub mod testing;

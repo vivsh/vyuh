@@ -22,12 +22,15 @@ pub use serde::{Deserialize, Serialize};
 // ── Registration namespace ──────────────────────────────────────────────────
 
 pub use crate::bundles;
+pub use crate::db;
+pub use crate::db::{Model, Record};
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 pub use crate::routes::{
-    AppendHeaders, Form, Html, IntoResponse, Json, NoContent, POLL, Path, Query, Redirect, SSE,
-    State, StatusCode, Subscriber, WS,
+    Accepted, AppendHeaders, Created, FileResponse, Form, Html, IntoResponse, Json, NoContent,
+    POLL, Path, PermanentRedirect, Query, Redirect, SSE, State, StatusCode, StreamResponse,
+    Subscriber, TemporaryRedirect, WS, redirect,
 };
 
 // ── Tasks ───────────────────────────────────────────────────────────────────

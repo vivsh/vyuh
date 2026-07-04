@@ -19,6 +19,10 @@ pub enum BundleError {
     #[error(transparent)]
     Command(Arc<crate::commands::CommandError>),
 
+    #[cfg(feature = "migrations")]
+    #[error(transparent)]
+    Migration(Arc<crate::db::MigrationError>),
+
     #[error("Multiple errors occurred: {0:?}")]
     ErrorList(Vec<BundleError>),
 

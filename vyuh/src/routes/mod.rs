@@ -36,7 +36,10 @@ pub use methods::{MethodIter, Methods};
 pub use middleware::{Middleware, RawLayer, layer_from};
 pub use multipart::{JsonPart, MultipartForm, MultipartMap, UploadedFile, UploadedText};
 pub use subscriber::{ChannelAttach, Subscriber};
-pub use types::{BodyBytes, Form, Json, JsonStr, Path, Query, RouteConf};
+pub use types::{
+    Accepted, BodyBytes, Created, FileResponse, Form, Json, JsonStr, Path, PermanentRedirect,
+    Query, RouteConf, StreamResponse, TemporaryRedirect, redirect,
+};
 
 pub use crate::channels::{POLL, SSE, WS};
 

@@ -1,4 +1,4 @@
-use vyuh::{db, db::DbConf, db::FilteredBuilder, prelude::*};
+use vyuh::{db, db::DbConf, prelude::*};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct Echo {
@@ -11,7 +11,8 @@ struct Health {
     ok: bool,
 }
 
-#[derive(Debug, Serialize, JsonSchema, vyuh::db::Scannable)]
+#[derive(Debug, Serialize, JsonSchema, vyuh::db::Model)]
+#[table(name = "items")]
 struct Item {
     id: i64,
     name: String,
@@ -35,9 +36,10 @@ async fn echo(Json(input): Json<Echo>) -> Json<Echo> {
 #[bundles::route(path = "/items/{id}")]
 async fn get_item(site: Site, Path(ItemPath { id }): Path<ItemPath>) -> Result<Json<Item>, Error> {
     let mut session = site.db();
-    let item = db::select("items")
-        .filter("id = :id")
-        .bind_as("id", id)
+    let table = Item::table();
+    let cols = table.cols();
+    let item = db::from(&table)
+        .filter(cols.id.eq(db::val(id)))
         .first::<Item, _>(&mut session)
         .await?;
     let Some(item) = item else {

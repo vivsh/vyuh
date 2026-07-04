@@ -17,13 +17,16 @@ use crate::tasks::{MemoryTaskStore, TaskClient, TaskDispatcher, TaskRunner, Task
 use crate::templates::{TemplateEngine, TemplateError, Templates};
 use crate::{services, watch};
 use axum::ServiceExt;
+use axum::body::{self, Body};
 use axum::extract::{Request, State};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
+use tower::ServiceExt as TowerServiceExt;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
@@ -246,14 +249,17 @@ impl SiteBuilder {
         let mut router = bundle.to_router();
 
         if !bundle.asset_dirs.is_empty() {
-            let assets = crate::assets::AssetServe::from_dirs(bundle.asset_dirs.clone(), "public")
-                .strip_url_prefix("assets")
-                .precompressed(true)
-                .with_etag(true);
-            router = router.nest_service("/assets", assets);
+            let assets = crate::assets::AssetServe::from_dirs(
+                bundle.asset_dirs.clone(),
+                crate::assets::PUBLIC_ASSETS_FOLDER,
+            )
+            .strip_url_prefix(crate::assets::PUBLIC_ASSETS_URL_PREFIX.trim_start_matches('/'))
+            .precompressed(true)
+            .with_etag(true);
+            router = router.nest_service(crate::assets::PUBLIC_ASSETS_URL_PREFIX, assets);
         }
 
-        let mut template_engine = TemplateEngine::new();
+        let mut template_engine = TemplateEngine::from_conf(&self.conf.templates, timezone);
 
         let pool = if let Some(pool) = pool {
             DbPool::from_pool(pool)
@@ -267,7 +273,9 @@ impl SiteBuilder {
             Authenticator::new(&self.conf.auth, &self.conf.secret_key, &project_dir)
                 .map_err(|err| conf::ConfError::Other(format!("Auth config error: {err}")))?;
 
-        bundle.doc_engine.setup(&mut router, &bundle.ops)?;
+        bundle
+            .doc_engine
+            .setup(&mut router, &bundle.ops, &self.conf.auth)?;
 
         let slash_router = Arc::new(
             crate::middlewares::SlashRouter::from_operations(
@@ -376,6 +384,11 @@ impl SiteInner {
     }
 }
 
+/// A fully built Vyuh application.
+///
+/// `Site` owns the composed bundle, runtime configuration, services, database
+/// pool, task runner, signal/emitter engines, templates, commands, console, and
+/// router state used by handlers and framework subsystems.
 #[derive(Clone)]
 pub struct Site {
     inner: Arc<SiteInner>,
@@ -426,6 +439,8 @@ impl std::fmt::Debug for Site {
 }
 
 impl Site {
+    /// Build a `Site` from configuration and a bundle without starting the HTTP server.
+    /// Background engines such as services, emitters, and tasks are started after build.
     pub async fn build(conf: SiteConf, bundle: impl IntoBundle) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
         let site = builder.build(None, bundle).await?;
@@ -441,15 +456,21 @@ impl Site {
         Ok(site)
     }
 
+    /// Run the command-aware application entrypoint using process arguments.
+    /// With no command arguments this runs the built-in `serve` command.
     pub async fn run(conf: SiteConf, bundle: impl IntoBundle) -> Result<(), SiteError> {
         Self::run_with_args(conf, bundle, std::env::args().skip(1)).await
     }
 
+    /// Build the site and start the HTTP server directly.
+    /// Prefer `run` for binaries that should support built-in and application commands.
     pub async fn serve(conf: SiteConf, bundle: impl IntoBundle) -> Result<(), SiteError> {
         let site = Self::build(conf, bundle).await?;
         site.start().await
     }
 
+    /// Build a test site using an already-created database pool.
+    /// This avoids creating a pool from configuration while still starting runtime engines.
     pub async fn test(
         conf: SiteConf,
         bundle: impl IntoBundle,
@@ -464,6 +485,8 @@ impl Site {
         Ok(site)
     }
 
+    /// Start the HTTP server for an already-built site.
+    /// This consumes the site handle and returns when the server shuts down or fails.
     pub async fn start(self) -> Result<(), SiteError> {
         SiteBuilder::start_server(self).await
     }
@@ -475,8 +498,29 @@ impl Site {
     ) -> Result<(), SiteError> {
         let args: Vec<String> = args.into_iter().collect();
         let (command_name, command_args) = Self::command_from_args(&args);
-        let site = Self::build(conf, bundle).await?;
+        let bundle = bundle.into_bundle();
+        let preview_commands = Self::command_registry_for_bundle(&bundle)?;
         let command_arg_refs: Vec<&str> = command_args.iter().map(String::as_str).collect();
+        if let Some(output) = preview_commands.early_output(&command_name, &command_arg_refs) {
+            match output {
+                Ok(output) => {
+                    println!("{output}");
+                    return Ok(());
+                }
+                Err(err) => {
+                    let output = conf.errors.render_command(
+                        crate::errors::ErrorCommandContext {
+                            command: command_name,
+                            args: command_args,
+                        },
+                        err.to_view(),
+                    );
+                    return Err(crate::commands::CommandError::Exit(output).into());
+                }
+            }
+        }
+
+        let site = Self::build(conf, bundle).await?;
         if let Err(err) = site.execute_command(&command_name, &command_arg_refs).await {
             let output = site.inner.conf.errors.render_command(
                 crate::errors::ErrorCommandContext {
@@ -485,10 +529,17 @@ impl Site {
                 },
                 err.to_view(),
             );
-            eprintln!("{output}");
-            std::process::exit(1);
+            return Err(crate::commands::CommandError::Exit(output).into());
         }
         Ok(())
+    }
+
+    fn command_registry_for_bundle(
+        bundle: &crate::bundles::Bundle,
+    ) -> Result<crate::commands::CommandRegistry, crate::commands::CommandError> {
+        let mut registry = bundle.commands.clone();
+        registry.merge(crate::commands::builtin_registry()?)?;
+        Ok(registry)
     }
 
     pub(crate) fn command_from_args(args: &[String]) -> (String, Vec<String>) {
@@ -499,30 +550,57 @@ impl Site {
         }
     }
 
+    /// Return how long this site has been alive since build completion.
+    /// The value is monotonic and intended for health, status, and diagnostics.
     pub fn uptime(&self) -> std::time::Duration {
         self.inner.start_time.elapsed()
     }
 
+    /// Iterate over registered operations from the composed bundle.
+    /// Console, OpenAPI, and diagnostics use this metadata to inspect application surfaces.
     pub fn iter_operations(&self) -> impl Iterator<Item = &callables::Operation> {
         self.inner.bundle.iter_operations()
     }
 
+    pub(crate) fn asset_dirs(&self) -> Vec<crate::embed::Dir> {
+        self.inner.bundle.asset_dirs.clone()
+    }
+
+    #[cfg(feature = "migrations")]
+    pub(crate) fn migration_registry(&self) -> &crate::db::MigrationRegistry {
+        &self.inner.bundle.migrations
+    }
+
+    /// Collect URL metadata contributed by bundles.
+    /// Collectors use this to decide which ordinary GET routes can be rendered as files.
+    pub async fn url_info(
+        &self,
+    ) -> Result<Vec<crate::collectors::UrlInfo>, crate::collectors::StaticExportError> {
+        self.inner.bundle.url_info.collect(self.clone()).await
+    }
+
+    /// Create a child notifier that resolves when the site begins shutdown.
+    /// Long-lived handlers, services, and transports should observe this signal.
     pub fn shutdown_notifier(&self) -> CancellationNotifier {
         self.inner.shutdown_notifier.child()
     }
 
-    /// Notify all components to shutdown
+    /// Notify all site-managed components that shutdown has started.
+    /// This does not wait for background workers to finish.
     pub fn shutdown(&self) {
         self.inner.shutdown_notifier.notify_waiters();
     }
 
-    /// Notify all components to shutdown
+    /// Notify site-managed components to shut down and abort remaining background tasks.
+    /// Use this in tests or programmatic shutdown paths that must wait for cleanup.
     pub async fn shutdown_and_wait(&self) {
         self.inner.shutdown_notifier.notify_waiters();
         self.inner.joinset.lock().abort_all();
         while let Some(_) = self.inner.joinset.lock().try_join_next() {}
     }
 
+    /// Return the signal client for emitting typed in-process events.
+    /// Emitted signals are dispatched to signal handlers and channel transports.
     pub fn signals(&self) -> SignalClient {
         SignalClient::new(self.clone(), self.inner.signal_engine.clone())
     }
@@ -569,18 +647,26 @@ impl Site {
         self.inner.joinset.lock().spawn(fut);
     }
 
+    /// Return the configured project directory.
+    /// Relative runtime paths such as logs, uploads, and local resources are resolved from it.
     pub fn project_dir(&self) -> &Path {
         self.inner.project_dir.as_path()
     }
 
+    /// Return the effective site configuration.
+    /// Treat this as operational configuration; avoid exposing it directly to untrusted clients.
     pub fn conf(&self) -> &SiteConf {
         &self.inner.conf
     }
 
+    /// Reverse a named route into a URL path.
+    /// Returns `None` when the route name is unknown or required parameters are missing.
     pub fn reverse(&self, name: &str, args: &[(&str, &str)]) -> Option<String> {
         self.inner.bundle.reverse(name, args)
     }
 
+    /// Return the template rendering facade for this site.
+    /// Templates are loaded from bundle-owned private `templates/**` assets.
     pub fn templates(&self) -> Templates {
         Templates::new(self.clone())
     }
@@ -589,18 +675,26 @@ impl Site {
         &self.inner.template_engine
     }
 
+    /// Return the configured authenticator.
+    /// Routes and commands can use it for JWT and role-aware authentication behavior.
     pub fn auth(&self) -> &Authenticator {
         &self.inner.authenticator
     }
 
+    /// Return the configured timezone, defaulting to UTC.
+    /// Use this for application date/time rendering and operational timestamps.
     pub fn timezone(&self) -> Tz {
         self.inner.timezone
     }
 
+    /// Return the database pool facade.
+    /// The concrete backend is selected by the crate feature and site configuration.
     pub fn db(&self) -> DbPool {
         self.inner.pool.clone()
     }
 
+    /// Return the channel facade for live client delivery.
+    /// Channels consume typed signal payloads and expose them over transports such as SSE.
     pub fn channels(&self) -> Channels {
         Channels::new(self.inner.channels.clone())
     }
@@ -621,6 +715,8 @@ impl Site {
         self.inner.task_engine.has_tasks()
     }
 
+    /// Return the configured local file storage facade.
+    /// This is used by upload handlers to persist and address saved files.
     pub fn file_storage(&self) -> crate::file_storage::LocalStorage {
         crate::file_storage::LocalStorage::from_conf(
             &self.inner.project_dir,
@@ -628,6 +724,8 @@ impl Site {
         )
     }
 
+    /// Resolve a registered service by type.
+    /// Services are constructed once during site build and shared by handlers.
     pub fn service<T: ?Sized + 'static>(&self) -> Result<Arc<T>, services::ServiceError> {
         self.inner
             .service_engine
@@ -698,16 +796,54 @@ impl Site {
         router.with_state(self.clone())
     }
 
+    /// Return the task client for submitting durable background work.
+    /// Registered task handlers determine how submitted payloads are executed.
     pub fn tasks(&self) -> TaskClient<TaskStore> {
         TaskClient::new(self.inner.task_engine.clone())
     }
 
-    pub async fn execute_command(
+    pub(crate) async fn execute_command(
         &self,
         name: &str,
         args: &[&str],
     ) -> Result<(), crate::commands::CommandError> {
         self.inner.commands.execute(name, args, self.clone()).await
+    }
+
+    /// Return the collectors facade for bundle-owned assets and renderable pages.
+    /// Use it to collect public assets or render selected URL-info routes to files.
+    pub fn collectors(&self) -> crate::collectors::Collectors {
+        crate::collectors::Collectors::new(self.clone())
+    }
+
+    pub(crate) async fn render_get(
+        &self,
+        uri: &str,
+    ) -> Result<crate::collectors::RenderedResponse, crate::Error> {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .map_err(crate::Error::other)?;
+        let resp = self
+            .router()
+            .oneshot(req)
+            .await
+            .map_err(|err| crate::Error::invalid(format!("route rendering failed: {err}")))?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .map_err(crate::Error::other)?;
+        Ok(crate::collectors::RenderedResponse {
+            status,
+            content_type,
+            body,
+        })
     }
 }
 
@@ -768,5 +904,28 @@ mod tests {
 
         assert_eq!(command, "greet");
         assert_eq!(args, strings(&["--name", "Vyuh"]));
+    }
+
+    #[tokio::test]
+    async fn command_help_does_not_build_site() {
+        let conf = crate::SiteConf::default()
+            .log_init(false)
+            .project_dir("/path/that/does/not/exist");
+        let result =
+            Site::run_with_args(conf, crate::bundles::Bundle::new(), strings(&["help"])).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unknown_command_does_not_build_site() {
+        let conf = crate::SiteConf::default()
+            .log_init(false)
+            .project_dir("/path/that/does/not/exist");
+        let err = Site::run_with_args(conf, crate::bundles::Bundle::new(), strings(&["missing"]))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("missing"));
     }
 }

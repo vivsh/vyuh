@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod conf;
+mod middleware;
 mod pages;
 mod query;
 mod schema_view;
@@ -35,6 +36,10 @@ fn web_assets() -> crate::bundles::Bundle {
 pub(crate) fn stylesheet_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(resolve_stylesheet_path).as_str()
+}
+
+pub(crate) fn redacted_config(site: &Site) -> types::ConfigOut {
+    types::ConfigOut::from_site(site)
 }
 
 fn resolve_stylesheet_path() -> String {
@@ -208,12 +213,17 @@ mod tests {
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
+    #[cfg(feature = "cors")]
+    use crate::routes::CorsMiddleware;
     use crate::{
         Data, Site, SiteConf, bundles,
         console::ConsoleConf,
+        middlewares::{CorsConf, HttpConf},
         routes::{Json, Methods, RouteConf},
         testing::TestClient,
     };
+    #[cfg(feature = "cors")]
+    use tower_http::cors::CorsLayer;
 
     async fn ping() -> Json<&'static str> {
         Json("pong")
@@ -315,6 +325,13 @@ mod tests {
         let conf = SiteConf::default()
             .host("example.com")
             .log_init(false)
+            .http(HttpConf {
+                cors: CorsConf {
+                    enabled: true,
+                    permissive: true,
+                },
+                ..HttpConf::default()
+            })
             .console(ConsoleConf::default().enabled(true));
         let site = Site::build(conf, app_bundle()).await.unwrap();
         let token = site
@@ -373,6 +390,18 @@ mod tests {
             .await
             .assert_ok();
 
+        let operations = client
+            .get("/console/api/operations?kind=route&q=ping")
+            .header(header::COOKIE.as_str(), &cookie)
+            .send()
+            .await;
+        assert_eq!(operations.status(), StatusCode::OK);
+        let operations = operations.text().await;
+        assert!(operations.contains("\"middleware\""));
+        assert!(operations.contains("\"request_id\""));
+        assert!(operations.contains("\"cors\""));
+        assert!(operations.contains("\"scope\":\"site\""));
+
         let conf = client
             .get("/console/api/conf")
             .header(header::COOKIE.as_str(), &cookie)
@@ -396,14 +425,19 @@ mod tests {
         assert!(openapi.contains("\"/ping\""));
         assert!(!openapi.contains("/console"));
         assert!(!openapi.contains("console_operations"));
+        assert!(!openapi.contains("request_id"));
+        assert!(!openapi.contains("catch_panic"));
+        assert!(!openapi.contains("\"origin\""));
     }
 
+    #[cfg(feature = "cors")]
     #[tokio::test]
     async fn console_html_pages_and_assets_work() {
         let conf = SiteConf::default()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true));
-        let site = Site::build(conf, app_bundle()).await.unwrap();
+        let bundle = app_bundle().layer(CorsMiddleware::new(CorsLayer::permissive()));
+        let site = Site::build(conf, bundle).await.unwrap();
         let ping_id = site
             .iter_operations()
             .find(|op| op.name == "ping")
@@ -542,6 +576,12 @@ mod tests {
         assert!(selected.contains("Methods"));
         assert!(selected.contains("Request"));
         assert!(selected.contains("Response"));
+        assert!(selected.contains("Middleware"));
+        assert!(selected.contains("operation middleware"));
+        assert!(selected.contains("API-visible request metadata"));
+        assert!(selected.contains("origin"));
+        assert!(selected.contains("request_id"));
+        assert!(selected.contains("site middleware"));
 
         let selected = client
             .get(&format!("/console/operations?selected={invoice_signal_id}"))

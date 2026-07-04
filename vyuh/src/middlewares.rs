@@ -320,6 +320,8 @@ fn effective_policy(policy: SlashPolicy, op: &Operation) -> SlashPolicy {
 fn is_html_operation(op: &Operation) -> bool {
     op.returns.iter().any(|ret| match &ret.part {
         ReturnPart::Body(_, content_type) => content_type.as_ref().starts_with("text/html"),
+        ReturnPart::Created(_, content_type) => content_type.as_ref().starts_with("text/html"),
+        ReturnPart::Accepted(_, content_type) => content_type.as_ref().starts_with("text/html"),
         _ => false,
     })
 }

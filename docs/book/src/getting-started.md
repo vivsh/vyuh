@@ -17,49 +17,7 @@ input should be checked at the boundary. Add `JsonSchema` when a type should
 appear in generated OpenAPI.
 
 ```rust
-use vyuh::prelude::*;
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]
-struct Signup {
-    #[validate(email)]
-    email: String,
-
-    #[validate(min_length = 3, max_length = 80)]
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct UserCreated {
-    id: i64,
-    email: String,
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct LoginOut {
-    access: String,
-    refresh: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct BuildReportJob {
-    account_id: i64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct ReportBuilt {
-    location: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct Tick {
-    source: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct ReindexArgs {
-    scope: String,
-}
+{{#include ../../../vyuh/examples/getting_started.rs:data_types}}
 ```
 
 These types are intentionally plain. Vyuh does not ask you to declare a second
@@ -71,34 +29,7 @@ Routes are ordinary async functions with typed inputs and typed outputs. The
 important thing to notice is not the macro. It is the function signature.
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::{AuthUser, TokenPair};
-
-#[bundles::route(path = "/users", method = "POST")]
-async fn signup(Valid(Data(input)): Valid<Data<Signup>>) -> Result<Data<UserCreated>, Error> {
-    Ok(Data::new(UserCreated {
-        id: 1,
-        email: input.email.clone(),
-        name: input.name.clone(),
-    }))
-}
-
-#[bundles::route(path = "/login", method = "POST")]
-async fn login(site: Site) -> Result<Data<LoginOut>, Error> {
-    let tokens: TokenPair = site
-        .auth()
-        .create_token_pair(AuthUser::new("user-123", 0), &["web"])?;
-
-    Ok(Data::new(LoginOut {
-        access: tokens.access,
-        refresh: tokens.refresh,
-    }))
-}
-
-#[bundles::route(path = "/me", method = "GET")]
-async fn me(user: AuthUser) -> Result<Data<String>, Error> {
-    Ok(Data::new(user.key.to_string()))
-}
+{{#include ../../../vyuh/examples/getting_started.rs:routes}}
 ```
 
 `signup` is a validated JSON route. `login` and `me` show the normal JWT path
@@ -115,32 +46,7 @@ Vyuh does not make them feel alien. They use the same handler style and the
 same bundle composition model.
 
 ```rust
-use vyuh::prelude::*;
-
-#[bundles::task]
-async fn build_report(Data(job): Data<BuildReportJob>) -> Data<ReportBuilt> {
-    Data::new(ReportBuilt {
-        location: format!("reports/{}.json", job.account_id),
-    })
-}
-
-#[bundles::cron(expr = "0 */5 * * * *")]
-async fn heartbeat() -> Data<Tick> {
-    Data::new(Tick {
-        source: "docs-example".into(),
-    })
-}
-
-#[bundles::signal]
-async fn record_tick(Data(tick): Data<Tick>) -> Result<(), Error> {
-    println!("tick from {}", tick.source);
-    Ok(())
-}
-
-async fn rebuild_index(Data(args): Data<ReindexArgs>) -> Result<(), Error> {
-    println!("reindex {}", args.scope);
-    Ok(())
-}
+{{#include ../../../vyuh/examples/getting_started.rs:runtime_paths}}
 ```
 
 This is where Vyuh starts to feel different. The route, task, cron emitter,
@@ -168,30 +74,7 @@ and let it follow the routes that bundle already owns. That means prefixes,
 nesting, and route metadata stay aligned without a parallel documentation tree.
 
 ```rust
-use vyuh::auth::AuthConf;
-
-let auth = AuthConf::default();
-
-fn api_bundle() -> bundles::Bundle {
-    bundles::bundle! {
-        signup,
-        login,
-        me,
-        build_report,
-        heartbeat,
-        record_tick,
-    }
-    .merge(command_bundle())
-    .with_openapi(
-        bundles::OpenApiConf::default()
-            .title("Vyuh Getting Started")
-            .version("0.1.0")
-            .description("Routes, auth, tasks, commands, and cron.")
-            .spec("/openapi.json")
-            .viewer("/docs"),
-    )
-    .with_prefix("/api")
-}
+{{#include ../../../vyuh/examples/getting_started.rs:api_bundle}}
 ```
 
 OpenAPI and the docs viewer need no per-route schema file, no separate route
@@ -205,15 +88,7 @@ That matters because commands are operational code, but they still belong to
 the same application.
 
 ```rust
-use vyuh::bundles;
-use vyuh::commands::CommandConf;
-
-fn command_bundle() -> bundles::Bundle {
-    bundles::bundle([bundles::command(
-        rebuild_index,
-        CommandConf::new("search:rebuild").description("Rebuild the search index."),
-    )])
-}
+{{#include ../../../vyuh/examples/getting_started.rs:command_bundle}}
 ```
 
 The result is modest but useful: CLI work stays close to the feature that owns
@@ -225,20 +100,7 @@ Put the bundle and site configuration together in `main`. This is where the
 different surfaces stop being examples and become one application.
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::AuthConf;
-
-#[tokio::main]
-async fn main() -> Result<(), SiteError> {
-    let auth = AuthConf::default();
-
-    Site::run(
-        SiteConf::from_env_with_files()?
-            .auth(auth),
-        api_bundle(),
-    )
-    .await
-}
+{{#include ../../../vyuh/examples/getting_started.rs:main}}
 ```
 
 The bundle is where the feature surface comes together: routes, a task, a cron

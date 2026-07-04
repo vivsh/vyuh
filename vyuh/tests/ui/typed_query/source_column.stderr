@@ -1,0 +1,15 @@
+error[E0599]: no method named `column` found for struct `vyuh::db::typed::Subquery<PostId>` in the current scope
+  --> tests/ui/typed_query/source_column.rs:27:17
+   |
+27 |     let _ = ids.column::<i64>("id");
+   |                 ^^^^^^
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following traits define an item `column`, perhaps you need to implement one of them:
+           candidate #1: `Row`
+           candidate #2: `sqlx::Statement`
+help: there is a method `cols` with a similar name, but with different arguments
+  --> src/db/queries/typed_queries/source.rs
+   |
+   |     pub fn cols(&self) -> <T as Projectable>::Columns {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

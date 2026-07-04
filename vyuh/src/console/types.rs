@@ -5,6 +5,7 @@ use crate::{
     Operation, OperationKind, Site,
     auth::JwtKeySource,
     callables::{ArgPart, ArgSpec, ReturnPart, ReturnSpec, TypeSchema},
+    console::middleware::{MiddlewareInfo, operation_middleware},
     logging::LogSink,
     tasks::{TaskRecord, TaskStatus},
 };
@@ -36,11 +37,12 @@ pub struct OperationOut {
     pub hidden: bool,
     pub conf: Option<serde_json::Value>,
     pub args: Vec<SchemaItem>,
+    pub middleware: Vec<MiddlewareOut>,
     pub returns: Vec<SchemaItem>,
 }
 
-impl From<&Operation> for OperationOut {
-    fn from(op: &Operation) -> Self {
+impl OperationOut {
+    pub(crate) fn from_operation(op: &Operation, site: &Site) -> Self {
         Self {
             id: op.id.to_string(),
             name: op.name.clone(),
@@ -54,7 +56,51 @@ impl From<&Operation> for OperationOut {
             hidden: op.hidden,
             conf: op.conf.clone(),
             args: op.args.iter().map(SchemaItem::from_arg).collect(),
+            middleware: operation_middleware(site, op)
+                .iter()
+                .map(MiddlewareOut::from_info)
+                .collect(),
             returns: op.returns.iter().map(SchemaItem::from_return).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MiddlewareOut {
+    pub name: String,
+    pub scope: String,
+    pub description: Option<String>,
+    pub request_parts: Vec<SchemaItem>,
+    pub settings: Vec<SettingOut>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SettingOut {
+    pub key: String,
+    pub value: String,
+}
+
+impl MiddlewareOut {
+    fn from_info(info: &MiddlewareInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            scope: info.scope.to_string(),
+            description: info.description.clone(),
+            request_parts: info
+                .request_parts
+                .iter()
+                .map(|part| SchemaItem::from_part(&part.name, part.description.clone(), &part.part))
+                .collect(),
+            settings: info.settings.iter().map(SettingOut::from_setting).collect(),
+        }
+    }
+}
+
+impl SettingOut {
+    fn from_setting(setting: &crate::console::middleware::MiddlewareSetting) -> Self {
+        Self {
+            key: setting.key.clone(),
+            value: setting.value.clone(),
         }
     }
 }
@@ -71,11 +117,23 @@ pub struct SchemaItem {
 
 impl SchemaItem {
     fn from_arg(arg: &ArgSpec) -> Self {
-        let (location, schema, content_type) = arg_part(&arg.part);
+        let (location, schema, content_type) = arg_item(&arg.part);
         Self {
             name: arg.name.clone(),
             location,
             description: arg.description.clone(),
+            status_code: None,
+            content_type,
+            schema,
+        }
+    }
+
+    fn from_part(name: &str, description: Option<String>, part: &ArgPart) -> Self {
+        let (location, schema, content_type) = arg_item(part);
+        Self {
+            name: name.to_string(),
+            location,
+            description,
             status_code: None,
             content_type,
             schema,
@@ -95,6 +153,12 @@ impl SchemaItem {
     }
 }
 
+fn arg_item(part: &ArgPart) -> (String, Option<String>, Option<String>) {
+    let flat = first_arg_part(part);
+    let (location, schema, content_type) = arg_part(flat.part);
+    (location_label(location, flat), schema, content_type)
+}
+
 fn arg_part(part: &ArgPart) -> (String, Option<String>, Option<String>) {
     match part {
         ArgPart::Header(schema) => ("header".into(), schema_json(schema), None),
@@ -106,9 +170,76 @@ fn arg_part(part: &ArgPart) -> (String, Option<String>, Option<String>) {
             schema_json(schema),
             Some(content_type.to_string()),
         ),
+        ArgPart::BodyWith {
+            schema,
+            content_type,
+            ..
+        } => (
+            "body".into(),
+            schema_json(schema),
+            Some(content_type.to_string()),
+        ),
         ArgPart::Security { scheme, .. } => (format!("security: {scheme}"), None, None),
+        ArgPart::Response(_) => ("response".into(), None, None),
+        ArgPart::Composite(_) => ("composite".into(), None, None),
+        ArgPart::Optional(_) => ("optional".into(), None, None),
+        ArgPart::Fallible(_) => ("fallible".into(), None, None),
         ArgPart::Zone => ("zone".into(), None, None),
         ArgPart::Ignore => ("runtime".into(), None, None),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FlatArgPart<'a> {
+    part: &'a ArgPart,
+    optional: bool,
+    fallible: bool,
+}
+
+fn first_arg_part(part: &ArgPart) -> FlatArgPart<'_> {
+    let mut output = None;
+    push_first_arg_part(part, false, false, &mut output);
+    output.unwrap_or(FlatArgPart {
+        part,
+        optional: false,
+        fallible: false,
+    })
+}
+
+fn push_first_arg_part<'a>(
+    part: &'a ArgPart,
+    optional: bool,
+    fallible: bool,
+    output: &mut Option<FlatArgPart<'a>>,
+) {
+    if output.is_some() {
+        return;
+    }
+    match part {
+        ArgPart::Composite(parts) => {
+            for nested in parts {
+                push_first_arg_part(nested, optional, fallible, output);
+            }
+        }
+        ArgPart::Optional(nested) => push_first_arg_part(nested, true, fallible, output),
+        ArgPart::Fallible(nested) => push_first_arg_part(nested, optional, true, output),
+        ArgPart::Response(_) => {}
+        other => {
+            *output = Some(FlatArgPart {
+                part: other,
+                optional,
+                fallible,
+            });
+        }
+    }
+}
+
+fn location_label(location: String, part: FlatArgPart<'_>) -> String {
+    match (part.optional, part.fallible) {
+        (true, true) => format!("optional fallible {location}"),
+        (true, false) => format!("optional {location}"),
+        (false, true) => format!("fallible {location}"),
+        (false, false) => location,
     }
 }
 
@@ -120,7 +251,23 @@ fn return_part(part: &ReturnPart) -> (String, Option<String>, Option<String>) {
             schema_json(schema),
             Some(content_type.to_string()),
         ),
+        ReturnPart::Created(schema, content_type) => (
+            "created".into(),
+            schema_json(schema),
+            Some(content_type.to_string()),
+        ),
+        ReturnPart::Accepted(schema, content_type) => (
+            "accepted".into(),
+            schema_json(schema),
+            Some(content_type.to_string()),
+        ),
         ReturnPart::Empty => ("empty".into(), None, None),
+        ReturnPart::Redirect { status_code } => (
+            format!("redirect {status_code}"),
+            None,
+            Some("Location".into()),
+        ),
+        ReturnPart::Binary(content_type) => ("binary".into(), None, Some(content_type.to_string())),
         ReturnPart::Unknown => ("unknown".into(), None, None),
     }
 }
