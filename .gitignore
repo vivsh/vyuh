@@ -8,3 +8,4 @@ uxar/src/admin/frontend/node_modules/
 __pycache__/
 *.pyc
 .venv/
+uploads/
