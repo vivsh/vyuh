@@ -14,7 +14,7 @@ use vyuh::{
         Service, ServiceBuildContext, ServiceError, ServiceExposer, ServiceInstance, ServiceRef,
         ServiceRunner,
     },
-    testing::TestClient,
+    testing::TestSite,
 };
 
 fn test_conf() -> SiteConf {
@@ -82,7 +82,7 @@ async fn services_ref_works_in_routes() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/count")

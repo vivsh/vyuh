@@ -14,6 +14,7 @@ mod schemable;
 mod service;
 mod signal;
 mod task;
+mod test;
 mod url_info;
 mod validate;
 
@@ -380,6 +381,15 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_task(attr, item)
+}
+
+/// Builds an isolated `TestSite` around an async integration-test body.
+///
+/// This is syntax sugar over `vyuh::testing::test_site` and
+/// `TestSite::builder(...).without_migrations()`.
+#[proc_macro_attribute]
+pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    test::parse_test(attr, item)
 }
 
 // #[proc_macro_attribute]

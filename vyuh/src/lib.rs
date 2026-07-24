@@ -36,9 +36,6 @@ pub mod validation;
 pub mod validators;
 mod watch;
 
-#[cfg(test)]
-mod testing_tests;
-
 pub mod routes;
 pub use callables::{Data, DataValue, Operation, OperationKind};
 pub use commands::CommandError;
@@ -56,4 +53,4 @@ pub use site::{Site, SiteConfig, SiteError};
 pub use validation::{
     Valid, ValidRejection, Validate, ValidationError, ValidationReport, ValidationSchema,
 };
-pub use vyuh_macros::MultipartData;
+pub use vyuh_macros::{MultipartData, test};

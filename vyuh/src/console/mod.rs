@@ -220,7 +220,7 @@ mod tests {
         console::ConsoleConf,
         middlewares::{CorsConf, HttpConf},
         routes::{Json, Methods, RouteConf},
-        testing::TestClient,
+        testing::TestSite,
     };
     #[cfg(feature = "cors")]
     use tower_http::cors::CorsLayer;
@@ -291,7 +291,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let client = TestClient::new(site);
+        let client = TestSite::new(site);
 
         client
             .get("/console/api/status")
@@ -304,7 +304,7 @@ mod tests {
     async fn console_local_debug_allows_direct_access() {
         let conf = SiteConf::default().log_init(false);
         let site = Site::build(conf, app_bundle()).await.unwrap();
-        let client = TestClient::new(site);
+        let client = TestSite::new(site);
 
         let status = client.get("/console/api/status").send().await;
         assert_eq!(status.status(), StatusCode::OK);
@@ -338,7 +338,7 @@ mod tests {
             .console_runtime()
             .and_then(|runtime| runtime.bootstrap_token())
             .unwrap();
-        let client = TestClient::new(site);
+        let client = TestSite::new(site);
 
         client
             .get("/console/api/status")
@@ -457,7 +457,7 @@ mod tests {
             .console_runtime()
             .and_then(|runtime| runtime.bootstrap_token())
             .unwrap();
-        let client = TestClient::new(site);
+        let client = TestSite::new(site);
 
         let login = client
             .get(&format!("/console/login?token={token}"))
@@ -674,7 +674,7 @@ mod tests {
             .console_runtime()
             .and_then(|runtime| runtime.bootstrap_token())
             .unwrap();
-        let client = TestClient::new(site);
+        let client = TestSite::new(site);
         let login = client
             .get(&format!("/console/login?token={token}"))
             .send()

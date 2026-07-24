@@ -306,7 +306,7 @@ async fn upload_site() -> (vyuh::Site, tempfile::TempDir) {
 #[tokio::test]
 async fn optional_file_may_be_absent() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = optional_body(boundary, None);
 
@@ -333,7 +333,7 @@ async fn optional_file_may_be_absent() {
 #[tokio::test]
 async fn optional_empty_file_field_is_absent() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = optional_body(boundary, Some(("", "application/octet-stream", &[])));
 
@@ -357,7 +357,7 @@ async fn optional_empty_file_field_is_absent() {
 #[tokio::test]
 async fn vec_file_field_collects_repeated_files() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let first = png_bytes();
     let second = png_bytes();
@@ -391,7 +391,7 @@ async fn vec_file_field_collects_repeated_files() {
 #[tokio::test]
 async fn optional_file_accepts_real_image() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let image = png_bytes();
     let body = optional_body(boundary, Some(("image.png", "image/png", &image)));
@@ -441,7 +441,7 @@ async fn upload_openapi_site() -> (vyuh::Site, tempfile::TempDir) {
 #[tokio::test]
 async fn typed_multipart_accepts_sniffed_png() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = multipart_body(boundary, "avatar.png", "image/png", &png_bytes());
 
@@ -467,7 +467,7 @@ async fn typed_multipart_accepts_sniffed_png() {
 #[tokio::test]
 async fn macro_less_upload_saves_file_with_local_storage() {
     let (site, dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = multipart_body(boundary, "avatar.png", "image/png", &png_bytes());
 
@@ -492,7 +492,7 @@ async fn macro_less_upload_saves_file_with_local_storage() {
 #[tokio::test]
 async fn invalid_sniffed_file_is_rejected() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = multipart_body(boundary, "avatar.png", "image/png", b"not an image");
 
@@ -517,7 +517,7 @@ async fn invalid_sniffed_file_is_rejected() {
 #[tokio::test]
 async fn multipart_errors_render_html_by_default() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = multipart_body(boundary, "avatar.png", "image/png", b"not an image");
 
@@ -544,7 +544,7 @@ async fn multipart_errors_render_html_by_default() {
 #[tokio::test]
 async fn oversized_file_is_rejected() {
     let (site, _dir) = upload_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
     let boundary = "vyuh-boundary";
     let body = multipart_body(boundary, "avatar.png", "image/png", &[0x89; 80]);
 
@@ -573,7 +573,7 @@ fn unsafe_storage_names_are_rejected() {
 #[tokio::test]
 async fn multipart_openapi_documents_binary_file_field() {
     let (site, _dir) = upload_openapi_site().await;
-    let client = vyuh::testing::TestClient::new(site.clone());
+    let client = vyuh::testing::TestSite::new(site.clone());
 
     let spec: Value = client
         .get("/openapi.json")

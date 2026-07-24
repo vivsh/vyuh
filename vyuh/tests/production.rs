@@ -13,7 +13,7 @@ use vyuh::{
     console::ConsoleConf,
     middlewares::{CorsConf, HttpConf, TimeoutConf},
     routes::{BodyBytes, Html, Json},
-    testing::TestClient,
+    testing::TestSite,
 };
 
 #[bundles::route(path = "/echo", method = "POST")]
@@ -40,7 +40,7 @@ async fn production_profile_exposes_probes_metrics_and_security_headers() {
     let site = Site::build(SiteConf::production().log_init(false), production_bundle())
         .await
         .expect("production profile should build with its secure defaults");
-    let client = TestClient::new(site);
+    let client = TestSite::new(site);
 
     client
         .get("/healthz")
@@ -82,7 +82,7 @@ async fn production_profile_enforces_body_limits_and_timeouts() {
     )
     .await
     .expect("production timeout configuration should build");
-    let client = TestClient::new(site);
+    let client = TestSite::new(site);
 
     client
         .post("/echo")

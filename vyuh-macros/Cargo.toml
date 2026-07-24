@@ -25,5 +25,5 @@ mool-macros-impl = "0.1.2"
 tokio = {workspace = true}
 
 [dev-dependencies]
-vyuh = { path = "../vyuh" }
+vyuh = { path = "../vyuh", features = ["postgres", "test-support"] }
 trybuild = "1.0"

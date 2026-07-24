@@ -4,7 +4,7 @@ use serde_json::Value;
 use vyuh::{
     Data, SiteConf, SiteConfig, Validate, bundles,
     routes::{BodyBytes, Json, Path, Query, StatusCode, Valid},
-    testing::TestClient,
+    testing::TestSite,
 };
 
 fn test_conf() -> SiteConf {
@@ -124,7 +124,7 @@ async fn request_site(openapi: bool) -> vyuh::Site {
 #[tokio::test]
 async fn request_documentation_signatures_work() {
     let site = request_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let tuple_path: Value = client
         .get("/orgs/acme/users/42")
@@ -195,7 +195,7 @@ async fn request_documentation_signatures_work() {
 #[tokio::test]
 async fn body_bytes_is_documented_as_binary_openapi_body() {
     let site = request_site(true).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let spec: Value = client
         .get("/openapi.json")

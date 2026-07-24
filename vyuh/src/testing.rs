@@ -3,7 +3,7 @@
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
 ))]
 use crate::bundles::Bundle;
-use crate::db::{DbConf, Pool};
+use crate::db::DbConf;
 use crate::{Site, SiteConf};
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 use crate::{SiteError, bundles::IntoBundle};
@@ -14,17 +14,24 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{self, Value, value::to_value};
 use std::collections::BTreeMap;
-use std::ops::Deref;
 use tower::ServiceExt;
 
 pub use crate::db::sqlx::test_block_on;
+#[doc(hidden)]
+pub use tokio;
 
+/// Returns the router of an already-built site for direct Axum-level tests.
 pub fn router(site: &Site) -> Router {
     site.router()
 }
 
-pub struct TestClient {
-    inner: TestClientInner,
+/// A complete in-process Vyuh test fixture.
+///
+/// `TestSite` owns the site and router used by request assertions. When built
+/// with [`test_site`], it also owns Mool's isolated database and removes it
+/// during [`Self::teardown`].
+pub struct TestSite {
+    inner: TestSiteInner,
     #[cfg(all(
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
@@ -32,22 +39,23 @@ pub struct TestClient {
     database: Option<crate::db::testing::TestDatabase>,
 }
 
-struct TestClientInner {
+struct TestSiteInner {
     app: Router,
     site: Site,
 }
 
-impl Drop for TestClientInner {
+impl Drop for TestSiteInner {
     fn drop(&mut self) {
         self.site.shutdown();
     }
 }
 
-impl TestClient {
+impl TestSite {
+    /// Wraps an already-built site in an in-process test fixture.
     pub fn new(site: Site) -> Self {
         let app = router(&site);
         Self {
-            inner: TestClientInner { app, site },
+            inner: TestSiteInner { app, site },
             #[cfg(all(
                 feature = "test-support",
                 any(feature = "postgres", feature = "mysql", feature = "sqlite")
@@ -56,10 +64,10 @@ impl TestClient {
         }
     }
 
-    /// Builds an in-process HTTP client from application configuration and a supplied Mool pool.
+    /// Builds an in-process test site from application configuration and a supplied Mool pool.
     ///
-    /// The caller retains database ownership and must tear it down after this client has shut
-    /// down. Prefer [`Self::from_conf`] when Mool's `test-support` feature is enabled.
+    /// The caller retains database ownership and must tear it down after this site has shut
+    /// down. Prefer [`test_site`] when Mool's `test-support` feature is enabled.
     #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     pub async fn from_pool(
         conf: SiteConf,
@@ -70,7 +78,7 @@ impl TestClient {
         Ok(Self::new(site))
     }
 
-    /// Provisions a Mool-owned isolated database, applies bundle migrations, and builds a client.
+    /// Provisions a Mool-owned isolated database, applies bundle migrations, and builds a test site.
     ///
     /// The supplied configuration must contain credentials that can create and drop an isolated
     /// database. Call [`Self::teardown`] to shut down the site and report cleanup failures.
@@ -78,10 +86,7 @@ impl TestClient {
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
     ))]
-    pub async fn from_conf(
-        conf: SiteConf,
-        bundle: impl IntoBundle,
-    ) -> Result<Self, TestClientError> {
+    pub async fn from_conf(conf: SiteConf, bundle: impl IntoBundle) -> Result<Self, TestSiteError> {
         Self::builder(conf, bundle).build().await
     }
 
@@ -90,8 +95,8 @@ impl TestClient {
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
     ))]
-    pub fn builder(conf: SiteConf, bundle: impl IntoBundle) -> TestClientBuilder {
-        TestClientBuilder {
+    pub fn builder(conf: SiteConf, bundle: impl IntoBundle) -> TestSiteBuilder {
+        TestSiteBuilder {
             conf,
             bundle: bundle.into_bundle(),
             apply_migrations: true,
@@ -107,7 +112,7 @@ impl TestClient {
         conf: &SiteConf,
         bundle: &Bundle,
         apply_migrations: bool,
-    ) -> Result<crate::db::testing::TestDatabase, TestClientError> {
+    ) -> Result<crate::db::testing::TestDatabase, TestSiteError> {
         let setup = crate::db::testing::setup(conf.database.clone());
         #[cfg(not(feature = "migrations"))]
         let _ = (bundle, apply_migrations);
@@ -129,13 +134,13 @@ impl TestClient {
         conf: SiteConf,
         bundle: Bundle,
         database: crate::db::testing::TestDatabase,
-    ) -> Result<Self, TestClientError> {
+    ) -> Result<Self, TestSiteError> {
         let site = Site::test(conf, bundle, database.pool().as_sqlx().clone()).await;
         match site {
             Ok(site) => {
                 let app = router(&site);
                 Ok(Self {
-                    inner: TestClientInner { app, site },
+                    inner: TestSiteInner { app, site },
                     database: Some(database),
                 })
             }
@@ -151,10 +156,10 @@ impl TestClient {
     async fn cleanup_failed_site(
         database: crate::db::testing::TestDatabase,
         site: SiteError,
-    ) -> Result<Self, TestClientError> {
+    ) -> Result<Self, TestSiteError> {
         match database.teardown().await {
-            Ok(()) => Err(TestClientError::Site(site)),
-            Err(cleanup) => Err(TestClientError::SetupCleanup { site, cleanup }),
+            Ok(()) => Err(TestSiteError::Site(site)),
+            Err(cleanup) => Err(TestSiteError::SetupCleanup { site, cleanup }),
         }
     }
 
@@ -168,7 +173,7 @@ impl TestClient {
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
     ))]
-    pub async fn teardown(self) -> Result<(), TestClientError> {
+    pub async fn teardown(self) -> Result<(), TestSiteError> {
         let Self { inner, database } = self;
         inner.site.shutdown_and_wait().await;
         drop(inner);
@@ -210,7 +215,7 @@ impl TestClient {
 ))]
 /// Errors returned while provisioning a Mool-owned database or removing it after a test.
 #[derive(Debug, thiserror::Error)]
-pub enum TestClientError {
+pub enum TestSiteError {
     /// Mool could not provision, migrate, or remove the isolated target.
     #[error(transparent)]
     Database(#[from] crate::db::testing::TestDatabaseError),
@@ -227,12 +232,139 @@ pub enum TestClientError {
     },
 }
 
+/// Describes a failure while a macro-owned test site is set up, exercised, or removed.
+///
+/// The body error remains available to the caller even when deterministic database cleanup also
+/// fails. [`finish_test`] constructs this value after the test site has been shut down.
 #[cfg(all(
     feature = "test-support",
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
 ))]
-/// Configures whether a test client applies registered migrations before site construction.
-pub struct TestClientBuilder {
+#[derive(Debug, thiserror::Error)]
+pub enum TestRunError<E> {
+    /// The test configuration factory returned the caller's structured error.
+    #[error("test configuration failed")]
+    Configuration(E),
+    /// The isolated test site could not be provisioned.
+    #[error("test site setup failed: {0}")]
+    Setup(TestSiteError),
+    /// The test body returned an error after its site was built.
+    #[error("test body failed")]
+    Body(E),
+    /// The test site ran successfully but its owned database could not be removed.
+    #[error("test site cleanup failed: {0}")]
+    Cleanup(TestSiteError),
+    /// Both the body and deterministic cleanup failed.
+    #[error("test body and test site cleanup both failed")]
+    BodyAndCleanup {
+        /// The error returned by the test body.
+        body: E,
+        /// The error returned while removing the macro-owned fixture.
+        cleanup: TestSiteError,
+    },
+}
+
+/// Converts a macro configuration expression into a site configuration.
+///
+/// `#[vyuh::test]` accepts either a direct [`SiteConf`] or a fallible
+/// `Result<SiteConf, E>` factory result. A configuration error is preserved as
+/// [`TestRunError::Configuration`] because no site exists yet to tear down.
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub trait TestConfSource<E> {
+    /// Returns a test-site configuration or the caller's structured test error.
+    fn into_test_conf(self) -> Result<SiteConf, E>;
+}
+
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+impl<E> TestConfSource<E> for SiteConf {
+    fn into_test_conf(self) -> Result<SiteConf, E> {
+        Ok(self)
+    }
+}
+
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+impl<E> TestConfSource<E> for Result<SiteConf, E> {
+    fn into_test_conf(self) -> Result<SiteConf, E> {
+        self
+    }
+}
+
+/// Combines a test body result with the deterministic teardown result of its owned test site.
+///
+/// A body failure takes precedence when both operations fail; the cleanup error is retained as a
+/// structured secondary value in [`TestRunError::BodyAndCleanup`].
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub fn finish_test<T, E>(
+    body: Result<T, E>,
+    cleanup: Result<(), TestSiteError>,
+) -> Result<(), TestRunError<E>> {
+    match (body, cleanup) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Err(body), Ok(())) => Err(TestRunError::Body(body)),
+        (Ok(_), Err(cleanup)) => Err(TestRunError::Cleanup(cleanup)),
+        (Err(body), Err(cleanup)) => Err(TestRunError::BodyAndCleanup { body, cleanup }),
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+mod test_run_error_tests {
+    use super::*;
+
+    /// Supplies a structured teardown failure without opening a database connection.
+    fn cleanup_error() -> TestSiteError {
+        TestSiteError::Site(SiteError::AssetError("test cleanup failure".to_string()))
+    }
+
+    /// Retains a structured setup failure before a test body can be entered.
+    #[test]
+    fn setup_failure_is_preserved() {
+        let result = Err::<(), _>(TestRunError::<&str>::Setup(cleanup_error()));
+        assert!(matches!(result, Err(TestRunError::Setup(_))));
+    }
+
+    /// Preserves a cleanup failure when an otherwise successful test body completes.
+    #[test]
+    fn cleanup_failure_is_preserved() {
+        let result = finish_test::<(), &str>(Ok(()), Err(cleanup_error()));
+        assert!(matches!(result, Err(TestRunError::Cleanup(_))));
+    }
+
+    /// Preserves both errors while giving the test-body failure precedence in the result shape.
+    #[test]
+    fn body_and_cleanup_failures_are_preserved() {
+        let result = finish_test::<(), _>(Err("body failure"), Err(cleanup_error()));
+        assert!(matches!(
+            result,
+            Err(TestRunError::BodyAndCleanup {
+                body: "body failure",
+                ..
+            })
+        ));
+    }
+}
+
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+/// Configures whether a test site applies registered migrations before site construction.
+pub struct TestSiteBuilder {
     conf: SiteConf,
     bundle: Bundle,
     apply_migrations: bool,
@@ -242,7 +374,7 @@ pub struct TestClientBuilder {
     feature = "test-support",
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
 ))]
-impl TestClientBuilder {
+impl TestSiteBuilder {
     /// Leaves the isolated database empty instead of applying registered migrations.
     ///
     /// Use this for migration-command tests, schema-negative tests, or fixtures that create
@@ -252,12 +384,24 @@ impl TestClientBuilder {
         self
     }
 
-    /// Provisions the isolated database and builds the in-process client.
-    pub async fn build(self) -> Result<TestClient, TestClientError> {
+    /// Provisions the isolated database and builds the in-process test site.
+    pub async fn build(self) -> Result<TestSite, TestSiteError> {
         let database =
-            TestClient::provision_database(&self.conf, &self.bundle, self.apply_migrations).await?;
-        TestClient::from_database(self.conf, self.bundle, database).await
+            TestSite::provision_database(&self.conf, &self.bundle, self.apply_migrations).await?;
+        TestSite::from_database(self.conf, self.bundle, database).await
     }
+}
+
+/// Provisions an isolated Mool database, applies registered migrations, and builds a test site.
+///
+/// Use [`TestSite::builder`] when migrations must remain unapplied, and
+/// [`TestSite::from_pool`] when a fixture owns a database shared by several test sites.
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub async fn test_site(conf: SiteConf, bundle: impl IntoBundle) -> Result<TestSite, TestSiteError> {
+    TestSite::from_conf(conf, bundle).await
 }
 
 pub struct TestRequestBuilder {
@@ -298,7 +442,7 @@ impl TestRequestBuilder {
     }
 
     pub fn query<T: Serialize>(mut self, params: &[(&str, T)]) -> Self {
-        let query = TestClient::build_query(params);
+        let query = TestSite::build_query(params);
         if self.path.contains('?') {
             self.path = format!("{}&{}", self.path, query);
         } else {
@@ -392,7 +536,7 @@ impl TestResponse {
     }
 }
 
-impl TestClient {
+impl TestSite {
     pub fn build_query<T: Serialize>(params: &[(&str, T)]) -> String {
         let mut map = BTreeMap::new();
         for (k, v) in params {
@@ -431,195 +575,4 @@ pub async fn mock_site() -> SiteConf {
     };
 
     conf
-}
-
-/// RAII guard for a test database
-/// Automatically drops the database when the guard is dropped
-pub struct MockDb {
-    pool: Pool,
-    pub db_name: String,
-    pub base_url: String,
-}
-
-impl MockDb {
-    pub fn pool(&self) -> &Pool {
-        &self.pool
-    }
-}
-
-impl Deref for MockDb {
-    type Target = Pool;
-
-    fn deref(&self) -> &Self::Target {
-        &self.pool
-    }
-}
-
-impl Drop for MockDb {
-    fn drop(&mut self) {
-        #[cfg(any(feature = "postgres", feature = "mysql"))]
-        let db_name = self.db_name.clone();
-        #[cfg(any(feature = "postgres", feature = "mysql"))]
-        let base_url = self.base_url.clone();
-
-        #[cfg(feature = "postgres")]
-        {
-            if !db_name.is_empty() {
-                let _ = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().ok()?;
-                    rt.block_on(async {
-                        if let Ok(root_pool) = crate::db::sqlx::PgPool::connect(&base_url).await {
-                            let _ = crate::db::sqlx::query(&format!(
-                                "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-                                db_name
-                            ))
-                            .execute(&root_pool)
-                            .await;
-                            root_pool.close().await;
-                        }
-                        Some(())
-                    })
-                })
-                .join();
-            }
-        }
-
-        #[cfg(feature = "mysql")]
-        {
-            if !db_name.is_empty() {
-                let _ = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().ok()?;
-                    rt.block_on(async {
-                        if let Ok(root_pool) = crate::db::sqlx::MySqlPool::connect(&base_url).await
-                        {
-                            let _ = crate::db::sqlx::query(&format!(
-                                "DROP DATABASE IF EXISTS `{}`",
-                                db_name
-                            ))
-                            .execute(&root_pool)
-                            .await;
-                            root_pool.close().await;
-                        }
-                        Some(())
-                    })
-                })
-                .join();
-            }
-        }
-
-        #[cfg(feature = "sqlite")]
-        {
-            // SQLite uses :memory:, no cleanup needed
-        }
-    }
-}
-
-/// Creates a new isolated database for testing
-/// Similar to sqlx test macros, creates a unique database that is cleaned up after use
-/// Returns a MockDb guard that derefs to Pool and drops the database on drop
-///
-/// # Example
-/// ```ignore
-/// #[tokio::test]
-/// async fn test_something() {
-///     let db = mock_db().await;
-///     // Use db like a Pool - it derefs automatically
-///     crate::db::sqlx::query("SELECT 1").execute(&*db).await.unwrap();
-///     // Database is dropped when db goes out of scope
-/// }
-/// ```
-pub async fn mock_db() -> MockDb {
-    #[cfg(feature = "postgres")]
-    {
-        let base_url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://localhost".to_string());
-
-        let db_name = format!("vyuh_test_{}", uuid::Uuid::now_v7().simple());
-
-        let root_pool = crate::db::sqlx::PgPool::connect(&base_url)
-            .await
-            .expect("Failed to connect to postgres");
-
-        crate::db::sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
-            .execute(&root_pool)
-            .await
-            .expect("Failed to create test database");
-
-        root_pool.close().await;
-
-        let test_url = if base_url.contains('/') {
-            let parts: Vec<&str> = base_url.rsplitn(2, '/').collect();
-            format!("{}/{}", parts[1], db_name)
-        } else {
-            format!("{}/{}", base_url, db_name)
-        };
-
-        let pool = crate::db::sqlx::PgPool::connect(&test_url)
-            .await
-            .expect("Failed to connect to test database");
-
-        MockDb {
-            pool,
-            db_name,
-            base_url,
-        }
-    }
-
-    #[cfg(feature = "mysql")]
-    {
-        let base_url =
-            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| "mysql://localhost".to_string());
-
-        let db_name = format!("vyuh_test_{}", uuid::Uuid::now_v7().simple());
-
-        let root_pool = crate::db::sqlx::MySqlPool::connect(&base_url)
-            .await
-            .expect("Failed to connect to mysql");
-
-        crate::db::sqlx::query(&format!("CREATE DATABASE `{}`", db_name))
-            .execute(&root_pool)
-            .await
-            .expect("Failed to create test database");
-
-        root_pool.close().await;
-
-        let test_url = if base_url.contains('/') {
-            let parts: Vec<&str> = base_url.rsplitn(2, '/').collect();
-            format!("{}/{}", parts[1], db_name)
-        } else {
-            format!("{}/{}", base_url, db_name)
-        };
-
-        let pool = crate::db::sqlx::MySqlPool::connect(&test_url)
-            .await
-            .expect("Failed to connect to test database");
-
-        MockDb {
-            pool,
-            db_name,
-            base_url,
-        }
-    }
-
-    #[cfg(feature = "sqlite")]
-    {
-        let pool = crate::db::sqlx::SqlitePool::connect(":memory:")
-            .await
-            .expect("Failed to create in-memory sqlite database");
-
-        MockDb {
-            pool,
-            db_name: String::new(),
-            base_url: String::new(),
-        }
-    }
-
-    #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-    {
-        MockDb {
-            pool: Pool::default(),
-            db_name: String::new(),
-            base_url: String::new(),
-        }
-    }
 }

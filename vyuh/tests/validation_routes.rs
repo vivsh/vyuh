@@ -6,7 +6,7 @@ use vyuh::{
     Error, SiteConf, Validate, bundles,
     errors::{ErrorConf, HttpErrorRenderMode},
     routes::{Form, Html, Json, Path, Query, StatusCode, Valid},
-    testing::TestClient,
+    testing::TestSite,
 };
 
 fn test_conf() -> SiteConf {
@@ -140,7 +140,7 @@ async fn validation_site(openapi: bool) -> vyuh::Site {
 #[tokio::test]
 async fn plain_json_does_not_validate() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .post("/parse")
@@ -158,7 +158,7 @@ async fn plain_json_does_not_validate() {
 #[tokio::test]
 async fn valid_json_returns_structured_422() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let body: Value = client
         .post("/valid")
@@ -191,7 +191,7 @@ async fn valid_json_returns_structured_422() {
 #[tokio::test]
 async fn valid_query_and_path_share_error_shape() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let query_body: Value = client
         .get("/search?q=x")
@@ -221,7 +221,7 @@ async fn valid_query_and_path_share_error_shape() {
 #[tokio::test]
 async fn parse_errors_return_400_error_report() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let body: Value = client
         .post("/parse")
@@ -242,7 +242,7 @@ async fn parse_errors_return_400_error_report() {
 #[tokio::test]
 async fn auto_error_rendering_uses_json_for_json_requests() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let json_body: Value = client
         .post("/valid")
@@ -274,7 +274,7 @@ async fn auto_error_rendering_uses_json_for_json_requests() {
 #[tokio::test]
 async fn auto_error_rendering_uses_json_for_json_accept() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let body: Value = client
         .get("/search?q=x")
@@ -292,7 +292,7 @@ async fn auto_error_rendering_uses_json_for_json_accept() {
 #[tokio::test]
 async fn auto_error_rendering_uses_html_without_json_signal() {
     let site = validation_site(false).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let response = client
         .post("/valid-form")
@@ -331,7 +331,7 @@ async fn auto_error_rendering_escapes_default_html() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let html = client
         .get("/bad-html")
@@ -349,7 +349,7 @@ async fn auto_error_rendering_escapes_default_html() {
 #[tokio::test]
 async fn openapi_constraints_appear_only_for_valid_inputs() {
     let site = validation_site(true).await;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let spec: Value = client
         .get("/openapi.json")
@@ -442,7 +442,7 @@ async fn custom_error_handler_can_replace_response() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let text = client
         .post("/valid")
@@ -497,7 +497,7 @@ async fn custom_json_and_html_error_renderers_can_replace_messages() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let json_body: Value = client
         .post("/valid")
@@ -559,7 +559,7 @@ async fn html_error_renderer_can_be_forced_by_config() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let html_body = client
         .post("/valid")
@@ -588,7 +588,7 @@ async fn json_error_renderer_can_be_forced_by_config() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let body: Value = client
         .post("/valid-form")

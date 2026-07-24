@@ -1,0 +1,7 @@
+error: `#[vyuh::test]` requires `site: &TestSite` as its only argument
+ --> tests/ui/test/fail_site.rs:1:1
+  |
+1 | #[vyuh::test]
+  | ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `vyuh::test` (in Nightly builds, run with -Z macro-backtrace for more info)

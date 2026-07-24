@@ -9,7 +9,7 @@ use vyuh::{
     },
     bundles, routes,
     routes::{Json, StatusCode},
-    testing::TestClient,
+    testing::TestSite,
 };
 
 fn test_conf() -> SiteConf {
@@ -416,7 +416,7 @@ async fn auth_accepts_bearer_authorization_header() {
         )
         .unwrap()
         .access_token;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/me")
@@ -438,7 +438,7 @@ async fn public_route_does_not_require_auth() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/public")
@@ -467,7 +467,7 @@ async fn auth_accepts_legacy_jwt_authorization_header() {
         )
         .unwrap()
         .access_token;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/me")
@@ -489,7 +489,7 @@ async fn auth_missing_token_returns_unauthorized() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/me")
@@ -518,7 +518,7 @@ async fn auth_permit_rejects_missing_role() {
         )
         .unwrap()
         .access_token;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/secure")
@@ -548,7 +548,7 @@ async fn auth_user_rejects_refresh_token() {
         )
         .unwrap()
         .refresh_token;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/me")
@@ -601,7 +601,7 @@ async fn audience_required_rejects_route_without_audience() {
         .create_token_pair(AuthUser::new("user-1", 0), &["web"])
         .unwrap()
         .access_token;
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/me")
@@ -724,7 +724,7 @@ async fn api_key_extracts_from_configured_header() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/api-key")
@@ -756,7 +756,7 @@ async fn api_key_authorization_scheme_works_when_configured() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/api-key")
@@ -780,7 +780,7 @@ async fn api_key_query_param_is_explicit_opt_in() {
     )
     .await
     .unwrap();
-    let disabled_client = TestClient::new(disabled_site.clone());
+    let disabled_client = TestSite::new(disabled_site.clone());
 
     disabled_client
         .get("/api-key?api_key=valid-key")
@@ -804,7 +804,7 @@ async fn api_key_query_param_is_explicit_opt_in() {
     )
     .await
     .unwrap();
-    let enabled_client = TestClient::new(enabled_site.clone());
+    let enabled_client = TestSite::new(enabled_site.clone());
 
     enabled_client
         .get("/api-key?api_key=valid-key")
@@ -826,7 +826,7 @@ async fn api_key_missing_verifier_returns_server_error() {
     )
     .await
     .unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     client
         .get("/api-key")
@@ -851,7 +851,7 @@ async fn api_key_openapi_security_scheme_is_generated() {
             .spec("/openapi.json"),
     );
     let site = vyuh::Site::build(conf, bundle).await.unwrap();
-    let client = TestClient::new(site.clone());
+    let client = TestSite::new(site.clone());
 
     let spec: serde_json::Value = client
         .get("/openapi.json")

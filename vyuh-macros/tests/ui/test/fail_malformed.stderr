@@ -1,0 +1,13 @@
+error: expected `conf = ...`, `bundle = ...`, or `migrations = true|false`
+ --> tests/ui/test/fail_malformed.rs:3:14
+  |
+3 | #[vyuh::test(conf)]
+  |              ^^^^
+
+warning: unused import: `vyuh::testing::TestSite`
+ --> tests/ui/test/fail_malformed.rs:1:5
+  |
+1 | use vyuh::testing::TestSite;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

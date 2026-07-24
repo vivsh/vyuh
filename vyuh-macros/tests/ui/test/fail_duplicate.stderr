@@ -1,0 +1,13 @@
+error: duplicate `conf` option
+ --> tests/ui/test/fail_duplicate.rs:3:49
+  |
+3 | #[vyuh::test(conf = SiteConf::default(), conf = SiteConf::default())]
+  |                                                 ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `SiteConf` and `testing::TestSite`
+ --> tests/ui/test/fail_duplicate.rs:1:12
+  |
+1 | use vyuh::{SiteConf, testing::TestSite};
+  |            ^^^^^^^^  ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

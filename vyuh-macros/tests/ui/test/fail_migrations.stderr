@@ -1,0 +1,13 @@
+error: `migrations` must be `true` or `false`
+ --> tests/ui/test/fail_migrations.rs:3:27
+  |
+3 | #[vyuh::test(migrations = enabled)]
+  |                           ^^^^^^^
+
+warning: unused import: `vyuh::testing::TestSite`
+ --> tests/ui/test/fail_migrations.rs:1:5
+  |
+1 | use vyuh::testing::TestSite;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

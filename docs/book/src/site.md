@@ -246,9 +246,41 @@ async fn route_works(pool: vyuh::db::Pool) -> Result<(), vyuh::SiteError> {
 }
 ```
 
-For route-level tests, build a site and send requests through
-`vyuh::testing::TestClient` or `vyuh::testing::router(&site)`. Use
+For route-level tests, use `vyuh::testing::test_site` to provision a complete
+`TestSite`, or build a site and send requests through
+`vyuh::testing::TestSite::new(site)` or `vyuh::testing::router(&site)`. Use
 `.log_init(false)` in tests when test output should stay quiet.
+
+`test_site` owns Mool's isolated database and applies registered migrations:
+
+```rust,ignore
+let site = vyuh::testing::test_site(conf, app_bundle()).await?;
+site.get("/api/posts").send().await.assert_ok();
+site.teardown().await?;
+```
+
+For a database shared by multiple test sites, retain Mool's `TestDatabase` in
+the fixture and use `TestSite::from_pool`; shut down every site before calling
+the fixture's `teardown`.
+
+For an owned integration fixture, `#[vyuh::test]` is thin syntax sugar over
+`TestSite`. Its body always receives `&TestSite`, and the generated wrapper
+shuts down the site and tears down the Mool database even when the body fails:
+
+```rust,ignore
+#[vyuh::test(conf = test_conf, bundle = app_bundle)]
+async fn public_posts_hide_drafts(
+    site: &vyuh::testing::TestSite,
+) -> Result<(), TestError> {
+    site.get("/api/posts").send().await.assert_ok();
+    Ok(())
+}
+```
+
+With no arguments the macro uses `SiteConf::default()` and an empty
+`Bundle::default()`; it never discovers application bundles automatically. Use
+`migrations = false` for schema-negative or migration-command tests. Shared
+database fixtures continue to use `TestSite::from_pool` directly.
 
 ## Shutdown
 

@@ -39,7 +39,7 @@
 //!   cargo test -p vyuh --features postgres,migrations,test-support --example blog
 //! ```
 //!
-//! The tests use Vyuh's `testing::TestClient`, which provisions Mool's
+//! The tests use Vyuh's `testing::TestSite`, which provisions Mool's
 //! migration-aware test database and exercises routes without binding an HTTP port.
 
 use axum::body::Body;
@@ -989,7 +989,7 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use thiserror::Error as ThisError;
-    use vyuh::testing::TestClient;
+    use vyuh::testing::{TestSite, TestSiteError};
 
     #[derive(Debug, ThisError)]
     enum TestError {
@@ -1000,11 +1000,11 @@ mod tests {
         #[error(transparent)]
         Sql(#[from] db::sqlx::Error),
         #[error(transparent)]
-        Client(#[from] vyuh::testing::TestClientError),
+        Site(#[from] TestSiteError),
     }
 
     /// Returns test-safe application configuration using the configured PostgreSQL test server.
-    fn test_conf() -> Result<SiteConf, db::DbError> {
+    fn test_conf() -> Result<SiteConf, TestError> {
         Ok(SiteConf::default()
             .secret_key("vyuh-blog-test-secret-key-with-enough-entropy")
             .auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
@@ -1038,13 +1038,12 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies that Mool-isolated data is exercised through Vyuh's in-process HTTP client.
-    #[tokio::test]
-    async fn public_posts_hide_drafts() -> Result<(), TestError> {
-        let client = TestClient::from_conf(test_conf()?, app_bundle()).await?;
-        seed_posts(client.site()).await?;
+    /// Verifies that Mool-isolated data is exercised through Vyuh's in-process test site.
+    #[vyuh::test(conf = test_conf, bundle = app_bundle)]
+    async fn public_posts_hide_drafts(site: &TestSite) -> Result<(), TestError> {
+        seed_posts(site.site()).await?;
 
-        let response = client.get("/api/posts").send().await.assert_ok();
+        let response = site.get("/api/posts").send().await.assert_ok();
         let body: Value = response.json().await;
         assert_eq!(body.pointer("/total").and_then(Value::as_i64), Some(1));
         assert_eq!(
@@ -1052,35 +1051,28 @@ mod tests {
             Some("published-post")
         );
 
-        client.teardown().await?;
         Ok(())
     }
 
-    /// Verifies that a test client can intentionally leave registered migrations unapplied.
-    #[tokio::test]
-    async fn client_can_skip_migrations() -> Result<(), TestError> {
-        let client = TestClient::builder(test_conf()?, app_bundle())
-            .without_migrations()
-            .build()
-            .await?;
+    /// Verifies that a test site can intentionally leave registered migrations unapplied.
+    #[vyuh::test(conf = test_conf, bundle = app_bundle, migrations = false)]
+    async fn client_can_skip_migrations(site: &TestSite) -> Result<(), TestError> {
         let table: Option<String> =
             db::sqlx::query_scalar("SELECT to_regclass('public.blog_users')::text")
-                .fetch_one(client.site().db().as_sqlx())
+                .fetch_one(site.site().db().as_sqlx())
                 .await?;
         assert_eq!(table, None);
 
-        client.teardown().await?;
         Ok(())
     }
 
     /// Verifies that the blog login route returns a session cookie for a valid user.
-    #[tokio::test]
-    async fn login_returns_session_cookie() -> Result<(), TestError> {
-        let client = TestClient::from_conf(test_conf()?, app_bundle()).await?;
-        let mut db = client.site().db();
+    #[vyuh::test(conf = test_conf, bundle = app_bundle)]
+    async fn login_returns_session_cookie(site: &TestSite) -> Result<(), TestError> {
+        let mut db = site.site().db();
         insert_user(&mut db, "reader", "Reader", "password-123", false).await?;
 
-        let response = client
+        let response = site
             .post("/api/session")
             .json(&LoginInput {
                 username: "reader".to_string(),
@@ -1094,7 +1086,6 @@ mod tests {
             .and_then(|value| value.to_str().ok());
         assert!(cookie.is_some_and(|value| value.starts_with("blog_access=")));
 
-        client.teardown().await?;
         Ok(())
     }
 }

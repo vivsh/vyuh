@@ -1,0 +1,13 @@
+error: `#[vyuh::test]` requires an async function
+ --> tests/ui/test/fail_not_async.rs:4:1
+  |
+4 | fn not_async(site: &TestSite) -> Result<(), ()> {
+  | ^^
+
+warning: unused import: `vyuh::testing::TestSite`
+ --> tests/ui/test/fail_not_async.rs:1:5
+  |
+1 | use vyuh::testing::TestSite;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
