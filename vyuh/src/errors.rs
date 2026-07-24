@@ -1,6 +1,7 @@
 use crate::auth::AuthError;
 use crate::callables::CallError;
 use crate::db::DbError;
+use crate::utils::html;
 use crate::validation::{PathSeg, ValidationError, ValidationReport};
 use axum::{
     Json,
@@ -160,6 +161,28 @@ impl std::fmt::Debug for ErrorConf {
 }
 
 impl ErrorConf {
+    /// Uses Vyuh's standard JSON API error body for JSON requests.
+    ///
+    /// The response contains `source`, `code`, `detail`, `path`, and `errors`.
+    /// HTML requests continue to use the default HTML renderer unless a custom
+    /// HTML handler is configured.
+    pub fn api_json(self) -> Self {
+        self.json(|ctx, view| async move {
+            (
+                view.status,
+                Json(serde_json::json!({
+                    "source": view.source,
+                    "code": view.code,
+                    "detail": view.message,
+                    "path": ctx.path,
+                    "errors": view.errors,
+                })),
+            )
+                .into_response()
+        })
+        .http_mode(HttpErrorRenderMode::Auto)
+    }
+
     pub fn handler<F, Fut>(mut self, handler: F) -> Self
     where
         F: Fn(ErrorRequestContext, ErrorReport) -> Fut + Send + Sync + 'static,
@@ -277,10 +300,10 @@ fn default_html_error(ctx: ErrorRequestContext, view: ErrorView) -> Response {
     let body = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{status} {code}</title></head><body><main><h1>{status}</h1><p>{message}</p><p><code>{method} {path}</code></p></main></body></html>",
         status = view.status.as_u16(),
-        code = escape_html(view.code.as_ref()),
-        message = escape_html(view.message.as_ref()),
-        method = escape_html(ctx.method.as_str()),
-        path = escape_html(&ctx.path),
+        code = html::escape(view.code.as_ref()),
+        message = html::escape(view.message.as_ref()),
+        method = html::escape(ctx.method.as_str()),
+        path = html::escape(&ctx.path),
     );
     (
         view.status,
@@ -288,15 +311,6 @@ fn default_html_error(ctx: ErrorRequestContext, view: ErrorView) -> Response {
         body,
     )
         .into_response()
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 impl ErrorReport {
@@ -480,7 +494,7 @@ pub enum ErrorSource {
     Validation(ValidationReport),
     Database(DbError),
     Auth(AuthError),
-    Sqlx(sqlx::Error),
+    Sqlx(crate::db::sqlx::Error),
     Other(Box<dyn StdError + Send + Sync + 'static>),
 }
 
@@ -847,10 +861,10 @@ impl From<AuthError> for Error {
     }
 }
 
-impl From<sqlx::Error> for Error {
-    fn from(err: sqlx::Error) -> Self {
+impl From<crate::db::sqlx::Error> for Error {
+    fn from(err: crate::db::sqlx::Error) -> Self {
         let kind = match &err {
-            sqlx::Error::RowNotFound => ErrorKind::NotFound,
+            crate::db::sqlx::Error::RowNotFound => ErrorKind::NotFound,
             _ => ErrorKind::Other,
         };
         Self {

@@ -16,8 +16,8 @@ struct PostId {
 fn main() {
     let posts = Post::table();
     let ids = match db::from(&posts)
-        .select_expr("id", &posts.id)
         .all::<PostId>()
+        .set(db::out::<PostId>().id, &posts.id)
         .subquery()
     {
         Ok(ids) => ids,

@@ -18,8 +18,8 @@ Vyuh keeps that model explicit. Handler signatures stay meaningful. Validation
 is opt-in. Auth is opt-in. Retry is explicit. Bundles compose features without
 hiding how the application is wired.
 
-Website: [vyuh-rs.github.io](https://vyuh-rs.github.io/)
-Docs: [vyuh-rs.github.io/docs](https://vyuh-rs.github.io/docs/)
+Website: [vivsh.github.io/vyuh](https://vivsh.github.io/vyuh/)
+Docs: [vivsh.github.io/vyuh/docs](https://vivsh.github.io/vyuh/docs/)
 
 Vyuh is usable today, but it is not API-stable yet. Expect breaking changes
 before `1.0`.
@@ -91,7 +91,7 @@ vyuh = { version = "0.2", features = ["postgres"] }
 ```
 
 For local experiments or documentation examples, Vyuh can run without a backend
-feature and will use an in-memory SQLite-compatible setup plus in-memory tasks.
+feature with no live database pool and in-memory tasks.
 
 Start with one route, one cron emitter, and one OpenAPI declaration:
 
@@ -182,8 +182,8 @@ one central setup file.
 
 ## Documentation
 
-- [Website](https://vyuh-rs.github.io/)
-- [Full docs](https://vyuh-rs.github.io/docs/)
+- [Website](https://vivsh.github.io/vyuh/)
+- [Full docs](https://vivsh.github.io/vyuh/docs/)
 - [Source docs](docs/book/src/SUMMARY.md)
 - [Site and lifecycle](docs/book/src/site.md)
 - [Bundles](docs/book/src/bundles.md)
@@ -194,7 +194,7 @@ one central setup file.
 
 ## Backend Support
 
-Vyuh supports Postgres, MySQL, and SQLite through SQLx, with Postgres as the
+Vyuh supports Postgres, MySQL, and SQLite through Mool, with Postgres as the
 preferred production backend where concurrency and notification features matter
 most.
 

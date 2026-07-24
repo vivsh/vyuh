@@ -5,12 +5,12 @@ description = "Vyuh documentation"
 authors = ["Vyuh contributors"]
 
 [output.html]
-site-url = "/"
+site-url = "/vyuh/docs/"
 additional-css = [
   "theme/vyuh.css",
 ]
-git-repository-url = "https://github.com/vyuh-rs/vyuh"
-edit-url-template = "https://github.com/vyuh-rs/vyuh/edit/main/docs/book/{path}"
+git-repository-url = "https://github.com/vivsh/vyuh"
+edit-url-template = "https://github.com/vivsh/vyuh/edit/main/docs/book/{path}"
 
 [output.html.playground]
 runnable = false

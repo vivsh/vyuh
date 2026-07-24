@@ -1,8 +1,8 @@
 use darling::FromMeta;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, DeriveInput, Error, Fields, Lit, LitInt, LitStr, Meta, Result, Token, Type,
-    spanned::Spanned,
+    Attribute, DeriveInput, Error, Expr, ExprArray, Fields, Lit, LitInt, LitStr, Meta, Result,
+    Token, Type, spanned::Spanned,
 };
 
 // -------------------------------------------------------------------------------------
@@ -46,6 +46,8 @@ static COLUMN_KEYS: &[&str] = &[
     "flatten",
     "json",
     "reference",
+    "backref",
+    "prefetch",
     "read_only",
     "skip_bind",
     "selectable",
@@ -182,34 +184,177 @@ pub struct ReferenceSpec {
     pub from: Option<String>,
     pub to: Option<String>,
     pub join: Option<String>,
+    pub on: Vec<JoinOnSpec>,
+    pub relation: Option<syn::Path>,
+}
+
+#[derive(Debug, Clone, FromMeta)]
+#[allow(dead_code)]
+pub struct JoinOnSpec {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MarkerSpec {
+    pub path: syn::Path,
+}
+
+impl FromMeta for MarkerSpec {
+    fn from_meta(item: &Meta) -> darling::Result<Self> {
+        match item {
+            Meta::Path(path) => Ok(Self { path: path.clone() }),
+            Meta::List(list) => Self::from_list(
+                &darling::ast::NestedMeta::parse_meta_list(list.tokens.clone())
+                    .map_err(darling::Error::from)?,
+            ),
+            Meta::NameValue(name_value) => Self::from_expr(&name_value.value),
+        }
+    }
+
+    fn from_expr(expr: &Expr) -> darling::Result<Self> {
+        match expr {
+            Expr::Path(path) => Ok(Self {
+                path: path.path.clone(),
+            }),
+            _ => Err(darling::Error::custom("expected marker type").with_span(expr)),
+        }
+    }
+
+    fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
+        if items.len() != 1 {
+            return Err(darling::Error::custom("expected a single marker type"));
+        }
+        let Some(item) = items.first() else {
+            return Err(darling::Error::custom("expected a marker type"));
+        };
+        match item {
+            darling::ast::NestedMeta::Meta(Meta::Path(path)) => Ok(Self { path: path.clone() }),
+            darling::ast::NestedMeta::Meta(meta) => {
+                Err(darling::Error::custom("expected marker type").with_span(meta))
+            }
+            darling::ast::NestedMeta::Lit(lit) => {
+                Err(darling::Error::custom("expected marker type").with_span(lit))
+            }
+        }
+    }
 }
 
 impl FromMeta for ReferenceSpec {
     fn from_word() -> darling::Result<Self> {
-        Ok(ReferenceSpec {
-            from: None,
-            to: None,
-            join: None,
-        })
+        Ok(ReferenceSpec::default())
     }
 
     fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
-        #[derive(FromMeta)]
-        struct RefParams {
-            #[darling(default)]
-            from: Option<LitStr>,
-            #[darling(default)]
-            to: Option<LitStr>,
-            #[darling(default)]
-            join: Option<LitStr>,
+        let mut spec = ReferenceSpec::default();
+        for item in items {
+            match item {
+                darling::ast::NestedMeta::Meta(meta) => parse_reference_meta(meta, &mut spec)?,
+                darling::ast::NestedMeta::Lit(lit) => {
+                    return Err(
+                        darling::Error::custom("unsupported reference literal").with_span(lit)
+                    );
+                }
+            }
         }
+        Ok(spec)
+    }
+}
 
-        let params = RefParams::from_list(items)?;
-        Ok(ReferenceSpec {
-            from: params.from.map(|lit| lit.value()),
-            to: params.to.map(|lit| lit.value()),
-            join: params.join.map(|lit| lit.value()),
+fn parse_reference_meta(meta: &Meta, spec: &mut ReferenceSpec) -> darling::Result<()> {
+    match meta {
+        Meta::Path(path) => {
+            spec.relation = Some(path.clone());
+            Ok(())
+        }
+        Meta::NameValue(name_value) => parse_reference_name_value(name_value, spec),
+        Meta::List(list) if list.path.is_ident("on") => parse_reference_on(list, spec),
+        Meta::List(list) => {
+            Err(darling::Error::custom("unsupported reference list").with_span(list))
+        }
+    }
+}
+
+fn parse_reference_name_value(
+    name_value: &syn::MetaNameValue,
+    spec: &mut ReferenceSpec,
+) -> darling::Result<()> {
+    let value = lit_str_value(&name_value.value)?;
+    if name_value.path.is_ident("from") {
+        spec.from = Some(value);
+        return Ok(());
+    }
+    if name_value.path.is_ident("to") {
+        spec.to = Some(value);
+        return Ok(());
+    }
+    if name_value.path.is_ident("join") {
+        spec.join = Some(value);
+        return Ok(());
+    }
+    Err(darling::Error::custom("unknown reference argument").with_span(name_value))
+}
+
+fn lit_str_value(expr: &Expr) -> darling::Result<String> {
+    match expr {
+        Expr::Lit(lit) => match &lit.lit {
+            Lit::Str(value) => Ok(value.value()),
+            _ => Err(darling::Error::custom("expected string literal").with_span(expr)),
+        },
+        _ => Err(darling::Error::custom("expected string literal").with_span(expr)),
+    }
+}
+
+fn parse_reference_on(list: &syn::MetaList, spec: &mut ReferenceSpec) -> darling::Result<()> {
+    let nested = darling::ast::NestedMeta::parse_meta_list(list.tokens.clone())
+        .map_err(darling::Error::from)?;
+    let on = JoinOnSpec::from_list(&nested)?;
+    spec.on.push(on);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct StringList(pub Vec<String>);
+
+impl StringList {
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+}
+
+impl FromMeta for StringList {
+    fn from_expr(expr: &Expr) -> darling::Result<Self> {
+        match expr {
+            Expr::Array(array) => parse_string_array(array).map(Self),
+            Expr::Lit(lit) => parse_string_lit(&lit.lit).map(|value| Self(vec![value])),
+            _ => Err(darling::Error::custom("expected string or string array").with_span(expr)),
+        }
+    }
+}
+
+fn parse_string_array(array: &ExprArray) -> darling::Result<Vec<String>> {
+    array
+        .elems
+        .iter()
+        .map(|expr| match expr {
+            Expr::Lit(lit) => parse_string_lit(&lit.lit),
+            _ => Err(darling::Error::custom("expected string literal").with_span(expr)),
         })
+        .collect()
+}
+
+fn parse_string_lit(lit: &Lit) -> darling::Result<String> {
+    match lit {
+        Lit::Str(value) => Ok(value.value()),
+        _ => Err(darling::Error::custom("expected string literal").with_span(lit)),
     }
 }
 
@@ -219,7 +364,8 @@ impl FromMeta for ReferenceSpec {
 pub struct PrimaryKeySpec {
     #[darling(default)]
     pub name: Option<String>,
-    pub columns: Vec<LitStr>,
+    #[darling(default)]
+    pub columns: StringList,
 }
 
 /// Target side of a table-level composite foreign key.
@@ -227,7 +373,7 @@ pub struct PrimaryKeySpec {
 #[allow(dead_code)]
 pub struct ForeignKeyTargetSpec {
     pub table: String,
-    pub columns: Vec<LitStr>,
+    pub columns: StringList,
 }
 
 /// Table-level foreign key metadata from `#[table(foreign_key(...))]`.
@@ -236,7 +382,7 @@ pub struct ForeignKeyTargetSpec {
 pub struct ForeignKeySpec {
     #[darling(default)]
     pub name: Option<String>,
-    pub columns: Vec<LitStr>,
+    pub columns: StringList,
     pub references: ForeignKeyTargetSpec,
 }
 
@@ -422,6 +568,10 @@ pub struct ColumnAttrs {
     pub json: bool,
     #[darling(default)]
     pub reference: Option<ReferenceSpec>,
+    #[darling(default)]
+    pub backref: Option<MarkerSpec>,
+    #[darling(default)]
+    pub prefetch: Option<MarkerSpec>,
 
     #[darling(default)]
     pub read_only: bool,
@@ -466,6 +616,7 @@ pub struct FieldMeta {
     pub ident: Option<syn::Ident>,
     pub ty: Type,
     pub validate: ValidateAttrs,
+    #[allow(dead_code)]
     pub column: ColumnAttrs,
 }
 
@@ -559,6 +710,7 @@ impl ContainerAttrs {
     }
 }
 
+#[allow(dead_code)]
 pub fn to_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {

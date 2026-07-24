@@ -1,0 +1,5 @@
+error: Multiple errors: (Unknown field: `ilike`, Unexpected meta-item format `list` at column)
+  --> tests/ui/typed_query/old_filter_syntax.rs:12:5
+   |
+12 |     #[filter(ilike, column(title))]
+   |     ^

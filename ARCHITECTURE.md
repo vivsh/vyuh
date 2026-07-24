@@ -45,6 +45,9 @@ The `vyuh` crate is organized around these subsystems:
   or external event sources, and signal-backed client-facing live delivery.
 - `tasks` provides typed background task registration and backend-selected task
   execution.
+- `observability` owns configured liveness/readiness probes and bounded-label
+  Prometheus HTTP metrics. Deployment policy is supplied through `SiteConf`,
+  not inferred from a host environment.
 - `commands` provides typed command registration and command dispatch through a
   built `Site`.
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
@@ -52,13 +55,25 @@ The `vyuh` crate is organized around these subsystems:
 - `assets`, `templates`, and `embed` provide embedded assets, server-side
   templates, private bundle resources, and the shared web asset surface used by
   the built-in console.
+- `utils` provides small framework-neutral helpers for common web application
+  tasks. Subsystem-specific helpers stay in their owning modules.
 - `collectors` provides URL metadata, asset collection, and selected page
   collection built on normal bundles and routes.
+- `db` is a facade over the standalone Mool database toolkit. Vyuh re-exports
+  Mool's pools, sessions, records, models, typed queries, filters, relations,
+  raw SQL, and migration types as `vyuh::db`.
 - `db::migrations` provides backend-aware crate-owned migration registration,
   Gaman schema integration, and migration command support. Postgres is the
   richest backend, and SQLite is supported for Gaman's native safe subset.
   Migration files live in a crate-level `migrations/` directory, not under
   assets.
+- Persistent task stores use Mool models, typed query scopes, transactions, and
+  backend lock extensions. Vyuh owns task lifecycle and claim policy; Mool owns
+  database execution. Task schemas are migration-owned and are never created or
+  altered during site startup.
+- Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
+  are layered over the Mool pool through extension traits and remain native to
+  Vyuh.
 - `logging` configures structured tracing output.
 
 ## Macro Crate
@@ -76,20 +91,21 @@ compact while feeding metadata into the runtime:
 ## Backend Model
 
 No database backend feature is enabled by default. In that lightweight mode,
-Vyuh uses SQLite-compatible SQLx aliases and a shared in-memory SQLite default
-database URL, while tasks use `MemoryTaskStore`.
+Vyuh has no active SQL dialect or database pool, while tasks use
+`MemoryTaskStore`.
 
 Production applications should enable exactly one database backend feature:
 
-- `postgres` is the recommended production backend for high-concurrency task
+- `postgres` is the clustered production backend for high-concurrency task
   workers and Postgres-only capabilities.
-- `mysql` enables MySQL SQLx types and MySQL-backed task storage.
-- `sqlite` enables SQLite SQLx types and SQLite-backed task storage.
+- `sqlite` is supported for local and single-process durable deployments.
+- `mysql` compiles but is experimental until its migration and concurrent-task
+  evidence reaches the PostgreSQL/SQLite release bar.
 - Postgres-only capabilities such as LISTEN/NOTIFY and `RETURNING *` helpers
   must stay behind Postgres cfg boundaries.
 
-Backend selection belongs in `vyuh/src/db/commons.rs`, where `Database`,
-`Arguments`, `Row`, `QueryResult`, and `Pool` are aliased.
+Backend aliases and migration/query types are re-exported from Mool through
+`vyuh::db`; Vyuh does not own a second database abstraction.
 
 ## Signal And Channel Model
 
@@ -121,7 +137,9 @@ the client-facing event type uses the payload schema name.
 3. `SiteBuilder` creates the database pool, router, template engine,
    authenticator, command registry, channel backend, signal engine, emitter
    engine, services, and task engine. Database-backed builds use the selected
-   backend task store; lightweight builds use `MemoryTaskStore`.
+   backend task store; lightweight builds use `MemoryTaskStore`. When enabled,
+   observability endpoints are mounted before the site router is finalized and
+   request metrics are applied as a site-wide middleware.
 4. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
    template loading so console HTML and public assets ship with the runtime
    crate.

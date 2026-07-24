@@ -4,24 +4,24 @@ use crate::callables::{self, DataBox};
 use crate::channels::{Channels, LocalChannelBackend};
 use crate::commands::CommandRegistry;
 use crate::conf::{self, SiteConf};
-use crate::db::{DbError, DbPool, Notify, Pool};
+use crate::db::{DbError, DbPool, Notify, PgNotifyDbExt, Pool};
 use crate::emitters::EmitTarget;
 use crate::logging::{self, LoggingGuard};
 use crate::notifiers::CancellationNotifier;
+use crate::observability::Observability;
 use crate::signals::SignalClient;
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-use crate::tasks::TaskError;
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-use crate::tasks::store::AbstractTaskStore as _;
-use crate::tasks::{MemoryTaskStore, TaskClient, TaskDispatcher, TaskRunner, TaskStore};
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+use crate::tasks::MemoryTaskStore;
+use crate::tasks::{TaskClient, TaskDispatcher, TaskRunner, TaskStore};
 use crate::templates::{TemplateEngine, TemplateError, Templates};
 use crate::{services, watch};
 use axum::ServiceExt;
 use axum::body::{self, Body};
 use axum::extract::{Request, State};
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::{path::PathBuf, sync::Arc};
@@ -117,10 +117,6 @@ pub enum SiteError {
 
     #[error(transparent)]
     ServiceError(#[from] services::ServiceError),
-
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    #[error("Task migration error: {0}")]
-    TaskMigrationError(#[from] crate::tasks::TaskError),
 
     #[error(transparent)]
     CommandError(#[from] crate::commands::CommandError),
@@ -246,7 +242,18 @@ impl SiteBuilder {
 
         bundle.validate()?;
 
+        let observability = Observability::new(self.conf.observability.clone());
+        validate_observability_paths(&bundle, &observability)?;
+
         let mut router = bundle.to_router();
+
+        if observability.enabled() {
+            let [liveness_path, readiness_path, metrics_path] = observability.paths();
+            router = router
+                .route(liveness_path, get(crate::observability::liveness))
+                .route(readiness_path, get(crate::observability::readiness))
+                .route(metrics_path, get(crate::observability::metrics));
+        }
 
         if !bundle.asset_dirs.is_empty() {
             let assets = crate::assets::AssetServe::from_dirs(
@@ -287,6 +294,27 @@ impl SiteBuilder {
 
         let mut bundle = bundle.with_router_unchecked(router);
 
+        #[cfg(all(
+            feature = "migrations",
+            any(feature = "postgres", feature = "mysql", feature = "sqlite")
+        ))]
+        bundle
+            .migrations
+            .register_schema(crate::db::crate_schema(
+                "vyuh",
+                crate::tasks::persistence::schema::task_schema,
+            ))
+            .map_err(|error| crate::bundles::BundleError::Migration(Arc::new(error)))?;
+
+        #[cfg(feature = "migrations")]
+        let migration_runner = crate::commands::core::migration_runner(
+            bundle.migrations.clone(),
+            self.conf.database.url.clone(),
+        )
+        .map_err(|error| {
+            conf::ConfError::Other(format!("migration runner configuration: {error}"))
+        })?;
+
         let task_config = self.conf.tasks.clone();
 
         #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
@@ -326,6 +354,7 @@ impl SiteBuilder {
             project_dir,
             start_time: std::time::Instant::now(),
             conf: self.conf.clone(),
+            observability,
             pool,
             shutdown_notifier: CancellationNotifier::new(),
             service_engine: services::ServiceEngine::new(),
@@ -337,6 +366,8 @@ impl SiteBuilder {
             channels: LocalChannelBackend::new(self.conf.channels.clone()),
             console_runtime,
             bundle,
+            #[cfg(feature = "migrations")]
+            migration_runner,
             signal_engine,
             emitter_engine,
             commands: command_registry,
@@ -353,6 +384,7 @@ struct SiteInner {
     start_time: std::time::Instant,
     project_dir: PathBuf,
     conf: SiteConf,
+    observability: Observability,
     authenticator: Authenticator,
     pool: DbPool,
     channels: LocalChannelBackend,
@@ -364,6 +396,8 @@ struct SiteInner {
     signal_engine: crate::signals::SignalEngine,
     emitter_engine: crate::emitters::EmitterEngine,
     commands: CommandRegistry,
+    #[cfg(feature = "migrations")]
+    migration_runner: Option<crate::commands::core::SharedMigrationRunner>,
     task_engine: TaskDispatcher<TaskStore>,
     service_engine: services::ServiceEngine,
     shutdown_notifier: CancellationNotifier,
@@ -447,10 +481,6 @@ impl Site {
         let site = Self {
             inner: Arc::new(site),
         };
-        #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-        if site.inner.task_engine.has_tasks() {
-            site.inner.task_engine.store().run_migrations().await?;
-        }
         SiteBuilder::start_engines(&site).await?;
         crate::console::maybe_print_bootstrap_url(&site);
         Ok(site)
@@ -569,6 +599,12 @@ impl Site {
     #[cfg(feature = "migrations")]
     pub(crate) fn migration_registry(&self) -> &crate::db::MigrationRegistry {
         &self.inner.bundle.migrations
+    }
+
+    /// Returns the site-owned serialized Mool migration runner when migrations are registered.
+    #[cfg(feature = "migrations")]
+    pub(crate) fn migration_runner(&self) -> Option<crate::commands::core::SharedMigrationRunner> {
+        self.inner.migration_runner.clone()
     }
 
     /// Collect URL metadata contributed by bundles.
@@ -703,6 +739,11 @@ impl Site {
         self.inner.console_runtime.clone()
     }
 
+    /// Returns the runtime observability registry for framework-owned routes.
+    pub(crate) fn observability(&self) -> Observability {
+        self.inner.observability.clone()
+    }
+
     pub(crate) fn console_command_infos(&self) -> Vec<crate::commands::CommandInfo> {
         self.inner.commands.infos()
     }
@@ -784,8 +825,19 @@ impl Site {
             router = router.layer(TraceLayer::new_for_http());
         }
 
+        if self.inner.observability.enabled() {
+            router = router.layer(axum::middleware::from_fn_with_state(
+                self.clone(),
+                crate::observability::metrics_middleware,
+            ));
+        }
+
         if http.catch_panic.enabled {
-            router = router.layer(CatchPanicLayer::new());
+            let observability = self.inner.observability.clone();
+            router = router.layer(CatchPanicLayer::custom(move |_panic| {
+                observability.record_panic();
+                (StatusCode::INTERNAL_SERVER_ERROR, "Service panicked").into_response()
+            }));
         }
 
         router = router.layer(axum::middleware::from_fn_with_state(
@@ -845,6 +897,27 @@ impl Site {
             body,
         })
     }
+}
+
+/// Prevents framework-owned probe paths from replacing application routes.
+fn validate_observability_paths(
+    bundle: &Bundle,
+    observability: &Observability,
+) -> Result<(), SiteError> {
+    if !observability.enabled() {
+        return Ok(());
+    }
+    for path in observability.paths() {
+        if bundle.ops.values().any(|operation| operation.path == path) {
+            return Err(conf::ConfError::InvalidValue {
+                field: "observability".into(),
+                reason: format!("path {path} conflicts with an application route"),
+                expected: Some("a unique probe or metrics path".into()),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 impl axum::extract::FromRequestParts<Site> for Site {

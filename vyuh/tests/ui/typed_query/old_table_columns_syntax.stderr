@@ -1,0 +1,5 @@
+error: Error decoding #[table]: Unexpected meta-item format `list`
+ --> tests/ui/typed_query/old_table_columns_syntax.rs:4:52
+  |
+4 | #[table(primary_key(name = "memberships_identity", columns("tenant_id", "user_id")))]
+  |                                                    ^^^^^^^

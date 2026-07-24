@@ -249,7 +249,7 @@ fn command_bundle() -> vyuh::bundles::Bundle {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), SiteError> {
     let conf = SiteConf::default()
         .port(8080)
         .console(ConsoleConf::default());

@@ -57,7 +57,7 @@ Root schema contributors omit the namespace:
 use vyuh::prelude::*;
 
 #[bundles::schema]
-fn schema() -> db::Schema {
+fn schema() -> Result<db::Schema, db::SchemaLoadError> {
     db::Schema::builder(db::Dialect::Postgres)
         .table::<Account>()
         .table::<Project>()
@@ -92,7 +92,7 @@ Schema contributors from reusable crates should use the same namespace:
 use vyuh::prelude::*;
 
 #[bundles::schema(namespace = "auth")]
-fn schema() -> db::Schema {
+fn schema() -> Result<db::Schema, db::SchemaLoadError> {
     db::Schema::builder(db::Dialect::Postgres)
         .table::<User>()
         .table::<Session>()

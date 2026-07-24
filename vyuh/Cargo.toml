@@ -5,17 +5,18 @@ edition = "2024"
 license = "MIT"
 description = "Vyuh web framework for Axum and SQLx with handler-first APIs"
 readme = "../README.md"
-repository = "https://github.com/vyuh-rs/vyuh"
+repository = "https://github.com/vivsh/vyuh"
 documentation = "https://docs.rs/vyuh"
 
 [features]
 default = []
-postgres = ["sqlx/postgres", "gaman/postgres"]
-mysql = ["sqlx/mysql"]
-sqlite = ["sqlx/sqlite", "gaman/sqlite"]
+postgres = ["db_core/postgres"]
+mysql = ["db_core/mysql"]
+sqlite = ["db_core/sqlite"]
 cors = ["tower-http/cors"]
 argon2 = ["dep:argon2"]
-migrations = ["gaman/cli"]
+migrations = ["db_core/migrations"]
+test-support = ["db_core/test-support"]
 
 [dependencies]
 axum = {workspace = true}
@@ -31,7 +32,6 @@ smallvec = "1.13"
 tokio = {workspace = true}
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = {workspace = true}
-sqlx = {workspace = true}
 minijinja = { workspace = true, features = ["loader"] }
 blake3 = {workspace = true}
 dotenvy = {workspace = true}
@@ -61,6 +61,7 @@ serde_urlencoded = "0.7"
 rust-silos = {version="^0.3"}
 
 vyuh-macros = { path = "../vyuh-macros", version = "0.2.11" }
+db_core = { package = "mool", git = "https://github.com/vivsh/mool.git", rev = "1bc32db7c2fd6a17cb44d75b8efe4c0b4af9222a" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"
 notify = "^8.1"
@@ -79,11 +80,11 @@ percent-encoding = "2.3.2"
 sysinfo = "0.33"
 tempfile = "3"
 serde_yaml = "0.9"
-gaman = { git = "https://github.com/vivsh/gaman.git", default-features = false, features = ["native", "macros"] }
 
 [dev-dependencies]
 tokio = { version = "1.46.1", features = ["full", "test-util"] }
 trybuild = "1.0"
+sqlx = { workspace = true, features = ["macros", "migrate", "chrono", "runtime-tokio", "uuid", "json", "postgres", "mysql", "sqlite"] }
 
 [[example]]
 name = "tasks"

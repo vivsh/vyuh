@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `&mool::queries::Column<std::string::String>: IntoExpr<mool::types::Json>` is not satisfied
+  --> tests/ui/typed_query/json_on_non_json.rs:12:35
+   |
+12 |     let _ = db::funcs::json::text(&posts.title, "status");
+   |             --------------------- ^^^^^^^^^^^^ the trait `IntoExpr<mool::types::Json>` is not implemented for `&mool::queries::Column<std::string::String>`
+   |             |
+   |             required by a bound introduced by this call
+   |
+   = help: the following other types implement trait `IntoExpr<T>`:
+             &mool::queries::Column<T>
+             mool::queries::Column<T>
+note: required by a bound in `text`
+  --> $DB_CORE/src/queries/functions/json.rs
+   |
+   | pub fn text(json: impl IntoExpr<Json>, path: impl Into<String>) -> Expr<String> {
+   |                        ^^^^^^^^^^^^^^ required by this bound in `text`

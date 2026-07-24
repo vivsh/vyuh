@@ -9,7 +9,7 @@ error[E0599]: `All<Post>` is not an iterator
    | |_________|
    |
    |
-  ::: src/db/queries/typed_queries/executables.rs
+  ::: $DB_CORE/src/queries/executables/types.rs
    |
    |   pub struct All<T> {
    |   ----------------- doesn't satisfy `All<Post>: Iterator`

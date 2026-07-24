@@ -1,14 +1,16 @@
 mod backends;
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub(crate) mod persistence;
 pub(crate) mod store;
 pub(crate) mod tasks;
 
 pub use backends::memstore::MemoryTaskStore;
 #[cfg(feature = "mysql")]
-pub use backends::mysqlstore::MySqlTaskStore;
+pub type MySqlTaskStore = persistence::DbTaskStore;
 #[cfg(feature = "postgres")]
-pub use backends::pgstore::PgTaskStore;
+pub type PgTaskStore = persistence::DbTaskStore;
 #[cfg(feature = "sqlite")]
-pub use backends::sqlitestore::SqliteTaskStore;
+pub type SqliteTaskStore = persistence::DbTaskStore;
 pub use store::{AbstractTaskRunner, AbstractTaskStore};
 pub use tasks::*;
 

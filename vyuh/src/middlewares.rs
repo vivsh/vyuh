@@ -46,6 +46,31 @@ impl Default for HttpConf {
     }
 }
 
+impl HttpConf {
+    /// Returns the baseline HTTP policy for an internet-facing deployment.
+    ///
+    /// CORS remains disabled because allowed origins are application-specific.
+    pub fn production() -> Self {
+        Self {
+            trace: TraceConf { enabled: true },
+            compression: CompressionConf { enabled: true },
+            timeout: TimeoutConf {
+                enabled: true,
+                ..TimeoutConf::default()
+            },
+            body_limit: BodyLimitConf {
+                enabled: true,
+                ..BodyLimitConf::default()
+            },
+            security_headers: SecurityHeadersConf {
+                enabled: true,
+                ..SecurityHeadersConf::default()
+            },
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashConf {
     pub policy: SlashPolicy,

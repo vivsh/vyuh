@@ -1,0 +1,13 @@
+error[E0433]: failed to resolve: could not find `array` in `funcs`
+  --> tests/ui/typed_query/array_on_non_array.rs:12:24
+   |
+12 |     let _ = db::funcs::array::length(&posts.title);
+   |                        ^^^^^ could not find `array` in `funcs`
+   |
+note: found an item that was configured out
+  --> $DB_CORE/src/queries/mod.rs
+   |
+   |     #[cfg(feature = "postgres")]
+   |           -------------------- the item is gated behind the `postgres` feature
+   |     pub use super::functions::arrays as array;
+   |                                         ^^^^^

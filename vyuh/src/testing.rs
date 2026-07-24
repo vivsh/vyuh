@@ -1,5 +1,12 @@
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+use crate::bundles::Bundle;
 use crate::db::{DbConf, Pool};
 use crate::{Site, SiteConf};
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+use crate::{SiteError, bundles::IntoBundle};
 use axum::Router;
 use axum::body::{self, Body, Bytes};
 use axum::http::{Method, Request, Response};
@@ -10,25 +17,174 @@ use std::collections::BTreeMap;
 use std::ops::Deref;
 use tower::ServiceExt;
 
-pub use sqlx::{test, test_block_on};
+pub use crate::db::sqlx::test_block_on;
 
 pub fn router(site: &Site) -> Router {
     site.router()
 }
 
 pub struct TestClient {
+    inner: TestClientInner,
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    database: Option<crate::db::testing::TestDatabase>,
+}
+
+struct TestClientInner {
     app: Router,
     site: Site,
+}
+
+impl Drop for TestClientInner {
+    fn drop(&mut self) {
+        self.site.shutdown();
+    }
 }
 
 impl TestClient {
     pub fn new(site: Site) -> Self {
         let app = router(&site);
-        Self { app, site }
+        Self {
+            inner: TestClientInner { app, site },
+            #[cfg(all(
+                feature = "test-support",
+                any(feature = "postgres", feature = "mysql", feature = "sqlite")
+            ))]
+            database: None,
+        }
+    }
+
+    /// Builds an in-process HTTP client from application configuration and a supplied Mool pool.
+    ///
+    /// The caller retains database ownership and must tear it down after this client has shut
+    /// down. Prefer [`Self::from_conf`] when Mool's `test-support` feature is enabled.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub async fn from_pool(
+        conf: SiteConf,
+        bundle: impl IntoBundle,
+        pool: &crate::db::DbPool,
+    ) -> Result<Self, SiteError> {
+        let site = Site::test(conf, bundle, pool.as_sqlx().clone()).await?;
+        Ok(Self::new(site))
+    }
+
+    /// Provisions a Mool-owned isolated database, applies bundle migrations, and builds a client.
+    ///
+    /// The supplied configuration must contain credentials that can create and drop an isolated
+    /// database. Call [`Self::teardown`] to shut down the site and report cleanup failures.
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub async fn from_conf(
+        conf: SiteConf,
+        bundle: impl IntoBundle,
+    ) -> Result<Self, TestClientError> {
+        Self::builder(conf, bundle).build().await
+    }
+
+    /// Configures a Mool-owned test database before building an in-process client.
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub fn builder(conf: SiteConf, bundle: impl IntoBundle) -> TestClientBuilder {
+        TestClientBuilder {
+            conf,
+            bundle: bundle.into_bundle(),
+            apply_migrations: true,
+        }
+    }
+
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    /// Applies registered migrations to a Mool-owned isolated database.
+    async fn provision_database(
+        conf: &SiteConf,
+        bundle: &Bundle,
+        apply_migrations: bool,
+    ) -> Result<crate::db::testing::TestDatabase, TestClientError> {
+        let setup = crate::db::testing::setup(conf.database.clone());
+        #[cfg(not(feature = "migrations"))]
+        let _ = (bundle, apply_migrations);
+        #[cfg(feature = "migrations")]
+        let setup = if apply_migrations && bundle.migrations.root().is_some() {
+            setup.with_migrations(&bundle.migrations)
+        } else {
+            setup
+        };
+        Ok(setup.create().await?)
+    }
+
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    /// Transfers an isolated Mool database into the client after the site builds successfully.
+    async fn from_database(
+        conf: SiteConf,
+        bundle: Bundle,
+        database: crate::db::testing::TestDatabase,
+    ) -> Result<Self, TestClientError> {
+        let site = Site::test(conf, bundle, database.pool().as_sqlx().clone()).await;
+        match site {
+            Ok(site) => {
+                let app = router(&site);
+                Ok(Self {
+                    inner: TestClientInner { app, site },
+                    database: Some(database),
+                })
+            }
+            Err(site) => Self::cleanup_failed_site(database, site).await,
+        }
+    }
+
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    /// Removes an isolated database when site construction fails.
+    async fn cleanup_failed_site(
+        database: crate::db::testing::TestDatabase,
+        site: SiteError,
+    ) -> Result<Self, TestClientError> {
+        match database.teardown().await {
+            Ok(()) => Err(TestClientError::Site(site)),
+            Err(cleanup) => Err(TestClientError::SetupCleanup { site, cleanup }),
+        }
+    }
+
+    /// Stops background engines before its associated test database is removed.
+    pub async fn shutdown_and_wait(self) {
+        self.inner.site.shutdown_and_wait().await;
+    }
+
+    /// Shuts down the site and deterministically removes its Mool-owned test database.
+    #[cfg(all(
+        feature = "test-support",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub async fn teardown(self) -> Result<(), TestClientError> {
+        let Self { inner, database } = self;
+        inner.site.shutdown_and_wait().await;
+        drop(inner);
+        if let Some(database) = database {
+            database.teardown().await?;
+        }
+        Ok(())
+    }
+
+    /// Returns the built site for test data setup and framework state assertions.
+    pub fn site(&self) -> &Site {
+        &self.inner.site
     }
 
     pub fn request(&self, method: Method, path: &str) -> TestRequestBuilder {
-        TestRequestBuilder::new(self.app.clone(), method, path)
+        TestRequestBuilder::new(self.inner.app.clone(), method, path)
     }
 
     pub fn get(&self, path: &str) -> TestRequestBuilder {
@@ -48,9 +204,59 @@ impl TestClient {
     }
 }
 
-impl Drop for TestClient {
-    fn drop(&mut self) {
-        self.site.shutdown();
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+/// Errors returned while provisioning a Mool-owned database or removing it after a test.
+#[derive(Debug, thiserror::Error)]
+pub enum TestClientError {
+    /// Mool could not provision, migrate, or remove the isolated target.
+    #[error(transparent)]
+    Database(#[from] crate::db::testing::TestDatabaseError),
+    /// The site could not be built after the database was provisioned.
+    #[error(transparent)]
+    Site(#[from] SiteError),
+    /// Site construction and database cleanup both failed.
+    #[error("site build failed: {site}; isolated database cleanup also failed: {cleanup}")]
+    SetupCleanup {
+        /// The site construction failure.
+        site: SiteError,
+        /// The deterministic test database cleanup failure.
+        cleanup: crate::db::testing::TestDatabaseError,
+    },
+}
+
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+/// Configures whether a test client applies registered migrations before site construction.
+pub struct TestClientBuilder {
+    conf: SiteConf,
+    bundle: Bundle,
+    apply_migrations: bool,
+}
+
+#[cfg(all(
+    feature = "test-support",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+impl TestClientBuilder {
+    /// Leaves the isolated database empty instead of applying registered migrations.
+    ///
+    /// Use this for migration-command tests, schema-negative tests, or fixtures that create
+    /// their own schema. The site still uses the configured Mool pool.
+    pub fn without_migrations(mut self) -> Self {
+        self.apply_migrations = false;
+        self
+    }
+
+    /// Provisions the isolated database and builds the in-process client.
+    pub async fn build(self) -> Result<TestClient, TestClientError> {
+        let database =
+            TestClient::provision_database(&self.conf, &self.bundle, self.apply_migrations).await?;
+        TestClient::from_database(self.conf, self.bundle, database).await
     }
 }
 
@@ -262,8 +468,8 @@ impl Drop for MockDb {
                 let _ = std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().ok()?;
                     rt.block_on(async {
-                        if let Ok(root_pool) = sqlx::PgPool::connect(&base_url).await {
-                            let _ = sqlx::query(&format!(
+                        if let Ok(root_pool) = crate::db::sqlx::PgPool::connect(&base_url).await {
+                            let _ = crate::db::sqlx::query(&format!(
                                 "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
                                 db_name
                             ))
@@ -284,10 +490,14 @@ impl Drop for MockDb {
                 let _ = std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().ok()?;
                     rt.block_on(async {
-                        if let Ok(root_pool) = sqlx::MySqlPool::connect(&base_url).await {
-                            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS `{}`", db_name))
-                                .execute(&root_pool)
-                                .await;
+                        if let Ok(root_pool) = crate::db::sqlx::MySqlPool::connect(&base_url).await
+                        {
+                            let _ = crate::db::sqlx::query(&format!(
+                                "DROP DATABASE IF EXISTS `{}`",
+                                db_name
+                            ))
+                            .execute(&root_pool)
+                            .await;
                             root_pool.close().await;
                         }
                         Some(())
@@ -314,7 +524,7 @@ impl Drop for MockDb {
 /// async fn test_something() {
 ///     let db = mock_db().await;
 ///     // Use db like a Pool - it derefs automatically
-///     sqlx::query("SELECT 1").execute(&*db).await.unwrap();
+///     crate::db::sqlx::query("SELECT 1").execute(&*db).await.unwrap();
 ///     // Database is dropped when db goes out of scope
 /// }
 /// ```
@@ -326,11 +536,11 @@ pub async fn mock_db() -> MockDb {
 
         let db_name = format!("vyuh_test_{}", uuid::Uuid::now_v7().simple());
 
-        let root_pool = sqlx::PgPool::connect(&base_url)
+        let root_pool = crate::db::sqlx::PgPool::connect(&base_url)
             .await
             .expect("Failed to connect to postgres");
 
-        sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
+        crate::db::sqlx::query(&format!("CREATE DATABASE \"{}\"", db_name))
             .execute(&root_pool)
             .await
             .expect("Failed to create test database");
@@ -344,7 +554,7 @@ pub async fn mock_db() -> MockDb {
             format!("{}/{}", base_url, db_name)
         };
 
-        let pool = sqlx::PgPool::connect(&test_url)
+        let pool = crate::db::sqlx::PgPool::connect(&test_url)
             .await
             .expect("Failed to connect to test database");
 
@@ -362,11 +572,11 @@ pub async fn mock_db() -> MockDb {
 
         let db_name = format!("vyuh_test_{}", uuid::Uuid::now_v7().simple());
 
-        let root_pool = sqlx::MySqlPool::connect(&base_url)
+        let root_pool = crate::db::sqlx::MySqlPool::connect(&base_url)
             .await
             .expect("Failed to connect to mysql");
 
-        sqlx::query(&format!("CREATE DATABASE `{}`", db_name))
+        crate::db::sqlx::query(&format!("CREATE DATABASE `{}`", db_name))
             .execute(&root_pool)
             .await
             .expect("Failed to create test database");
@@ -380,7 +590,7 @@ pub async fn mock_db() -> MockDb {
             format!("{}/{}", base_url, db_name)
         };
 
-        let pool = sqlx::MySqlPool::connect(&test_url)
+        let pool = crate::db::sqlx::MySqlPool::connect(&test_url)
             .await
             .expect("Failed to connect to test database");
 
@@ -393,7 +603,7 @@ pub async fn mock_db() -> MockDb {
 
     #[cfg(feature = "sqlite")]
     {
-        let pool = sqlx::SqlitePool::connect(":memory:")
+        let pool = crate::db::sqlx::SqlitePool::connect(":memory:")
             .await
             .expect("Failed to create in-memory sqlite database");
 
@@ -406,12 +616,8 @@ pub async fn mock_db() -> MockDb {
 
     #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
     {
-        let pool = sqlx::SqlitePool::connect(":memory:")
-            .await
-            .expect("Failed to create in-memory sqlite database");
-
         MockDb {
-            pool,
+            pool: Pool::default(),
             db_name: String::new(),
             base_url: String::new(),
         }

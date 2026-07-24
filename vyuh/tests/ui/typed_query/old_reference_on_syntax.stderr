@@ -1,0 +1,27 @@
+error: Error decoding #[column] on field 'author': Unknown field: `author_id`
+  --> tests/ui/typed_query/old_reference_on_syntax.rs:19:27
+   |
+19 |     #[column(reference(on(author_id, id)))]
+   |                           ^^^^^^^^^
+
+error: Error decoding #[column] on field 'author': Unknown field: `id`
+  --> tests/ui/typed_query/old_reference_on_syntax.rs:19:38
+   |
+19 |     #[column(reference(on(author_id, id)))]
+   |                                      ^^
+
+error: Error decoding #[column] on field 'author': Missing field `from`
+  --> tests/ui/typed_query/old_reference_on_syntax.rs:14:24
+   |
+14 | #[derive(Debug, Clone, db::Record)]
+   |                        ^^^^^^^^^^
+   |
+   = note: this error originates in the derive macro `db::Record` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: Error decoding #[column] on field 'author': Missing field `to`
+  --> tests/ui/typed_query/old_reference_on_syntax.rs:14:24
+   |
+14 | #[derive(Debug, Clone, db::Record)]
+   |                        ^^^^^^^^^^
+   |
+   = note: this error originates in the derive macro `db::Record` (in Nightly builds, run with -Z macro-backtrace for more info)

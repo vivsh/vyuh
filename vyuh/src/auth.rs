@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::site::Site;
+use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -1155,6 +1156,18 @@ impl AuthUser {
             roles,
         }
     }
+
+    /// Parses the subject key into an application identifier type.
+    ///
+    /// Vyuh stores principals as strings so applications can choose their own
+    /// identifier format. This helper keeps route code concise without
+    /// imposing a framework-wide key type.
+    pub fn parse_key<T>(&self) -> Result<T, AuthError>
+    where
+        T: std::str::FromStr,
+    {
+        self.key.parse().map_err(|_| AuthError::InvalidToken)
+    }
 }
 
 impl PartialEq for AuthUser {
@@ -1306,7 +1319,7 @@ impl From<&jsonwebtoken::errors::Error> for AuthError {
     }
 }
 
-impl axum::extract::FromRequestParts<Site> for AuthUser {
+impl FromRequestParts<Site> for AuthUser {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
@@ -1321,7 +1334,22 @@ impl axum::extract::FromRequestParts<Site> for AuthUser {
     }
 }
 
-impl axum::extract::FromRequestParts<Site> for ApiKey {
+impl OptionalFromRequestParts<Site> for AuthUser {
+    type Rejection = AuthError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        site: &Site,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        match <AuthUser as FromRequestParts<Site>>::from_request_parts(parts, site).await {
+            Ok(user) => Ok(Some(user)),
+            Err(AuthError::MissingToken) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl FromRequestParts<Site> for ApiKey {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
@@ -1363,5 +1391,27 @@ impl IntoResponse for AuthError {
             message.to_string(),
         )
         .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthError, AuthUser};
+
+    /// Verifies that typed subject parsing succeeds for numeric principals.
+    #[test]
+    fn auth_user_parse_key() {
+        let user = AuthUser::new("42", 0);
+        assert!(matches!(user.parse_key::<i64>(), Ok(42)));
+    }
+
+    /// Verifies that invalid subject parsing is treated as an invalid token.
+    #[test]
+    fn auth_user_parse_key_rejects_invalid() {
+        let user = AuthUser::new("not-an-id", 0);
+        assert!(matches!(
+            user.parse_key::<i64>(),
+            Err(AuthError::InvalidToken)
+        ));
     }
 }

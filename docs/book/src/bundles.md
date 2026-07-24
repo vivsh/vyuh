@@ -98,6 +98,10 @@ The macro path does not add a unique runtime capability. Use direct
 registration when bundle parts are generated, conditional, feature-gated, or
 assembled from tables.
 
+`bundle!` is Vyuh's only custom macro syntax. Attribute macros and derives use
+ordinary structured metadata such as `key = "value"` and `item(...)`; direct
+APIs remain the canonical escape hatch when macro syntax is not appropriate.
+
 ## Module Organization
 
 `bundle!` members must be macro-registered items visible in the module where
@@ -173,7 +177,7 @@ static MIGRATIONS: db::EmbeddedMigrations =
     db::embedded_migrations!("migrations");
 
 #[bundles::schema(namespace = "auth")]
-fn schema() -> db::Schema {
+fn schema() -> Result<db::Schema, db::SchemaLoadError> {
     db::Schema::builder(db::Dialect::Postgres)
         .table::<User>()
         .build()

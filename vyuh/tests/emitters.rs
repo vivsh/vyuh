@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Duration;
 use vyuh::Data;
+use vyuh::db::PgNotifyDbExt;
 use vyuh::emitters::{self, *};
 
 async fn create_site(pool: PgPool) -> vyuh::Site {

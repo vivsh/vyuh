@@ -1,3 +1,5 @@
+#![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+
 use vyuh::db::mock::{DbCallKind, MockDBSession, PlannedCall, PlannedResponse};
 use vyuh::prelude::*;
 
@@ -21,7 +23,7 @@ struct Post {
 struct PostWithAuthor {
     #[column(flatten)]
     post: Post,
-    #[column(reference(from = "user_id", to = "id"))]
+    #[column(reference(on(from = "user_id", to = "id")))]
     author: User,
 }
 
@@ -44,7 +46,7 @@ struct Account {
 #[derive(Debug, Clone, db::Model)]
 #[table(
     name = "memberships",
-    primary_key(name = "memberships_identity", columns("tenant_id", "user_id"))
+    primary_key(name = "memberships_identity", columns = ["tenant_id", "user_id"])
 )]
 struct Membership {
     tenant_id: i64,
@@ -155,6 +157,7 @@ async fn model_builder_functions_work() {
     assert_eq!(total, 0);
 
     let table = User::table();
+    let id = db::var::<i64>().named("id");
 
     db::from(&table)
         .insert(&User {
@@ -167,24 +170,24 @@ async fn model_builder_functions_work() {
         .unwrap();
 
     db::from(&table)
-        .filter(table.id.eq(db::var("id")))
-        .bind("id", 1_i64)
+        .filter(table.id.eq(&id))
+        .bind(&id, 1_i64)
         .update(&UserPatch { active: true })
         .exec(&mut session)
         .await
         .unwrap();
 
     db::from(&table)
-        .filter(table.id.eq(db::var("id")))
-        .bind("id", 1_i64)
+        .filter(table.id.eq(&id))
+        .bind(&id, 1_i64)
         .delete()
         .exec(&mut session)
         .await
         .unwrap();
 
     db::from(&table)
-        .filter(table.id.eq(db::var("id")))
-        .bind("id", 1_i64)
+        .filter(table.id.eq(&id))
+        .bind(&id, 1_i64)
         .delete()
         .exec(&mut session)
         .await
@@ -200,6 +203,7 @@ async fn typed_insert_update_delete_and_raw_query_use_named_binds() {
     session.plan_execute_ok("SELECT * FROM users WHERE id = ", 1);
 
     let table = User::table();
+    let id = db::var::<i64>().named("id");
 
     db::from(&table)
         .insert(&User {
@@ -212,16 +216,16 @@ async fn typed_insert_update_delete_and_raw_query_use_named_binds() {
         .unwrap();
 
     db::from(&table)
-        .filter(table.id.eq(db::var("id")))
-        .bind("id", 1_i64)
+        .filter(table.id.eq(&id))
+        .bind(&id, 1_i64)
         .update(&UserPatch { active: false })
         .exec(&mut session)
         .await
         .unwrap();
 
     db::from(&table)
-        .filter(table.id.eq(db::var("id")))
-        .bind("id", 1_i64)
+        .filter(table.id.eq(&id))
+        .bind(&id, 1_i64)
         .delete()
         .exec(&mut session)
         .await

@@ -173,9 +173,7 @@ async fn main() -> Result<(), Error> {
     };
 
     let conf = SiteConf::default();
-    let site = Site::build(conf, bundle)
-        .await
-        .expect("Failed to build site");
+    let site = Site::build(conf, bundle).await.map_err(Error::other)?;
     let tasks = site.tasks();
 
     // ── Fire-and-forget tasks ─────────────────────────────────────────────
@@ -185,14 +183,14 @@ async fn main() -> Result<(), Error> {
             subject: "Hello from Vyuh".to_string(),
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     tasks
         .submit(ProcessingJob {
             data: "important payload".to_string(),
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     // ── Typed output tasks ───────────────────────────────────────────────
     let report_id = tasks
@@ -201,14 +199,14 @@ async fn main() -> Result<(), Error> {
             include_details: true,
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     let export_id = tasks
         .submit(ExportJob {
             name: "account-42".to_string(),
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     // ── Suspend/resume tasks ──────────────────────────────────────────────
     let doc1 = tasks
@@ -218,7 +216,7 @@ async fn main() -> Result<(), Error> {
             submitter: "alice".to_string(),
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     let doc2 = tasks
         .submit(ApprovalRequest {
@@ -227,16 +225,16 @@ async fn main() -> Result<(), Error> {
             submitter: "bob".to_string(),
         })
         .await
-        .expect("submit failed");
+        .map_err(Error::other)?;
 
     // Allow the task engine to run and suspend the approval tasks.
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-    if let Some(record) = tasks.get(report_id).await.expect("load report task failed") {
+    if let Some(record) = tasks.get(report_id).await.map_err(Error::other)? {
         println!("report result: {:?}", record.result);
     }
 
-    if let Some(record) = tasks.get(export_id).await.expect("load export task failed") {
+    if let Some(record) = tasks.get(export_id).await.map_err(Error::other)? {
         println!("export result: {:?}", record.result);
     }
 
@@ -248,7 +246,7 @@ async fn main() -> Result<(), Error> {
             },
         )
         .await
-        .expect("resume failed");
+        .map_err(Error::other)?;
 
     tasks
         .resume(
@@ -259,7 +257,7 @@ async fn main() -> Result<(), Error> {
             },
         )
         .await
-        .expect("resume failed");
+        .map_err(Error::other)?;
 
     // Allow resumed tasks to complete.
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;

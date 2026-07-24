@@ -308,6 +308,8 @@ fn test_parse_and_apply_arg_override_by_name() {
         }],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -339,6 +341,8 @@ fn test_parse_and_apply_arg_override_by_position() {
         }],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -364,6 +368,8 @@ fn test_parse_and_apply_returns() {
         args: vec![],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -395,6 +401,8 @@ fn test_parse_and_apply_signature_return_status_override() {
         args: vec![],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -423,6 +431,8 @@ fn test_parse_and_apply_description() {
         args: vec![],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -456,6 +466,8 @@ fn test_parse_and_apply_mixed() {
         }],
         returns: vec![],
         description: None,
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };
@@ -538,6 +550,8 @@ fn test_build_patch_chain_complete() {
             description: Some("Success".to_string()),
         }],
         description: Some("User handler".to_string()),
+        operation_id: None,
+        deprecated: false,
         method: false,
         receiver: None,
     };

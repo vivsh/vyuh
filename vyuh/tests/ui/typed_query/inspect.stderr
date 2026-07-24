@@ -4,7 +4,7 @@ error[E0599]: `QueryScope` is not an iterator
 12 |     let _ = db::from(&posts).inspect();
    |                              ^^^^^^^ `QueryScope` is not an iterator
    |
-  ::: src/db/queries/typed_queries/scope.rs
+  ::: $DB_CORE/src/queries/scope.rs
    |
    | pub struct QueryScope {
    | --------------------- doesn't satisfy `QueryScope: Iterator`

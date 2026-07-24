@@ -1,34 +1,19 @@
+use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{LitStr, parse_macro_input};
+use syn::parse_macro_input;
 
-#[derive(Default)]
+#[derive(Default, darling::FromMeta)]
 struct SchemaAttr {
-    namespace: Option<LitStr>,
-}
-
-impl syn::parse::Parse for SchemaAttr {
-    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        if input.is_empty() {
-            return Ok(Self::default());
-        }
-        let key: syn::Ident = input.parse()?;
-        if key != "namespace" {
-            return Err(syn::Error::new_spanned(
-                key,
-                "expected `namespace = \"...\"`",
-            ));
-        }
-        input.parse::<syn::Token![=]>()?;
-        let namespace: LitStr = input.parse()?;
-        Ok(Self {
-            namespace: Some(namespace),
-        })
-    }
+    #[darling(default)]
+    namespace: Option<String>,
 }
 
 pub(crate) fn parse_schema(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attr = parse_macro_input!(attr as SchemaAttr);
+    let attr = match parse_attr(attr) {
+        Ok(attr) => attr,
+        Err(err) => return err.write_errors().into(),
+    };
     let input = parse_macro_input!(item as syn::ItemFn);
     let fn_name = &input.sig.ident;
     let bundle_part_fn_name =
@@ -48,4 +33,12 @@ pub(crate) fn parse_schema(attr: TokenStream, item: TokenStream) -> TokenStream 
         }
     }
     .into()
+}
+
+fn parse_attr(attr: TokenStream) -> darling::Result<SchemaAttr> {
+    if attr.is_empty() {
+        return Ok(SchemaAttr::default());
+    }
+    let nested = darling::ast::NestedMeta::parse_meta_list(attr.into())?;
+    SchemaAttr::from_list(&nested)
 }

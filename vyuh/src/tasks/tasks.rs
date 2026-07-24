@@ -68,19 +68,25 @@ pub enum TaskError {
     #[error("Identity already exists")]
     IdentityError,
 
+    #[error(
+        "Task migration provisioning is no longer performed at site startup; apply migrations before starting task workers"
+    )]
+    MigrationRequired,
+
     #[error(transparent)]
     CallError(#[from] crate::callables::CallError),
 
     #[error("Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
+    DatabaseError(#[from] crate::db::sqlx::Error),
+
+    #[error(transparent)]
+    StoreError(#[from] crate::db::DbError),
 
     #[error("Unknown task error: {0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, sqlx::Type,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[repr(i16)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -103,6 +109,24 @@ impl TaskStatus {
             TaskStatus::Suspended => "suspended",
             TaskStatus::Succeeded => "succeeded",
             TaskStatus::Failed => "failed",
+        }
+    }
+
+    /// Converts the persisted status representation into a task status.
+    ///
+    /// Invalid values indicate a corrupted or incompatible task row and are
+    /// returned as a structured task error.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+        match value {
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::Running),
+            2 => Ok(Self::Suspended),
+            3 => Ok(Self::Succeeded),
+            4 => Ok(Self::Failed),
+            _ => Err(TaskError::TaskExecutionError(format!(
+                "invalid task status value {value}"
+            ))),
         }
     }
 }
@@ -164,7 +188,7 @@ pub struct TaskListPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct TaskRecord {
     pub id: uuid::Uuid,
     pub name: String,
@@ -224,6 +248,7 @@ impl TaskRecord {
     }
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) fn sort_claimed_tasks(tasks: &mut [TaskRecord]) {
     tasks.sort_by_key(|task| {
         (
@@ -292,10 +317,6 @@ impl TaskOutcome {
         Self::Fail {
             error: error.into(),
         }
-    }
-
-    pub(crate) fn retry_error(delay: Option<Duration>, error: &Error) -> Self {
-        Self::retry(delay, error.display_compact())
     }
 
     pub(crate) fn fail_error(error: &Error) -> Self {

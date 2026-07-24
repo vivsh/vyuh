@@ -39,6 +39,7 @@
 
 # Operations
 
+- [Production deployment](production.md)
 - [Database](db.md)
 - [Migrations](migrations.md)
 - [Logging](logging.md)

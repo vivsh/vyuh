@@ -39,7 +39,6 @@ async fn claims_higher_priority_first<S>(store: &S) -> Result<(), vyuh::tasks::T
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut low = task_record("low_priority");
     let low_id = low.id;
     low.priority = -10;
@@ -64,7 +63,6 @@ async fn stores_and_claims_pending_tasks<S>(store: &S) -> Result<(), vyuh::tasks
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let record = task_record("claim_complete");
     let id = record.id;
     store.store_task(record).await?;
@@ -88,7 +86,6 @@ async fn suspends_and_resumes_by_topic<S>(store: &S) -> Result<(), vyuh::tasks::
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let record = task_record("suspend_resume");
     let id = record.id;
     store.store_task(record).await?;
@@ -128,7 +125,6 @@ async fn stale_runner_cannot_commit<S>(store: &S) -> Result<(), vyuh::tasks::Tas
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let record = task_record("stale_runner");
     let id = record.id;
     store.store_task(record).await?;
@@ -169,7 +165,6 @@ async fn stale_runner_cannot_retry<S>(store: &S) -> Result<(), vyuh::tasks::Task
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let record = task_record("stale_retry_runner");
     let id = record.id;
     store.store_task(record).await?;
@@ -196,7 +191,6 @@ async fn active_identity_is_unique_until_terminal<S>(
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let first = task_record_with_identity("identity_first", "identity:1");
     let first_id = first.id;
     store.store_task(first).await?;
@@ -226,7 +220,6 @@ async fn null_ready_at_is_claimable<S>(store: &S) -> Result<(), vyuh::tasks::Tas
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record("null_ready_at");
     let id = record.id;
     record.ready_at = None;
@@ -246,7 +239,6 @@ async fn future_ready_at_is_not_claimed<S>(store: &S) -> Result<(), vyuh::tasks:
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record("future_ready_at");
     record.ready_at = Some(chrono::Utc::now() + chrono::Duration::minutes(5));
     store.store_task(record).await?;
@@ -260,7 +252,6 @@ async fn retry_respects_max_attempts<S>(store: &S) -> Result<(), vyuh::tasks::Ta
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record_with_identity("retry_limit", "identity:retry");
     record.max_attempts = Some(1);
     let id = record.id;
@@ -295,7 +286,6 @@ async fn retry_uses_stored_retry_delay<S>(store: &S) -> Result<(), vyuh::tasks::
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record("retry_delay");
     let id = record.id;
     record.retry_delay_ms = Some(60_000);
@@ -317,7 +307,6 @@ async fn claims_expired_running_tasks<S>(store: &S) -> Result<(), vyuh::tasks::T
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record("expired_lease_claim");
     let id = record.id;
     record.status = TaskStatus::Running;
@@ -342,7 +331,6 @@ async fn per_task_lease_controls_reclaim<S>(store: &S) -> Result<(), vyuh::tasks
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut long_lease = task_record("long_lease");
     long_lease.status = TaskStatus::Running;
     long_lease.locked_by = Some("slow-runner".to_string());
@@ -381,7 +369,6 @@ async fn stale_runner_cannot_overwrite_reclaimed_task<S>(
 where
     S: AbstractTaskStore + Send + Sync,
 {
-    store.run_migrations().await?;
     let mut record = task_record("reclaimed_stale_commit");
     let id = record.id;
     record.status = TaskStatus::Running;
@@ -412,7 +399,6 @@ async fn concurrent_claimers_claim_each_task_once<S>(store: S) -> Result<(), vyu
 where
     S: AbstractTaskStore + Clone + Send + Sync + 'static,
 {
-    store.run_migrations().await?;
     let mut expected = HashSet::new();
     for i in 0..25 {
         let record = task_record(&format!("concurrent_claim_{i}"));
@@ -468,12 +454,23 @@ where
 }
 
 #[tokio::test]
+/// Verifies the full durable-task contract against the in-memory store.
 async fn memory_task_store_contract() -> Result<(), vyuh::tasks::TaskError> {
     run_store_contract(MemoryTaskStore::new(10)).await
 }
 
-#[sqlx::test]
-async fn database_task_store_contract(pool: vyuh::db::Pool) -> Result<(), vyuh::tasks::TaskError> {
-    let store = vyuh::tasks::TaskStore::new(10);
-    run_store_contract(store).await
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+/// Verifies persistent stores reject retired startup schema provisioning.
+#[allow(deprecated)]
+async fn database_task_store_requires_external_migrations() -> Result<(), vyuh::tasks::TaskError> {
+    let pool = sqlx::SqlitePool::connect(":memory:")
+        .await
+        .map_err(vyuh::tasks::TaskError::DatabaseError)?;
+    let store = vyuh::tasks::TaskStore::new(pool, 10, Duration::from_secs(30));
+    assert!(matches!(
+        store.run_migrations().await,
+        Err(vyuh::tasks::TaskError::MigrationRequired)
+    ));
+    Ok(())
 }

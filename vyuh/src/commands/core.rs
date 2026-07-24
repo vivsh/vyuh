@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(feature = "migrations")]
+use std::sync::Arc;
 
 use super::{CommandConf, CommandError, CommandRegistry};
 use crate::callables::specs::{ArgPart, IntoArgPart};
@@ -271,12 +273,16 @@ async fn serve_command(SiteRef(site): SiteRef, _args: Data<ServeArgs>) -> Result
 
 async fn health_command(SiteRef(site): SiteRef, _args: Data<HealthArgs>) -> Result<(), Error> {
     let uptime = site.uptime().as_secs();
-    let db_ok = sqlx::query("SELECT 1")
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    let db_ok = crate::db::sqlx::query("SELECT 1")
         .execute(site.db().as_sqlx())
         .await
         .is_ok();
     println!("health: ok");
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     println!("database: {}", if db_ok { "ok" } else { "error" });
+    #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+    println!("database: not configured");
     println!("uptime_seconds: {}", uptime);
     Ok(())
 }
@@ -328,50 +334,14 @@ async fn make_migration_command(
             "make_migration is only available in debug builds",
         ));
     }
-    let name = args.name.as_deref().unwrap_or("auto");
-    let engine = migration_engine(&site, None)?;
     let schema = site
         .migration_registry()
         .schema_for(None)
         .map_err(Error::other)?;
-    if args.empty {
-        let migration = engine.make_empty_migration(name).map_err(Error::other)?;
-        println!("Created empty migration {}", migration.id);
-        return Ok(());
+    match run_migration_command(&site, make_command(&args, schema)?).await? {
+        crate::db::engine::CommandResult::Make(result) => print_make_result(result),
+        result => Err(unexpected_migration_result("make_migration", result)),
     }
-    if args.merge {
-        let migration = engine.make_merge_migration(name).map_err(Error::other)?;
-        println!("Created merge migration {}", migration.id);
-        return Ok(());
-    }
-    let engine = engine.with_schema(|_| schema).map_err(Error::other)?;
-    if args.check {
-        engine.make_migration_check().map_err(Error::other)?;
-        println!("No migration changes detected.");
-        return Ok(());
-    }
-    let result = if args.dry_run && args.non_interactive {
-        engine
-            .make_migration_dry_run_non_interactive(args.name.as_deref())
-            .map_err(Error::other)?
-    } else if args.dry_run {
-        engine
-            .make_migration_dry_run(args.name.as_deref())
-            .map_err(Error::other)?
-    } else if args.non_interactive {
-        engine
-            .make_migration_non_interactive(args.name.as_deref())
-            .map_err(Error::other)?
-    } else {
-        engine
-            .make_migration_named(args.name.as_deref())
-            .map_err(Error::other)?
-    };
-    match result {
-        Some(migration) => println!("Created migration {}", migration.id),
-        None => println!("No changes detected."),
-    }
-    Ok(())
 }
 
 #[cfg(feature = "migrations")]
@@ -379,29 +349,14 @@ async fn migrate_command(
     SiteRef(site): SiteRef,
     Data(args): Data<MigrateArgs>,
 ) -> Result<(), Error> {
-    let engine = migration_engine(&site, None)?;
-    if args.plan {
-        for id in engine.plan().await.map_err(Error::other)? {
-            println!("{id}");
+    match run_migration_command(&site, apply_command(&args)).await? {
+        crate::db::engine::CommandResult::Movement(movement) => {
+            println!("Applied {} migration(s).", movement.applied);
+            Ok(())
         }
-        return Ok(());
+        crate::db::engine::CommandResult::Pending(pending) => print_pending_migrations(pending),
+        result => Err(unexpected_migration_result("migrate", result)),
     }
-    if args.check {
-        if engine.check().await.map_err(Error::other)? {
-            return Err(Error::invalid("pending migrations exist"));
-        }
-        println!("No pending migrations.");
-        return Ok(());
-    }
-    let applied = if args.fake {
-        engine.fake_migrate().await.map_err(Error::other)?
-    } else if let Some(target) = args.target.as_deref() {
-        engine.migrate_to(target).await.map_err(Error::other)?
-    } else {
-        engine.migrate().await.map_err(Error::other)?
-    };
-    println!("Applied {applied} migration(s).");
-    Ok(())
 }
 
 #[cfg(feature = "migrations")]
@@ -409,17 +364,28 @@ async fn show_migrations_command(
     SiteRef(site): SiteRef,
     _args: Data<ShowMigrationsArgs>,
 ) -> Result<(), Error> {
-    let engine = migration_engine(&site, None)?;
-    let rows = engine.show_migrations().await.map_err(Error::other)?;
-    if rows.is_empty() {
-        println!("No migrations found.");
-        return Ok(());
+    match run_migration_command(
+        &site,
+        crate::db::engine::MigrationCommand::Status {
+            reverse: false,
+            search: None,
+        },
+    )
+    .await?
+    {
+        crate::db::engine::CommandResult::Status(rows) => {
+            if rows.is_empty() {
+                println!("No migrations found.");
+            } else {
+                for row in rows {
+                    let marker = if row.applied { "x" } else { " " };
+                    println!("[{marker}] {}", row.id);
+                }
+            }
+            Ok(())
+        }
+        result => Err(unexpected_migration_result("show_migrations", result)),
     }
-    for (id, applied) in rows {
-        let marker = if applied { "x" } else { " " };
-        println!("[{marker}] {id}");
-    }
-    Ok(())
 }
 
 #[cfg(feature = "migrations")]
@@ -427,17 +393,23 @@ async fn sql_migrate_command(
     SiteRef(site): SiteRef,
     Data(args): Data<SqlMigrateArgs>,
 ) -> Result<(), Error> {
-    let engine = migration_engine(&site, None)?;
-    let sql = match (args.backwards, args.id.as_deref()) {
-        (true, Some(id)) => engine.sql_rollback(&[id]).map_err(Error::other)?,
-        (true, None) => engine.sql_rollback(&[]).map_err(Error::other)?,
-        (false, Some(id)) => engine.sql_migrate_id(id).map_err(Error::other)?,
-        (false, None) => engine.sql_migrate().map_err(Error::other)?,
-    };
-    for statement in sql {
-        println!("{statement}");
+    match run_migration_command(
+        &site,
+        crate::db::engine::MigrationCommand::Sql {
+            id: args.id.clone(),
+            backwards: args.backwards,
+        },
+    )
+    .await?
+    {
+        crate::db::engine::CommandResult::Sql(sql) => {
+            for statement in sql {
+                println!("{statement}");
+            }
+            Ok(())
+        }
+        result => Err(unexpected_migration_result("sql_migrate", result)),
     }
-    Ok(())
 }
 
 #[cfg(feature = "migrations")]
@@ -445,15 +417,24 @@ async fn verify_db_command(
     SiteRef(site): SiteRef,
     Data(args): Data<VerifyDbArgs>,
 ) -> Result<(), Error> {
-    let schema = args.schema.clone();
-    let engine = migration_engine(&site, None)?;
-    let drift = engine.verify(&schema).await.map_err(Error::other)?;
-    if drift.is_empty() {
-        println!("Database schema matches migration state.");
-        return Ok(());
+    match run_migration_command(
+        &site,
+        crate::db::engine::MigrationCommand::Verify {
+            schemas: vec![args.schema.clone()],
+        },
+    )
+    .await?
+    {
+        crate::db::engine::CommandResult::Verify(drift) if drift.findings.is_empty() => {
+            println!("Database schema matches migration state.");
+            Ok(())
+        }
+        crate::db::engine::CommandResult::Verify(drift) => {
+            println!("{}", serde_json::to_string_pretty(&drift)?);
+            Err(Error::invalid("database drift detected"))
+        }
+        result => Err(unexpected_migration_result("verify_db", result)),
     }
-    println!("{}", serde_json::to_string_pretty(&drift)?);
-    Err(Error::invalid("database drift detected"))
 }
 
 #[cfg(feature = "migrations")]
@@ -461,55 +442,146 @@ async fn inspect_db_command(
     SiteRef(site): SiteRef,
     Data(args): Data<InspectDbArgs>,
 ) -> Result<(), Error> {
-    let schema_name = args.schema.clone();
-    let engine = migration_engine(&site, None)?;
-    let schema = engine
-        .inspect_db(&[schema_name.as_str()])
-        .await
+    match run_migration_command(
+        &site,
+        crate::db::engine::MigrationCommand::Inspect {
+            schemas: vec![args.schema.clone()],
+            filters: Vec::new(),
+            table: None,
+        },
+    )
+    .await?
+    {
+        crate::db::engine::CommandResult::Inspect(schema) => {
+            println!("{}", serde_json::to_string_pretty(&schema)?);
+            Ok(())
+        }
+        result => Err(unexpected_migration_result("inspect_db", result)),
+    }
+}
+
+#[cfg(feature = "migrations")]
+/// Concrete Mool runner used for one site-owned migration lifecycle.
+pub(crate) type NativeMigrationRunner = crate::db::engine::MigrationRunner<
+    crate::db::engine::NativeMigrationStore,
+    crate::db::engine::DatabaseTrackingStore,
+    crate::db::engine::LazyExecutor,
+>;
+
+#[cfg(feature = "migrations")]
+/// One serialized Mool migration runner shared by all site commands.
+pub(crate) type SharedMigrationRunner = Arc<tokio::sync::Mutex<NativeMigrationRunner>>;
+
+#[cfg(feature = "migrations")]
+async fn run_migration_command(
+    site: &Site,
+    command: crate::db::engine::MigrationCommand,
+) -> Result<crate::db::engine::CommandResult, Error> {
+    let runner = site
+        .migration_runner()
+        .ok_or_else(|| Error::invalid("no root migration source is registered"))?;
+    let mut runner = runner.lock().await;
+    runner.run_command(&command).await.map_err(Error::other)
+}
+
+#[cfg(feature = "migrations")]
+pub(crate) fn migration_runner(
+    registry: crate::db::MigrationRegistry,
+    database_url: String,
+) -> Result<Option<SharedMigrationRunner>, Error> {
+    let registry = Arc::new(registry);
+    let Some(source) = registry.root() else {
+        return Ok(None);
+    };
+    let dialect = crate::db::engine::Config::dialect_from_database_url(&database_url)
         .map_err(Error::other)?;
-    println!("{}", serde_json::to_string_pretty(&schema)?);
+    let config = crate::db::engine::Config::new(
+        database_url,
+        source.dir(),
+        PathBuf::from("schema.yaml"),
+        dialect,
+    );
+    let runner = crate::db::engine::NativeRunnerFactory::from_store(config, registry).build();
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(runner))))
+}
+
+#[cfg(feature = "migrations")]
+fn make_command(
+    args: &MakeMigrationArgs,
+    schema: crate::db::Schema,
+) -> Result<crate::db::engine::MigrationCommand, Error> {
+    use crate::db::engine::{MakeCommand, MigrationCommand};
+
+    if args.empty {
+        return Ok(MigrationCommand::Make(MakeCommand::Empty {
+            name: args.name.clone().unwrap_or_else(|| "auto".to_string()),
+        }));
+    }
+    if args.merge {
+        return Ok(MigrationCommand::Make(MakeCommand::Merge {
+            name: args.name.clone().unwrap_or_else(|| "auto".to_string()),
+        }));
+    }
+    if args.check {
+        return Ok(MigrationCommand::Make(MakeCommand::Check {
+            schema,
+            decisions: Vec::new(),
+        }));
+    }
+    Ok(MigrationCommand::Make(MakeCommand::Generate {
+        schema,
+        name: args.name.clone(),
+        dry_run: args.dry_run,
+        decisions: Vec::new(),
+    }))
+}
+
+#[cfg(feature = "migrations")]
+fn apply_command(args: &MigrateArgs) -> crate::db::engine::MigrationCommand {
+    use crate::db::engine::{ApplyCommand, MigrationCommand};
+
+    if args.plan {
+        MigrationCommand::Apply(ApplyCommand::Plan)
+    } else if args.check {
+        MigrationCommand::Apply(ApplyCommand::Check)
+    } else {
+        MigrationCommand::Apply(ApplyCommand::Execute {
+            target: args.target.clone(),
+            fake: args.fake,
+            fake_verified: false,
+            schemas: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "migrations")]
+fn print_make_result(result: crate::db::engine::MakeResult) -> Result<(), Error> {
+    match result {
+        crate::db::engine::MakeResult::Created(migration) => {
+            println!("Created migration {}", migration.id);
+        }
+        crate::db::engine::MakeResult::Preview(migration) => {
+            println!("Migration preview {}", migration.id);
+        }
+        crate::db::engine::MakeResult::NoChanges => println!("No changes detected."),
+        crate::db::engine::MakeResult::CheckPassed => println!("No migration changes detected."),
+    }
     Ok(())
 }
 
 #[cfg(feature = "migrations")]
-fn migration_engine(site: &Site, namespace: Option<&str>) -> Result<gaman::MigrationEngine, Error> {
-    let registry = site.migration_registry();
-    let source = match namespace {
-        Some(ns) => registry
-            .get(ns)
-            .ok_or_else(|| Error::invalid(format!("no migration source for namespace '{ns}'")))?,
-        None => registry
-            .root()
-            .ok_or_else(|| Error::invalid("no root migration source is registered"))?,
-    };
-    let mut config = gaman::Config::new(
-        Some(site.conf().database.url.clone()),
-        source.dir(),
-        PathBuf::from("schema.yaml"),
-    );
-    config.tls = gaman::TlsMode::NoTls;
-    let mut engine = gaman::MigrationEngine::new(config, source.embedded());
-    if let Some(dialect) = configured_dialect() {
-        engine = engine.with_dialect(dialect);
+fn print_pending_migrations(pending: Vec<String>) -> Result<(), Error> {
+    if pending.is_empty() {
+        println!("No pending migrations.");
+        return Ok(());
     }
-    if namespace.is_none() {
-        for (ns, source) in registry.crates() {
-            engine = engine.add_migrations(ns, source.embedded());
-        }
+    for id in pending {
+        println!("{id}");
     }
-    Ok(engine)
+    Ok(())
 }
 
 #[cfg(feature = "migrations")]
-fn configured_dialect() -> Option<gaman::core::Dialect> {
-    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
-    {
-        return Some(gaman::core::Dialect::Postgres);
-    }
-    #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
-    {
-        return Some(gaman::core::Dialect::Sqlite);
-    }
-    #[allow(unreachable_code)]
-    None
+fn unexpected_migration_result(command: &str, result: crate::db::engine::CommandResult) -> Error {
+    Error::invalid(format!("{command} received unexpected result: {result:?}"))
 }

@@ -6,9 +6,11 @@ error[E0412]: cannot find type `QueryScope` in module `db`
    |
 help: consider importing one of these structs
    |
- 1 + use crate::db::typed::QueryScope;
+ 1 + use crate::db::queries::QueryScope;
    |
- 1 + use vyuh::db::typed::QueryScope;
+ 1 + use db_core::queries::QueryScope;
+   |
+ 1 + use vyuh::db::queries::QueryScope;
    |
 help: if you import `QueryScope`, refer to it directly
    |
@@ -24,11 +26,13 @@ error[E0412]: cannot find type `All` in module `db`
    |
 help: consider importing one of these structs
    |
- 1 + use crate::db::typed::All;
+ 1 + use crate::db::queries::All;
+   |
+ 1 + use db_core::queries::All;
    |
  1 + use futures::stream::All;
    |
- 1 + use vyuh::db::typed::All;
+ 1 + use vyuh::db::queries::All;
    |
 help: if you import `All`, refer to it directly
    |
@@ -44,9 +48,11 @@ error[E0412]: cannot find type `ModelTable` in module `db`
    |
 help: consider importing one of these structs
    |
- 1 + use crate::db::typed::ModelTable;
+ 1 + use crate::db::queries::ModelTable;
    |
- 1 + use vyuh::db::typed::ModelTable;
+ 1 + use db_core::queries::ModelTable;
+   |
+ 1 + use vyuh::db::queries::ModelTable;
    |
 help: if you import `ModelTable`, refer to it directly
    |
@@ -62,11 +68,13 @@ error[E0412]: cannot find type `Predicate` in module `db`
    |
 help: consider importing one of these items
    |
- 1 + use crate::db::typed::Predicate;
+ 1 + use crate::db::queries::Predicate;
+   |
+ 1 + use db_core::queries::Predicate;
    |
  1 + use tower_http::compression::Predicate;
    |
- 1 + use vyuh::db::typed::Predicate;
+ 1 + use vyuh::db::queries::Predicate;
    |
 help: if you import `Predicate`, refer to it directly
    |
@@ -82,9 +90,11 @@ error[E0412]: cannot find type `Projectable` in module `db`
    |
 help: consider importing one of these traits
    |
- 1 + use crate::db::typed::Projectable;
+ 1 + use crate::db::queries::Projectable;
    |
- 1 + use vyuh::db::typed::Projectable;
+ 1 + use db_core::queries::Projectable;
+   |
+ 1 + use vyuh::db::queries::Projectable;
    |
 help: if you import `Projectable`, refer to it directly
    |
@@ -97,3 +107,46 @@ error[E0433]: failed to resolve: could not find `__private` in `db`
    |
 16 |     let _ = db::__private::table("posts");
    |                 ^^^^^^^^^ could not find `__private` in `db`
+
+error[E0425]: cannot find function `count` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:17:17
+   |
+17 |     let _ = db::count(&Post::table().id);
+   |                 ^^^^^ not found in `db`
+   |
+help: consider importing one of these functions
+   |
+ 1 + use crate::db::funcs::count;
+   |
+ 1 + use db_core::funcs::count;
+   |
+ 1 + use vyuh::db::funcs::count;
+   |
+help: if you import `count`, refer to it directly
+   |
+17 -     let _ = db::count(&Post::table().id);
+17 +     let _ = count(&Post::table().id);
+   |
+
+error[E0425]: cannot find function `now` in module `db`
+  --> tests/ui/typed_query/top_level_exports.rs:18:17
+   |
+18 |     let _ = db::now();
+   |                 ^^^ not found in `db`
+   |
+help: consider importing one of these functions
+   |
+ 1 + use crate::db::funcs::datetime::now;
+   |
+ 1 + use crate::db::funcs::now;
+   |
+ 1 + use db_core::funcs::datetime::now;
+   |
+ 1 + use db_core::funcs::now;
+   |
+   = and 2 other candidates
+help: if you import `now`, refer to it directly
+   |
+18 -     let _ = db::now();
+18 +     let _ = now();
+   |

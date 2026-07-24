@@ -1,15 +1,31 @@
-error[E0599]: no method named `column` found for struct `vyuh::db::typed::Subquery<PostId>` in the current scope
-  --> tests/ui/typed_query/source_column.rs:27:17
+error[E0308]: mismatched types
+  --> tests/ui/typed_query/source_column.rs:23:9
    |
-27 |     let _ = ids.column::<i64>("id");
-   |                 ^^^^^^
+18 |       let ids = match db::from(&posts)
+   |  _____________________-
+19 | |         .all::<PostId>()
+20 | |         .set(db::out::<PostId>().id, &posts.id)
+21 | |         .subquery()
+   | |___________________- this expression has type `mool::queries::Subquery<PostId>`
+22 |       {
+23 |           Ok(ids) => ids,
+   |           ^^^^^^^ expected `Subquery<PostId>`, found `Result<_, _>`
    |
-   = help: items from traits can only be used if the trait is implemented and in scope
-   = note: the following traits define an item `column`, perhaps you need to implement one of them:
-           candidate #1: `Row`
-           candidate #2: `sqlx::Statement`
-help: there is a method `cols` with a similar name, but with different arguments
-  --> src/db/queries/typed_queries/source.rs
+   = note: expected struct `mool::queries::Subquery<PostId>`
+                found enum `Result<_, _>`
+
+error[E0308]: mismatched types
+  --> tests/ui/typed_query/source_column.rs:24:9
    |
-   |     pub fn cols(&self) -> <T as Projectable>::Columns {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+18 |       let ids = match db::from(&posts)
+   |  _____________________-
+19 | |         .all::<PostId>()
+20 | |         .set(db::out::<PostId>().id, &posts.id)
+21 | |         .subquery()
+   | |___________________- this expression has type `mool::queries::Subquery<PostId>`
+...
+24 |           Err(_) => return,
+   |           ^^^^^^ expected `Subquery<PostId>`, found `Result<_, _>`
+   |
+   = note: expected struct `mool::queries::Subquery<PostId>`
+                found enum `Result<_, _>`

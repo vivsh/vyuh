@@ -3,15 +3,12 @@ mod bitrole;
 mod bundle;
 mod bundlepart;
 mod cron;
-mod filterable;
 mod migrations;
-mod model;
 mod multipart;
 mod openapi;
 mod periodic;
 mod pgnotify;
 mod route;
-mod scannable;
 mod schema;
 mod schemable;
 mod service;
@@ -158,19 +155,19 @@ pub fn bundle(input: TokenStream) -> TokenStream {
     bundle::parse_bundle(input)
 }
 
-#[proc_macro_derive(Record, attributes(field, column, table))]
+#[proc_macro_derive(Record, attributes(field, column, table, db))]
 pub fn derive_record(input: TokenStream) -> TokenStream {
-    scannable::derive_record(input)
+    mool_macros_impl::record::derive_record(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
-#[proc_macro_derive(Model, attributes(field, column, table))]
+#[proc_macro_derive(Model, attributes(field, column, table, db))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
-    model::derive_model(input)
+    mool_macros_impl::model::derive_model(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
-#[proc_macro_derive(Filterable, attributes(filter))]
+#[proc_macro_derive(Filterable, attributes(filter, db))]
 pub fn derive_filterable(input: TokenStream) -> TokenStream {
-    filterable::derive_filterable(input)
+    mool_macros_impl::filterable::derive_filterable(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
 /// Derives the BitRole trait for role-based access control.

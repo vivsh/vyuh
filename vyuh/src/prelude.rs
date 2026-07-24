@@ -14,7 +14,7 @@
 
 // ── Core framework types ────────────────────────────────────────────────────
 
-pub use crate::{Data, Error, Site, SiteConf, SiteError, Valid, Validate};
+pub use crate::{Data, DeploymentMode, Error, Site, SiteConf, SiteError, Valid, Validate};
 
 pub use schemars::JsonSchema;
 pub use serde::{Deserialize, Serialize};
@@ -23,7 +23,8 @@ pub use serde::{Deserialize, Serialize};
 
 pub use crate::bundles;
 pub use crate::db;
-pub use crate::db::{Model, Record};
+pub use crate::db::{Model, PgNotifyDbExt, Record};
+pub use crate::observability::ObservabilityConf;
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 

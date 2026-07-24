@@ -34,7 +34,12 @@ pub async fn login(
         .consume_bootstrap(&query.token, ttl)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let max_age = time::Duration::seconds(conf.session_ttl_seconds as i64);
-    let jar = jar.add(session_cookie(&conf.cookie_name, token, max_age));
+    let jar = jar.add(session_cookie(
+        &conf.cookie_name,
+        token,
+        max_age,
+        conf.secure_cookie,
+    ));
     Ok((jar, Redirect::to(&conf.path).into_response()))
 }
 
@@ -49,7 +54,7 @@ pub async fn logout(
     {
         runtime.clear_session(cookie.value());
     }
-    let jar = jar.add(expired_cookie(&conf.cookie_name));
+    let jar = jar.add(expired_cookie(&conf.cookie_name, conf.secure_cookie));
     (jar, Json(serde_json::json!({ "ok": true })))
 }
 

@@ -13,6 +13,7 @@ pub mod collectors;
 pub mod commands;
 pub mod console;
 pub mod db;
+mod db_notify;
 pub mod embed;
 pub mod emitters;
 pub mod errors;
@@ -20,6 +21,7 @@ pub mod file_storage;
 pub mod logging;
 pub mod middlewares;
 pub(crate) mod notifiers;
+pub mod observability;
 pub mod prelude;
 pub(crate) mod roles;
 pub(crate) mod schedulers;
@@ -29,6 +31,7 @@ pub mod signals;
 pub mod tasks;
 pub mod templates;
 pub mod testing;
+pub mod utils;
 pub mod validation;
 pub mod validators;
 mod watch;
@@ -39,7 +42,7 @@ mod testing_tests;
 pub mod routes;
 pub use callables::{Data, DataValue, Operation, OperationKind};
 pub use commands::CommandError;
-pub use conf::SiteConf;
+pub use conf::{DeploymentMode, SiteConf};
 pub use errors::{
     Error, ErrorCommandContext, ErrorContext, ErrorKind, ErrorRenderContext, ErrorRenderTarget,
     ErrorReport, ErrorRequestContext, ErrorSourceKind, ErrorView, HttpErrorRenderMode,

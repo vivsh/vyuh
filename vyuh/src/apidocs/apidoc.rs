@@ -1652,6 +1652,7 @@ mod tests {
     }
 
     #[derive(JsonSchema)]
+    #[allow(dead_code)]
     struct ValidatedNote {
         title: String,
     }
@@ -1916,6 +1917,7 @@ mod tests {
     }
 
     #[derive(Debug, JsonSchema, crate::MultipartData)]
+    #[allow(dead_code)]
     struct ProductionUploadImageIn {
         #[upload(
             content_types = ["image/png", "image/jpeg"],

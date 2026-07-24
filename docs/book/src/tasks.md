@@ -388,15 +388,19 @@ All durable stores keep the lifecycle in one row and index the hot paths for
 claiming pending work, resuming suspended tasks, enforcing active identity
 uniqueness, and reclaiming expired running leases.
 
+Persistent task tables are migration-owned. Apply the application's Mool/Gaman
+migrations before starting task workers; `Site::build` never creates or alters
+task tables. This makes schema changes reviewable and prevents a replica from
+changing production DDL during startup.
+
 With no backend feature enabled, Vyuh uses `MemoryTaskStore`. This is good for
 quick starts, local experiments, docs, and tests that do not need durability. It
 is not a production durable queue.
 
-Use Postgres for production multi-worker deployments by default. Use MySQL when
-the rest of the application is already on MySQL and the deployment uses an
-InnoDB-compatible server with row-locking support. Use SQLite when the app is
-embedded, local, single-process, or needs a durable queue without a separate
-database service.
+Use Postgres for production multi-worker deployments by default. SQLite is for
+embedded, local, and single-process durable execution. MySQL is compile
+supported but experimental until its migration and concurrent-claimer evidence
+matches the Postgres and SQLite release gates.
 
 ## Examples
 

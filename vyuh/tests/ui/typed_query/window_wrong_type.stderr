@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `Expr<f64>: IntoExpr<i64>` is not satisfied
+  --> tests/ui/typed_query/window_wrong_type.rs:16:13
+   |
+14 |         .set(
+   |          --- required by a bound introduced by this call
+15 |             db::out::<Post>().id,
+16 |             db::funcs::percent_rank().over(db::funcs::window()),
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoExpr<i64>` is not implemented for `Expr<f64>`
+   |
+   = help: the trait `IntoExpr<i64>` is not implemented for `Expr<f64>`
+           but trait `IntoExpr<f64>` is implemented for it
+   = help: for that trait implementation, expected `f64`, found `i64`
+note: required by a bound in `queries::executables::read::<impl All<T>>::set`
+  --> $DB_CORE/src/queries/executables/read.rs
+   |
+   |     pub fn set<V>(mut self, target: impl IntoOutputTarget<V>, expr: impl IntoExpr<V>) -> Self
+   |                                                                          ^^^^^^^^^^^ required by this bound in `queries::executables::read::<impl All<T>>::set`

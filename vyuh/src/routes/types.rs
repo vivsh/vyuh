@@ -6,6 +6,7 @@ use axum::body::Bytes;
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::{HeaderValue, StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,41 @@ pub struct Path<T>(pub T);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Form<T>(pub T);
+
+/// Standard JSON success payload for mutation endpoints.
+#[derive(Debug, Clone, Copy, Default, Serialize, JsonSchema)]
+pub struct OkOut {
+    pub ok: bool,
+}
+
+/// JSON success response with a stable `{ "ok": true }` body.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OkJson;
+
+/// JSON response wrapper that can be mutated before it is returned.
+///
+/// This is useful for login/logout handlers that need to attach cookies while
+/// keeping a concrete JSON response schema for generated API docs.
+pub struct CookieJson<T> {
+    response: Response,
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+/// Raw pagination query input shared by list endpoints.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+pub struct PageParams {
+    #[serde(default)]
+    pub page: Option<usize>,
+    #[serde(default)]
+    pub per_page: Option<usize>,
+}
+
+/// Resolved one-indexed pagination bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageBounds {
+    pub page: usize,
+    pub per_page: usize,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct BodyBytes(pub Bytes);
@@ -57,6 +93,69 @@ impl_wrapper!(Json);
 impl_wrapper!(Query);
 impl_wrapper!(Path);
 impl_wrapper!(Form);
+
+impl OkOut {
+    /// Returns a successful mutation payload.
+    pub fn ok() -> Self {
+        Self { ok: true }
+    }
+}
+
+impl IntoResponse for OkJson {
+    fn into_response(self) -> Response {
+        Json(OkOut::ok()).into_response()
+    }
+}
+
+impl<T> CookieJson<T>
+where
+    T: Serialize,
+{
+    /// Creates a JSON response whose headers or cookies can still be changed.
+    pub fn new(body: T) -> Self {
+        Self {
+            response: Json(body).into_response(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Returns the mutable response for cookie/header changes.
+    pub fn response_mut(&mut self) -> &mut Response {
+        &mut self.response
+    }
+}
+
+impl<T> IntoResponse for CookieJson<T> {
+    fn into_response(self) -> Response {
+        self.response
+    }
+}
+
+impl PageParams {
+    /// Resolves raw query input into bounded pagination values.
+    ///
+    /// Page numbers are one-indexed. `default_per_page` and `max_per_page` are
+    /// clamped to at least one so callers cannot accidentally create a
+    /// zero-sized page.
+    pub fn resolve(self, default_per_page: usize, max_per_page: usize) -> PageBounds {
+        let max_per_page = max_per_page.max(1);
+        let default_per_page = default_per_page.clamp(1, max_per_page);
+        PageBounds {
+            page: self.page.unwrap_or(1).max(1),
+            per_page: self
+                .per_page
+                .unwrap_or(default_per_page)
+                .clamp(1, max_per_page),
+        }
+    }
+}
+
+impl PageBounds {
+    /// Returns the zero-indexed row offset for this page.
+    pub fn offset(self) -> usize {
+        (self.page - 1) * self.per_page
+    }
+}
 
 impl BodyBytes {
     pub fn into_inner(self) -> Bytes {
@@ -363,5 +462,58 @@ impl Default for RouteConf {
             path: Cow::Borrowed("/"),
             slash: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header;
+
+    use super::{CookieJson, IntoResponse, Json, OkJson, OkOut, PageParams};
+
+    /// Verifies that page query input is normalized to safe bounds.
+    #[test]
+    fn page_params_resolve_bounds() {
+        let params = PageParams {
+            page: Some(0),
+            per_page: Some(500),
+        };
+        let page = params.resolve(20, 100);
+        assert_eq!(page.page, 1);
+        assert_eq!(page.per_page, 100);
+        assert_eq!(page.offset(), 0);
+    }
+
+    /// Verifies that default page size is clamped when routes configure it badly.
+    #[test]
+    fn page_params_clamp_default() {
+        let page = PageParams::default().resolve(0, 0);
+        assert_eq!(page.page, 1);
+        assert_eq!(page.per_page, 1);
+    }
+
+    /// Verifies that cookie JSON exposes a mutable response before return.
+    #[test]
+    fn cookie_json_mutates_headers() {
+        let mut response = CookieJson::new(OkOut::ok());
+        response.response_mut().headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        assert!(
+            response
+                .into_response()
+                .headers()
+                .contains_key(header::CACHE_CONTROL)
+        );
+    }
+
+    /// Verifies that the standard OK response uses JSON response semantics.
+    #[test]
+    fn ok_json_returns_success() {
+        let response = OkJson.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let json = Json(OkOut::ok()).into_response();
+        assert_eq!(json.status(), response.status());
     }
 }

@@ -1,6 +1,9 @@
 // roles.rs
 
-use axum::{extract::FromRequestParts, http::request::Parts};
+use axum::{
+    extract::{FromRequestParts, OptionalFromRequestParts},
+    http::request::Parts,
+};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt::Debug, marker::PhantomData};
 
@@ -100,11 +103,29 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> FromRequestParts<Site> for Pe
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
-        let user = AuthUser::from_request_parts(parts, site).await?;
+        let user = <AuthUser as FromRequestParts<Site>>::from_request_parts(parts, site).await?;
         if !O::has_permission(user.roles, MASK) {
             return Err(AuthError::Forbidden);
         }
         Ok(Permit(user, PhantomData, PhantomData))
+    }
+}
+
+impl<const MASK: RoleType, R: BitRole, O: HasPerm> OptionalFromRequestParts<Site>
+    for Permit<MASK, R, O>
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        site: &Site,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        match <Permit<MASK, R, O> as FromRequestParts<Site>>::from_request_parts(parts, site).await
+        {
+            Ok(permit) => Ok(Some(permit)),
+            Err(AuthError::MissingToken | AuthError::Forbidden) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 

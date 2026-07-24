@@ -5,8 +5,8 @@ use super::specs::{
     ArgPart, CallError, DataValue, IntoArgPart, IntoReturnPart, ReturnPart, ReturnSpec, TypeSchema,
 };
 use crate::routes::{
-    Accepted, BodyBytes, Created, FileResponse, Form, Json, JsonStr, Path, PermanentRedirect,
-    Query, StreamResponse, TemporaryRedirect,
+    Accepted, BodyBytes, CookieJson, Created, FileResponse, Form, Json, JsonStr, OkJson, OkOut,
+    Path, PermanentRedirect, Query, StreamResponse, TemporaryRedirect,
 };
 use crate::validation::{Valid, Validate, ValidationSchema};
 use crate::{
@@ -345,6 +345,18 @@ impl<T: JsonSchema + Send + 'static> IntoReturnPart for axum::extract::Json<T> {
 impl<T: JsonSchema + Send + 'static> IntoReturnPart for Json<T> {
     fn into_return_part() -> ReturnPart {
         ReturnPart::Body(TypeSchema::wrap::<T>(), Cow::Borrowed("application/json"))
+    }
+}
+
+impl<T: JsonSchema + Send + 'static> IntoReturnPart for CookieJson<T> {
+    fn into_return_part() -> ReturnPart {
+        <Json<T> as IntoReturnPart>::into_return_part()
+    }
+}
+
+impl IntoReturnPart for OkJson {
+    fn into_return_part() -> ReturnPart {
+        <Json<OkOut> as IntoReturnPart>::into_return_part()
     }
 }
 

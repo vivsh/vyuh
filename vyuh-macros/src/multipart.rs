@@ -1,7 +1,9 @@
+use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Expr, Fields, GenericArgument, Lit, PathArguments, Type, parse_macro_input,
+    Data, DeriveInput, Expr, ExprArray, Fields, GenericArgument, Lit, PathArguments, Type,
+    parse_macro_input, spanned::Spanned,
 };
 
 pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
@@ -122,10 +124,10 @@ fn field_kind(ty: &Type) -> FieldKind {
     if type_ends_with(ty, "i64") {
         return FieldKind::I64 { optional: false };
     }
-    if let Some(inner) = vec_inner_type(ty) {
-        if type_ends_with(inner, "UploadedFile") {
-            return FieldKind::FileVec;
-        }
+    if let Some(inner) = vec_inner_type(ty)
+        && type_ends_with(inner, "UploadedFile")
+    {
+        return FieldKind::FileVec;
     }
     match option_inner_type(ty) {
         Some(inner) if type_ends_with(inner, "UploadedFile") => FieldKind::File { optional: true },
@@ -142,8 +144,8 @@ fn file_spec(
     multiple: bool,
     field_ident: &syn::Ident,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let content_types = upload.content_types;
-    let extensions = upload.extensions;
+    let content_types = upload.content_types.into_vec();
+    let extensions = upload.extensions.into_vec();
     let max_size = upload.max_size;
     let sniff = upload.sniff;
     let mut rule = quote! { ::vyuh::routes::multipart::FileRule::new() };
@@ -267,11 +269,15 @@ fn i64_init(
     }
 }
 
-#[derive(Default)]
+#[derive(Default, darling::FromMeta)]
 struct UploadAttrs {
-    content_types: Vec<String>,
-    extensions: Vec<String>,
+    #[darling(default)]
+    content_types: StringValues,
+    #[darling(default)]
+    extensions: StringValues,
+    #[darling(default)]
     sniff: Option<String>,
+    #[darling(default)]
     max_size: Option<u64>,
 }
 
@@ -282,64 +288,56 @@ impl UploadAttrs {
             if !attr.path().is_ident("upload") {
                 continue;
             }
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("content_types") {
-                    attrs.content_types = parse_string_values(meta.value()?.parse()?)?;
-                } else if meta.path.is_ident("extensions") {
-                    attrs.extensions = parse_string_values(meta.value()?.parse()?)?;
-                } else if meta.path.is_ident("sniff") {
-                    let value: Lit = meta.value()?.parse()?;
-                    attrs.sniff = Some(match value {
-                        Lit::Str(value) => value.value(),
-                        other => {
-                            return Err(syn::Error::new_spanned(
-                                other,
-                                "sniff must be a string literal",
-                            ));
-                        }
-                    });
-                } else if meta.path.is_ident("max_size") {
-                    let value: Lit = meta.value()?.parse()?;
-                    attrs.max_size = Some(match value {
-                        Lit::Int(value) => value.base10_parse()?,
-                        other => {
-                            return Err(syn::Error::new_spanned(
-                                other,
-                                "max_size must be an integer literal",
-                            ));
-                        }
-                    });
-                } else {
-                    return Err(meta.error("unsupported upload attribute"));
-                }
-                Ok(())
-            })?;
+            let parsed = parse_upload_attr(attr)?;
+            attrs = parsed;
         }
         Ok(attrs)
     }
 }
 
-fn parse_string_values(expr: Expr) -> syn::Result<Vec<String>> {
-    match expr {
-        Expr::Array(array) => array
-            .elems
-            .into_iter()
-            .map(|expr| match expr {
-                Expr::Lit(expr) => match expr.lit {
-                    Lit::Str(value) => Ok(value.value()),
-                    other => Err(syn::Error::new_spanned(other, "expected string literal")),
-                },
-                other => Err(syn::Error::new_spanned(other, "expected string literal")),
-            })
-            .collect(),
-        Expr::Lit(expr) => match expr.lit {
-            Lit::Str(value) => Ok(vec![value.value()]),
-            other => Err(syn::Error::new_spanned(other, "expected string literal")),
-        },
-        other => Err(syn::Error::new_spanned(
-            other,
-            "expected string literal or array of string literals",
-        )),
+#[derive(Default)]
+struct StringValues(Vec<String>);
+
+impl StringValues {
+    fn into_vec(self) -> Vec<String> {
+        self.0
+    }
+}
+
+impl FromMeta for StringValues {
+    fn from_expr(expr: &Expr) -> darling::Result<Self> {
+        match expr {
+            Expr::Array(array) => parse_string_array(array).map(Self),
+            Expr::Lit(expr) => parse_string_lit(&expr.lit).map(|value| Self(vec![value])),
+            _ => Err(darling::Error::custom("expected string or string array").with_span(expr)),
+        }
+    }
+}
+
+fn parse_upload_attr(attr: &syn::Attribute) -> syn::Result<UploadAttrs> {
+    let nested = match &attr.meta {
+        syn::Meta::List(list) => darling::ast::NestedMeta::parse_meta_list(list.tokens.clone())
+            .map_err(|err| syn::Error::new(attr.span(), err.to_string()))?,
+        _ => return Err(syn::Error::new(attr.span(), "expected #[upload(...)]")),
+    };
+    UploadAttrs::from_list(&nested).map_err(|err| syn::Error::new(attr.span(), err.to_string()))
+}
+
+fn parse_string_array(array: &ExprArray) -> darling::Result<Vec<String>> {
+    array
+        .elems
+        .iter()
+        .map(|expr| match expr {
+            Expr::Lit(expr) => parse_string_lit(&expr.lit),
+            _ => Err(darling::Error::custom("expected string literal").with_span(expr)),
+        })
+        .collect()
+}
+
+fn parse_string_lit(lit: &Lit) -> darling::Result<String> {
+    match lit {
+        Lit::Str(value) => Ok(value.value()),
+        _ => Err(darling::Error::custom("expected string literal").with_span(lit)),
     }
 }
 

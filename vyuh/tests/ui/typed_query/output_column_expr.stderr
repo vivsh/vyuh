@@ -1,0 +1,14 @@
+error[E0599]: `OutputColumn<i64>` is not an iterator
+  --> tests/ui/typed_query/output_column_expr.rs:13:44
+   |
+13 |     let _ = db::from(&posts).filter(out.id.eq(db::val(1_i64)));
+   |                                            ^^ `OutputColumn<i64>` is not an iterator
+   |
+  ::: $DB_CORE/src/queries/output.rs
+   |
+   | pub struct OutputColumn<T> {
+   | -------------------------- doesn't satisfy `OutputColumn<i64>: Iterator`
+   |
+   = note: the following trait bounds were not satisfied:
+           `OutputColumn<i64>: Iterator`
+           which is required by `&mut OutputColumn<i64>: Iterator`

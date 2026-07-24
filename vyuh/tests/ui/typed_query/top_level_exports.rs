@@ -14,4 +14,6 @@ fn main() {
     let _ = std::any::type_name::<db::Predicate>();
     let _ = std::any::type_name::<db::Projectable>();
     let _ = db::__private::table("posts");
+    let _ = db::count(&Post::table().id);
+    let _ = db::now();
 }

@@ -6,7 +6,7 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use crate::{
-    auth::{AuthConf, JwtKeySource},
+    auth::{AuthConf, CookieSameSite, JwtKeySource},
     channels::ChannelConf,
     console::ConsoleConf,
     db::DbConf,
@@ -15,6 +15,7 @@ use crate::{
     file_storage::UploadConf,
     logging,
     middlewares::HttpConf,
+    observability::ObservabilityConf,
     tasks::TaskConf,
     templates::TemplateConf,
 };
@@ -90,6 +91,17 @@ pub fn project_dir() -> PathBuf {
     }
 }
 
+/// Controls whether configuration is validated for local development or production deployment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    /// Preserve flexible local-development defaults.
+    #[default]
+    Development,
+    /// Require the framework's hardened production configuration.
+    Production,
+}
+
 fn default_secret_key() -> String {
     format!(
         "dev-secret-{}-replace-before-production",
@@ -97,9 +109,22 @@ fn default_secret_key() -> String {
     )
 }
 
+/// Builds the common error for a required production setting.
+fn production_required(field: &str) -> ConfError {
+    ConfError::InvalidValue {
+        field: field.into(),
+        reason: "must be enabled in production mode".into(),
+        expected: Some("true".into()),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct SiteConf {
+    /// Deployment validation mode.
+    #[serde(default)]
+    pub deployment: DeploymentMode,
+
     pub host: String,
 
     pub port: u16,
@@ -141,6 +166,10 @@ pub struct SiteConf {
 
     pub http: HttpConf,
 
+    /// Health probe and Prometheus metrics configuration.
+    #[serde(default)]
+    pub observability: ObservabilityConf,
+
     #[serde(skip)]
     pub errors: ErrorConf,
 }
@@ -149,6 +178,7 @@ impl Default for SiteConf {
     fn default() -> Self {
         let secret_key = default_secret_key();
         Self {
+            deployment: DeploymentMode::Development,
             host: "localhost".to_string(),
             port: 8080,
             project_dir: project_dir().as_os_str().to_string_lossy().to_string(),
@@ -167,12 +197,24 @@ impl Default for SiteConf {
             emitters: EmitterConf::default(),
             logging: logging::LoggingConf::default(),
             http: HttpConf::default(),
+            observability: ObservabilityConf::default(),
             errors: ErrorConf::default(),
         }
     }
 }
 
 impl SiteConf {
+    /// Returns an explicit configuration baseline for production deployments.
+    pub fn production() -> Self {
+        Self {
+            deployment: DeploymentMode::Production,
+            console: ConsoleConf::production(),
+            http: HttpConf::production(),
+            observability: ObservabilityConf::production(),
+            ..Self::default()
+        }
+    }
+
     /// Apply env vars as patches. Errors if invalid format.
     pub fn with_env(mut self) -> Result<Self, ConfError> {
         apply_env_patches(&mut self, None)?;
@@ -215,6 +257,12 @@ impl SiteConf {
 
     pub fn host(mut self, host: impl Into<String>) -> Self {
         self.host = host.into();
+        self
+    }
+
+    /// Sets the deployment validation mode.
+    pub fn deployment(mut self, deployment: DeploymentMode) -> Self {
+        self.deployment = deployment;
         self
     }
 
@@ -273,6 +321,12 @@ impl SiteConf {
         self
     }
 
+    /// Sets health probe and metrics configuration.
+    pub fn observability(mut self, observability: ObservabilityConf) -> Self {
+        self.observability = observability;
+        self
+    }
+
     pub fn touch_reload(mut self, path: impl Into<String>) -> Self {
         self.touch_reload = Some(path.into());
         self
@@ -316,6 +370,8 @@ impl SiteConf {
         self.validate_database(&mut errors);
         self.validate_paths(&mut errors);
         self.console.validate(&mut errors);
+        self.observability.validate(&mut errors);
+        self.validate_production(&mut errors);
 
         if errors.is_empty() {
             Ok(())
@@ -369,8 +425,9 @@ impl SiteConf {
     }
 
     fn validate_database(&self, errors: &mut Vec<ConfError>) {
-        #[cfg(not(debug_assertions))]
+        #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
         {
+            #[cfg(not(debug_assertions))]
             if self.database.lazy {
                 errors.push(ConfError::InvalidValue {
                     field: "database.lazy".into(),
@@ -378,29 +435,105 @@ impl SiteConf {
                     expected: Some("false".into()),
                 });
             }
+
+            if self.database.url.is_empty() {
+                errors.push(ConfError::RequiredField {
+                    field: "database.url".into(),
+                    reason: "cannot be empty".into(),
+                });
+            }
+            if self.database.max_connections == 0 {
+                errors.push(ConfError::InvalidValue {
+                    field: "database.max_connections".into(),
+                    reason: "must be non-zero".into(),
+                    expected: Some("positive integer".into()),
+                });
+            }
+            if self.database.min_connections > self.database.max_connections {
+                errors.push(ConfError::InvalidValue {
+                    field: "database.min_connections".into(),
+                    reason: format!(
+                        "cannot exceed max_connections ({} > {})",
+                        self.database.min_connections, self.database.max_connections
+                    ),
+                    expected: Some(format!("<= {}", self.database.max_connections)),
+                });
+            }
         }
-        if self.database.url.is_empty() {
-            errors.push(ConfError::RequiredField {
-                field: "database.url".into(),
-                reason: "cannot be empty".into(),
-            });
+
+        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+        let _ = errors;
+    }
+
+    /// Adds errors for configurations that are unsafe for production deployment.
+    fn validate_production(&self, errors: &mut Vec<ConfError>) {
+        if self.deployment != DeploymentMode::Production {
+            return;
         }
-        if self.database.max_connections == 0 {
+        self.validate_production_http(errors);
+        self.validate_production_console(errors);
+        self.validate_production_cookies(errors);
+    }
+
+    /// Validates mandatory transport protections for the production profile.
+    fn validate_production_http(&self, errors: &mut Vec<ConfError>) {
+        for (field, enabled) in [
+            ("http.trace.enabled", self.http.trace.enabled),
+            ("http.compression.enabled", self.http.compression.enabled),
+            ("http.timeout.enabled", self.http.timeout.enabled),
+            ("http.body_limit.enabled", self.http.body_limit.enabled),
+            (
+                "http.security_headers.enabled",
+                self.http.security_headers.enabled,
+            ),
+        ] {
+            if !enabled {
+                errors.push(production_required(field));
+            }
+        }
+        if self.http.cors.enabled && self.http.cors.permissive {
             errors.push(ConfError::InvalidValue {
-                field: "database.max_connections".into(),
-                reason: "must be non-zero".into(),
-                expected: Some("positive integer".into()),
+                field: "http.cors.permissive".into(),
+                reason: "must be false in production mode".into(),
+                expected: Some("application-specific CORS middleware".into()),
             });
         }
-        if self.database.min_connections > self.database.max_connections {
+    }
+
+    /// Validates the optional administrative console before exposing it in production.
+    fn validate_production_console(&self, errors: &mut Vec<ConfError>) {
+        if self.console.enabled && !self.console.secure_cookie {
             errors.push(ConfError::InvalidValue {
-                field: "database.min_connections".into(),
-                reason: format!(
-                    "cannot exceed max_connections ({} > {})",
-                    self.database.min_connections, self.database.max_connections
-                ),
-                expected: Some(format!("<= {}", self.database.max_connections)),
+                field: "console.secure_cookie".into(),
+                reason: "must be true when console is enabled in production mode".into(),
+                expected: Some("true".into()),
             });
+        }
+    }
+
+    /// Validates cookie transport and browser isolation settings in production.
+    fn validate_production_cookies(&self, errors: &mut Vec<ConfError>) {
+        for (field, cookie) in [
+            ("auth.access_cookie", self.auth.access_cookie.as_ref()),
+            ("auth.refresh_cookie", self.auth.refresh_cookie.as_ref()),
+        ] {
+            let Some(cookie) = cookie else {
+                continue;
+            };
+            if !cookie.secure || !cookie.http_only {
+                errors.push(ConfError::InvalidValue {
+                    field: field.into(),
+                    reason: "must use secure and HTTP-only cookies in production mode".into(),
+                    expected: Some("secure=true, http_only=true".into()),
+                });
+            }
+            if matches!(cookie.same_site, CookieSameSite::None) && !cookie.secure {
+                errors.push(ConfError::InvalidValue {
+                    field: field.into(),
+                    reason: "SameSite=None requires secure cookies".into(),
+                    expected: Some("secure=true".into()),
+                });
+            }
         }
     }
 

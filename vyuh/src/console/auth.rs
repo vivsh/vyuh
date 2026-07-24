@@ -205,20 +205,23 @@ pub(crate) fn session_cookie<'a>(
     name: &str,
     value: impl Into<std::borrow::Cow<'a, str>>,
     max_age: time::Duration,
+    secure: bool,
 ) -> Cookie<'a> {
     Cookie::build((name.to_string(), value.into()))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
+        .secure(secure)
         .max_age(max_age)
         .build()
 }
 
-pub(crate) fn expired_cookie(name: &str) -> Cookie<'static> {
+pub(crate) fn expired_cookie(name: &str, secure: bool) -> Cookie<'static> {
     Cookie::build((name.to_string(), ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
+        .secure(secure)
         .max_age(time::Duration::ZERO)
         .build()
 }
@@ -295,4 +298,29 @@ fn role_names(mask: RoleType) -> Vec<&'static str> {
         names.push("admin");
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expired_cookie, session_cookie};
+
+    /// Verifies that production console session cookies carry every browser transport protection.
+    #[test]
+    fn secure_session_cookie_sets_browser_protections() {
+        let cookie = session_cookie("vyuh_console", "session", time::Duration::hours(1), true);
+        let rendered = cookie.to_string();
+
+        assert!(rendered.contains("HttpOnly"));
+        assert!(rendered.contains("SameSite=Lax"));
+        assert!(rendered.contains("Secure"));
+    }
+
+    /// Verifies that logout cookies keep the HTTPS restriction while expiring a session.
+    #[test]
+    fn secure_expired_cookie_keeps_https_restriction() {
+        let rendered = expired_cookie("vyuh_console", true).to_string();
+
+        assert!(rendered.contains("Max-Age=0"));
+        assert!(rendered.contains("Secure"));
+    }
 }

@@ -1,0 +1,14 @@
+error[E0599]: no method named `update` found for struct `All<T>` in the current scope
+  --> tests/ui/typed_query/select_write.rs:24:10
+   |
+21 |       let _ = db::from(&posts)
+   |               ----------------
+   |               |
+   |  _____________method `update` is available on `QueryScope`
+   | |
+22 | |         .all::<Post>()
+23 | |         .set(db::out::<Post>().id, &posts.id)
+24 | |         .update(&patch);
+   | |         -^^^^^^ method not found in `All<Post>`
+   | |_________|
+   |

@@ -44,6 +44,9 @@ pub trait AbstractTaskStore {
         id: uuid::Uuid,
     ) -> impl Future<Output = Result<Option<TaskRecord>, TaskError>> + Send + '_;
 
+    #[deprecated(
+        note = "Task schema provisioning is migration-command owned; apply migrations before starting workers"
+    )]
     fn run_migrations(&self) -> impl Future<Output = Result<(), TaskError>> + Send + '_;
 }
 
@@ -93,6 +96,7 @@ impl<T: AbstractTaskStore + ?Sized> AbstractTaskStore for Arc<T> {
         (**self).get_task(id)
     }
 
+    #[allow(deprecated)]
     fn run_migrations(&self) -> impl Future<Output = Result<(), TaskError>> + Send + '_ {
         (**self).run_migrations()
     }

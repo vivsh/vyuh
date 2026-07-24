@@ -25,7 +25,7 @@ struct Account {
     bio: Option<String>,
 }
 
-fn root_schema() -> db::Schema {
+fn root_schema() -> Result<db::Schema, db::SchemaLoadError> {
     db::Schema::builder(db::Dialect::Postgres)
         .table::<Account>()
         .build()

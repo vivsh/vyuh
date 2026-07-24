@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
@@ -15,6 +17,9 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,11 +40,11 @@ jobs:
       - name: Build site
         run: bash scripts/build-pages.sh public
 
-      - name: Deploy to vyuh-rs.github.io
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          external_repository: vyuh-rs/vyuh-rs.github.io
-          publish_branch: main
-          publish_dir: public
-          personal_token: ${{ secrets.VYUH_PAGES_DEPLOY_TOKEN }}
-          force_orphan: true
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

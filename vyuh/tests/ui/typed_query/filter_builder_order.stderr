@@ -1,0 +1,5 @@
+error[E0599]: no method named `order_by` found for struct `FilterBuilder<Post>` in the current scope
+  --> tests/ui/typed_query/filter_builder_order.rs:13:25
+   |
+13 |         let _ = builder.order_by(posts.id.asc());
+   |                         ^^^^^^^^ method not found in `FilterBuilder<Post>`

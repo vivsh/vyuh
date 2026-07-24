@@ -24,6 +24,9 @@ pub struct ConsoleConf {
     pub session_ttl_seconds: u64,
     pub print_bootstrap_url: ConsoleBootstrapMode,
     pub cookie_name: String,
+    /// Whether the console session cookie is restricted to HTTPS.
+    #[serde(default)]
+    pub secure_cookie: bool,
     pub page_size_default: usize,
     pub page_size_max: usize,
     pub status_cache_ttl_seconds: u64,
@@ -38,6 +41,7 @@ impl Default for ConsoleConf {
             session_ttl_seconds: 28_800,
             print_bootstrap_url: ConsoleBootstrapMode::LocalOnly,
             cookie_name: "vyuh_console".to_string(),
+            secure_cookie: false,
             page_size_default: 50,
             page_size_max: 250,
             status_cache_ttl_seconds: 5,
@@ -46,6 +50,14 @@ impl Default for ConsoleConf {
 }
 
 impl ConsoleConf {
+    /// Returns the console configuration used by the production site profile.
+    pub fn production() -> Self {
+        Self {
+            enabled: false,
+            secure_cookie: true,
+            ..Self::default()
+        }
+    }
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -73,6 +85,12 @@ impl ConsoleConf {
 
     pub fn cookie_name(mut self, name: impl Into<String>) -> Self {
         self.cookie_name = name.into();
+        self
+    }
+
+    /// Configures whether the console session cookie requires HTTPS.
+    pub fn secure_cookie(mut self, secure: bool) -> Self {
+        self.secure_cookie = secure;
         self
     }
 

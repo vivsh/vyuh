@@ -37,8 +37,9 @@ pub use middleware::{Middleware, RawLayer, layer_from};
 pub use multipart::{JsonPart, MultipartForm, MultipartMap, UploadedFile, UploadedText};
 pub use subscriber::{ChannelAttach, Subscriber};
 pub use types::{
-    Accepted, BodyBytes, Created, FileResponse, Form, Json, JsonStr, Path, PermanentRedirect,
-    Query, RouteConf, StreamResponse, TemporaryRedirect, redirect,
+    Accepted, BodyBytes, CookieJson, Created, FileResponse, Form, Json, JsonStr, OkJson, OkOut,
+    PageBounds, PageParams, Path, PermanentRedirect, Query, RouteConf, StreamResponse,
+    TemporaryRedirect, redirect,
 };
 
 pub use crate::channels::{POLL, SSE, WS};

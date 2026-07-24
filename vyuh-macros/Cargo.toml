@@ -5,7 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "Procedural macros for the Vyuh web framework"
 readme = "../README.md"
-repository = "https://github.com/vyuh-rs/vyuh"
+repository = "https://github.com/vivsh/vyuh"
 documentation = "https://docs.rs/vyuh-macros"
 
 [lib]
@@ -20,6 +20,7 @@ syn = { version = "2", features = ["full"] }
 darling = "0.20"
 heck = "0.4"
 cron = "0.12"
+mool-macros-impl = "0.1.2"
 
 tokio = {workspace = true}
 

@@ -1,0 +1,7 @@
+error[E0433]: failed to resolve: could not find `TextSearchExt` in `backend`
+  --> tests/ui/typed_query/filter_wrong_operator.rs:10:24
+   |
+10 | #[derive(Debug, Clone, db::Filterable)]
+   |                        ^^^^^^^^^^^^^^ could not find `TextSearchExt` in `backend`
+   |
+   = note: this error originates in the derive macro `db::Filterable` (in Nightly builds, run with -Z macro-backtrace for more info)

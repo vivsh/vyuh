@@ -1,0 +1,7 @@
+error[E0609]: no field `missing` on type `FilterBuilder<Post>`
+  --> tests/ui/typed_query/filter_missing_column.rs:13:5
+   |
+13 |     #[filter(op = "eq", column = "missing")]
+   |     ^ unknown field
+   |
+   = note: available fields are: `id`, `title`

@@ -31,21 +31,30 @@
 //! Other useful pages:
 //! - http://127.0.0.1:8080/console
 //! - http://127.0.0.1:8080/docs
+//!
+//! Run the HTTP integration tests against disposable PostgreSQL databases:
+//!
+//! ```sh
+//! DATABASE_URL=postgres://postgres:postgres@localhost/postgres \
+//!   cargo test -p vyuh --features postgres,migrations,test-support --example blog
+//! ```
+//!
+//! The tests use Vyuh's `testing::TestClient`, which provisions Mool's
+//! migration-aware test database and exercises routes without binding an HTTP port.
 
-use std::convert::Infallible;
-
-use axum::{body::Body, extract::FromRequestParts, http::request::Parts, response::Response};
-use serde_json::json;
+use axum::body::Body;
 use tokio_util::io::ReaderStream;
 use vyuh::{
     ErrorKind,
     auth::{AuthConf, AuthUser, BitRole, check_password, make_password},
     commands::CommandConf,
     console::ConsoleConf,
-    errors::{ErrorConf, HttpErrorRenderMode},
+    db::backend::ReturningExt,
+    errors::ErrorConf,
     file_storage::StorageName,
     prelude::*,
-    routes::{FileResponse, MultipartForm, UploadedFile},
+    routes::{CookieJson, FileResponse, MultipartForm, OkJson, OkOut, PageParams, UploadedFile},
+    utils::text::{numbered_slug, slugify},
 };
 
 static MIGRATIONS: db::EmbeddedMigrations = db::embedded_migrations!("examples/blog/migrations");
@@ -88,11 +97,7 @@ struct Post {
     excerpt: String,
     body: String,
     image_url: Option<String>,
-    #[column(
-        references = "blog_users.id",
-        references_name = "blog_posts_author_id_fkey",
-        index
-    )]
+    #[column(reference = "blog_users.id", index)]
     author_id: i64,
     #[column(default = "false")]
     published: bool,
@@ -107,17 +112,9 @@ struct Post {
 struct Comment {
     #[column(primary_key, serial)]
     id: i64,
-    #[column(
-        references = "blog_posts.id",
-        references_name = "blog_comments_post_id_fkey",
-        index
-    )]
+    #[column(reference = "blog_posts.id", index)]
     post_id: i64,
-    #[column(
-        references = "blog_users.id",
-        references_name = "blog_comments_author_id_fkey",
-        index
-    )]
+    #[column(reference = "blog_users.id", index)]
     author_id: i64,
     body: String,
     #[column(type = "timestamp with time zone", default = "now()")]
@@ -128,7 +125,7 @@ struct Comment {
 struct PostWithAuthor {
     #[column(flatten)]
     post: Post,
-    #[column(reference(from = "author_id", to = "id"))]
+    #[column(reference(on(from = "author_id", to = "id")))]
     author: User,
 }
 
@@ -136,7 +133,7 @@ struct PostWithAuthor {
 struct CommentWithAuthor {
     #[column(flatten)]
     comment: Comment,
-    #[column(reference(from = "author_id", to = "id"))]
+    #[column(reference(on(from = "author_id", to = "id")))]
     author: User,
 }
 
@@ -188,18 +185,8 @@ struct UserInput {
 struct PostsQuery {
     #[serde(default)]
     all: bool,
-    #[serde(default)]
-    page: Option<usize>,
-    #[serde(default)]
-    per_page: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
-struct PageQuery {
-    #[serde(default)]
-    page: Option<usize>,
-    #[serde(default)]
-    per_page: Option<usize>,
+    #[serde(flatten)]
+    page: PageParams,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -304,110 +291,12 @@ struct SessionOut {
     user: Option<UserOut>,
 }
 
-struct CookieJson<T>(Response, std::marker::PhantomData<T>);
-
-impl<T> CookieJson<T>
-where
-    T: Serialize,
-{
-    fn new(body: T) -> Self {
-        Self(Json(body).into_response(), std::marker::PhantomData)
-    }
-
-    fn response_mut(&mut self) -> &mut Response {
-        &mut self.0
-    }
-}
-
-impl<T> IntoResponse for CookieJson<T> {
-    fn into_response(self) -> Response {
-        self.0
-    }
-}
-
-impl<T> vyuh::callables::IntoReturnPart for CookieJson<T>
-where
-    T: JsonSchema + Send + 'static,
-{
-    fn into_return_part() -> vyuh::callables::ReturnPart {
-        <Json<T> as vyuh::callables::IntoReturnPart>::into_return_part()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-struct PageOut<T> {
-    items: Vec<T>,
-    total: i64,
-    page: usize,
-    per_page: usize,
-    total_pages: usize,
-}
-
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct AdminSummaryOut {
     post_count: i64,
     user_count: i64,
     comment_count: i64,
-    posts: PageOut<PostOut>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-struct OkOut {
-    ok: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Pagination {
-    page: usize,
-    per_page: usize,
-}
-
-struct MaybeUser(Option<AuthUser>);
-
-impl FromRequestParts<Site> for MaybeUser {
-    type Rejection = Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
-        let user = parts
-            .extensions
-            .get::<AuthUser>()
-            .cloned()
-            .or_else(|| site.auth().extract_user(parts, &[], false).ok());
-        if let Some(user) = user.as_ref() {
-            parts.extensions.insert(user.clone());
-        }
-        Ok(Self(user))
-    }
-}
-
-impl vyuh::callables::IntoArgPart for MaybeUser {
-    fn into_arg_part() -> vyuh::callables::ArgPart {
-        vyuh::callables::ArgPart::Optional(Box::new(
-            <AuthUser as vyuh::callables::IntoArgPart>::into_arg_part(),
-        ))
-    }
-}
-
-struct MaybeAdmin(bool);
-
-impl FromRequestParts<Site> for MaybeAdmin {
-    type Rejection = Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
-        let user = MaybeUser::from_request_parts(parts, site).await?.0;
-        let is_admin = user
-            .map(|user| user.roles & UserRole::Admin.to_role_type() != 0)
-            .unwrap_or(false);
-        Ok(Self(is_admin))
-    }
-}
-
-impl vyuh::callables::IntoArgPart for MaybeAdmin {
-    fn into_arg_part() -> vyuh::callables::ArgPart {
-        vyuh::callables::ArgPart::Optional(Box::new(
-            <AdminUser as vyuh::callables::IntoArgPart>::into_arg_part(),
-        ))
-    }
+    posts: db::Page<PostOut>,
 }
 
 #[bundles::route(path = "/")]
@@ -416,12 +305,17 @@ async fn app() -> Result<Html<String>, Error> {
 }
 
 #[bundles::route(path = "/api/session")]
-async fn session(site: Site, MaybeUser(user): MaybeUser) -> Result<Json<SessionOut>, Error> {
+async fn session(site: Site, user: Option<AuthUser>) -> Result<Json<SessionOut>, Error> {
     let Some(user) = user else {
         return Ok(Json(SessionOut { user: None }));
     };
     let mut db = site.db();
-    let user = load_user(&mut db, user_id(&user)?).await?;
+    let table = User::table();
+    let user = db::from(&table)
+        .filter(table.id.eq(db::val(user.parse_key()?)))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
     Ok(Json(SessionOut {
         user: Some(UserOut::from(user)),
     }))
@@ -433,7 +327,12 @@ async fn login(
     Valid(Json(input)): Valid<Json<LoginInput>>,
 ) -> Result<CookieJson<SessionOut>, Error> {
     let mut db = site.db();
-    let user = find_user_by_username(&mut db, &input.username).await?;
+    let table = User::table();
+    let user = db::from(&table)
+        .filter(table.username.eq(db::val(input.username.clone())))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
     if !check_password(&input.password, &user.password_hash)? {
         return Err(Error::bad_request("invalid username or password"));
     }
@@ -457,7 +356,7 @@ async fn login(
 
 #[bundles::route(path = "/api/session", method = "DELETE")]
 async fn logout(site: Site) -> Result<CookieJson<OkOut>, Error> {
-    let mut response = CookieJson::new(OkOut { ok: true });
+    let mut response = CookieJson::new(OkOut::ok());
     site.auth().logout(false, response.response_mut());
     site.auth().logout(true, response.response_mut());
     Ok(response)
@@ -466,36 +365,51 @@ async fn logout(site: Site) -> Result<CookieJson<OkOut>, Error> {
 #[bundles::route(path = "/api/posts")]
 async fn list_posts(
     site: Site,
-    MaybeAdmin(is_admin): MaybeAdmin,
+    admin: Option<AdminUser>,
     Query(query): Query<PostsQuery>,
-) -> Result<Json<PageOut<PostOut>>, Error> {
+) -> Result<Json<db::Page<PostOut>>, Error> {
     let mut db = site.db();
-    let include_all = query.all && is_admin;
-    let posts = query_posts(
-        &mut db,
-        include_all,
-        page_params(query.page, query.per_page),
-    )
-    .await?;
-    Ok(Json(PageOut::from_page(posts, PostOut::from)))
+    let include_all = query.all && admin.is_some();
+    let page = query.page.resolve(DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    let posts = query_posts(&mut db, include_all, page).await?;
+    Ok(Json(posts.map(PostOut::from)))
 }
 
 #[bundles::route(path = "/api/posts/{slug}")]
 async fn show_post(
     site: Site,
-    MaybeUser(user): MaybeUser,
-    MaybeAdmin(is_admin): MaybeAdmin,
+    user: Option<AuthUser>,
+    admin: Option<AdminUser>,
     Path(slug): Path<String>,
 ) -> Result<Json<PostDetailOut>, Error> {
     let mut db = site.db();
-    let post = load_post_by_slug_with_author(&mut db, &slug).await?;
-    if !post.post.published && !is_admin {
+    let post_table = Post::table();
+    let post = db::from(&post_table)
+        .filter(post_table.slug.eq(db::val(slug)))
+        .one::<PostWithAuthor>()
+        .exec(&mut db)
+        .await?;
+    if !post.post.published && admin.is_none() {
         return Err(Error::not_found("post not found"));
     }
-    let comments = load_comments(&mut db, post.post.id).await?;
-    let actor_id = user.as_ref().map(user_id).transpose()?;
+    let comment_table = Comment::table();
+    let comments = db::from(&comment_table)
+        .filter(comment_table.post_id.eq(db::val(post.post.id)))
+        .order_by(comment_table.created_at.asc())
+        .all::<CommentWithAuthor>()
+        .exec(&mut db)
+        .await?;
+    let actor_id = user.as_ref().map(AuthUser::parse_key).transpose()?;
     let actor_is_admin = match actor_id {
-        Some(id) => load_user(&mut db, id).await?.is_admin,
+        Some(id) => {
+            let user_table = User::table();
+            db::from(&user_table)
+                .filter(user_table.id.eq(db::val(id)))
+                .one::<User>()
+                .exec(&mut db)
+                .await?
+                .is_admin
+        }
         None => false,
     };
     Ok(Json(detail_out(post, comments, actor_id, actor_is_admin)))
@@ -508,10 +422,27 @@ async fn create_post(
     Valid(MultipartForm(input)): Valid<MultipartForm<PostForm>>,
 ) -> Result<Json<PostOut>, Error> {
     let mut db = site.db();
-    let admin = load_user(&mut db, user_id(&user.into_user())?).await?;
+    let user_table = User::table();
+    let admin = db::from(&user_table)
+        .filter(user_table.id.eq(db::val(user.into_user().parse_key()?)))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
     let image_url = save_post_image(&site, input.image.as_ref()).await?;
     let slug = unique_slug(&mut db, &slugify(&input.title), None).await?;
-    let post = insert_post(&mut db, &input, slug, image_url, admin.id).await?;
+    let post = db::from(Post::table())
+        .returning::<Post>()
+        .insert(&NewPost {
+            title: input.title.clone(),
+            slug,
+            excerpt: input.excerpt.clone(),
+            body: input.body.clone(),
+            image_url,
+            author_id: admin.id,
+            published: input.published,
+        })
+        .exec(&mut db)
+        .await?;
     Ok(Json(PostOut::from((post, admin))))
 }
 
@@ -524,13 +455,33 @@ async fn update_post(
 ) -> Result<Json<PostOut>, Error> {
     let mut db = site.db();
     let _admin = user.into_user();
-    let current = load_post(&mut db, id).await?;
+    let table = Post::table();
+    let current = db::from(&table)
+        .filter(table.id.eq(db::val(id)))
+        .one::<Post>()
+        .exec(&mut db)
+        .await?;
     let image_url = save_post_image(&site, input.image.as_ref())
         .await?
         .or(current.image_url);
     let slug = unique_slug(&mut db, &slugify(&input.title), Some(id)).await?;
-    update_post_row(&mut db, id, &input, slug, image_url).await?;
-    let updated = load_post_with_author(&mut db, id).await?;
+    db::from(&table)
+        .filter(table.id.eq(db::val(id)))
+        .update(&PostPatch {
+            title: input.title.clone(),
+            slug,
+            excerpt: input.excerpt.clone(),
+            body: input.body.clone(),
+            image_url,
+            published: input.published,
+        })
+        .exec(&mut db)
+        .await?;
+    let updated = db::from(&table)
+        .filter(table.id.eq(db::val(id)))
+        .one::<PostWithAuthor>()
+        .exec(&mut db)
+        .await?;
     Ok(Json(PostOut::from(updated)))
 }
 
@@ -552,16 +503,16 @@ async fn update_status(
         .exec(&mut db)
         .await?;
     Ok(Json(PostOut::from(
-        load_post_with_author(&mut db, id).await?,
+        db::from(&table)
+            .filter(table.id.eq(db::val(id)))
+            .one::<PostWithAuthor>()
+            .exec(&mut db)
+            .await?,
     )))
 }
 
 #[bundles::route(path = "/api/admin/posts/{id}", method = "DELETE")]
-async fn delete_post(
-    site: Site,
-    user: AdminUser,
-    Path(id): Path<i64>,
-) -> Result<Json<OkOut>, Error> {
+async fn delete_post(site: Site, user: AdminUser, Path(id): Path<i64>) -> Result<OkJson, Error> {
     let mut db = site.db();
     let _admin = user.into_user();
     let table = Post::table();
@@ -570,7 +521,7 @@ async fn delete_post(
         .delete()
         .exec(&mut db)
         .await?;
-    Ok(Json(OkOut { ok: true }))
+    Ok(OkJson)
 }
 
 #[bundles::route(path = "/api/posts/{slug}/comments", method = "POST")]
@@ -582,8 +533,18 @@ async fn create_comment(
 ) -> Result<Json<PostDetailOut>, Error> {
     let mut db = site.db();
     let user = user.into_user();
-    let post = load_post_by_slug(&mut db, &slug).await?;
-    let author = load_user(&mut db, user_id(&user)?).await?;
+    let post_table = Post::table();
+    let post = db::from(&post_table)
+        .filter(post_table.slug.eq(db::val(slug)))
+        .one::<Post>()
+        .exec(&mut db)
+        .await?;
+    let user_table = User::table();
+    let author = db::from(&user_table)
+        .filter(user_table.id.eq(db::val(user.parse_key()?)))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
     db::from(&Comment::table())
         .insert(&NewComment {
             post_id: post.id,
@@ -592,8 +553,18 @@ async fn create_comment(
         })
         .exec(&mut db)
         .await?;
-    let post = load_post_with_author(&mut db, post.id).await?;
-    let comments = load_comments(&mut db, post.post.id).await?;
+    let post = db::from(&post_table)
+        .filter(post_table.id.eq(db::val(post.id)))
+        .one::<PostWithAuthor>()
+        .exec(&mut db)
+        .await?;
+    let comment_table = Comment::table();
+    let comments = db::from(&comment_table)
+        .filter(comment_table.post_id.eq(db::val(post.post.id)))
+        .order_by(comment_table.created_at.asc())
+        .all::<CommentWithAuthor>()
+        .exec(&mut db)
+        .await?;
     Ok(Json(detail_out(
         post,
         comments,
@@ -603,54 +574,52 @@ async fn create_comment(
 }
 
 #[bundles::route(path = "/api/comments/{id}", method = "DELETE")]
-async fn delete_comment(
-    site: Site,
-    user: BlogUser,
-    Path(id): Path<i64>,
-) -> Result<Json<OkOut>, Error> {
+async fn delete_comment(site: Site, user: BlogUser, Path(id): Path<i64>) -> Result<OkJson, Error> {
     let mut db = site.db();
     let user = user.into_user();
-    let actor = load_user(&mut db, user_id(&user)?).await?;
-    let comment = load_comment(&mut db, id).await?;
+    let user_table = User::table();
+    let actor = db::from(&user_table)
+        .filter(user_table.id.eq(db::val(user.parse_key()?)))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
+    let table = Comment::table();
+    let comment = db::from(&table)
+        .filter(table.id.eq(db::val(id)))
+        .one::<Comment>()
+        .exec(&mut db)
+        .await?;
     if !actor.is_admin && comment.author_id != actor.id {
         return Err(forbidden(
             "Only comment authors or admins can delete comments.",
         ));
     }
-    let table = Comment::table();
     db::from(&table)
         .filter(table.id.eq(db::val(id)))
         .delete()
         .exec(&mut db)
         .await?;
-    Ok(Json(OkOut { ok: true }))
+    Ok(OkJson)
 }
 
 #[bundles::route(path = "/api/admin/summary")]
 async fn admin_summary(
     site: Site,
     user: AdminUser,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<PageParams>,
 ) -> Result<Json<AdminSummaryOut>, Error> {
     let mut db = site.db();
     let _admin = user.into_user();
     let post_count = db::from(Post::table()).count().exec(&mut db).await?;
     let user_count = db::from(User::table()).count().exec(&mut db).await?;
     let comment_count = db::from(Comment::table()).count().exec(&mut db).await?;
-    let posts = query_posts(
-        &mut db,
-        true,
-        page_params(
-            query.page,
-            Some(query.per_page.unwrap_or(ADMIN_POST_PAGE_SIZE)),
-        ),
-    )
-    .await?;
+    let page = query.resolve(ADMIN_POST_PAGE_SIZE, MAX_PAGE_SIZE);
+    let posts = query_posts(&mut db, true, page).await?;
     Ok(Json(AdminSummaryOut {
         post_count,
         user_count,
         comment_count,
-        posts: PageOut::from_page(posts, PostOut::from),
+        posts: posts.map(PostOut::from),
     }))
 }
 
@@ -658,20 +627,17 @@ async fn admin_summary(
 async fn list_users(
     site: Site,
     user: AdminUser,
-    Query(query): Query<PageQuery>,
-) -> Result<Json<PageOut<UserOut>>, Error> {
+    Query(query): Query<PageParams>,
+) -> Result<Json<db::Page<UserOut>>, Error> {
     let mut db = site.db();
     let _admin = user.into_user();
-    let pagination = page_params(query.page, query.per_page);
-    let total = db::from(User::table()).count().exec(&mut db).await?;
+    let page = query.resolve(DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
     let table = User::table();
     let users = db::from(&table)
         .order_by(table.created_at.desc())
-        .slice::<User>(page_offset_usize(pagination), pagination.per_page)
-        .exec(&mut db)
+        .page::<User, _>(page.page, page.per_page, &mut db)
         .await?;
-    let users = page_from(users, total, pagination);
-    Ok(Json(PageOut::from_page(users, UserOut::from)))
+    Ok(Json(users.map(UserOut::from)))
 }
 
 #[bundles::route(path = "/api/users", method = "POST")]
@@ -694,23 +660,23 @@ async fn create_user(
 }
 
 #[bundles::route(path = "/api/users/{id}", method = "DELETE")]
-async fn delete_user(
-    site: Site,
-    user: AdminUser,
-    Path(id): Path<i64>,
-) -> Result<Json<OkOut>, Error> {
+async fn delete_user(site: Site, user: AdminUser, Path(id): Path<i64>) -> Result<OkJson, Error> {
     let mut db = site.db();
-    let admin = load_user(&mut db, user_id(&user.into_user())?).await?;
+    let table = User::table();
+    let admin = db::from(&table)
+        .filter(table.id.eq(db::val(user.into_user().parse_key()?)))
+        .one::<User>()
+        .exec(&mut db)
+        .await?;
     if admin.id == id {
         return Err(forbidden("Admins cannot delete their own account."));
     }
-    let table = User::table();
     db::from(&table)
         .filter(table.id.eq(db::val(id)))
         .delete()
         .exec(&mut db)
         .await?;
-    Ok(Json(OkOut { ok: true }))
+    Ok(OkJson)
 }
 
 #[bundles::route(path = "/uploads/{name}")]
@@ -741,7 +707,7 @@ async fn create_admin(site: Site, Data(args): Data<CreateAdminArgs>) -> Result<(
 }
 
 #[bundles::schema]
-fn schema() -> db::Schema {
+fn schema() -> Result<db::Schema, db::SchemaLoadError> {
     db::Schema::builder(db::Dialect::Postgres)
         .table::<User>()
         .table::<Post>()
@@ -853,39 +819,8 @@ async fn main() -> Result<(), SiteError> {
         .secret_key(secret)
         .auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
         .console(ConsoleConf::default().enabled(true))
-        .errors(blog_error_conf());
+        .errors(ErrorConf::default().api_json());
     Site::run(conf, app_bundle()).await
-}
-
-fn blog_error_conf() -> ErrorConf {
-    ErrorConf::default()
-        .json(|ctx, view| async move {
-            (
-                view.status,
-                Json(json!({
-                    "source": view.source,
-                    "code": view.code,
-                    "detail": view.message,
-                    "path": ctx.path,
-                    "errors": view.errors,
-                })),
-            )
-                .into_response()
-        })
-        .html(|ctx, view| async move {
-            let body = error_html(ctx.method.as_str(), &ctx.path, view.status.as_u16());
-            (view.status, Html(body)).into_response()
-        })
-        .http_mode(HttpErrorRenderMode::Auto)
-}
-
-fn error_html(method: &str, path: &str, status: u16) -> String {
-    format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><title>{status}</title></head><body><main><h1>{status}</h1><p>{method} {path}</p></main></body></html>"#,
-        status = status,
-        method = escape_html(method),
-        path = escape_html(path),
-    )
 }
 
 async fn insert_user(
@@ -895,11 +830,17 @@ async fn insert_user(
     password: &str,
     is_admin: bool,
 ) -> Result<User, Error> {
-    if find_user_by_username(db, username).await.is_ok() {
+    let table = User::table();
+    if db::from(&table)
+        .filter(table.username.eq(db::val(username.to_string())))
+        .exists()
+        .exec(db)
+        .await?
+    {
         return Err(Error::bad_request("username already exists"));
     }
     let password_hash = make_password(password, None, None)?;
-    Ok(db::from(User::table())
+    Ok(db::from(&table)
         .returning::<User>()
         .insert(&NewUser {
             username: username.to_string(),
@@ -911,152 +852,20 @@ async fn insert_user(
         .await?)
 }
 
-async fn insert_post(
-    db: &mut db::DbPool,
-    input: &PostForm,
-    slug: String,
-    image_url: Option<String>,
-    author_id: i64,
-) -> Result<Post, Error> {
-    Ok(db::from(Post::table())
-        .returning::<Post>()
-        .insert(&NewPost {
-            title: input.title.clone(),
-            slug: slug.clone(),
-            excerpt: input.excerpt.clone(),
-            body: input.body.clone(),
-            image_url,
-            author_id,
-            published: input.published,
-        })
-        .exec(db)
-        .await?)
-}
-
-async fn update_post_row(
-    db: &mut db::DbPool,
-    id: i64,
-    input: &PostForm,
-    slug: String,
-    image_url: Option<String>,
-) -> Result<(), Error> {
-    let table = Post::table();
-    db::from(&table)
-        .filter(table.id.eq(db::val(id)))
-        .update(&PostPatch {
-            title: input.title.clone(),
-            slug,
-            excerpt: input.excerpt.clone(),
-            body: input.body.clone(),
-            image_url,
-            published: input.published,
-        })
-        .exec(db)
-        .await?;
-    Ok(())
-}
-
 async fn query_posts(
     db: &mut db::DbPool,
     include_all: bool,
-    pagination: Pagination,
+    page: vyuh::routes::PageBounds,
 ) -> Result<db::Page<PostWithAuthor>, Error> {
     let table = Post::table();
-    let total = if include_all {
-        db::from(&table).count().exec(db).await?
-    } else {
-        db::from(&table)
-            .filter(table.published.eq(db::val(true)))
-            .count()
-            .exec(db)
-            .await?
-    };
     let scope = db::from(&table).order_by(table.created_at.desc());
     let scope = if include_all {
         scope
     } else {
         scope.filter(table.published.eq(db::val(true)))
     };
-    let items = scope
-        .slice::<PostWithAuthor>(page_offset_usize(pagination), pagination.per_page)
-        .exec(db)
-        .await?;
-    Ok(page_from(items, total, pagination))
-}
-
-async fn load_post_with_author(db: &mut db::DbPool, id: i64) -> Result<PostWithAuthor, Error> {
-    let table = Post::table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(id)))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_post_by_slug_with_author(
-    db: &mut db::DbPool,
-    slug: &str,
-) -> Result<PostWithAuthor, Error> {
-    let table = Post::table();
-    Ok(db::from(&table)
-        .filter(table.slug.eq(db::val(slug.to_string())))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_user(db: &mut db::DbPool, id: i64) -> Result<User, Error> {
-    let table = User::table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(id)))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn find_user_by_username(db: &mut db::DbPool, username: &str) -> Result<User, Error> {
-    let table = User::table();
-    Ok(db::from(&table)
-        .filter(table.username.eq(db::val(username.to_string())))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_post(db: &mut db::DbPool, id: i64) -> Result<Post, Error> {
-    let table = Post::table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(id)))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_post_by_slug(db: &mut db::DbPool, slug: &str) -> Result<Post, Error> {
-    let table = Post::table();
-    Ok(db::from(&table)
-        .filter(table.slug.eq(db::val(slug.to_string())))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_comment(db: &mut db::DbPool, id: i64) -> Result<Comment, Error> {
-    let table = Comment::table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(id)))
-        .one()
-        .exec(db)
-        .await?)
-}
-
-async fn load_comments(db: &mut db::DbPool, post_id: i64) -> Result<Vec<CommentWithAuthor>, Error> {
-    let table = Comment::table();
-    Ok(db::from(&table)
-        .filter(table.post_id.eq(db::val(post_id)))
-        .order_by(table.created_at.asc())
-        .all()
-        .exec(db)
+    Ok(scope
+        .page::<PostWithAuthor, _>(page.page, page.per_page, db)
         .await?)
 }
 
@@ -1073,14 +882,6 @@ async fn unique_slug(
         }
     }
     Err(Error::bad_request("could not generate unique slug"))
-}
-
-fn numbered_slug(base: &str, index: usize) -> String {
-    if index == 0 {
-        base.to_string()
-    } else {
-        format!("{base}-{index}")
-    }
 }
 
 async fn slug_exists(
@@ -1179,76 +980,121 @@ impl CommentOut {
     }
 }
 
-impl<T> PageOut<T> {
-    fn from_page<I>(page: db::Page<I>, map: impl Fn(I) -> T) -> Self {
-        Self {
-            items: page.items.into_iter().map(map).collect(),
-            total: page.total,
-            page: page.page,
-            per_page: page.per_page,
-            total_pages: page.total_pages,
-        }
-    }
-}
-
-fn page_from<T>(items: Vec<T>, total: i64, pagination: Pagination) -> db::Page<T> {
-    let total_pages = if pagination.per_page == 0 {
-        0
-    } else {
-        ((total.max(0) as usize) + pagination.per_page - 1) / pagination.per_page
-    };
-    db::Page {
-        items,
-        total,
-        page: pagination.page,
-        per_page: pagination.per_page,
-        total_pages,
-    }
-}
-
-fn page_offset_usize(pagination: Pagination) -> usize {
-    (pagination.page - 1) * pagination.per_page
-}
-
-fn page_params(page: Option<usize>, per_page: Option<usize>) -> Pagination {
-    Pagination {
-        page: page.unwrap_or(1).max(1),
-        per_page: per_page
-            .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE),
-    }
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn user_id(user: &AuthUser) -> Result<i64, Error> {
-    user.key
-        .parse::<i64>()
-        .map_err(|_| Error::bad_request("invalid user id in token"))
-}
-
 fn forbidden(message: &str) -> Error {
     Error::new(ErrorKind::Forbidden).with_context(message.to_string())
 }
 
-fn slugify(value: &str) -> String {
-    let mut out = String::new();
-    let mut dash = false;
-    for ch in value.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            dash = false;
-        } else if !dash && !out.is_empty() {
-            out.push('-');
-            dash = true;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use thiserror::Error as ThisError;
+    use vyuh::testing::TestClient;
+
+    #[derive(Debug, ThisError)]
+    enum TestError {
+        #[error(transparent)]
+        Blog(#[from] Error),
+        #[error(transparent)]
+        Db(#[from] db::DbError),
+        #[error(transparent)]
+        Sql(#[from] db::sqlx::Error),
+        #[error(transparent)]
+        Client(#[from] vyuh::testing::TestClientError),
     }
-    out.trim_matches('-').to_string()
+
+    /// Returns test-safe application configuration using the configured PostgreSQL test server.
+    fn test_conf() -> Result<SiteConf, db::DbError> {
+        Ok(SiteConf::default()
+            .secret_key("vyuh-blog-test-secret-key-with-enough-entropy")
+            .auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
+            .errors(ErrorConf::default().api_json())
+            .log_init(false)
+            .database(db::DbConf::from_env()?))
+    }
+
+    /// Seeds published and draft posts through the same Mool queries used by the application.
+    async fn seed_posts(site: &Site) -> Result<(), Error> {
+        let mut db = site.db();
+        let author = insert_user(&mut db, "writer", "Writer", "password-123", false).await?;
+        let table = Post::table();
+        for (title, slug, published) in [
+            ("Published post", "published-post", true),
+            ("Draft post", "draft-post", false),
+        ] {
+            db::from(&table)
+                .insert(&NewPost {
+                    title: title.to_string(),
+                    slug: slug.to_string(),
+                    excerpt: "Example excerpt".to_string(),
+                    body: "Example body".to_string(),
+                    image_url: None,
+                    author_id: author.id,
+                    published,
+                })
+                .exec(&mut db)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Verifies that Mool-isolated data is exercised through Vyuh's in-process HTTP client.
+    #[tokio::test]
+    async fn public_posts_hide_drafts() -> Result<(), TestError> {
+        let client = TestClient::from_conf(test_conf()?, app_bundle()).await?;
+        seed_posts(client.site()).await?;
+
+        let response = client.get("/api/posts").send().await.assert_ok();
+        let body: Value = response.json().await;
+        assert_eq!(body.pointer("/total").and_then(Value::as_i64), Some(1));
+        assert_eq!(
+            body.pointer("/items/0/slug").and_then(Value::as_str),
+            Some("published-post")
+        );
+
+        client.teardown().await?;
+        Ok(())
+    }
+
+    /// Verifies that a test client can intentionally leave registered migrations unapplied.
+    #[tokio::test]
+    async fn client_can_skip_migrations() -> Result<(), TestError> {
+        let client = TestClient::builder(test_conf()?, app_bundle())
+            .without_migrations()
+            .build()
+            .await?;
+        let table: Option<String> =
+            db::sqlx::query_scalar("SELECT to_regclass('public.blog_users')::text")
+                .fetch_one(client.site().db().as_sqlx())
+                .await?;
+        assert_eq!(table, None);
+
+        client.teardown().await?;
+        Ok(())
+    }
+
+    /// Verifies that the blog login route returns a session cookie for a valid user.
+    #[tokio::test]
+    async fn login_returns_session_cookie() -> Result<(), TestError> {
+        let client = TestClient::from_conf(test_conf()?, app_bundle()).await?;
+        let mut db = client.site().db();
+        insert_user(&mut db, "reader", "Reader", "password-123", false).await?;
+
+        let response = client
+            .post("/api/session")
+            .json(&LoginInput {
+                username: "reader".to_string(),
+                password: "password-123".to_string(),
+            })
+            .send()
+            .await
+            .assert_ok();
+        let cookie = response
+            .header("set-cookie")
+            .and_then(|value| value.to_str().ok());
+        assert!(cookie.is_some_and(|value| value.starts_with("blog_access=")));
+
+        client.teardown().await?;
+        Ok(())
+    }
 }

@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Expr<std::string::String>: IntoExpr<i64>` is not satisfied
+  --> tests/ui/typed_query/values_wrong_type.rs:18:25
+   |
+18 |         .set(&posts.id, db::val("wrong".to_string()));
+   |          ---            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoExpr<i64>` is not implemented for `Expr<std::string::String>`
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = help: the trait `IntoExpr<i64>` is not implemented for `Expr<std::string::String>`
+           but trait `IntoExpr<std::string::String>` is implemented for it
+   = help: for that trait implementation, expected `std::string::String`, found `i64`
+note: required by a bound in `queries::executables::write::<impl mool::queries::Insert<&'a T>>::set`
+  --> $DB_CORE/src/queries/executables/write.rs
+   |
+   |     pub fn set<V>(self, column: &Column<V>, expr: impl IntoExpr<V>) -> Insert<WriteValues<'a, T>> {
+   |                                                        ^^^^^^^^^^^ required by this bound in `queries::executables::write::<impl Insert<&T>>::set`
