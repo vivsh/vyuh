@@ -61,7 +61,7 @@ serde_urlencoded = "0.7"
 rust-silos = {version="^0.3"}
 
 vyuh-macros = { path = "../vyuh-macros", version = "0.2.11" }
-db_core = { package = "mool", git = "https://github.com/vivsh/mool.git", rev = "1bc32db7c2fd6a17cb44d75b8efe4c0b4af9222a" }
+db_core = { package = "mool", git = "https://github.com/vivsh/mool.git", rev = "9f29c3cfbe669ad883ed078594d156682ce30baf" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"
 notify = "^8.1"

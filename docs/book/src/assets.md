@@ -17,6 +17,7 @@ The main public pieces are:
 - Runtime serving of `public/**` under `/assets`.
 - `collect_assets` for copying bundled public assets to a deployment directory.
 - Minijinja loading of private `templates/**` files.
+- Mool/Gaman desired-schema loading from private `schema/**` files.
 
 Asset dirs are part of bundle composition. A feature can register routes,
 templates, public CSS, and private resources as one bundle.
@@ -41,6 +42,9 @@ assets/
     dashboard/
       layouts/
         base.html
+  schema/
+    users.yaml
+    reporting.sql
   sql/
     reports.sql
 ```
@@ -49,11 +53,13 @@ The folders have different visibility:
 
 - `public/**` is served over HTTP and copied by `collect_assets`.
 - `templates/**` is loaded into Minijinja and is not public.
+- `schema/**` is parsed as desired database schema when the `migrations` feature is enabled.
 - `sql/**` and other non-public folders are private resources.
 
 Database migrations do not live under assets. They are crate-owned database
-history files in a flat top-level `migrations/` directory. See
-[Migrations](migrations.md) for the migration model.
+history files in a flat top-level `migrations/` directory. Schema assets are
+desired state; migrations are immutable history. See [Migrations](migrations.md)
+for the migration model.
 
 Public namespacing is done by folders under `public/`. For example,
 `public/dashboard/dashboard.css` is served as `/assets/dashboard/dashboard.css`.
@@ -82,6 +88,21 @@ let bundle = bundles::bundle! {
 `embed_silo!` reads from the filesystem in debug builds and embeds the files in
 release builds. That keeps local frontend iteration fast while making release
 binaries self-contained.
+
+Later registered asset directories override earlier files with the same relative
+path. This applies consistently to templates and schema assets.
+
+## Schema Assets
+
+Files below `schema/` are private desired-schema inputs for the migration engine:
+
+- `.yaml` and `.yml` files use Gaman's authored schema format.
+- `.sql` files use authored DDL parsed for the configured database dialect.
+- Files are merged through Mool; they are never executed as ad-hoc SQL.
+
+Schema assets participate in `make_migration`, `--dry-run`, and `--check`. They
+never apply migrations or modify a database while a site starts. They are not
+served under `/assets` and are not copied by `collect_assets`.
 
 ## Runtime Serving
 
@@ -156,9 +177,9 @@ public/dashboard/dashboard.css -> <output-dir>/dashboard/dashboard.css
 public/images/logo.svg -> <output-dir>/images/logo.svg
 ```
 
-`collect_assets` does not copy templates, SQL files, database migrations, or
-other private resources. It copies the same public asset surface that runtime
-serving exposes.
+`collect_assets` does not copy templates, schema files, SQL files, database
+migrations, or other private resources. It copies the same public asset surface
+that runtime serving exposes.
 
 Use `collect_assets` when the application server should not serve assets
 directly in production, or when a deployment platform expects a static asset

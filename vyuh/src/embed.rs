@@ -100,4 +100,45 @@ impl DirSet {
         let files: Vec<File> = self.inner.iter().map(File::new).collect();
         files.into_iter()
     }
+
+    /// Walks files using later directory entries as path-level overrides.
+    pub fn walk_override(&self) -> impl Iterator<Item = File> {
+        let files: Vec<File> = self.inner.iter_override().map(File::new).collect();
+        files.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io, path::Path};
+
+    use super::*;
+
+    fn asset_dir(path: &Path) -> Result<Dir, io::Error> {
+        let root = path
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 asset path"))?;
+        Ok(Dir::new(Silo::new(root)))
+    }
+
+    /// Verifies that later asset directories override matching relative paths.
+    #[test]
+    fn walk_override_uses_later_file() -> Result<(), io::Error> {
+        let first = tempfile::tempdir()?;
+        let second = tempfile::tempdir()?;
+        std::fs::write(first.path().join("shared.txt"), "first")?;
+        std::fs::write(second.path().join("shared.txt"), "second")?;
+
+        let files = DirSet::new(vec![asset_dir(first.path())?, asset_dir(second.path())?])
+            .walk_override()
+            .collect::<Vec<_>>();
+
+        assert_eq!(files.len(), 1);
+        let bytes = files
+            .first()
+            .ok_or_else(|| io::Error::other("overlaid file was not found"))?
+            .read_bytes_sync()?;
+        assert_eq!(bytes, b"second");
+        Ok(())
+    }
 }

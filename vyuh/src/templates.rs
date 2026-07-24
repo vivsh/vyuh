@@ -85,9 +85,6 @@ pub enum TemplateError {
     #[error("Template not found: {0}")]
     NotFound(String),
 
-    #[error("Duplicate template: {0}")]
-    Duplicate(String),
-
     #[error("Render error: {0}")]
     RenderError(#[from] minijinja::Error),
 }
@@ -150,7 +147,7 @@ impl TemplateEngine {
             dir_vec.push(asset_dir.clone());
         }
 
-        for file in embed::DirSet::new(dir_vec).walk() {
+        for file in embed::DirSet::new(dir_vec).walk_override() {
             self.inject_file(file, Some("templates/"))?;
         }
 
@@ -181,10 +178,6 @@ impl TemplateEngine {
 
         if name.is_empty() {
             return Ok(());
-        }
-
-        if self.exists(&name) {
-            return Err(TemplateError::Duplicate(name));
         }
 
         let content = file.read_bytes_sync().map_err(|e| {
@@ -779,8 +772,9 @@ mod tests {
         );
     }
 
+    /// Verifies that a later asset directory overrides a matching template path.
     #[test]
-    fn duplicate_template_names_are_rejected() {
+    fn later_assets_override_templates() {
         let first = tempfile::tempdir().unwrap();
         write_file(
             first.path().join("templates/shared.html").as_path(),
@@ -801,9 +795,14 @@ mod tests {
         ]);
 
         let mut engine = TemplateEngine::new();
-        let err = engine.inject_templates(&bundle).unwrap_err();
+        engine.inject_templates(&bundle).unwrap();
 
-        assert!(matches!(err, TemplateError::Duplicate(name) if name == "shared.html"));
+        assert_eq!(
+            engine
+                .render("shared.html", &serde_json::json!({}))
+                .unwrap(),
+            "second"
+        );
     }
 
     #[test]

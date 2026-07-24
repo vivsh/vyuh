@@ -294,6 +294,18 @@ impl SiteBuilder {
 
         let mut bundle = bundle.with_router_unchecked(router);
 
+        #[cfg(feature = "migrations")]
+        crate::schema_assets::register(
+            &mut bundle.migrations,
+            &bundle.asset_dirs,
+            &self.conf.database.url,
+        )
+        .map_err(|error| SiteError::AssetError(error.to_string()))?;
+
+        #[cfg(not(feature = "migrations"))]
+        crate::schema_assets::reject(&bundle.asset_dirs)
+            .map_err(|error| SiteError::AssetError(error.to_string()))?;
+
         #[cfg(all(
             feature = "migrations",
             any(feature = "postgres", feature = "mysql", feature = "sqlite")

@@ -28,8 +28,9 @@ migrations/
   0002_add_sessions.yaml
 ```
 
-Migrations do not live under `assets/`. Assets are runtime resources; migrations
-are database history.
+Migrations do not live under `assets/`; they are database history. Embedded
+`assets/schema/**` files may define desired schema state, but they do not replace
+committed migrations and never run automatically at site startup.
 
 Migration files are embedded into the executable at compile time with
 `embedded_migrations!`, so release deployments do not need to ship loose YAML

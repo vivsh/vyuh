@@ -189,13 +189,14 @@ Use public asset URLs from templates:
 
 See [Assets](assets.md) for public asset serving and `collect_assets`.
 
-## Naming And Duplicates
+## Naming And Overrides
 
 Template names are explicit paths such as `dashboard/base.html`. There are no
 package names or hidden namespace rules.
 
-Duplicate template names fail site build. This keeps rendering deterministic and
-prevents one bundle from silently replacing another bundle's template.
+Later registered asset directories override earlier templates with the same
+relative name. This gives an application a deliberate, deterministic way to
+replace a dependency template without adding package namespaces.
 
 ## Examples
 
@@ -206,7 +207,6 @@ formatting.
 ## Failure Modes
 
 - Missing templates return `TemplateError::NotFound`.
-- Duplicate template names fail during site build.
 - Invalid UTF-8 template files fail during site build.
 - Invalid template syntax fails during site build.
 - Render-time template errors return `TemplateError::RenderError`.

@@ -495,12 +495,9 @@ pub(crate) fn migration_runner(
     };
     let dialect = crate::db::engine::Config::dialect_from_database_url(&database_url)
         .map_err(Error::other)?;
-    let config = crate::db::engine::Config::new(
-        database_url,
-        source.dir(),
-        PathBuf::from("schema.yaml"),
-        dialect,
-    );
+    let registry_schema_path = source.dir().join(".vyuh-registry-schema.yaml");
+    let config =
+        crate::db::engine::Config::new(database_url, source.dir(), registry_schema_path, dialect);
     let runner = crate::db::engine::NativeRunnerFactory::from_store(config, registry).build();
     Ok(Some(Arc::new(tokio::sync::Mutex::new(runner))))
 }

@@ -52,9 +52,9 @@ The `vyuh` crate is organized around these subsystems:
   built `Site`.
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
   operations and types.
-- `assets`, `templates`, and `embed` provide embedded assets, server-side
-  templates, private bundle resources, and the shared web asset surface used by
-  the built-in console.
+- `assets`, `templates`, and `embed` provide overlaid embedded assets,
+  server-side templates, private bundle resources, desired-schema assets, and
+  the shared web asset surface used by the built-in console.
 - `utils` provides small framework-neutral helpers for common web application
   tasks. Subsystem-specific helpers stay in their owning modules.
 - `collectors` provides URL metadata, asset collection, and selected page
@@ -141,8 +141,9 @@ the client-facing event type uses the payload schema name.
    observability endpoints are mounted before the site router is finalized and
    request metrics are applied as a site-wide middleware.
 4. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
-   template loading so console HTML and public assets ship with the runtime
-   crate.
+   private template and schema asset loading. Later asset directories override
+   earlier matching paths; schema assets are parsed into the migration registry
+   without modifying the database.
 5. Axum routes receive `Site` as state and handlers use typed extractors.
 6. Handlers call query builders or services and return typed responses.
 7. OpenAPI and schema metadata are produced from registered operations and

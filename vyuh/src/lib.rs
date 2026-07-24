@@ -37,6 +37,7 @@ pub mod validators;
 mod watch;
 
 pub mod routes;
+mod schema_assets;
 pub use callables::{Data, DataValue, Operation, OperationKind};
 pub use commands::CommandError;
 pub use conf::{DeploymentMode, SiteConf};
