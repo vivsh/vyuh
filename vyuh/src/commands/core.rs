@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::{CommandConf, CommandError, CommandRegistry};
 use crate::callables::specs::{ArgPart, IntoArgPart};
 use crate::callables::{self, Data, FromSite};
-use crate::{Error, Site};
+use crate::{Error, ErrorKind, Site};
 
 // ── SiteRef extractor ─────────────────────────────────────────────────────────
 
@@ -337,7 +337,7 @@ async fn make_migration_command(
     let schema = site
         .migration_registry()
         .schema_for(None)
-        .map_err(Error::other)?;
+        .map_err(migration_schema_error)?;
     match run_migration_command(&site, make_command(&args, schema)?).await? {
         crate::db::engine::CommandResult::Make(result) => print_make_result(result),
         result => Err(unexpected_migration_result("make_migration", result)),
@@ -481,7 +481,51 @@ async fn run_migration_command(
         .migration_runner()
         .ok_or_else(|| Error::invalid("no root migration source is registered"))?;
     let mut runner = runner.lock().await;
-    runner.run_command(&command).await.map_err(Error::other)
+    runner
+        .run_command(&command)
+        .await
+        .map_err(migration_command_error)
+}
+
+#[cfg(feature = "migrations")]
+/// Converts a schema-registration failure into an actionable, caller-correctable command error.
+fn migration_schema_error(error: crate::db::MigrationError) -> Error {
+    let context = match &error {
+        crate::db::MigrationError::SchemaSource { namespace, .. } => {
+            format!("migration schema source '{namespace}' is invalid; inspect the server diagnostic for details")
+        }
+        crate::db::MigrationError::Schema(_) => {
+            "migration schema contributions cannot be merged; inspect the server diagnostic for details".to_string()
+        }
+        _ => "migration schema registration is invalid; inspect the server diagnostic for details"
+            .to_string(),
+    };
+    Error::wrap(ErrorKind::Invalid, error).with_context(context)
+}
+
+#[cfg(feature = "migrations")]
+/// Converts Gaman command diagnostics without exposing execution details to HTTP callers.
+fn migration_command_error(error: crate::db::engine::MigrationCommandError) -> Error {
+    use crate::db::engine::DiagnosticCode;
+
+    let diagnostic = error.diagnostic();
+    let context = match diagnostic.code {
+        DiagnosticCode::InvalidCommand => diagnostic.summary,
+        DiagnosticCode::ClarificationRequired => diagnostic.summary,
+        DiagnosticCode::ParseFailed => {
+            "migration SQL could not be parsed; inspect the server diagnostic for details"
+                .to_string()
+        }
+        _ => format!("migration command failed ({:?})", diagnostic.code),
+    };
+    let kind = match diagnostic.code {
+        DiagnosticCode::InvalidCommand
+        | DiagnosticCode::ClarificationRequired
+        | DiagnosticCode::ParseFailed => ErrorKind::Invalid,
+        _ => ErrorKind::Other,
+    };
+
+    Error::wrap(kind, error).with_context(context)
 }
 
 #[cfg(feature = "migrations")]
@@ -581,4 +625,62 @@ fn print_pending_migrations(pending: Vec<String>) -> Result<(), Error> {
 #[cfg(feature = "migrations")]
 fn unexpected_migration_result(command: &str, result: crate::db::engine::CommandResult) -> Error {
     Error::invalid(format!("{command} received unexpected result: {result:?}"))
+}
+
+#[cfg(all(test, feature = "migrations"))]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+    use crate::errors::ErrorView;
+
+    /// Verifies invalid migration commands become actionable client diagnostics.
+    #[test]
+    fn invalid_migration_command_is_an_unprocessable_diagnostic() {
+        let error = migration_command_error(crate::db::engine::MigrationCommandError::Invalid(
+            "a target migration id is required".to_string(),
+        ));
+        let view = ErrorView::from_error(&error);
+
+        assert_eq!(view.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(view.message.contains("target migration id is required"));
+        assert!(
+            error
+                .display_verbose()
+                .contains("a target migration id is required")
+        );
+    }
+
+    /// Verifies parser internals remain in the server diagnostic rather than the HTTP response.
+    #[test]
+    fn migration_parse_failure_redacts_sql_from_the_response() {
+        let error = migration_command_error(crate::db::engine::MigrationCommandError::Parse(
+            "unexpected token in SELECT secret_value FROM private_table".to_string(),
+        ));
+        let view = ErrorView::from_error(&error);
+
+        assert_eq!(view.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(view.message.contains("could not be parsed"));
+        assert!(!view.message.contains("secret_value"));
+        assert!(error.display_verbose().contains("secret_value"));
+    }
+
+    /// Verifies schema source failures retain their cause without exposing authored SQL text.
+    #[test]
+    fn migration_schema_failure_redacts_source_from_the_response() {
+        let error = migration_schema_error(crate::db::MigrationError::SchemaSource {
+            namespace: "reports".to_string(),
+            source: crate::db::SchemaLoadError::Validation(
+                crate::db::gaman::schema::SchemaValidationError::Invalid(
+                    "SELECT secret_value FROM private_table".to_string(),
+                ),
+            ),
+        });
+        let view = ErrorView::from_error(&error);
+
+        assert_eq!(view.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(view.message.contains("reports"));
+        assert!(!view.message.contains("secret_value"));
+        assert!(error.display_verbose().contains("secret_value"));
+    }
 }

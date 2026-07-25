@@ -8,9 +8,9 @@ use crate::embed::{self, Dir};
 
 const SCHEMA_DIR: &str = "schema";
 
-/// Errors raised while loading private schema assets.
+/// Errors raised while loading embedded desired-schema assets.
 #[derive(Debug, Error)]
-pub(crate) enum SchemaAssetError {
+pub enum SchemaAssetError {
     #[cfg(not(feature = "migrations"))]
     #[error("schema assets require the `migrations` feature: {path}")]
     MigrationsDisabled { path: PathBuf },
@@ -234,6 +234,59 @@ mod tests {
 
         let schema = registry.schema_for(None).map_err(test_error)?;
         assert!(schema.tables.contains_key("audit_log"));
+        Ok(())
+    }
+
+    /// Verifies PostgreSQL functions with nested CTE and LATERAL SQL load as schema assets.
+    #[test]
+    fn postgres_function_asset_loads_without_truncation() -> Result<(), io::Error> {
+        let source = r#"
+CREATE OR REPLACE FUNCTION dynrs_daily_report(p_working_date date)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+AS $$
+WITH eligible_sessions AS (
+    SELECT s.id, s.user_id
+    FROM sessions AS s
+    WHERE s.working_date = p_working_date
+), report_rows AS (
+    SELECT session.id, payload.report
+    FROM eligible_sessions AS session
+    CROSS JOIN LATERAL (
+        SELECT jsonb_build_object('user_id', session.user_id) AS report
+    ) AS payload
+)
+SELECT coalesce(jsonb_agg(report), '[]'::jsonb)
+FROM report_rows;
+$$;
+"#;
+
+        let schema = parse_source(
+            Path::new("schema/reports.sql"),
+            source,
+            crate::db::Dialect::Postgres,
+        )
+        .map_err(test_error)?;
+
+        assert_eq!(schema.functions.len(), 1);
+        Ok(())
+    }
+
+    /// Verifies malformed SQL retains the asset path and parser location for operators.
+    #[test]
+    fn sql_asset_parse_error_includes_path_and_location() -> Result<(), io::Error> {
+        let error = parse_source(
+            Path::new("schema/reports.sql"),
+            "CREATE TABLE reports (id integer,);",
+            crate::db::Dialect::Postgres,
+        )
+        .expect_err("invalid SQL must fail");
+        let message = error.to_string();
+
+        assert!(message.contains("schema/reports.sql"));
+        assert!(message.contains("postgres SQL parse error"));
+        assert!(message.contains("line"));
         Ok(())
     }
 

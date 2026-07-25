@@ -79,8 +79,8 @@ pub enum SiteError {
     #[error("Configuration error: {0}")]
     ConfError(#[from] conf::ConfError),
 
-    #[error("Assets error: {0}")]
-    AssetError(String),
+    #[error("schema asset error: {0}")]
+    SchemaAsset(#[from] crate::schema_assets::SchemaAssetError),
 
     #[error("Template file error: {0}")]
     TemplateFileError(String),
@@ -299,12 +299,10 @@ impl SiteBuilder {
             &mut bundle.migrations,
             &bundle.asset_dirs,
             &self.conf.database.url,
-        )
-        .map_err(|error| SiteError::AssetError(error.to_string()))?;
+        )?;
 
         #[cfg(not(feature = "migrations"))]
-        crate::schema_assets::reject(&bundle.asset_dirs)
-            .map_err(|error| SiteError::AssetError(error.to_string()))?;
+        crate::schema_assets::reject(&bundle.asset_dirs)?;
 
         #[cfg(all(
             feature = "migrations",

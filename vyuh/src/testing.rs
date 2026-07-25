@@ -328,7 +328,7 @@ mod test_run_error_tests {
 
     /// Supplies a structured teardown failure without opening a database connection.
     fn cleanup_error() -> TestSiteError {
-        TestSiteError::Site(SiteError::AssetError("test cleanup failure".to_string()))
+        TestSiteError::Site(SiteError::TimezoneError("test cleanup failure".to_string()))
     }
 
     /// Retains a structured setup failure before a test body can be entered.
