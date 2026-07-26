@@ -11,8 +11,7 @@ use crate::{
 /// stores status as its stable integer representation so database metadata is
 /// independent of the public task enum's SQLx compatibility derive.
 #[derive(Debug, Clone, db::Model)]
-#[cfg_attr(feature = "postgres", table(name = "tasks", schema = "vyuh"))]
-#[cfg_attr(any(feature = "mysql", feature = "sqlite"), table(name = "vyuh_tasks"))]
+#[table(name = "vyuh_tasks")]
 pub(super) struct TaskRow {
     #[column(primary_key, type = "uuid")]
     pub(super) id: uuid::Uuid,
@@ -97,7 +96,7 @@ impl TryFrom<TaskRow> for TaskRecord {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct ClaimPatch {
     pub(super) status: i16,
     pub(super) locked_by: Option<String>,
@@ -106,7 +105,7 @@ pub(super) struct ClaimPatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct ResumePatch {
     pub(super) status: i16,
     pub(super) resume_input: Option<String>,
@@ -115,7 +114,7 @@ pub(super) struct ResumePatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct CompletePatch {
     pub(super) status: i16,
     pub(super) resume_input: Option<String>,
@@ -130,7 +129,7 @@ pub(super) struct CompletePatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct SuspendPatch {
     pub(super) status: i16,
     pub(super) state: String,
@@ -146,7 +145,7 @@ pub(super) struct SuspendPatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct SleepPatch {
     pub(super) status: i16,
     pub(super) state: String,
@@ -162,7 +161,7 @@ pub(super) struct SleepPatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct FailPatch {
     pub(super) status: i16,
     pub(super) resume_input: Option<String>,
@@ -177,7 +176,7 @@ pub(super) struct FailPatch {
 }
 
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "tasks")]
+#[table(name = "vyuh_tasks")]
 pub(super) struct RetryPatch {
     pub(super) status: i16,
     pub(super) attempts: i32,

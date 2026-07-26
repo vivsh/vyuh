@@ -27,6 +27,7 @@ SSE, or long polling from the request; application handlers do not need Axum
 upgrade extractors.
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::auth::AuthUser;
 use vyuh::prelude::*;
 

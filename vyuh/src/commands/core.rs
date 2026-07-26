@@ -1,3 +1,5 @@
+#[cfg(feature = "migrations")]
+use crate::ErrorKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -7,7 +9,7 @@ use std::sync::Arc;
 use super::{CommandConf, CommandError, CommandRegistry};
 use crate::callables::specs::{ArgPart, IntoArgPart};
 use crate::callables::{self, Data, FromSite};
-use crate::{Error, ErrorKind, Site};
+use crate::{Error, Site};
 
 // ── SiteRef extractor ─────────────────────────────────────────────────────────
 

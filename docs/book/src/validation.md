@@ -11,6 +11,7 @@ separate steps:
 This keeps API behavior visible in the handler signature:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 async fn parse_only(Json(input): Json<CreateUser>) {
@@ -36,6 +37,7 @@ async fn parse_and_validate(Valid(Json(input)): Valid<Json<CreateUser>>) {
 Derive `Validate` on request DTOs and add `#[validate(...)]` attributes:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Deserialize, JsonSchema, Validate)]
@@ -202,6 +204,8 @@ Root-level errors are emitted under `non_field_errors`.
 Use `delegate` when a field's type has its own validation rules:
 
 ```rust
+use schemars::JsonSchema;
+
 #[derive(Deserialize, JsonSchema, Validate)]
 struct Address {
     #[validate(min_length = 2)]

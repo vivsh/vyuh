@@ -20,10 +20,12 @@ syn = { version = "2", features = ["full"] }
 darling = "0.20"
 heck = "0.4"
 cron = "0.12"
-mool-macros-impl = "0.1.2"
+mool-macros-impl = { git = "file:///Users/vivek/Projects/mool", rev = "0f8628158fa56503948377851bad218be1b8bf96" }
+rust-silos-macros-impl = "0.1.0"
 
 tokio = {workspace = true}
 
 [dev-dependencies]
-vyuh = { path = "../vyuh", features = ["postgres", "test-support"] }
+vyuh = { path = "../vyuh", features = ["postgres", "migrations", "test-support"] }
+schemars = "1"
 trybuild = "1.0"

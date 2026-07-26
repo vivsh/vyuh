@@ -58,10 +58,10 @@ tracing-log = "0.2"
 
 http-serde = "2.1.1"
 serde_urlencoded = "0.7"
-rust-silos = {version="^0.3"}
+rust-silos = { version = "^0.3.2" }
 
 vyuh-macros = { path = "../vyuh-macros", version = "0.2.11" }
-db_core = { package = "mool", git = "https://github.com/vivsh/mool.git", rev = "9f29c3cfbe669ad883ed078594d156682ce30baf" }
+db_core = { package = "mool", git = "file:///Users/vivek/Projects/mool", rev = "0f8628158fa56503948377851bad218be1b8bf96" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"
 notify = "^8.1"

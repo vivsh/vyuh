@@ -88,6 +88,7 @@ Add the crate with one backend feature for production work:
 
 ```toml
 vyuh = { version = "0.2", features = ["postgres"] }
+schemars = "1"
 ```
 
 For local experiments or documentation examples, Vyuh can run without a backend
@@ -96,6 +97,7 @@ feature with no live database pool and in-memory tasks.
 Start with one route, one cron emitter, and one OpenAPI declaration:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]

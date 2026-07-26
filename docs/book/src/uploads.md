@@ -26,6 +26,7 @@ The main public pieces are:
 Configure upload limits and local storage paths on `SiteConf`:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::file_storage::UploadConf;
 
@@ -53,6 +54,7 @@ Typed multipart parsing uses `MultipartData`:
 use vyuh::prelude::*;
 use vyuh::routes::{MultipartForm, UploadedFile};
 use vyuh::MultipartData;
+use schemars::JsonSchema;
 
 #[derive(JsonSchema, MultipartData)]
 struct AvatarUpload {

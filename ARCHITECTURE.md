@@ -61,7 +61,8 @@ The `vyuh` crate is organized around these subsystems:
   collection built on normal bundles and routes.
 - `db` is a facade over the standalone Mool database toolkit. Vyuh re-exports
   Mool's pools, sessions, records, models, typed queries, filters, relations,
-  raw SQL, and migration types as `vyuh::db`.
+  raw SQL, and migration types as `vyuh::db`; its database derives emit against
+  that facade. Schemars remains an application-owned direct dependency.
 - `db::migrations` provides backend-aware crate-owned migration registration,
   Gaman schema integration, and migration command support. Postgres is the
   richest backend, and SQLite is supported for Gaman's native safe subset.
@@ -83,6 +84,8 @@ compact while feeding metadata into the runtime:
 
 - Route, command, signal, emitter, task, cron, periodic, and asset macros
   generate bundle parts.
+- `embed_asset!` delegates directory discovery and force-mode expansion to Rust
+  Silos' shared macro implementation while emitting Vyuh's asset facade types.
 - `Record`, `Filterable`, `Validate`, and role/schema macros
   generate database, validation, schema, and auth integration code.
 - Macro implementation should keep parsing, validation, diagnostics, and code
@@ -144,9 +147,12 @@ the client-facing event type uses the payload schema name.
    private template and schema asset loading. Later asset directories override
    earlier matching paths; schema assets are parsed into the migration registry
    without modifying the database.
-5. Axum routes receive `Site` as state and handlers use typed extractors.
-6. Handlers call query builders or services and return typed responses.
-7. OpenAPI and schema metadata are produced from registered operations and
+5. `Site::run` executes one inert command unless it selects `serve`; `serve` and
+   direct server startup bind the listener, then start task, emitter, and service
+   workers before accepting HTTP work.
+6. Axum routes receive `Site` as state and handlers use typed extractors.
+7. Handlers call query builders or services and return typed responses.
+8. OpenAPI and schema metadata are produced from registered operations and
    type metadata.
 
 ## Extension Rules

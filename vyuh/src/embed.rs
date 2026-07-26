@@ -1,6 +1,15 @@
-use rust_silos::{File as SiloFile, Silo, SiloSet};
+use rust_silos::{File as SiloFile, SiloSet};
 use std::io::Read;
 use std::path::Path;
+
+/// Macro-expansion support for [`embed_assets!`].
+///
+/// Applications should use [`embed_assets!`] instead of these implementation types.
+#[doc(hidden)]
+pub use rust_silos::{EmbedEntry, Silo};
+
+/// Embeds one asset directory through Vyuh's asset facade.
+pub use vyuh_macros::embed_assets;
 
 /// Wrapper around rust-silos File with sync/async read methods
 pub struct File {

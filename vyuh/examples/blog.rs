@@ -43,6 +43,7 @@
 //! migration-aware test database and exercises routes without binding an HTTP port.
 
 use axum::body::Body;
+use schemars::JsonSchema;
 use tokio_util::io::ReaderStream;
 use vyuh::{
     ErrorKind,
@@ -57,7 +58,7 @@ use vyuh::{
     utils::text::{numbered_slug, slugify},
 };
 
-static MIGRATIONS: db::EmbeddedMigrations = db::embedded_migrations!("examples/blog/migrations");
+static MIGRATIONS: db::EmbeddedMigrations = db::embed_migrations!("examples/blog/migrations");
 const DEFAULT_PAGE_SIZE: usize = 9;
 const MAX_PAGE_SIZE: usize = 50;
 const ADMIN_POST_PAGE_SIZE: usize = 8;

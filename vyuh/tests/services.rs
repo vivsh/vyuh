@@ -277,7 +277,7 @@ async fn worker_probe_service() -> ServiceInstance<WorkerProbe> {
 }
 
 #[tokio::test]
-async fn services_worker_starts_and_can_extract_site() {
+async fn services_worker_starts_only_after_test_runtime_opt_in() {
     let site = vyuh::Site::build(
         test_conf(),
         bundles::bundle([bundles::service(worker_probe_service)]),
@@ -287,6 +287,12 @@ async fn services_worker_starts_and_can_extract_site() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     let probe = site.service::<WorkerProbe>().unwrap();
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+
+    let client = TestSite::new(site.clone());
+    client.start_runtime().await.unwrap();
+    client.start_runtime().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
     site.shutdown_and_wait().await;
 }
@@ -316,7 +322,7 @@ async fn failing_worker_probe_service() -> ServiceInstance<FailingWorkerProbe> {
 }
 
 #[tokio::test]
-async fn services_worker_error_stops_worker_without_crashing_site() {
+async fn services_worker_error_runs_only_after_test_runtime_opt_in() {
     let site = vyuh::Site::build(
         test_conf(),
         bundles::bundle([bundles::service(failing_worker_probe_service)]),
@@ -324,6 +330,8 @@ async fn services_worker_error_stops_worker_without_crashing_site() {
     .await
     .unwrap();
 
+    let client = TestSite::new(site.clone());
+    client.start_runtime().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let probe = site.service::<FailingWorkerProbe>().unwrap();
     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);

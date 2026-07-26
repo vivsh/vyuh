@@ -174,7 +174,7 @@ crate migrations use a virtual Gaman namespace:
 use vyuh::prelude::*;
 
 static MIGRATIONS: db::EmbeddedMigrations =
-    db::embedded_migrations!("migrations");
+    db::embed_migrations!("migrations");
 
 #[bundles::schema(namespace = "auth")]
 fn schema() -> Result<db::Schema, db::SchemaLoadError> {

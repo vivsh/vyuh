@@ -33,8 +33,8 @@ Migrations do not live under `assets/`; they are database history. Embedded
 committed migrations and never run automatically at site startup.
 
 Migration files are embedded into the executable at compile time with
-`embedded_migrations!`, so release deployments do not need to ship loose YAML
-files beside the binary.
+`db::embed_migrations!`, so release deployments do not need to ship loose YAML
+files beside the binary or declare Mool as a direct dependency.
 
 ## Root Migrations
 
@@ -44,7 +44,7 @@ Root application migrations are unnamespaced:
 use vyuh::prelude::*;
 
 static MIGRATIONS: db::EmbeddedMigrations =
-    db::embedded_migrations!("migrations");
+    db::embed_migrations!("migrations");
 
 #[bundles::migrations]
 fn migrations() -> db::MigrationSource {
@@ -75,7 +75,7 @@ namespace:
 use vyuh::prelude::*;
 
 static MIGRATIONS: db::EmbeddedMigrations =
-    db::embedded_migrations!("migrations");
+    db::embed_migrations!("migrations");
 
 #[bundles::migrations]
 fn migrations() -> db::MigrationSource {

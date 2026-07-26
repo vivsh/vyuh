@@ -22,6 +22,7 @@ Use `Data<T>` when the response is application data shared with other Vyuh
 subsystems:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Serialize, JsonSchema)]
@@ -41,6 +42,7 @@ async fn show_data() -> Data<NoteOut> {
 Use `Json<T>` for JSON responses:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Serialize, JsonSchema)]
@@ -63,6 +65,7 @@ When `T: JsonSchema`, OpenAPI documents the response body as
 Use `JsonStr` only when the body is already serialized JSON:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::routes::JsonStr;
 
@@ -76,6 +79,7 @@ async fn raw_json() -> JsonStr {
 Use status-specific JSON wrappers when the status is part of the contract:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Serialize, JsonSchema)]

@@ -3,6 +3,7 @@
 //! Starts a small site with routes, tasks, signals, commands, and cron emitters
 //! so the built-in console has representative operations to inspect.
 
+use schemars::JsonSchema;
 use vyuh::{commands::CommandConf, console::ConsoleConf, prelude::*};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -7,6 +7,7 @@
 ///   4. Fallible typed completion      (Result<Data<T>, Error>)
 ///   5. Method-based registration      (no #[bundles::task] macro)
 ///   6. Suspend/resume with enum state (Result<TaskState<T>, Error>)
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 // ── Input types ──────────────────────────────────────────────────────────────

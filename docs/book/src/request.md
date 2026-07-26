@@ -46,6 +46,7 @@ HTTP-shaped JSON. It behaves like `Json<T>` for routes, but the same wrapper is
 also used by commands, tasks, signals, and emitters.
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Deserialize)]
@@ -177,6 +178,7 @@ files, content types, and request limits.
 use vyuh::prelude::*;
 use vyuh::routes::{MultipartForm, UploadedFile};
 use vyuh::MultipartData;
+use schemars::JsonSchema;
 
 #[derive(JsonSchema, MultipartData)]
 struct AvatarUpload {
@@ -277,6 +279,8 @@ Wrappers contribute request metadata:
 Given a DTO that derives `Validate`:
 
 ```rust
+use schemars::JsonSchema;
+
 #[derive(Deserialize, JsonSchema, Validate)]
 struct CreateNote {
     #[validate(min_length = 3)]

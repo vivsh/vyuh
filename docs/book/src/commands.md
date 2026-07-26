@@ -25,9 +25,10 @@ commands:
 
 Applications register additional commands through bundles.
 
-Commands execute against the fully constructed `Site`. They share the same
-configuration, database pools, services, templates, assets, logging, task queue,
-and dependency injection as HTTP routes.
+Commands execute against a fully constructed but runtime-inert `Site`. They
+share configuration, database pools, service facades, templates, assets,
+logging, task queues, and dependency injection with HTTP routes, but do not
+start task workers, emitters, PgNotify listeners, or service workers.
 
 Commands are not durable background work. Use [Tasks](tasks.md) for retryable
 work that must survive restarts, and [Services](services.md) for site-lifetime
@@ -51,7 +52,7 @@ Site Lifetime  -> Service
 | Routes    | HTTP request    | one request         | APIs, pages, webhooks                         | maintenance scripts     |
 | Commands  | CLI invocation  | one process command | admin, repair, reindex, diagnostics           | durable background jobs |
 | Tasks     | task submission | persisted work unit | retryable async work, sleeps, external resume | interactive CLI tools   |
-| Services  | site startup    | site lifetime       | shared clients, caches, in-process loops      | one-off operations      |
+| Services  | serving runtime | site lifetime       | shared clients, caches, in-process loops      | one-off operations      |
 
 ## Overview
 
@@ -62,8 +63,8 @@ The main public pieces are:
 - `Data<T>` for typed command arguments.
 - `Site::run(conf, bundle)` for command-aware application entrypoints.
 
-Service constructors have completed and service workers have been spawned before
-the command handler runs.
+Service constructors have completed before the command handler runs, but service
+workers remain stopped until the serving runtime starts.
 
 ## Typical Commands
 
@@ -93,6 +94,7 @@ the dependency crate itself.
 Define a typed argument struct and register the command as a bundle part:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::commands::CommandConf;
 
@@ -169,6 +171,11 @@ global command lock, so separate processes may run commands concurrently. Use
 database locks, transactions, advisory locks, or application-level coordination
 when an operation must be exclusive.
 
+Vyuh does not require a Cargo plugin to manage this lifecycle. A future
+`cargo-vyuh` may supervise the application as a child process—invoke commands,
+launch `serve`, wait for readiness, and restart it—but the application binary
+remains the authority for commands, configuration, and shutdown.
+
 ## Arguments
 
 Command arguments come from the data type's `JsonSchema`. Keep command argument
@@ -203,6 +210,7 @@ once; repeated scalar and boolean flags are reported as duplicate flags.
 subsystems. It supports pattern matching, `Deref`, `AsRef`, and `into_inner()`:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 async fn reindex(Data(args): Data<ReindexArgs>) -> Result<(), Error> {
@@ -216,6 +224,7 @@ async fn reindex(Data(args): Data<ReindexArgs>) -> Result<(), Error> {
 Extract `Site` when a command needs subsystem access:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::commands::CommandConf;
 use vyuh::db::{DBSession, Statement};
@@ -250,11 +259,13 @@ let bundle = bundles::bundle([bundles::command(
 ```
 
 The full site is available because commands run after site build. Service
-constructors are different: they run while the site is still being assembled.
+constructors run during assembly; their workers start only when `serve` starts
+the runtime.
 
 Commands may enqueue tasks and this is often a good pattern:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -277,6 +288,9 @@ async fn rebuild(site: Site, Data(args): Data<RebuildArgs>) -> Result<(), Error>
 }
 ```
 
+The command persists the task and returns. A running `serve` process claims and
+executes it; the command process never starts a task worker itself.
+
 Use this when the command should trigger durable work and return quickly. Do the
 work directly in the command only when it is naturally short-lived and
 operationally interactive.
@@ -290,6 +304,7 @@ Wrap command data in `Valid<Data<T>>` when CLI arguments should be validated
 with the same rules used by routes:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Deserialize, Serialize, JsonSchema, Validate)]

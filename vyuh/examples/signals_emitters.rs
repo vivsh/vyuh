@@ -1,5 +1,6 @@
 //! End-to-end signals and emitters demo.
 
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

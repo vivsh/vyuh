@@ -156,6 +156,27 @@ pub fn bundle(input: TokenStream) -> TokenStream {
     bundle::parse_bundle(input)
 }
 
+/// Embeds YAML migrations using Vyuh's database facade.
+///
+/// The migration directory is resolved relative to the application crate's
+/// `CARGO_MANIFEST_DIR`. Generated types resolve through `vyuh::db`, so the
+/// application does not need a direct Mool dependency.
+#[proc_macro]
+pub fn embed_migrations(input: TokenStream) -> TokenStream {
+    mool_macros_impl::embed_migrations::expand(input.into(), quote::quote!(::vyuh::db)).into()
+}
+
+/// Embeds one asset directory using Vyuh's asset facade.
+///
+/// Generated asset runtime types resolve through `vyuh::embed`, so
+/// applications do not need a direct Rust Silos dependency.
+#[proc_macro]
+pub fn embed_assets(input: TokenStream) -> TokenStream {
+    let silo =
+        rust_silos_macros_impl::embed_silo::expand(input.into(), quote::quote!(::vyuh::embed));
+    quote::quote!(::vyuh::embed::Dir::new(#silo)).into()
+}
+
 #[proc_macro_derive(Record, attributes(field, column, table, db))]
 pub fn derive_record(input: TokenStream) -> TokenStream {
     mool_macros_impl::record::derive_record(input.into(), quote::quote!(::vyuh::db)).into()

@@ -16,10 +16,10 @@ Most applications interact with `Site` in two places:
 The main public pieces are:
 
 - `SiteConf` for application configuration.
-- `Site::build(conf, bundle)` for building a site without serving it.
-- `Site::run(conf, bundle)` for command-aware application entrypoints.
-- `Site::serve(conf, bundle)` for directly building and serving HTTP.
-- `Site::test(conf, bundle, pool)` for tests with an explicit SQLx pool.
+- `Site::run(conf, bundle)` as the standard application entrypoint.
+- `Site::build(conf, bundle)` for inert site assembly.
+- `Site::serve(conf, bundle)` for advanced direct HTTP serving.
+- `Site::test(conf, bundle, pool)` for inert tests with an explicit SQLx pool.
 - `site.start()` for serving an already-built site.
 - `Site` accessors such as `db()`, `tasks()`, `templates()`, `service()`,
   `auth()`, `signals()`, and `reverse()`.
@@ -102,11 +102,11 @@ Vyuh keeps lifecycle on `Site`:
 
 | Method | Purpose |
 | --- | --- |
-| `Site::build` | build the site object without starting HTTP |
-| `Site::run` | command-aware application entrypoint; no args defaults to `serve` |
-| `Site::serve` | build and directly serve HTTP, ignoring commands |
-| `Site::test` | build a test site with an explicit SQLx pool |
-| `site.start` | serve an already-built site |
+| `Site::build` | assemble an inert site without runtime workers or HTTP |
+| `Site::run` | standard command-aware entrypoint; no args defaults to `serve` |
+| `Site::serve` | advanced direct path that starts runtime workers and HTTP |
+| `Site::test` | assemble an inert site with an explicit SQLx pool |
+| `site.start` | start runtime workers and serve an already-built site |
 
 Use `Site::run` for ordinary application binaries:
 
@@ -150,9 +150,14 @@ async fn main() -> Result<(), vyuh::SiteError> {
 ```
 
 During build, Vyuh validates configuration and bundles, builds the router,
-creates the database pool, loads templates, initializes services, registers
-OpenAPI endpoints, prepares task stores when tasks are present, and starts
-background engines.
+creates the database pool, loads templates, constructs service facades,
+registers OpenAPI endpoints, and prepares task stores. It does not start task
+workers, emitters, PgNotify listeners, or service workers.
+
+The runtime starts only through `serve` or `site.start()`. Vyuh binds the HTTP
+listener first, then starts background engines, then begins serving requests.
+One-shot commands therefore retain database and service access without
+generating scheduled signals or consuming durable work.
 
 ## Using Site In Handlers
 
@@ -251,6 +256,14 @@ For route-level tests, use `vyuh::testing::test_site` to provision a complete
 `vyuh::testing::TestSite::new(site)` or `vyuh::testing::router(&site)`. Use
 `.log_init(false)` in tests when test output should stay quiet.
 
+`TestSite` is inert by default. Tests that deliberately cover task workers,
+emitters, PgNotify listeners, or service workers opt in explicitly:
+
+```rust,ignore
+let site = vyuh::testing::TestSite::new(site);
+site.start_runtime().await?;
+```
+
 `test_site` owns Mool's isolated database and applies registered migrations:
 
 ```rust,ignore
@@ -309,7 +322,7 @@ workers should still select on `site.shutdown_notifier()` so they can stop
 their own work cleanly before the grace period expires.
 
 `shutdown_and_wait()` can be used by tests or embedding code that needs to
-notify background tasks and abort remaining join handles.
+notify active background tasks and abort remaining join handles.
 
 ## Failure Modes
 
@@ -325,6 +338,6 @@ notify background tasks and abort remaining join handles.
 ## Current Limitations
 
 - `Site` is an in-process application handle, not a distributed coordinator.
-- Background engines are tied to the process that built the site.
+- Background engines are tied to the process that serves the site.
 - `Site::test` uses the supplied pool but does not replace application-level
   schema setup; tests still need the schema their routes and services expect.

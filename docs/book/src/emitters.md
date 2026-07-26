@@ -4,6 +4,9 @@ Emitters are typed in-process event sources. They run on the site runtime,
 produce `Data<T>` values, and dispatch that data to another subsystem.
 For v0, the public target is signals.
 
+Emitters start only when Vyuh serves the site. Commands may inspect and use the
+same site, but they never start cron, periodic, or PgNotify sources implicitly.
+
 Emitters are not durable queues. Missed cron or periodic ticks are not replayed,
 Postgres notifications are not persisted by Vyuh, and handler failures are
 logged rather than retried. Use tasks when work must be durable or observable as

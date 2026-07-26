@@ -34,6 +34,7 @@ Start from defaults and enable only the transport behavior the application
 needs:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::middlewares::{BodyLimitConf, CompressionConf, HttpConf, TraceConf};
 
@@ -245,6 +246,7 @@ OpenAPI and console can show the API-visible request or security contract:
 use vyuh::prelude::*;
 use vyuh::routes::CorsMiddleware;
 use tower_http::cors::CorsLayer;
+use schemars::JsonSchema;
 
 #[derive(Serialize, JsonSchema)]
 struct PingOut {

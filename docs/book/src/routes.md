@@ -127,6 +127,7 @@ remaining paragraphs become the description.
 Request wrappers parse only by default:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 async fn create(Json(input): Json<CreateUser>) {
@@ -137,6 +138,7 @@ async fn create(Json(input): Json<CreateUser>) {
 Validation is an explicit route-boundary choice:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Deserialize, JsonSchema, Validate)]

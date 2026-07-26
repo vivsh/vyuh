@@ -6,6 +6,7 @@
 //! Then open:
 //!   http://127.0.0.1:8080
 
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]

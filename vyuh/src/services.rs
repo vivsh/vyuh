@@ -304,6 +304,10 @@ pub trait Service: Sized + Send + Sync + 'static {
         Ok(())
     }
 
+    /// Registers background workers for the serving runtime.
+    ///
+    /// Vyuh invokes this while assembling a site, so implementations must only
+    /// register work through `runner` and must not perform runtime work directly.
     fn run(&mut self, _runner: &mut ServiceRunner) -> Result<(), ServiceError> {
         Ok(())
     }
@@ -409,7 +413,7 @@ impl ServiceEngine {
         Ok(())
     }
 
-    pub(crate) async fn start_workers(
+    pub(crate) fn start_workers(
         &self,
         site: Site,
         joinset: &mut tokio::task::JoinSet<()>,

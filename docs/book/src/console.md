@@ -49,8 +49,9 @@ Defaults:
 | `page_size_max` | `250` |
 | `status_cache_ttl_seconds` | `5` |
 
-With `LocalOnly`, Vyuh prints a short-lived bootstrap URL only when the
-configured host is `localhost`, `127.0.0.1`, or `::1`:
+With `LocalOnly`, Vyuh prints a short-lived bootstrap URL only when the serving
+runtime starts on `localhost`, `127.0.0.1`, or `::1`. One-shot commands never
+print a bootstrap URL:
 
 ```text
 Vyuh console enabled:

@@ -63,6 +63,8 @@ Signal data types must implement Vyuh's data bounds: they are serializable,
 deserializable, schema-capable, sendable, syncable, and `'static`.
 
 ```rust
+use schemars::JsonSchema;
+
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 struct NoteChanged {
     id: i64,

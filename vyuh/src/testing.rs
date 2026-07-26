@@ -3,10 +3,10 @@
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
 ))]
 use crate::bundles::Bundle;
-use crate::db::DbConf;
-use crate::{Site, SiteConf};
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-use crate::{SiteError, bundles::IntoBundle};
+use crate::bundles::IntoBundle;
+use crate::db::DbConf;
+use crate::{Site, SiteConf, SiteError};
 use axum::Router;
 use axum::body::{self, Body, Bytes};
 use axum::http::{Method, Request, Response};
@@ -62,6 +62,14 @@ impl TestSite {
             ))]
             database: None,
         }
+    }
+
+    /// Starts background runtime engines for an integration test.
+    ///
+    /// Test sites are inert by default. Call this only when the test needs to
+    /// exercise task workers, emitters, PgNotify listeners, or service workers.
+    pub async fn start_runtime(&self) -> Result<(), SiteError> {
+        self.inner.site.start_runtime().await
     }
 
     /// Builds an in-process test site from application configuration and a supplied Mool pool.
@@ -163,7 +171,7 @@ impl TestSite {
         }
     }
 
-    /// Stops background engines before its associated test database is removed.
+    /// Stops any active background engines before its associated test database is removed.
     pub async fn shutdown_and_wait(self) {
         self.inner.site.shutdown_and_wait().await;
     }

@@ -3,6 +3,7 @@
 //! The chapter includes anchored regions from this file so the tutorial code is
 //! checked by Cargo instead of drifting as inline markdown.
 
+use schemars::JsonSchema;
 use vyuh::auth::{AuthConf, AuthUser, TokenPair};
 use vyuh::commands::CommandConf;
 use vyuh::prelude::*;

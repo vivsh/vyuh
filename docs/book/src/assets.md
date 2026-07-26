@@ -13,7 +13,7 @@ or application resource data.
 The main public pieces are:
 
 - `#[bundles::asset_dir]` for registering a bundle asset directory.
-- `embed_silo!("path")` for debug-filesystem and release-embedded assets.
+- `vyuh::embed::embed_assets!("path")` for debug-filesystem and release-embedded assets.
 - Runtime serving of `public/**` under `/assets`.
 - `collect_assets` for copying bundled public assets to a deployment directory.
 - Minijinja loading of private `templates/**` files.
@@ -69,15 +69,14 @@ Public namespacing is done by folders under `public/`. For example,
 Register an asset dir in a bundle:
 
 ```rust
-use rust_silos::{Silo, embed_silo};
 use vyuh::prelude::*;
 use vyuh::embed;
 
-const ASSETS: Silo = embed_silo!("assets");
+const ASSETS: embed::Dir = embed::embed_assets!("assets");
 
 #[bundles::asset_dir]
 fn assets() -> embed::Dir {
-    embed::Dir::new(ASSETS.clone())
+    ASSETS.clone()
 }
 
 let bundle = bundles::bundle! {
@@ -85,9 +84,9 @@ let bundle = bundles::bundle! {
 };
 ```
 
-`embed_silo!` reads from the filesystem in debug builds and embeds the files in
-release builds. That keeps local frontend iteration fast while making release
-binaries self-contained.
+`embed_assets!` reads from the filesystem in debug builds and embeds the files
+in release builds. That keeps local frontend iteration fast while making
+release binaries self-contained. Pass `force = true` to always embed files.
 
 Later registered asset directories override earlier files with the same relative
 path. This applies consistently to templates and schema assets.
@@ -187,8 +186,8 @@ directory.
 
 ## Debug And Release Behavior
 
-Assets registered through `embed_silo!` have different storage behavior by build
-mode:
+Assets registered through `vyuh::embed::embed_assets!` have different storage
+behavior by build mode:
 
 - Debug builds read from the source filesystem.
 - Release builds serve embedded bytes from the compiled binary.

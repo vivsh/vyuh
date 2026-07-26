@@ -2,7 +2,7 @@
 
 Vyuh services are site-lifetime application components. Use them for shared
 clients, caches, coordinators, in-process state, and background loops that
-should be created once when the site starts.
+should be created once when the serving runtime starts.
 
 Services are not durable work queues. Use [Tasks](tasks.md) for work that must
 survive process restarts, retries, sleeps, or external resume.
@@ -22,9 +22,9 @@ The main public pieces are:
 - `ServiceRef<T>` and `Site::service<T>()` for using services.
 - `ServiceRunner` for service-owned background workers.
 
-Services are built during site startup before routes are served. A service is
-stored as an `Arc<T>` and can be extracted by routes, workers, and other
-callable handlers.
+Services are constructed during site assembly. A service is stored as an
+`Arc<T>` and can be extracted by routes and commands before the serving runtime
+starts; its registered workers start only when Vyuh serves the site.
 
 ## Registration
 
@@ -166,10 +166,12 @@ impl Service for SearchIndex {
 }
 ```
 
-Workers are simple Tokio tasks spawned once at site startup. If a worker returns
-`Err`, Vyuh logs the error and the worker stops. Vyuh does not restart service
-workers automatically; long-running workers should own their loop and listen for
-shutdown.
+`Service::run` is invoked during site assembly and must only register workers
+through `ServiceRunner`; it must not perform runtime work directly. Registered
+workers are simple Tokio tasks spawned once when `serve` starts. If a worker
+returns `Err`, Vyuh logs the error and the worker stops. Vyuh does not restart
+service workers automatically; long-running workers should own their loop and
+listen for shutdown.
 
 ## Examples
 

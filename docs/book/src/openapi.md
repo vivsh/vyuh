@@ -96,6 +96,7 @@ Request and response schemas come from `JsonSchema` types used in extractors and
 returns:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Deserialize, JsonSchema)]
@@ -123,6 +124,7 @@ that type.
 Plain wrappers document parse shape only:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 async fn create(Json(input): Json<CreateNote>) {
@@ -134,6 +136,8 @@ async fn create(Json(input): Json<CreateNote>) {
 validation:
 
 ```rust
+use schemars::JsonSchema;
+
 #[derive(Deserialize, JsonSchema, Validate)]
 struct CreateNote {
     #[validate(min_length = 3)]
@@ -220,6 +224,7 @@ handlers returning raw `Response`.
 Common response wrappers document their status and content type directly:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Serialize, JsonSchema)]

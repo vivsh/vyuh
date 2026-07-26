@@ -65,6 +65,7 @@ capabilities that direct registration cannot express.
 Macro registration:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -86,6 +87,7 @@ let bundle = bundles::bundle! {
 Equivalent direct registration:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::bundles;
 use vyuh::bundles::IntoBundle;
@@ -108,6 +110,7 @@ type.
 Fire-and-forget handlers can return nothing:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[bundles::task]
@@ -131,6 +134,7 @@ async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> {
 Handlers that complete with a typed result can return `Data<T>`:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -184,6 +188,7 @@ later resume. `suspension.get()` returns `None` on the first run and
 `Some(T)` on a resumed run.
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -392,6 +397,9 @@ Persistent task tables are migration-owned. Apply the application's Mool/Gaman
 migrations before starting task workers; `Site::build` never creates or alters
 task tables. This makes schema changes reviewable and prevents a replica from
 changing production DDL during startup.
+
+Task workers start only in the serving runtime. Commands can submit durable
+tasks, but they do not claim or execute them themselves.
 
 With no backend feature enabled, Vyuh uses `MemoryTaskStore`. This is good for
 quick starts, local experiments, docs, and tests that do not need durability. It

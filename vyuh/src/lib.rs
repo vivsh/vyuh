@@ -48,7 +48,6 @@ pub use errors::{
 pub use file_storage::{
     FileStorageError, LocalStorage, SavedFile, StorageBackend, StorageName, UploadConf,
 };
-pub use schemars;
 pub use serde;
 pub use site::{Site, SiteConfig, SiteError};
 pub use validation::{

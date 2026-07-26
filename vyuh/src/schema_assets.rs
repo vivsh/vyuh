@@ -102,7 +102,8 @@ fn load(
     for file in schema_files(dirs) {
         found = true;
         let path = file.path().to_path_buf();
-        let fragment = parse(&file, dialect)?;
+        let outcome = parse(&file, dialect);
+        let fragment = outcome?;
         schema = schema
             .merge(fragment)
             .map_err(|source| SchemaAssetError::Merge { path, source })?;

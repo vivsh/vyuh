@@ -10,8 +10,6 @@ mod types;
 
 use std::{sync::OnceLock, time::Duration};
 
-use rust_silos::{Silo, embed_silo};
-
 use crate::{Site, bundles, embed, routes::Methods};
 
 pub use auth::{ConsoleRole, ConsoleUser};
@@ -19,7 +17,7 @@ pub use conf::{ConsoleBootstrapMode, ConsoleConf};
 
 pub(crate) use auth::ConsoleRuntime;
 
-const WEB_ASSETS: Silo = embed_silo!("web", force = true);
+const WEB_ASSETS: embed::Dir = embed::embed_assets!("web", force = true);
 const FALLBACK_STYLESHEET_PATH: &str = "/assets/css/vyuh.css";
 
 pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
@@ -30,7 +28,7 @@ pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
 }
 
 fn web_assets() -> crate::bundles::Bundle {
-    bundles::bundle([bundles::asset_dir(embed::Dir::new(WEB_ASSETS.clone()))])
+    bundles::bundle([bundles::asset_dir(WEB_ASSETS.clone())])
 }
 
 pub(crate) fn stylesheet_path() -> &'static str {
@@ -49,7 +47,7 @@ fn resolve_stylesheet_path() -> String {
 }
 
 fn read_stylesheet_name() -> Option<String> {
-    let file = embed::Dir::new(WEB_ASSETS.clone()).get_file("public/css/manifest.json")?;
+    let file = WEB_ASSETS.get_file("public/css/manifest.json")?;
     let bytes = file.read_bytes_sync().ok()?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     manifest

@@ -25,7 +25,7 @@ use axum::routing::get;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::{OnceCell, mpsc};
 use tower::ServiceExt as TowerServiceExt;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::compression::CompressionLayer;
@@ -131,7 +131,8 @@ impl SiteBuilder {
         Self { conf }
     }
 
-    async fn start_engines(site: &Site) -> Result<(), SiteError> {
+    /// Starts all site-owned background engines exactly once per site runtime.
+    async fn start_runtime(site: &Site) -> Result<(), SiteError> {
         if site.inner.task_engine.has_tasks() {
             let task_runner = TaskRunner::new(site.inner.task_engine.clone());
 
@@ -154,17 +155,22 @@ impl SiteBuilder {
 
         site.inner
             .service_engine
-            .start_workers(site.clone(), &mut site.inner.joinset.lock())
-            .await?;
+            .start_workers(site.clone(), &mut site.inner.joinset.lock())?;
 
         Ok(())
     }
 
     async fn start_server(site: Site) -> Result<(), SiteError> {
+        let listener = Self::bind_listener(&site).await?;
+        site.start_runtime().await?;
+        crate::console::maybe_print_bootstrap_url(&site);
+        Self::serve_listener(site, listener).await
+    }
+
+    /// Binds the configured HTTP listener before runtime work can start.
+    async fn bind_listener(site: &Site) -> Result<tokio::net::TcpListener, SiteError> {
         let host = site.inner.conf.host.clone();
         let port = site.inner.conf.port;
-
-        // Parse the address and handle errors gracefully
         let addr: SocketAddr = format!("{}:{}", host, port)
             .to_socket_addrs()
             .ok()
@@ -176,12 +182,16 @@ impl SiteBuilder {
                 ))
             })?;
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Ok(tokio::net::TcpListener::bind(addr).await?)
+    }
 
+    /// Runs the HTTP server and stops site-owned background work on exit.
+    async fn serve_listener(
+        site: Site,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), SiteError> {
         let make_svc = ServiceExt::<Request>::into_make_service(site.router());
-
         let touch_reload = site.inner.conf.touch_reload.clone();
-
         let shutdown = watch::ShutdownController::new(
             touch_reload,
             site.inner.shutdown_notifier.clone(),
@@ -201,12 +211,14 @@ impl SiteBuilder {
             },
         }
 
-        // Abort all tasks and wait for them to finish without holding the lock
-        // across an await point (parking_lot guards are not Send).
-        site.inner.joinset.lock().abort_all();
-        while let Some(_) = site.inner.joinset.lock().try_join_next() {}
-
+        Self::abort_runtime(&site);
         Ok(())
+    }
+
+    /// Aborts runtime work after the HTTP server stops accepting requests.
+    fn abort_runtime(site: &Site) {
+        site.inner.joinset.lock().abort_all();
+        while site.inner.joinset.lock().try_join_next().is_some() {}
     }
 
     async fn build(
@@ -368,6 +380,7 @@ impl SiteBuilder {
             pool,
             shutdown_notifier: CancellationNotifier::new(),
             service_engine: services::ServiceEngine::new(),
+            runtime: OnceCell::new(),
             timezone,
             authenticator,
             template_engine,
@@ -410,6 +423,7 @@ struct SiteInner {
     migration_runner: Option<crate::commands::core::SharedMigrationRunner>,
     task_engine: TaskDispatcher<TaskStore>,
     service_engine: services::ServiceEngine,
+    runtime: OnceCell<()>,
     shutdown_notifier: CancellationNotifier,
     _logging_guard: LoggingGuard,
     joinset: Arc<parking_lot::Mutex<tokio::task::JoinSet<()>>>,
@@ -483,34 +497,40 @@ impl std::fmt::Debug for Site {
 }
 
 impl Site {
-    /// Build a `Site` from configuration and a bundle without starting the HTTP server.
-    /// Background engines such as services, emitters, and tasks are started after build.
+    /// Builds an inert `Site` from configuration and a bundle.
+    ///
+    /// The site exposes its router, database, services, and commands, but does
+    /// not start task workers, emitters, PgNotify listeners, or service workers.
     pub async fn build(conf: SiteConf, bundle: impl IntoBundle) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
         let site = builder.build(None, bundle).await?;
-        let site = Self {
+        Ok(Self {
             inner: Arc::new(site),
-        };
-        SiteBuilder::start_engines(&site).await?;
-        crate::console::maybe_print_bootstrap_url(&site);
-        Ok(site)
+        })
     }
 
-    /// Run the command-aware application entrypoint using process arguments.
-    /// With no command arguments this runs the built-in `serve` command.
+    /// Runs Vyuh's standard command-aware application entrypoint.
+    ///
+    /// With no command arguments this runs the built-in `serve` command. Other
+    /// commands execute against an inert site and do not start background work.
     pub async fn run(conf: SiteConf, bundle: impl IntoBundle) -> Result<(), SiteError> {
         Self::run_with_args(conf, bundle, std::env::args().skip(1)).await
     }
 
-    /// Build the site and start the HTTP server directly.
-    /// Prefer `run` for binaries that should support built-in and application commands.
+    /// Builds the site and starts the HTTP server directly.
+    ///
+    /// This is the advanced server-only entrypoint. Prefer [`Self::run`] for
+    /// ordinary application binaries that support built-in and application commands.
     pub async fn serve(conf: SiteConf, bundle: impl IntoBundle) -> Result<(), SiteError> {
         let site = Self::build(conf, bundle).await?;
         site.start().await
     }
 
-    /// Build a test site using an already-created database pool.
-    /// This avoids creating a pool from configuration while still starting runtime engines.
+    /// Builds an inert test site using an already-created database pool.
+    ///
+    /// This avoids creating a pool from configuration and leaves runtime
+    /// engines stopped. Use [`crate::testing::TestSite::start_runtime`] only
+    /// when an integration test must exercise background execution.
     pub async fn test(
         conf: SiteConf,
         bundle: impl IntoBundle,
@@ -518,17 +538,28 @@ impl Site {
     ) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
         let site = builder.build(Some(pool), bundle).await?;
-        let site = Self {
+        Ok(Self {
             inner: Arc::new(site),
-        };
-        SiteBuilder::start_engines(&site).await?;
-        Ok(site)
+        })
     }
 
-    /// Start the HTTP server for an already-built site.
+    /// Starts runtime engines and the HTTP server for an already-built site.
+    ///
     /// This consumes the site handle and returns when the server shuts down or fails.
     pub async fn start(self) -> Result<(), SiteError> {
         SiteBuilder::start_server(self).await
+    }
+
+    /// Starts background engines for Vyuh's test harness.
+    ///
+    /// Production applications start runtime engines only through `serve` or
+    /// `start`; this crate-visible method supports deliberate test coverage.
+    pub(crate) async fn start_runtime(&self) -> Result<(), SiteError> {
+        self.inner
+            .runtime
+            .get_or_try_init(|| SiteBuilder::start_runtime(self))
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn run_with_args(
@@ -957,6 +988,53 @@ impl axum::extract::FromRequestParts<Site> for SiteConfig {
 #[cfg(test)]
 mod tests {
     use super::Site;
+    use crate::{
+        Error, bundles,
+        callables::Data,
+        commands::CommandConf,
+        emitters::{EmitTarget, PeriodicConf},
+        signals::SignalConf,
+        tasks::TaskHandlerConf,
+    };
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    static RUNTIME_SIGNALS: AtomicUsize = AtomicUsize::new(0);
+    static RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone, Deserialize, JsonSchema, Serialize)]
+    struct RuntimeSignal;
+
+    #[derive(Clone, Deserialize, JsonSchema, Serialize)]
+    struct RuntimeTask;
+
+    #[derive(Clone, Deserialize, JsonSchema, Serialize)]
+    struct WaitArgs {}
+
+    async fn emit_runtime_signal() -> Data<RuntimeSignal> {
+        Data::new(RuntimeSignal)
+    }
+
+    async fn count_runtime_signal(_signal: Data<RuntimeSignal>) {
+        RUNTIME_SIGNALS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn count_runtime_task(_task: Data<RuntimeTask>) {
+        RUNTIME_TASKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn wait_command(site: Site, _args: Data<WaitArgs>) -> Result<(), Error> {
+        site.tasks()
+            .submit(RuntimeTask)
+            .await
+            .map_err(Error::other)?;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        Ok(())
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
@@ -997,7 +1075,7 @@ mod tests {
         let result =
             Site::run_with_args(conf, crate::bundles::Bundle::new(), strings(&["help"])).await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "command failed: {result:?}");
     }
 
     #[tokio::test]
@@ -1010,5 +1088,40 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("missing"));
+    }
+
+    /// Verifies one-shot commands do not activate emitters, signals, or task workers.
+    #[tokio::test]
+    async fn command_does_not_start_runtime() {
+        RUNTIME_SIGNALS.store(0, Ordering::SeqCst);
+        RUNTIME_TASKS.store(0, Ordering::SeqCst);
+        let bundle = bundles::bundle([
+            bundles::signal::<RuntimeSignal, _, _>(count_runtime_signal, SignalConf::default()),
+            bundles::periodic::<RuntimeSignal, _, _>(
+                emit_runtime_signal,
+                PeriodicConf {
+                    interval: Duration::from_millis(1),
+                    target: EmitTarget::Signal,
+                },
+            ),
+            bundles::task::<RuntimeTask, _, _>(
+                count_runtime_task,
+                TaskHandlerConf::new("runtime-task-probe"),
+            ),
+            bundles::command::<WaitArgs, _, _>(
+                wait_command,
+                CommandConf::new("wait-runtime-probe"),
+            ),
+        ]);
+        let result = Site::run_with_args(
+            crate::SiteConf::default().log_init(false),
+            bundle,
+            strings(&["wait-runtime-probe"]),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(RUNTIME_SIGNALS.load(Ordering::SeqCst), 0);
+        assert_eq!(RUNTIME_TASKS.load(Ordering::SeqCst), 0);
     }
 }

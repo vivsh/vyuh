@@ -9,6 +9,10 @@ toolkit lives in the standalone Mool crate, but Vyuh applications should keep
 using the framework facade unless they are intentionally depending on Mool
 outside a Vyuh app.
 
+`db::Record`, `db::Model`, and `db::Filterable` are Vyuh facade derives. They
+generate implementations against `vyuh::db`, so ordinary Vyuh applications do
+not need a direct Mool dependency.
+
 Vyuh has no default database backend feature. In this backendless mode it has
 no live SQL dialect or pool and tasks use `MemoryTaskStore`. This is useful for
 quick starts, docs, local experiments, and tests that do not need database
@@ -72,6 +76,7 @@ No backend feature is enabled by default:
 ```toml
 [dependencies]
 vyuh = { version = "0.2" }
+schemars = "1"
 ```
 
 In this lightweight mode, `DbConf::default()` intentionally has no database
@@ -83,6 +88,7 @@ Production applications should choose exactly one backend feature:
 ```toml
 [dependencies]
 vyuh = { version = "0.2", features = ["postgres"] }
+schemars = "1"
 ```
 
 Available backend features are:

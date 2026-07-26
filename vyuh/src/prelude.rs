@@ -16,14 +16,16 @@
 
 pub use crate::{Data, DeploymentMode, Error, Site, SiteConf, SiteError, Valid, Validate};
 
-pub use schemars::JsonSchema;
 pub use serde::{Deserialize, Serialize};
 
 // ── Registration namespace ──────────────────────────────────────────────────
 
 pub use crate::bundles;
 pub use crate::db;
+#[cfg(feature = "migrations")]
+pub use crate::db::embed_migrations;
 pub use crate::db::{Model, PgNotifyDbExt, Record};
+pub use crate::embed::embed_assets;
 pub use crate::observability::ObservabilityConf;
 
 // ── Routes ──────────────────────────────────────────────────────────────────
