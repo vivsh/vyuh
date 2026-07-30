@@ -520,6 +520,17 @@
       const { createApp } = Vue;
       const { createRouter, createWebHashHistory } = VueRouter;
 
+      axios.interceptors.request.use((request) => {
+        const csrf = document.cookie
+          .split(";")
+          .map((value) => value.trim())
+          .find((value) => value.startsWith("blog_access_csrf="));
+        if (csrf) {
+          request.headers["x-csrf-token"] = decodeURIComponent(csrf.split("=")[1]);
+        }
+        return request;
+      });
+
       axios.defaults.withCredentials = true;
 
       const EmptyState = {

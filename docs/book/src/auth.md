@@ -1,325 +1,636 @@
-# Auth
+# Authentication
 
-Vyuh auth is opt-in and handler-signature driven. If a route does not extract
-`AuthUser`, `permit!(...)`, or `ApiKey`, Vyuh does no authentication work for
-that route.
+Vyuh authentication is built around complete credential providers. A provider owns how an
+access credential is authenticated, whether refresh is supported, how both
+credentials are encoded and delivered, and which application checks run after
+cryptographic verification. Handlers see the same `AuthUser` regardless of the
+provider or token format.
 
-Vyuh does not provide user models, registration, password reset, API-key tables,
-session tables, or account management flows. Applications own identity storage
-and decide how users or API keys are verified.
+Identity proof is a separate, composable layer. Named login methods support
+password and HTTP Basic token exchange, password plus MFA, and OIDC
+Authorization Code with PKCE. Applications still own user rows, password and
+factor storage, account linking, and every authentication route.
 
-Vyuh auth deliberately stops at verified principals. Applications own user
-records, account lifecycle, and domain permissions.
+## Audiences and identity
 
-## Mental Model
-
-| Need | Use |
-| --- | --- |
-| Public route | no auth type |
-| Authenticated JWT user | `AuthUser` |
-| Static role mask | `permit!(Role, Admin)` |
-| Dynamic permission | handler or service logic |
-| Machine-to-machine auth | `ApiKey` |
-| Issue or refresh JWTs | `site.auth()` |
-| Django password hashes | `make_password`, `check_password` |
-
-Roles are optional. The `permit!` macro is a static role-mask convenience, not a
-general authorization framework. Omit roles entirely when an application does
-not need them.
-
-Console roles live under `vyuh::console` and are separate from application
-roles. They only control access to Vyuh's optional read-only console APIs.
-
-## Configuration
-
-Auth configuration lives on `SiteConf`. Cookies are disabled by default:
+An `Audience` names an API surface. Declare it once and use the same descriptor
+when issuing credentials and composing protected bundles:
 
 ```rust
+use vyuh::auth::{Audience, AuthUser};
 use vyuh::prelude::*;
-use vyuh::auth::{AuthConf, CookieConf};
 
-let conf = SiteConf::default()
-    .secret_key("replace-with-a-long-random-secret")
-    .auth(
-        AuthConf::default()
-            .access_ttl(3600)
-            .refresh_ttl(604800)
-            .access_cookie(CookieConf::new("access_token"))
-            .refresh_cookie(CookieConf::new("refresh_token")),
-    );
-```
-
-By default, JWTs are signed with `HS256` using `SiteConf.secret_key`.
-`SiteConf::validate()` checks the configured minimum length for HMAC signing
-keys.
-
-Useful `AuthConf` options:
-
-- `access_ttl(seconds)` and `refresh_ttl(seconds)`.
-- `issuer(value)` to require and emit an issuer claim.
-- `audience(policy)` for optional, required, or disabled audience checks.
-- `leeway_seconds(seconds)` for clock skew.
-- `min_secret_len(len)` for signing-secret validation.
-- `jwt(...)` for algorithm and key configuration.
-- `access_cookie(...)` and `refresh_cookie(...)` for opt-in cookies.
-- `api_keys(...)` for API-key verification.
-
-## JWT Users
-
-Use `site.auth()` to issue tokens:
-
-```rust
-use vyuh::prelude::*;
-use vyuh::auth::{AuthError, AuthUser, TokenPair};
-
-async fn login(site: Site) -> Result<Json<TokenPair>, AuthError> {
-    let user = AuthUser::new("user-123", 0);
-    let tokens = site.auth().create_token_pair(user, &["web"])?;
-    Ok(Json(tokens))
-}
-```
-
-Extract `AuthUser` to require an access token:
-
-```rust
-use vyuh::prelude::*;
-use vyuh::auth::AuthUser;
+const API: Audience = Audience::new("api");
+const REPORTS: Audience = Audience::new("reports");
 
 async fn me(user: AuthUser) -> Json<String> {
     Json(user.key.to_string())
 }
+
+let api = bundles::bundle! { me }
+    .with_audience(API);
 ```
 
-`AuthUser` contains:
+Audience names are validated during site construction and login. Duplicate
+audiences are removed while preserving order. An audience controls where a
+credential is accepted; roles control what the identity may do within that
+surface.
 
-- `key`: the authenticated subject, stored as JWT `sub`.
-- `roles`: a `u64` static role mask.
-
-Access and refresh tokens are distinct. `AuthUser` accepts access tokens only,
-and `site.auth().refresh(...)` accepts refresh tokens only.
-
-Access tokens can be sent with:
-
-```text
-Authorization: Bearer <jwt>
-```
-
-The older `Authorization: JWT <jwt>` form is also accepted.
-
-## JWT Algorithms
-
-Vyuh defaults to `HS256` with `SiteConf.secret_key`. That matches the common
-Django Simple JWT default of HS256 with Django's `SECRET_KEY`. Django core
-itself does not use JWT for its built-in sessions; its signing utilities use
-SHA-256 signed values and cookies.
-
-Use `JwtConf` when deployments need a different symmetric algorithm or an
-asymmetric key pair:
+Vyuh safely maps omitted audiences to `DEFAULT_AUDIENCE` (`"default"`). This
+keeps existing Django applications concise without making an audience-less
+token unrestricted:
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::{AuthConf, JwtConf, JwtKeySource};
+// Both use the configured default audience.
+site.auth().login(user, &[]).await?;
+let routes = bundles::bundle! { me };
 
-let auth = AuthConf::default().jwt(JwtConf::hs512(JwtKeySource::Env(
-    "JWT_SECRET".into(),
-)));
+// Applications can choose a more meaningful default.
+let auth = AuthConf::default().default_audience(API);
 ```
 
-Asymmetric deployments can sign with a private PEM and verify with a public
-PEM. Relative file paths are resolved from `SiteConf.project_dir`:
+A legacy authenticated token with no `aud` claim owns only that default. An
+explicit `aud: []` is invalid, and the default is never added to explicitly
+listed audiences. Applications that require every route and call site to name
+an audience use `AuthConf::require_explicit_audiences()`; site construction then
+rejects authenticated routes without `.with_audience(...)`, and empty login or
+refresh slices fail.
+
+Construct identities with role builders:
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::{AuthConf, JwtConf, JwtKeySource};
+let user = AuthUser::new("user-123")
+    .with_role(UserRole::User);
 
-let auth = AuthConf::default().jwt(JwtConf::rs256(
-    JwtKeySource::File("secrets/jwt-private.pem".into()),
-    JwtKeySource::File("secrets/jwt-public.pem".into()),
-));
+let editor = AuthUser::new("user-456")
+    .with_roles([UserRole::User, UserRole::Editor]);
+
+let restored = AuthUser::new("user-789")
+    .with_role_mask(database_role_mask);
 ```
 
-Supported algorithms are `HS256`, `HS384`, `HS512`, `RS256`, `RS384`,
-`RS512`, `ES256`, `ES384`, and `EdDSA`. HMAC algorithms use one symmetric key
-and reject a separate verifying key. RSA, ECDSA, and EdDSA configurations
-require both signing and verifying keys. Token decoding accepts only the
-configured algorithm.
+`AuthUser` exposes its stable `key`, role mask, and accepting provider. A token
+or key verifier can attach request-only data with `with_extra`; handlers recover
+it with `extra::<T>()`. Extras are not serialized into tokens and are redacted
+from diagnostics. Use `permit!` for static role gates.
 
-## Cookies
+### Authentication assurance
 
-Cookies are opt-in. When configured, `login_user(...)` writes access and refresh
-cookies, and `logout(...)` clears them:
+`AuthenticationContext` describes how and when the current identity was
+proven. It is not a separate route extractor. A protected handler obtains it
+from its extracted `AuthUser`:
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::AuthConf;
+async fn assurance(user: AuthUser) -> Json<bool> {
+    let authentication = user.authentication();
+    Json(authentication.has_method("totp"))
+}
+```
 
-let conf = SiteConf::default().auth(
-    AuthConf::cookie_pair("access_token", "refresh_token")
+The context exposes:
+
+- `auth_time() -> Option<DateTime<Utc>>`, the time identity proof completed;
+- `methods()`, authenticated method-reference names such as `password`, `oidc`,
+  or `totp`;
+- `has_method(name)`, a convenient method-reference check;
+- `acr()`, an optional authentication-context class asserted by the login
+  method or external identity provider.
+
+`auth_time` is optional because opaque keys and externally decoded credentials
+may not provide a trustworthy proof time. Credentials created through Vyuh
+login methods carry their authenticated assurance through access-token issuance
+and refresh. Assurance describes identity proof; audiences and roles remain the
+authorization controls.
+
+## Login methods
+
+`AuthProvider` answers *which credential system issues the result*.
+`LoginMethod` answers *how identity is proven*. Select them consistently:
+
+```rust
+const PASSWORD: LoginMethod<PasswordCredentials> =
+    LoginMethod::new("password");
+
+let auth = AuthConf::default().method(
+    PASSWORD,
+    PasswordLogin::new(AccountPasswords),
+);
+
+site.auth()
+    .via(PASSWORD)
+    .login(credentials, &[API])
+    .await?;
+```
+
+For a non-default token provider, compose both selectors:
+
+```rust
+site.auth()
+    .using(APP_AUTH)
+    .via(PASSWORD)
+    .login(credentials, &[API])
+    .await?;
+```
+
+`using` and `via` are infallible selectors. They retain typed descriptors;
+provider names, registrations, method types, and capabilities are checked by
+the terminal `login`, `begin`, `complete`, `refresh`, or `logout` operation.
+Configuration itself is validated by `Site::build`.
+
+One-step methods expose `login`. Inherently multi-step methods expose only
+`begin` and `complete`; the type system prevents completing password or Basic
+login and prevents using one-step `login` on OIDC or MFA. Login methods are
+registered centrally through `AuthConf::method`; route bundles do not repeat
+that registration as runtime or documentation metadata.
+
+### Password and Basic exchange
+
+Applications implement `PasswordVerifier`, returning an `AuthUser` only after
+safe account lookup and password verification. Both body credentials and Basic
+exchange can share that verifier:
+
+```rust
+let auth = AuthConf::default()
+    .method(PASSWORD, PasswordLogin::new(AccountPasswords))
+    .method(BASIC, BasicLogin::new(AccountPasswords));
+```
+
+`BasicCredentials` extracts `Authorization: Basic`, but only on the login route
+that requests it. Basic is exchanged for the normal access/refresh pair and is
+never accepted by protected `AuthUser` handlers.
+
+### Password plus MFA
+
+Compose the primary verifier with application-owned factor verification:
+
+```rust
+const PASSWORD_MFA: LoginMethod<PasswordCredentials, MfaResponse> =
+    LoginMethod::new("password-mfa");
+
+let method = PasswordLogin::new(AccountPasswords).then(
+    MfaLogin::new(AccountFactors).totp().recovery_codes(),
 );
 ```
 
-`CookieConf` uses typed `CookieSameSite` values. Invalid SameSite strings are
-not silently accepted.
+The first route calls `begin(credentials, &[API])` and returns
+`LoginChallenge`. The completion route calls
+`complete(MfaResponse::totp(challenge, code))`. No credential is issued before
+the factor succeeds. An optional `AuthConf::login_state_store` atomically
+consumes continuation IDs for strict replay protection.
 
-## Static Roles
+### OIDC
 
-Static role checks are useful for simple route gates:
+Enable the `oidc` feature and register one discovery-backed method:
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::{AuthUser, BitRole, permit};
-
-#[derive(BitRole)]
-enum AppRole {
-    Manager,
-    Editor,
-    Viewer,
-}
-
-async fn managers_only(_permit: permit!(AppRole, Manager)) {}
+let google = OidcLogin::discovery("https://accounts.google.com")
+    .client_id("client-id")
+    .client_secret(KeySource::env("GOOGLE_CLIENT_SECRET"))
+    .redirect_uri("https://example.com/auth/google/callback")
+    .scopes(["email", "profile"])
+    .mapper(GoogleAccountMapper);
 ```
 
-Role expressions support:
+The start route calls `via(GOOGLE)?.begin(OidcStart::new(), &[API])`; the
+callback calls `via(GOOGLE)?.complete(callback)`. Vyuh validates discovery,
+Authorization Code, PKCE-S256, state, nonce, ID-token signature, issuer,
+audience, expiry, and access-token hash before invoking `OidcUserMapper`.
 
-- `permit!(AppRole, Manager)` - requires one role.
-- `permit!(AppRole, Manager | Editor)` - requires any listed role.
-- `permit!(AppRole, Manager & Editor)` - requires all listed roles.
+MFA and OIDC continuation state is AES-256-GCM sealed with a domain-separated
+site-secret key. New state uses the active secret and in-flight state accepts
+configured fallback secrets during rotation. The state binds login method,
+credential provider, audiences, and expiry.
 
-`permit!` returns `401` for missing or invalid tokens and `403` when the token
-is valid but lacks the required role mask. It also contributes role metadata to
-OpenAPI.
+## Default JWT login
 
-Use handler or service logic for dynamic authorization:
+`AuthConf::default()` registers one bearer JWT provider using HS256 and
+`SiteConf.secret_key`. It issues a one-hour access token and a seven-day refresh
+token:
 
 ```rust
+use vyuh::auth::{AuthConf, AuthUser, LoginResponse};
 use vyuh::prelude::*;
-use vyuh::auth::AuthUser;
 
-async fn edit_post(
-    site: Site,
-    user: AuthUser,
-    Path(id): Path<i64>,
-) -> Result<Json<PostOut>, Error> {
-    let post = load_post(site.db(), id).await?;
-    if post.owner_id != user.key.as_ref() {
-        return Err(Error::new(vyuh::ErrorKind::Forbidden).with_context("not allowed"));
-    }
-    Ok(Json(post.into()))
+async fn login(site: Site) -> Result<LoginResponse, Error> {
+    let user = AuthUser::new("user-123");
+    Ok(site.auth().login(user, &[API]).await?)
+}
+
+let conf = SiteConf::default()
+    .secret_key("replace-with-at-least-32-random-characters")
+    .auth(AuthConf::default());
+```
+
+`login`, rather than a framework login route, remains the credential-creation
+API. Applications can call it directly with an already verified `AuthUser`, or
+select a configured identity-proof method through `.via(...)`.
+
+For multiple API surfaces, pass one slice:
+
+```rust
+site.auth().login(user, &[API, REPORTS]).await?;
+```
+
+There is no `issue_many` operation and no separate refresh provider.
+`TokenKind::Access` and `TokenKind::Refresh` distinguish the two credentials
+inside one provider.
+
+## Refresh
+
+Vyuh supplies refresh behavior, while the application chooses and registers the
+route:
+
+```rust
+use axum::extract::Request;
+
+async fn refresh(site: Site, request: Request) -> Result<LoginResponse, Error> {
+    let (parts, _) = request.into_parts();
+    Ok(site.auth().refresh(&parts, &[API]).await?)
 }
 ```
 
-## API Keys
-
-API keys are for machine-to-machine authentication. Vyuh extracts keys, but the
-application verifies them through a hook. Vyuh does not store plaintext keys or
-own API-key tables.
+Without `using`, refresh always selects `DEFAULT_AUTH_PROVIDER`. A route for a
+different complete provider selects it explicitly:
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::auth::{ApiKey, ApiKeyPrincipal, ApiKeyVerifier, AuthError};
+site.auth()
+    .using(APP_AUTH)
+    .refresh(&parts, &[API])
+    .await?;
+```
 
-struct MyVerifier;
+Refresh extracts only the selected provider's refresh credential, verifies its format and
+`TokenKind`, validates time, provider, binding, and lifecycle state, then runs
+the provider's `TokenVerifier`. Requested audiences must already be present in
+the refresh token, so a refresh may preserve or narrow authority but cannot add
+it. The result contains a new access token and a rotated refresh token with the
+same family identifier.
 
-impl ApiKeyVerifier for MyVerifier {
-    async fn verify(&self, presented: &str) -> Result<ApiKeyPrincipal, AuthError> {
-        if presented == "secret" {
-            Ok(ApiKeyPrincipal::new("key-1").subject("service-1"))
-        } else {
-            Err(AuthError::InvalidApiKey)
+Stateless rotation is the default: an old refresh token remains valid until it
+expires. Add a `TokenLifecycle` to atomically consume token IDs, detect replay,
+and revoke a refresh family when the application needs stateful rotation.
+
+## `LoginResponse`
+
+`LoginResponse` implements `IntoResponse` and keeps body data separate from
+credential delivery:
+
+```rust
+let login = site.auth().login(user, &[API]).await?;
+
+let access = login.credentials().access();
+let refresh = login.credentials().refresh();
+
+let login = login.data(serde_json::json!({ "user": "user-123" }));
+assert_eq!(login.data_ref()["user"], "user-123");
+login.write(&mut response);
+```
+
+For body-delivered tokens, the default JSON contains `access_token`, optional
+`refresh_token`, `token_type`, and `expires_in`. Cookie-delivered values are
+omitted. When every credential is delivered by cookie, the body is `{ "ok":
+true }`. Replacing the body with `.data(value)` does not discard cookies or
+response headers.
+
+`Credentials` deliberately exposes values only through `access()` and
+`refresh()`. It does not implement `Debug`, `Display`, or `Serialize`.
+
+## Complete token providers
+
+Use `AuthConf::empty()` when no implicit provider is wanted. An `AuthProvider`
+is a stable name for one complete configured authentication system:
+
+```rust
+use chrono::Duration;
+use vyuh::auth::{
+    AuthConf, AuthProvider, CookieConf, Jwt, TokenConf, TokenProvider,
+};
+
+const APP_AUTH: AuthProvider = AuthProvider::new("app-auth");
+
+let auth = AuthConf::empty().provider(
+    APP_AUTH,
+    TokenProvider::new(Jwt::hs256_site_secret())
+        .access(TokenConf::bearer().ttl(Duration::minutes(15)))
+        .refresh(
+            TokenConf::cookie(CookieConf::new("refresh_token"))
+                .ttl(Duration::days(30)),
+        ),
+);
+```
+
+Select it for login or refresh without changing the operation shape:
+
+```rust
+site.auth()
+    .using(APP_AUTH)
+    .login(user, &[API])
+    .await?;
+
+site.auth()
+    .using(APP_AUTH)
+    .refresh(&parts, &[API])
+    .await?;
+```
+
+The unselected `login`, `refresh`, and `logout` conveniences all mean the
+default provider. Refresh and logout never probe or mutate another provider;
+multi-provider routes must select their provider with `using`.
+
+Call `.without_refresh()` for access-only providers. Access and refresh may use
+different formats while remaining one provider:
+
+```rust
+use vyuh::auth::DjangoSigning;
+
+let provider = TokenProvider::new(Jwt::hs256_site_secret())
+    .access(TokenConf::bearer().ttl(Duration::minutes(15)))
+    .refresh(
+        TokenConf::cookie("refresh_token")
+            .ttl(Duration::days(30))
+            .codec(DjangoSigning::site_secret()),
+    );
+```
+
+`TokenConf` owns location, delivery, lifetime, optional codec override, CSRF
+policy, and a bounded pre-decode credential-size limit.
+
+Construct only valid source/delivery combinations directly:
+
+```rust
+TokenConf::bearer();
+TokenConf::header("x-auth-token");
+TokenConf::header_with_scheme("authorization", "Token");
+TokenConf::cookie(CookieConf::new("auth_token"));
+TokenConf::query("token", UnsafeQueryCredentials::allow());
+
+// Extraction and response delivery are independent when requested explicitly.
+TokenConf::header("x-auth-token")
+    .response_header("x-new-auth-token");
+```
+
+Bearer, custom-header, and query sources return new credentials in the response
+body by default. Cookie sources write the same cookie. Query credentials are
+never emitted into URLs. Duplicate matching headers, cookies, or query values
+are rejected instead of choosing one.
+
+## Token formats
+
+Every parseable format authenticates the same private `AuthToken` envelope:
+provider, `TokenKind`, subject, roles, audiences, timestamps, token and family
+IDs, optional issuer and binding, and optional authenticated payload data.
+Normal handlers never extract `AuthToken`; they extract `AuthUser`.
+
+Built-in codecs are:
+
+- `Jwt`: HS256 from the site secret or explicit asymmetric RS256 keys, exact
+  algorithm pinning, duplicate-claim rejection, and key-ID rotation.
+- `DjangoSigning`: Django 5.2 `TimestampSigner` and
+  `django.core.signing.dumps/loads` compatible salted HMAC, timestamps,
+  compressed payloads, and fallback secrets. This does not mean SimpleJWT or
+  Django session-storage compatibility.
+- `Paseto`: PASETO v4.public and v4.local behind the `paseto` feature.
+- `Branca`: authenticated encrypted BRANCA tokens behind the `branca` feature.
+
+For example:
+
+```rust
+use vyuh::auth::{DjangoSigning, KeySource, Jwt, TokenProvider};
+
+let django = TokenProvider::new(DjangoSigning::site_secret());
+
+let asymmetric = TokenProvider::new(
+    Jwt::rs256(
+        KeySource::file("keys/jwt-private.pem"),
+        KeySource::file("keys/jwt-public.pem"),
+    )
+    .key_id("2026-07")
+    .verification_key(
+        "2026-04",
+        KeySource::file("keys/jwt-public-2026-04.pem"),
+    ),
+);
+```
+
+`KeySource` is opaque and is constructed only through `site_secret`, `file`,
+`env`, or `inline`. Key material and source values remain redacted from
+diagnostics and are resolved during site construction.
+
+Issuer, temporal, audience, binding, and lifecycle policy belongs to
+`TokenProvider` and runs exactly once after format authentication. For example,
+`.issuer("https://api.example.com")` and `.leeway(Duration::seconds(30))` apply
+equally to JWT, PASETO, BRANCA, Django signing, and custom codecs.
+
+`TokenProvider::custom(codec, format)` accepts an application codec that
+implements both `TokenEncoder` and `TokenDecoder`. `verify_only(decoder,
+format)` integrates externally issued self-contained tokens; login and refresh
+then fail with `UnsupportedProviderCapability`. Framework validation always
+runs after decoding and cannot be bypassed by a `TokenVerifier`.
+
+An external decoder constructs the normalized value without invented claims:
+
+```rust
+let token = AuthToken::builder(
+    PARTNER_AUTH,
+    TokenKind::Access,
+    claims.subject,
+    claims.issued_at,
+    claims.expires_at,
+)
+.roles(claims.roles)
+.audiences(claims.audiences)
+.issuer(claims.issuer)
+.token_id(claims.token_id)
+.authentication(claims.auth_time, claims.amr, claims.acr)
+.payload(claims.application_data)
+.build()?;
+```
+
+Provider, kind, subject, issuance, and expiry are mandatory. Audience omission
+is preserved for default-audience compatibility, while an explicitly empty
+audience is rejected. Runtime extras belong on `AuthUser`, never `AuthToken`.
+
+## Secret rotation and Django compatibility
+
+The simple path remains one Django-style site secret:
+
+```rust
+let conf = SiteConf::default().secret_key(current_secret);
+```
+
+During rotation, keep previous values as verify-only fallbacks:
+
+```rust
+let conf = SiteConf::default()
+    .secret_key(current_secret)
+    .secret_key_fallbacks([previous_secret, older_secret]);
+```
+
+The active secret creates new credentials. Up to seven fallback values are
+tried only during verification. JWT HMAC and Django signing use the ring
+directly; PASETO local and BRANCA derive fixed-size, domain-separated keys with
+HKDF-SHA256. Production validation rejects the framework development secret,
+weak secrets, duplicate fallbacks, and oversized key rings.
+
+`SECRET_KEY_FALLBACKS` accepts either a JSON string array or a comma-separated
+environment value, matching the simple deployment style of `SECRET_KEY`.
+
+Formats with native key IDs use one active signing key and named retired
+verification keys. Unknown or duplicate IDs fail; rotation never enables a
+second algorithm.
+
+## Application verification and lifecycle
+
+A `TokenVerifier` runs only after extraction, size limits, cryptographic
+authentication, provider and kind checks, temporal validation, requested
+audiences, CSRF, and binding. It may reject a user, replace stale roles, or add
+runtime extras:
+
+```rust
+use vyuh::auth::{AuthError, AuthToken, AuthUser, TokenVerifier};
+
+struct ActiveAccount;
+
+impl TokenVerifier for ActiveAccount {
+    async fn verify(&self, token: &AuthToken) -> Result<AuthUser, AuthError> {
+        let account = load_account(token.subject()).await?;
+        if !account.active {
+            return Err(AuthError::InvalidCredential);
         }
+        Ok(AuthUser::new(account.id.to_string())
+            .with_role_mask(account.roles)
+            .with_extra(account))
+    }
+}
+```
+
+Use `TokenLifecycle` for refresh replay protection, token-ID revocation,
+security-version invalidation, or family logout. Lifecycle rotation completes
+before a refreshed `LoginResponse` is returned.
+
+## Opaque API keys
+
+`AuthKey` is separate from parseable `AuthToken` formats. Its verifier owns the
+lookup, expiry, revocation, tenant checks, and role resolution:
+
+```rust
+use vyuh::auth::{
+    AuthError, AuthKey, AuthProvider, AuthUser, KeyRequest, KeyVerifier,
+};
+
+const API_KEY: AuthProvider = AuthProvider::new("api-key");
+
+struct ApiKeyVerifier;
+
+impl KeyVerifier for ApiKeyVerifier {
+    async fn verify(
+        &self,
+        credential: &vyuh::auth::PresentedCredential<'_>,
+        request: KeyRequest<'_>,
+    ) -> Result<AuthUser, AuthError> {
+        let record = load_api_key(credential.expose(), request.audience()).await?;
+        Ok(AuthUser::new(record.subject)
+            .with_role_mask(record.roles)
+            .with_extra(record))
     }
 }
 
-async fn ingest(key: ApiKey) {
-    let key_id = key.key_id.to_string();
-}
-```
-
-Configure the verifier:
-
-```rust
-use vyuh::prelude::*;
-use vyuh::auth::{ApiKeyConf, AuthConf};
-
-let auth = AuthConf::default().api_keys(
-    ApiKeyConf::default().verifier(MyVerifier)
+let auth = AuthConf::default().provider(
+    API_KEY,
+    AuthKey::header("x-api-key", ApiKeyVerifier),
 );
 ```
 
-By default, API keys are read from `X-API-Key` and
-`Authorization: ApiKey <key>`. Query-string API keys are disabled by default
-because URLs are commonly logged and copied. Enable them only when the protocol
-requires it.
+Headers and cookies are supported. Query extraction requires an explicit
+`UnsafeQueryCredentials::allow()` acknowledgement because URLs leak into logs,
+history, referrers, and monitoring systems.
 
-## OpenAPI
+## Cookies, CSRF, and logout
 
-Auth is reflected in generated OpenAPI specs from handler arguments:
+Token cookies are opt-in and are not server-side sessions. `CookieConf`
+defaults to `Secure`, `HttpOnly`, `SameSite=Lax`, and path `/`. A cookie
+credential automatically gets a readable double-submit CSRF cookie; unsafe
+requests must copy its value into `X-CSRF-Token`. The policy can be renamed with
+`CsrfConf`. Explicitly disabling it is rejected in production.
 
-- `AuthUser` adds JWT security.
-- `permit!(Role, ...)` adds `bearerAuth` with role scopes.
-- `ApiKey` adds `apiKeyAuth`.
+Logout is another authenticator helper owned by an application route:
 
-When cookie-pair auth is configured, Vyuh also emits a cookie security scheme
-using the configured access-cookie name. Public endpoints need no annotation:
-absence of auth extractors means no security requirement.
+```rust
+use axum::{extract::Request, response::Response};
 
-Vyuh emits standard security schemes:
-
-```yaml
-components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-    apiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
-    cookieAuth:
-      type: apiKey
-      in: cookie
-      name: access_token
+async fn logout(site: Site, request: Request) -> Result<Response, Error> {
+    let (parts, _) = request.into_parts();
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    let logout = site.auth().logout(&parts).await?;
+    logout.write(&mut response);
+    Ok(response)
+}
 ```
 
-OpenAPI spec endpoints can be protected independently with
-`OpenApiConf::auth(...)`, which receives the extracted `AuthUser`.
+For the default `{ "ok": true }` body, return `LogoutResponse` directly:
 
-## Password Utilities
+```rust
+async fn logout(site: Site, request: Request) -> Result<LogoutResponse, Error> {
+    let (parts, _) = request.into_parts();
+    Ok(site.auth().logout(&parts).await?)
+}
+```
 
-Vyuh includes small PBKDF2 password helpers:
+Cookie providers clear access, refresh, and CSRF cookies. Stateless bearer
+providers need no server mutation. A token or key lifecycle can revoke the
+presented credential or refresh family. Logout is therefore provider-managed
+sign-out: without a lifecycle it clears applicable client state but does not
+claim server-side revocation.
 
-- `make_password(password, salt, algorithm)`
-- `check_password(password, encoded)`
-- `unusable_password()`
+## Security and operations
 
-The encoded hash format is compatible with Django PBKDF2 hashes. Django
-compatibility means password-hash compatibility and migration friendliness, not
-Django sessions, permissions, groups, or user tables.
+Vyuh bounds credential input before decoding, pins algorithms, binds locally
+issued tokens to their provider, validates expiry and `not_before`, rejects
+audience escalation, short-circuits malformed credentials, and renders generic
+`401`, `403`, `500`, and provider-unavailable `503` bodies. Raw keys, tokens,
+bindings, and key material are redacted from formatting and serialization.
 
-## Examples
+Prometheus output includes `vyuh_auth_attempts_total` with configured provider
+names, one fixed `<unknown>` selector bucket, and safe outcome classes, plus
+`vyuh_login_attempts_total` with the same bounded method-label policy. OpenAPI
+emits one security alternative per provider, `x-vyuh-audience`, token
+`bearerFormat`, API-key locations, and CSRF-header metadata for unsafe
+cookie-authenticated operations.
 
-The snippets in this chapter cover JWT issuance, route protection with
-`AuthUser`, optional cookies, static roles, dynamic authorization, API-key
-verification, and OpenAPI security metadata.
+Rate limiting remains middleware policy. Treat password login, refresh, and
+expensive API-key verification endpoints as explicit rate-limit boundaries.
 
-## Failure Modes
+## Future session providers
 
-- Missing JWTs return `AuthError::MissingToken` and HTTP `401`.
-- Invalid JWTs return `AuthError::InvalidToken` and HTTP `401`.
-- Expired JWTs return `AuthError::ExpiredToken` and HTTP `401`.
-- Access/refresh token-kind mismatch returns `AuthError::WrongTokenKind` and
-  HTTP `401`.
-- Missing API keys return `AuthError::MissingApiKey` and HTTP `401`.
-- Invalid API keys return `AuthError::InvalidApiKey` and HTTP `401`.
-- Failed audience, role, or permission checks return `AuthError::Forbidden` and
-  HTTP `403`.
+Traditional server-side sessions are not implemented. The internal provider
+runtime already has asynchronous authenticate, login, refresh, logout, response
+attachment, and capability boundaries, so a future stateful provider can fit
+the same handler and `Authenticator` APIs without introducing session-specific
+routes or extractors.
 
-## Current Limitations
+Vyuh's Django-compatible `make_password`, `check_password`, and
+`unusable_password` helpers remain available independently of token format.
 
-- Auth is stateless unless the application stores extra session or token data.
-- API-key storage and revocation are application responsibilities.
-- JWK and JWKS fetching are not included in this pass.
-- Vyuh does not ship user models, registration, password reset, or account
-  management flows.
-- Role masks are limited to 64 bit positions.
+## Migration from the halted auth redesign
+
+The earlier uncommitted API has no compatibility aliases. Update applications
+as follows:
+
+- register identity proof with `AuthConf::method`, reserving `login` for the
+  runtime operation;
+- configure the default credential provider through
+  `AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider)` instead of
+  default-provider convenience fields;
+- construct sources with `TokenConf::{bearer,header,cookie,query}` or the
+  parallel `AuthKey` constructors instead of `CredentialLocation`;
+- compose password or Basic proof with MFA through `.then(...)`;
+- construct externally decoded values through `AuthToken::builder(...)`;
+- call infallible `LoginResponse::write`; obtain assurance through
+  `AuthUser::authentication()` and handle its `auth_time()` as optional;
+- remove `?` after `using(...)` and `via(...)`; selection errors are returned
+  by the following terminal operation;
+- replace `logout(parts, response).await?` with
+  `let logout = logout(parts).await?; logout.write(response);`.
+
+Access and refresh remain `TokenKind` values inside one provider, and all
+`login` and `refresh` calls continue to take `&[Audience]`.

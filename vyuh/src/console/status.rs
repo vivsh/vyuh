@@ -1,8 +1,50 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::Serialize;
 use sysinfo::{Pid, System};
 
 use crate::Site;
+
+#[derive(Clone)]
+pub(crate) struct ConsoleStatusCache(Arc<Mutex<Option<StatusCache>>>);
+
+#[derive(Clone)]
+struct StatusCache {
+    refreshed_at: Instant,
+    status: StatusOut,
+}
+
+impl ConsoleStatusCache {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(Mutex::new(None)))
+    }
+
+    pub(crate) fn get(&self, site: &Site, ttl: Duration) -> StatusOut {
+        let now = Instant::now();
+        if let Some(status) = self.cached(now, ttl) {
+            return status;
+        }
+        let status = collect(site);
+        *self.0.lock() = Some(StatusCache {
+            refreshed_at: now,
+            status: status.clone(),
+        });
+        status
+    }
+
+    fn cached(&self, now: Instant, ttl: Duration) -> Option<StatusOut> {
+        self.0
+            .lock()
+            .as_ref()
+            .filter(|cache| now.duration_since(cache.refreshed_at) < ttl)
+            .map(|cache| cache.status.clone())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusOut {
@@ -85,7 +127,7 @@ pub fn collect(site: &Site) -> StatusOut {
             database_backend: database_backend(),
             uptime_seconds: site.uptime().as_secs(),
             features: enabled_features(),
-            operation_count: site.iter_operations().count(),
+            operation_count: site.operations().list().count(),
             command_count: site.console_command_infos().len(),
             service_count: site.console_service_infos().len(),
         },

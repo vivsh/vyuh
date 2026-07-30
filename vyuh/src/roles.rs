@@ -123,7 +123,7 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> OptionalFromRequestParts<Site
         match <Permit<MASK, R, O> as FromRequestParts<Site>>::from_request_parts(parts, site).await
         {
             Ok(permit) => Ok(Some(permit)),
-            Err(AuthError::MissingToken | AuthError::Forbidden) => Ok(None),
+            Err(AuthError::NoCredential | AuthError::Forbidden) => Ok(None),
             Err(err) => Err(err),
         }
     }
@@ -141,8 +141,9 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> crate::callables::IntoArgPart
             })
             .collect();
         crate::callables::ArgPart::Composite(vec![
+            crate::callables::ArgPart::Authentication,
             crate::callables::ArgPart::Security {
-                scheme: Cow::Borrowed("bearerAuth"),
+                scheme: Cow::Borrowed("vyuhAuth"),
                 scopes,
                 join_all: O::join_all(),
             },

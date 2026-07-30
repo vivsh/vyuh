@@ -43,8 +43,29 @@ jobs:
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Django fixture dependency
+        run: python -m pip install "Django==5.2.*"
+      - name: Verify Django cross-language fixtures
+        run: python vyuh/tests/fixtures/django_signing.py
       - name: Run backendless unit and integration suite
         run: cargo test -p vyuh --no-default-features
+
+  auth-codecs:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [oidc, paseto, branca, "oidc,paseto,branca"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout Mool prerequisite
+        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test authentication codec feature set
+        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --test auth
 
   feature-matrix:
     runs-on: ubuntu-latest

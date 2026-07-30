@@ -220,12 +220,9 @@ with `/`, must not be `/`, and must not end with `/`.
 middleware to all routes in the bundle; middleware that exposes metadata also
 updates operations for documentation.
 
-`reverse(name, args)` resolves a named route to its final path. Missing path
-arguments return `None`; extra arguments are ignored; substituted values are
-percent-encoded.
-
-`iter_operations()` exposes the collected operation metadata. Callers that show
-operations should filter hidden entries.
+After `Site::build`, route reversal and resolution use `site.routes()`, while
+operation lookup and iteration use `site.operations()`. Bundles retain this
+metadata during composition but do not expose parallel runtime facades.
 
 ## OpenAPI Order
 

@@ -9,11 +9,12 @@ use crate::db::DbConf;
 use crate::{Site, SiteConf, SiteError};
 use axum::Router;
 use axum::body::{self, Body, Bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{self, Value, value::to_value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::SocketAddr};
 use tower::ServiceExt;
 
 pub use crate::db::sqlx::test_block_on;
@@ -418,6 +419,7 @@ pub struct TestRequestBuilder {
     path: String,
     headers: Vec<(String, String)>,
     body: Option<Body>,
+    peer_addr: SocketAddr,
 }
 
 impl TestRequestBuilder {
@@ -428,6 +430,7 @@ impl TestRequestBuilder {
             path: path.to_string(),
             headers: Vec::new(),
             body: None,
+            peer_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
     }
 
@@ -438,6 +441,12 @@ impl TestRequestBuilder {
 
     pub fn body(mut self, body: Body) -> Self {
         self.body = Some(body);
+        self
+    }
+
+    /// Sets the connection peer address attached to this in-process request.
+    pub fn peer_addr(mut self, peer_addr: SocketAddr) -> Self {
+        self.peer_addr = peer_addr;
         self
     }
 
@@ -464,9 +473,10 @@ impl TestRequestBuilder {
         for (k, v) in self.headers {
             req = req.header(&k, &v);
         }
-        let req = req
+        let mut req = req
             .body(self.body.unwrap_or_else(|| Body::empty()))
             .unwrap();
+        req.extensions_mut().insert(ConnectInfo(self.peer_addr));
         let resp = self.app.clone().oneshot(req).await.unwrap();
         TestResponse { resp }
     }
@@ -573,6 +583,7 @@ pub async fn mock_site() -> SiteConf {
         project_dir: "/tmp/vyuh_test".to_string(),
         database: DbConf::default(),
         secret_key: "test_secret_key_minimum_32_chars!".to_string(),
+        secret_key_fallbacks: Vec::new(),
         media_dir: None,
         templates: crate::templates::TemplateConf::default(),
         touch_reload: None,

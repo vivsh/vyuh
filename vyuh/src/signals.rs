@@ -13,6 +13,7 @@ use std::{any::TypeId, collections::HashMap, sync::Arc};
 pub struct SignalHandler {
     type_id: TypeId,
     func: Callable<SignalContext, Error>,
+    operation_id: crate::OperationId,
 }
 
 impl SignalHandler {
@@ -30,11 +31,18 @@ impl SignalHandler {
 pub struct SignalContext {
     site: Site,
     payload: DataBox,
+    operation_id: crate::OperationId,
 }
 
 impl HasSite for SignalContext {
     fn site(&self) -> &Site {
         &self.site
+    }
+}
+
+impl callables::FromContextParts<SignalContext> for crate::OperationId {
+    fn from_context_parts(context: &SignalContext) -> Result<Self, CallError> {
+        Ok(context.operation_id)
     }
 }
 
@@ -48,13 +56,12 @@ pub struct SignalConf {}
 pub(crate) struct Signaller {
     pub(crate) handler: SignalHandler,
     pub(crate) options: SignalConf,
+    operation: crate::callables::Operation,
 }
 
 impl Signaller {
     pub(crate) fn operation(&self) -> crate::callables::Operation {
-        let spec = self.handler.func.inspect();
-        crate::callables::Operation::from_specs(crate::callables::OperationKind::Signal, spec)
-            .with_conf(&self.options)
+        self.operation.clone().with_conf(&self.options)
     }
 }
 
@@ -70,13 +77,19 @@ where
         + 'static,
 {
     let callable = Callable::new(handler);
+    let operation = crate::callables::Operation::from_specs(
+        crate::callables::OperationKind::Signal,
+        callable.inspect(),
+    );
 
     Signaller {
         handler: SignalHandler {
             func: callable,
             type_id: TypeId::of::<T>(),
+            operation_id: operation.id,
         },
         options,
+        operation,
     }
 }
 
@@ -242,6 +255,7 @@ impl SignalEngine {
             let ctx = SignalContext {
                 site: site.clone(),
                 payload: payload.clone(),
+                operation_id: handler.operation_id,
             };
             if let Err(err) = handler.call(ctx).await {
                 tracing::error!("Error executing signal handler: {}", err);
@@ -267,6 +281,36 @@ mod tests {
     #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
     struct TestChannelSignal {
         user_id: usize,
+    }
+
+    /// Verifies each signal invocation receives its handler's canonical operation ID.
+    #[tokio::test]
+    async fn signal_extracts_operation_id() -> Result<(), String> {
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let captured = Arc::clone(&seen);
+        let handler = move |id: crate::OperationId, _data: Data<TestSignal>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                *captured.lock() = Some(id);
+            }
+        };
+        let signaller = signal::<TestSignal, _, _>(handler, SignalConf::default());
+        let expected = signaller.operation().id;
+        let mut registry = SignalRegistry::new();
+        registry.register(signaller);
+        let site = crate::Site::build(
+            crate::SiteConf::default().log_init(false),
+            crate::bundles::Bundle::new(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        registry
+            .engine()
+            .dispatch_payload(site, DataBox::new(TestSignal { value: 1 }))
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(*seen.lock(), Some(expected));
+        Ok(())
     }
 
     static HANDLER_COUNT: AtomicUsize = AtomicUsize::new(0);

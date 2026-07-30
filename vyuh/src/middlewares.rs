@@ -255,7 +255,7 @@ impl SlashRouter {
                 continue;
             }
 
-            let policy = effective_policy(op.slash_policy.unwrap_or(default_policy), &op);
+            let policy = effective_slash(op.slash_policy.unwrap_or(default_policy), &op);
             let path = op.path.as_str();
             let methods = op.methods;
             let mut add_rule = |from_path: String, action: SlashAction| -> Result<(), String> {
@@ -325,7 +325,7 @@ impl SlashRouter {
     }
 }
 
-fn effective_policy(policy: SlashPolicy, op: &Operation) -> SlashPolicy {
+pub(crate) fn effective_slash(policy: SlashPolicy, op: &Operation) -> SlashPolicy {
     match policy {
         SlashPolicy::Auto => {
             if is_html_operation(op) {

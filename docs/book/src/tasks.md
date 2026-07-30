@@ -105,6 +105,23 @@ inspection. Submission is typed: `site.tasks().submit(...)` finds the registered
 handler by the submitted data type. Vyuh enforces one handler per task input
 type.
 
+Task handlers may extract their canonical operation identity before `Data<T>`:
+
+```rust
+#[bundles::task]
+async fn send_email(
+    operation_id: OperationId,
+    site: Site,
+    Data(job): Data<SendEmail>,
+) {
+    let _metadata = site.operations().find(operation_id);
+    // process job
+}
+```
+
+The ID identifies the currently registered task operation and is not persisted
+as part of the task record.
+
 ## Handler Shapes
 
 Fire-and-forget handlers can return nothing:

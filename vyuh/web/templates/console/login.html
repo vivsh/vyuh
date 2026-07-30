@@ -4,21 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Login - Vyuh Console</title>
-  <link rel="icon" href="/assets/img/favicon.svg">
+  <link rel="icon" href="{{ asset_root }}/img/favicon.svg">
   <link rel="stylesheet" href="{{ stylesheet_path }}">
 </head>
 <body class="vyuh-page console-body">
   <section class="console-login">
     <article class="vyuh-card console-login-card">
       <a class="vyuh-brand" href="{{ base_path }}/">
-        <img src="/assets/img/vyuh-logo-transparent.png" alt="Vyuh logo">
+        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="Vyuh logo">
         <span>vyuh</span>
       </a>
       <p class="vyuh-kicker console-login-kicker">Console login</p>
-      <h1 class="vyuh-section-title">Use the bootstrap URL printed by Vyuh.</h1>
-      <p class="vyuh-copy">Console access uses an isolated console cookie. Normal application auth does not grant access to this operational UI.</p>
-      <p class="vyuh-copy">In debug builds on localhost, the console opens directly without a bootstrap token.</p>
-      <p class="vyuh-copy">Start the site with console enabled, open the printed bootstrap URL, then return to this page.</p>
+      <h1 class="vyuh-section-title">Enter a console login token.</h1>
+      <p class="vyuh-copy">Generate a short-lived token with the <code>console-token</code> command. Normal application auth does not grant access to this operational UI.</p>
+      <form method="post" action="{{ login_url }}" class="vyuh-console-toolbar">
+        <label>Login token<input type="password" name="token" autocomplete="one-time-code" required></label>
+        <button type="submit">Sign in</button>
+      </form>
     </article>
   </section>
 </body>

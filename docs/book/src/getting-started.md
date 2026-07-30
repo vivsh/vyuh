@@ -1,7 +1,7 @@
 # Getting Started
 
 This chapter walks through a small Vyuh application that touches the framework
-surfaces most projects care about first: routes, JWT auth, a task, a command,
+surfaces most projects care about first: routes, provider authentication, a task, a command,
 a cron emitter, a signal handler, and OpenAPI.
 
 It is not a production-ready application, and it is not trying to hide that.
@@ -32,8 +32,9 @@ important thing to notice is not the macro. It is the function signature.
 {{#include ../../../vyuh/examples/getting_started.rs:routes}}
 ```
 
-`signup` is a validated JSON route. `login` and `me` show the normal JWT path
-with very little ceremony.
+`signup` is a validated JSON route. `login` selects the configured password
+method with `.via(PASSWORD)` and returns the normal JWT credentials; `me`
+extracts the resulting `AuthUser`.
 
 That combination is already most of what a real API does: parse input, validate
 it, authenticate some endpoints, and issue tokens without dropping into
@@ -65,9 +66,9 @@ uniformity argument in practice, not as a slogan.
 ## Auth And OpenAPI
 
 Auth stays explicit. If a handler does not extract auth, Vyuh does no auth work
-for it. For a first application, JWT is the path with the least ceremony:
-configure auth once, issue a token pair, and extract `AuthUser` where a route
-should require an access token.
+for it. For a first application, the default token provider is the path with
+the least ceremony: configure one `PasswordLogin`, return a `LoginResponse`,
+and extract `AuthUser` where a route should require an access token.
 
 OpenAPI works the same way Vyuh usually works: attach it once at the bundle,
 and let it follow the routes that bundle already owns. That means prefixes,
@@ -79,7 +80,8 @@ nesting, and route metadata stay aligned without a parallel documentation tree.
 
 OpenAPI and the docs viewer need no per-route schema file, no separate route
 table, and no duplicate metadata layer. They come from the handlers and bundle
-declaration you already had to write anyway.
+declaration you already had to write anyway. Authenticated routes also belong
+to a bundle audience, which becomes part of their generated metadata.
 
 ## Command Bundle
 
@@ -104,7 +106,7 @@ different surfaces stop being examples and become one application.
 ```
 
 The bundle is where the feature surface comes together: routes, a task, a cron
-emitter, a signal handler, command registration, JWT-protected handlers, and
+emitter, a signal handler, command registration, provider-protected handlers, and
 OpenAPI. `main` stays small because the feature wiring already lives with the
 feature.
 
@@ -116,8 +118,8 @@ feature.
   recognizably close to each other.
 - Validation is explicit through `Valid<Data<T>>`, not inferred from derives
   alone.
-- JWT auth is explicit through `AuthUser`, while setup stays small with
-  `AuthConf::default()`.
+- Provider auth is explicit through `AuthUser` and a bundle audience, while
+  setup stays small with `AuthConf::default()`.
 - OpenAPI is attached once and follows the bundle tree automatically.
 
 From here, the next useful pages are [Bundles](bundles.md), [Routes](routes.md),

@@ -75,6 +75,37 @@ async fn test_execute_command() {
     assert!(result.is_ok());
 }
 
+/// Verifies a command handler receives the ID retained by its operation metadata.
+#[tokio::test]
+async fn command_extracts_operation_id() -> Result<(), String> {
+    let seen = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let captured = std::sync::Arc::clone(&seen);
+    let handler = move |id: crate::OperationId, _args: Data<TestArgs>| {
+        let captured = std::sync::Arc::clone(&captured);
+        async move {
+            *captured.lock() = Some(id);
+            Ok::<(), Error>(())
+        }
+    };
+    let command = command::<TestArgs, _, _>(handler, CommandConf::new("operation"))
+        .map_err(|error| error.to_string())?;
+    let expected = command.operation().id;
+    let mut registry = CommandRegistry::new();
+    registry
+        .register(command)
+        .map_err(|error| error.to_string())?;
+    registry
+        .execute(
+            "operation",
+            &["--name", "A", "--age", "1"],
+            make_site().await,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(*seen.lock(), Some(expected));
+    Ok(())
+}
+
 #[test]
 fn test_parse_arrays_booleans_and_scalars() {
     let args = command_arg_defs::<ParserArgs>();

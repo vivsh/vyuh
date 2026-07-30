@@ -37,6 +37,9 @@ pub struct ServeArgs {}
 pub struct HealthArgs {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ConsoleTokenArgs {}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ShowConfigArgs {
     #[serde(default)]
     pub raw: bool,
@@ -146,6 +149,16 @@ pub fn core_registry() -> Result<CommandRegistry, CommandError> {
         CommandConf::new("health").description("Check basic site health."),
     )?;
     registry.register(health)?;
+
+    let console_token = super::command::<
+        ConsoleTokenArgs,
+        _,
+        crate::callables::specs::Tuple2<SiteRef, Data<ConsoleTokenArgs>>,
+    >(
+        console_token_command,
+        CommandConf::new("console-token").description("Generate a 90-second console login token."),
+    )?;
+    registry.register(console_token)?;
 
     let show_config = super::command::<
         ShowConfigArgs,
@@ -286,6 +299,26 @@ async fn health_command(SiteRef(site): SiteRef, _args: Data<HealthArgs>) -> Resu
     #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
     println!("database: not configured");
     println!("uptime_seconds: {}", uptime);
+    Ok(())
+}
+
+async fn console_token_command(
+    SiteRef(site): SiteRef,
+    _args: Data<ConsoleTokenArgs>,
+) -> Result<(), Error> {
+    if !site.conf().console.enabled {
+        return Err(Error::invalid("console is not enabled"));
+    }
+    use crate::auth::AuthUser;
+    use crate::console::auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, ConsoleRole};
+
+    let user = AuthUser::new("console-token").with_role(ConsoleRole::Admin);
+    let token = site
+        .auth()
+        .issue_raw(CONSOLE_LOGIN, user, &[CONSOLE_AUDIENCE], None)
+        .await
+        .map_err(Error::other)?;
+    println!("{token}");
     Ok(())
 }
 

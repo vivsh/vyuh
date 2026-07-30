@@ -7,74 +7,85 @@ use serde::Deserialize;
 
 use crate::{
     Site,
+    auth::AuthUser,
     console::{
-        auth::{ConsoleCookies, ConsoleSessionUser, expired_cookie, session_cookie},
+        auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, CONSOLE_TOKEN},
         query::{
             OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit_max,
         },
         types::{ConfigOut, OperationOut, Page, SessionOut, TaskDetailOut, TaskOut},
     },
-    routes::{Json, Path, Query},
+    routes::{ClientIp, Form, Json, Path, Query},
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct LoginQuery {
+pub struct LoginForm {
     token: String,
 }
 
 pub async fn login(
     site: Site,
-    Query(query): Query<LoginQuery>,
-    ConsoleCookies(jar): ConsoleCookies,
-) -> Result<(axum_extra::extract::CookieJar, Response), StatusCode> {
-    let runtime = site.console_runtime().ok_or(StatusCode::NOT_FOUND)?;
-    let conf = &site.conf().console;
-    let ttl = std::time::Duration::from_secs(conf.session_ttl_seconds);
-    let token = runtime
-        .consume_bootstrap(&query.token, ttl)
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let max_age = time::Duration::seconds(conf.session_ttl_seconds as i64);
-    let jar = jar.add(session_cookie(
-        &conf.cookie_name,
-        token,
-        max_age,
-        conf.secure_cookie,
-    ));
-    Ok((jar, Redirect::to(&conf.path).into_response()))
+    ClientIp(ip): ClientIp,
+    Form(form): Form<LoginForm>,
+) -> Result<Response, StatusCode> {
+    let parts = axum::http::Request::new(axum::body::Body::empty())
+        .into_parts()
+        .0;
+    let user = site
+        .auth()
+        .verify_raw(CONSOLE_LOGIN, &form.token, &parts, CONSOLE_AUDIENCE)
+        .await
+        .map_err(|error| {
+            tracing::debug!(error = %error, "console login credential rejected");
+            StatusCode::UNAUTHORIZED
+        })?;
+    let login = site
+        .auth()
+        .using(CONSOLE_TOKEN)
+        .login_bound(user, &[CONSOLE_AUDIENCE], ip.to_string())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let destination = site
+        .routes()
+        .reverse_url("console_home", &[])
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut response = Redirect::to(&destination).into_response();
+    login.write(&mut response);
+    Ok(response)
 }
 
-pub async fn logout(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-    ConsoleCookies(jar): ConsoleCookies,
-) -> (axum_extra::extract::CookieJar, Json<serde_json::Value>) {
-    let conf = &site.conf().console;
-    if let Some(cookie) = jar.get(&conf.cookie_name)
-        && let Some(runtime) = site.console_runtime()
-    {
-        runtime.clear_session(cookie.value());
-    }
-    let jar = jar.add(expired_cookie(&conf.cookie_name, conf.secure_cookie));
-    (jar, Json(serde_json::json!({ "ok": true })))
+pub async fn logout(site: Site, _user: AuthUser) -> Result<Response, StatusCode> {
+    let parts = axum::http::Request::new(axum::body::Body::empty())
+        .into_parts()
+        .0;
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    let logout = site
+        .auth()
+        .using(CONSOLE_TOKEN)
+        .logout(&parts)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    logout.write(&mut response);
+    Ok(response)
 }
 
-pub async fn session(ConsoleSessionUser(user): ConsoleSessionUser) -> Json<SessionOut> {
+pub async fn session(user: AuthUser) -> Json<SessionOut> {
     Json(SessionOut {
-        subject: user.subject,
+        subject: user.key.to_string(),
         roles: user.roles,
-        role_names: user.role_names,
+        role_names: Vec::new(),
     })
 }
 
 pub async fn operations(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Query(query): Query<OperationQuery>,
 ) -> Json<Page<OperationOut>> {
     let conf = &site.conf().console;
     let console_bundle_id = console_bundle_id(&site);
     let (items, next_cursor) = filter_operations(
-        site.iter_operations(),
+        site.operations().list(),
         &query,
         console_bundle_id,
         conf.page_size_default,
@@ -91,25 +102,28 @@ pub async fn operations(
 
 pub async fn operation_detail(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<OperationOut>, StatusCode> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let id = id
+        .parse::<crate::OperationId>()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     let console_bundle_id = console_bundle_id(&site);
-    site.iter_operations()
-        .find(|op| op.id == id && !is_console_operation(op, console_bundle_id))
+    site.operations()
+        .find(id)
+        .filter(|op| !is_console_operation(op, console_bundle_id))
         .map(|op| OperationOut::from_operation(op, &site))
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
 
 fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {
-    site.console_runtime().map(|runtime| runtime.bundle_id())
+    site.console_bundle_id()
 }
 
 pub async fn tasks(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<Page<TaskOut>>, StatusCode> {
     let conf = &site.conf().console;
@@ -127,7 +141,7 @@ pub async fn tasks(
 
 pub async fn task_detail(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDetailOut>, StatusCode> {
     let id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::NOT_FOUND)?;
@@ -140,26 +154,15 @@ pub async fn task_detail(
     Ok(Json(TaskDetailOut::from(&record)))
 }
 
-pub async fn status(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Json<crate::console::status::StatusOut> {
-    let ttl = std::time::Duration::from_secs(site.conf().console.status_cache_ttl_seconds);
-    let status = site
-        .console_runtime()
-        .map(|runtime| runtime.status(&site, ttl))
-        .unwrap_or_else(|| crate::console::status::collect(&site));
-    Json(status)
+pub async fn status(site: Site, _user: AuthUser) -> Json<crate::console::status::StatusOut> {
+    Json(site.console_status())
 }
 
-pub async fn conf(site: Site, ConsoleSessionUser(_user): ConsoleSessionUser) -> Json<ConfigOut> {
+pub async fn conf(site: Site, _user: AuthUser) -> Json<ConfigOut> {
     Json(ConfigOut::from_site(&site))
 }
 
-pub async fn openapi(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Result<Response, StatusCode> {
+pub async fn openapi(site: Site, _user: AuthUser) -> Result<Response, StatusCode> {
     let body = openapi_json(&site).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((
         StatusCode::OK,
@@ -172,7 +175,8 @@ pub async fn openapi(
 pub(super) fn openapi_json(site: &Site) -> Result<String, String> {
     let console_bundle_id = console_bundle_id(site);
     let routes = site
-        .iter_operations()
+        .operations()
+        .list()
         .filter(|op| {
             op.kind == crate::OperationKind::Route
                 && !op.hidden

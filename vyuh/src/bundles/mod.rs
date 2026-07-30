@@ -4,11 +4,10 @@ mod part;
 
 use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-
 use crate::middlewares::SlashPolicy;
 use crate::{
     Site,
+    auth::{Audience, AudienceId},
     callables::OperationKind,
     commands::CommandRegistry,
     embed, emitters,
@@ -53,6 +52,12 @@ pub trait IntoBundle {
     fn into_bundle(self) -> Bundle;
 }
 
+/// Request-local bundle metadata installed by an audience-bearing bundle.
+#[derive(Clone, Debug)]
+pub(crate) struct BundleRequestContext {
+    pub(crate) audience: Option<AudienceId>,
+}
+
 impl IntoBundle for Bundle {
     fn into_bundle(self) -> Bundle {
         self
@@ -88,11 +93,12 @@ pub struct Bundle {
     pub(super) inner_router: routes::AxumRouter<Site>,
     /// All operations keyed by their stable UUID — routes, signals, tasks, commands,
     /// services, and hidden doc-engine markers alike.
-    pub(crate) ops: BTreeMap<uuid::Uuid, crate::callables::Operation>,
+    pub(crate) ops: BTreeMap<crate::OperationId, crate::callables::Operation>,
     /// Secondary index: route name → UUID. Populated only for HTTP routes so that
-    /// `reverse()` can look up a path by the human-readable name.
-    pub(crate) name_index: BTreeMap<String, uuid::Uuid>,
+    /// `Routes::reverse_url()` can look up a path by the human-readable name.
+    pub(crate) name_index: BTreeMap<String, crate::OperationId>,
     pub(super) id: uuid::Uuid,
+    pub(crate) audience: Option<AudienceId>,
     label: Option<String>,
     pub(crate) signals: SignalRegistry,
     pub(crate) emitters: emitters::EmitterRegistry,
@@ -112,6 +118,7 @@ impl Bundle {
     pub fn new() -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
+            audience: None,
             label: None,
             inner_router: routes::AxumRouter::new(),
             ops: BTreeMap::new(),
@@ -142,6 +149,40 @@ impl Bundle {
         self.label.as_deref()
     }
 
+    /// Applies an audience requirement to this bundle and nested bundles that
+    /// do not declare their own audience.
+    pub fn with_audience(mut self, declared: Audience) -> Self {
+        let audience = match AudienceId::new(declared.as_str()) {
+            Ok(audience) => audience,
+            Err(error) => {
+                self.errors.push(BundleError::Auth(error.to_string()));
+                return self;
+            }
+        };
+        for operation in self.ops.values_mut() {
+            if operation.audience.is_none() {
+                operation.audience = Some(audience.clone());
+            }
+        }
+        let context = BundleRequestContext {
+            audience: Some(audience.clone()),
+        };
+        self.inner_router = self.inner_router.layer(axum::Extension(context));
+        self.audience = Some(audience);
+        self
+    }
+
+    pub(crate) fn apply_default_audience(&mut self, audience: Option<AudienceId>) {
+        let Some(audience) = audience else {
+            return;
+        };
+        for operation in self.ops.values_mut() {
+            if operation.requires_auth() && operation.audience.is_none() {
+                operation.audience = Some(audience.clone());
+            }
+        }
+    }
+
     pub(crate) fn with_owning_bundle_id(mut self) -> Self {
         for op in self.ops.values_mut() {
             op.set_bundle_id(self.id);
@@ -160,18 +201,20 @@ impl Bundle {
         if !self.errors.is_empty() {
             return Err(BundleError::ErrorList(self.errors.clone()));
         }
+        for operation in self.ops.values() {
+            if operation.requires_auth() && operation.audience.is_none() {
+                return Err(BundleError::MissingAuthAudience {
+                    name: operation.name.clone(),
+                    path: operation.path.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
     /// Returns the axum router for the HTTP routes registered in this bundle.
     pub fn to_router(&self) -> routes::AxumRouter<Site> {
         self.inner_router.clone()
-    }
-
-    /// Iterates over all operations: routes, signals, tasks, commands, services, and
-    /// internal hidden markers. Callers that display operations should filter `op.hidden`.
-    pub fn iter_operations(&self) -> impl Iterator<Item = &crate::callables::Operation> {
-        self.ops.values()
     }
 
     /// Appends tags to every operation in this bundle.
@@ -206,7 +249,14 @@ impl Bundle {
     /// next time `validate()` is called. `SiteBuilder::build` always calls
     /// `validate()` before the site starts, so no error is silently swallowed.
     pub fn merge<B: IntoBundle>(mut self, other: B) -> Self {
-        let other = other.into_bundle();
+        let mut other = other.into_bundle();
+        if let Some(audience) = &self.audience {
+            for operation in other.ops.values_mut() {
+                if operation.audience.is_none() {
+                    operation.audience = Some(audience.clone());
+                }
+            }
+        }
         let router = match self.absorb(other) {
             Ok(r) => r,
             Err(e) => {
@@ -283,26 +333,6 @@ impl Bundle {
     pub(crate) fn with_router_unchecked(mut self, router: routes::AxumRouter<Site>) -> Self {
         self.inner_router = router;
         self
-    }
-
-    /// Reverse-resolves a named route to its URL, filling in path parameters.
-    ///
-    /// Returns `None` if no route with that name is registered.
-    pub fn reverse(&self, name: &str, args: &[(&str, &str)]) -> Option<String> {
-        let id = self.name_index.get(name)?;
-        let op = self.ops.get(id)?;
-        let mut path = op.path.to_string();
-        for (k, v) in args {
-            let placeholder = format!("{{{k}}}");
-            if path.contains(&placeholder) {
-                let encoded = utf8_percent_encode(v, NON_ALPHANUMERIC).to_string();
-                path = path.replace(&placeholder, &encoded);
-            }
-        }
-        if path.contains('{') || path.contains('}') {
-            return None;
-        }
-        Some(path)
     }
 
     // -----------------------------------------------------------------------
@@ -439,11 +469,11 @@ mod tests {
 
     fn route_op(name: &str, path: &str, methods: routes::Methods) -> crate::callables::Operation {
         crate::callables::Operation {
-            id: uuid::Uuid::new_v4(),
+            id: crate::OperationId::new(),
             name: name.to_string(),
             description: None,
             summary: None,
-            operation_id: None,
+            openapi_id: None,
             deprecated: false,
             path: path.to_string(),
             kind: OperationKind::Route,
@@ -455,6 +485,7 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
+            audience: None,
             bundle_id: None,
             slash_policy: None,
         }
@@ -589,32 +620,5 @@ mod tests {
             bundle.errors.as_slice(),
             [BundleError::InvalidRoutePrefix { .. }]
         ));
-    }
-
-    #[test]
-    fn valid_prefix_updates_operation_paths() {
-        let op = route_op("notes", "/notes", routes::Methods::GET);
-        let prefixed = bundle_with_route(op).with_prefix("/v1");
-        assert_eq!(
-            prefixed.reverse("notes", &[]),
-            Some("/v1/notes".to_string())
-        );
-    }
-
-    #[test]
-    fn reverse_encodes_path_params() {
-        let op = route_op("note", "/notes/{id}", routes::Methods::GET);
-        let bundle = bundle_with_route(op);
-        assert_eq!(
-            bundle.reverse("note", &[("id", "a/b c")]),
-            Some("/notes/a%2Fb%20c".to_string())
-        );
-    }
-
-    #[test]
-    fn reverse_returns_none_when_params_are_missing() {
-        let op = route_op("note", "/notes/{id}", routes::Methods::GET);
-        let bundle = bundle_with_route(op);
-        assert_eq!(bundle.reverse("note", &[]), None);
     }
 }

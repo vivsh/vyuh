@@ -18,13 +18,18 @@ OpenAPI generation uses these inputs:
 - Doc comments supply operation summary and description.
 - `PatchOp` overrides names, descriptions, argument metadata, response metadata,
   status codes, and extra responses.
-- `AuthUser`, `ApiKey`, and validation wrappers contribute security and error
-  response metadata.
+- `AuthUser`, `permit!(...)`, and validation wrappers contribute security and
+  error response metadata.
 - `OpenApiConf` controls the generated spec endpoint and API metadata.
 
 Vyuh emits OpenAPI 3.0.3 by default for broad tooling compatibility. Use
 `.openapi_version(bundles::OpenApiVersion::V31)` when a project wants an
 OpenAPI 3.1 document and its client/documentation tooling supports it.
+
+Vyuh's UUID-backed `OperationId` is the canonical runtime identity used by
+`site.operations()` and handler extraction. It is separate from OpenAPI's
+configurable string `operationId`; multi-method OpenAPI suffixes never create
+additional runtime operations.
 
 ## Registration
 
@@ -271,13 +276,14 @@ Vyuh documents common framework errors from handler metadata:
 
 - request inputs imply `400 Bad Request`;
 - `Valid<T>` inputs imply `422 Unprocessable Entity`;
-- auth inputs such as `AuthUser` and `ApiKey` imply `401 Unauthorized`.
+- auth inputs such as `AuthUser` and `permit!(...)` imply safe `401`, `403`,
+  `500`, and provider-unavailable `503` responses.
 
 These responses are explicit operation metadata contributed by the argument
 wrappers, not generator guesswork. They use Vyuh's standard `ErrorReport` body.
-`500` is not emitted by default, because adding it to every operation makes the
-spec noisy. Add explicit response metadata for endpoints where documenting an
-internal-error response is useful.
+`500` is not added to unrelated public operations. Authentication extractors
+include it because framework or provider configuration can fail independently
+of an invalid credential.
 
 ## Security
 
@@ -295,9 +301,22 @@ async fn me(user: AuthUser) -> Json<String> {
 }
 ```
 
-`AuthUser` contributes JWT security metadata. If the site uses cookie-pair auth,
-OpenAPI includes a cookie security scheme from `AuthConf` as an alternative to
-bearer JWT auth. `ApiKey` uses the configured API-key header or query parameter.
+`AuthUser` contributes one OpenAPI alternative for each configured provider,
+with a scheme derived from that provider's access-credential location. JWT,
+PASETO, BRANCA, and custom token codecs contribute their `bearerFormat`; opaque
+`AuthKey` providers use OpenAPI `apiKey`. `AuthUser` routes also carry their
+effective bundle audience as `x-vyuh-audience` metadata. Unsafe operations that
+may authenticate through a cookie carry `x-vyuh-csrf-header` metadata.
+When a route omits `.with_audience(...)`, this extension contains the site's
+configured default audience; strict explicit-audience mode rejects that route
+instead.
+
+Login methods are registered once through `AuthConf::method`. Application-owned
+route bundles do not repeat the selected method as OpenAPI-only metadata.
+`BasicCredentials` contributes an HTTP Basic input scheme, and
+`LoginResponse<T>` contributes the selected response-body schema. Applications
+can use the ordinary response override APIs when they want to document a
+specific MFA challenge or OIDC redirect route more narrowly.
 
 ## Argument Overrides
 

@@ -1,11 +1,64 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap, fmt, str::FromStr};
 
+use crate::auth::AudienceId;
 use crate::middlewares::SlashPolicy;
 use crate::routes::Methods;
 
-use super::{ArgSpec, CallSpec, Callable, LayerSpec, ReturnSpec};
+use super::{ArgPart, ArgSpec, CallSpec, Callable, IntoArgPart, LayerSpec, ReturnSpec};
+
+/// Canonical runtime identity for one registered Vyuh operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OperationId(uuid::Uuid);
+
+impl OperationId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl fmt::Display for OperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for OperationId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
+impl axum::extract::FromRequestParts<crate::Site> for OperationId {
+    type Rejection = axum::http::StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &crate::Site,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .copied()
+            .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+impl IntoArgPart for OperationId {
+    fn into_arg_part() -> ArgPart {
+        ArgPart::Ignore
+    }
+}
+
+impl IntoArgPart for axum::Extension<OperationId> {
+    fn into_arg_part() -> ArgPart {
+        ArgPart::Ignore
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 
@@ -23,11 +76,13 @@ pub enum OperationKind {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Operation {
-    pub id: uuid::Uuid,
+    /// Canonical runtime identity assigned when the operation is created.
+    pub id: OperationId,
     pub name: String,
     pub description: Option<String>,
     pub summary: Option<String>,
-    pub operation_id: Option<String>,
+    /// Configurable string identifier emitted into OpenAPI documents.
+    pub openapi_id: Option<String>,
     pub deprecated: bool,
     pub path: String,
     pub kind: OperationKind,
@@ -39,11 +94,23 @@ pub struct Operation {
     pub conf: Option<serde_json::Value>,
     pub owner: Option<String>,
     pub hidden: bool,
+    /// Effective audience inherited from the owning bundle tree.
+    pub(crate) audience: Option<AudienceId>,
     pub(crate) bundle_id: Option<uuid::Uuid>,
     pub(crate) slash_policy: Option<SlashPolicy>,
 }
 
 impl Operation {
+    pub(crate) fn requires_auth(&self) -> bool {
+        self.args
+            .iter()
+            .any(|argument| argument.part.requires_auth())
+            || self
+                .layers
+                .iter()
+                .flat_map(|layer| layer.parts.iter())
+                .any(crate::callables::ArgPart::requires_auth)
+    }
     pub(crate) fn assign_bundle_id(&mut self, id: uuid::Uuid) {
         if self.bundle_id.is_none() {
             self.bundle_id = Some(id);
@@ -52,6 +119,15 @@ impl Operation {
 
     pub(crate) fn set_bundle_id(&mut self, id: uuid::Uuid) {
         self.bundle_id = Some(id);
+    }
+
+    /// Returns the audience required by this operation, when it is authenticated.
+    pub fn audience(&self) -> Option<&str> {
+        self.audience.as_ref().map(AudienceId::as_str)
+    }
+
+    pub(crate) fn audience_id(&self) -> Option<&AudienceId> {
+        self.audience.as_ref()
     }
 
     pub(crate) fn nest(&mut self, path: &str) {
@@ -72,16 +148,16 @@ impl Operation {
     /// Returns a list of method strings like "GET", "POST", etc.
     /// Handles combined filters (e.g., GET | POST).
     pub fn http_methods(&self) -> Vec<&'static str> {
-        return self.methods.to_vec();
+        self.methods.to_vec()
     }
 
     pub fn from_api_doc(name: &str, path: &str) -> Self {
         Operation {
-            id: uuid::Uuid::new_v4(),
+            id: OperationId::new(),
             name: name.to_string(),
             description: None,
             summary: None,
-            operation_id: None,
+            openapi_id: None,
             deprecated: false,
             path: path.to_string(),
             methods: Methods::GET,
@@ -93,6 +169,7 @@ impl Operation {
             conf: None,
             owner: None,
             hidden: true,
+            audience: None,
             bundle_id: None,
             slash_policy: None,
         }
@@ -102,11 +179,11 @@ impl Operation {
         let (summary, description) =
             Self::split_str_into_summary_description(specs.description.as_deref());
         Operation {
-            id: uuid::Uuid::new_v4(),
+            id: OperationId::new(),
             name: specs.name.clone(),
-            description: description,
-            summary: summary,
-            operation_id: Some(specs.name.clone()),
+            description,
+            summary,
+            openapi_id: Some(specs.name.clone()),
             deprecated: false,
             path: String::new(),
             methods: Methods::POST,
@@ -118,15 +195,13 @@ impl Operation {
             conf: None,
             owner: None,
             hidden: false,
+            audience: None,
             bundle_id: None,
             slash_policy: None,
         }
     }
 
-    pub fn from_callable<T: Send>(kind: OperationKind, callable: Callable<T>) -> Self
-    where
-        T: Sized,
-    {
+    pub fn from_callable<T: Send + Sized>(kind: OperationKind, callable: Callable<T>) -> Self {
         Self::from_specs(kind, callable.inspect())
     }
 
@@ -139,7 +214,7 @@ impl Operation {
         };
         let parts: Vec<&str> = s.splitn(2, "\n\n").collect();
         let summary = parts
-            .get(0)
+            .first()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let description = if parts.len() > 1 {
@@ -148,5 +223,26 @@ impl Operation {
             None
         };
         (summary, description)
+    }
+}
+
+/// Read-only access to the operations registered on one built site.
+pub struct Operations<'a> {
+    operations: &'a BTreeMap<OperationId, Operation>,
+}
+
+impl<'a> Operations<'a> {
+    pub(crate) const fn new(operations: &'a BTreeMap<OperationId, Operation>) -> Self {
+        Self { operations }
+    }
+
+    /// Lists every operation, including hidden framework operations.
+    pub fn list(&self) -> impl ExactSizeIterator<Item = &'a Operation> + 'a {
+        self.operations.values()
+    }
+
+    /// Finds one operation by its canonical runtime identity.
+    pub fn find(&self, id: OperationId) -> Option<&'a Operation> {
+        self.operations.get(&id)
     }
 }

@@ -3,21 +3,12 @@
 //! Secrets and deployment-specific values go in env vars.
 //! Project structure and logic go in source code.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, fmt, path::PathBuf};
 
 use crate::{
-    auth::{AuthConf, CookieSameSite, JwtKeySource},
-    channels::ChannelConf,
-    console::ConsoleConf,
-    db::DbConf,
-    emitters::EmitterConf,
-    errors::ErrorConf,
-    file_storage::UploadConf,
-    logging,
-    middlewares::HttpConf,
-    observability::ObservabilityConf,
-    tasks::TaskConf,
-    templates::TemplateConf,
+    auth::AuthConf, channels::ChannelConf, console::ConsoleConf, db::DbConf, emitters::EmitterConf,
+    errors::ErrorConf, file_storage::UploadConf, logging, middlewares::HttpConf,
+    observability::ObservabilityConf, tasks::TaskConf, templates::TemplateConf,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -118,7 +109,7 @@ fn production_required(field: &str) -> ConfError {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct SiteConf {
     /// Deployment validation mode.
@@ -133,8 +124,12 @@ pub struct SiteConf {
 
     pub database: DbConf,
 
-    #[serde(default = "default_secret_key")]
+    #[serde(default = "default_secret_key", skip_serializing)]
     pub secret_key: String,
+
+    /// Previous application secrets accepted only while verifying credentials.
+    #[serde(default, skip_serializing)]
+    pub secret_key_fallbacks: Vec<String>,
 
     /// absolute or relative to project_dir
     pub media_dir: Option<String>,
@@ -149,6 +144,7 @@ pub struct SiteConf {
 
     pub tz: Option<String>,
 
+    #[serde(skip, default)]
     pub auth: AuthConf,
 
     pub tasks: TaskConf,
@@ -174,6 +170,23 @@ pub struct SiteConf {
     pub errors: ErrorConf,
 }
 
+impl fmt::Debug for SiteConf {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SiteConf")
+            .field("deployment", &self.deployment)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("project_dir", &self.project_dir)
+            .field("secret_key", &"<redacted>")
+            .field("secret_key_fallbacks", &self.secret_key_fallbacks.len())
+            .field("auth", &self.auth)
+            .field("console", &self.console)
+            .field("observability", &self.observability)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for SiteConf {
     fn default() -> Self {
         let secret_key = default_secret_key();
@@ -184,6 +197,7 @@ impl Default for SiteConf {
             project_dir: project_dir().as_os_str().to_string_lossy().to_string(),
             database: Default::default(),
             secret_key,
+            secret_key_fallbacks: Vec::new(),
             media_dir: None,
             templates: TemplateConf::default(),
             touch_reload: None,
@@ -283,6 +297,16 @@ impl SiteConf {
 
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = key.into();
+        self
+    }
+
+    /// Sets previous secrets retained temporarily for credential verification.
+    pub fn secret_key_fallbacks<I, S>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.secret_key_fallbacks = keys.into_iter().map(Into::into).collect();
         self
     }
 
@@ -386,20 +410,15 @@ impl SiteConf {
                 field: "secret_key".into(),
                 reason: "cannot be empty".into(),
             });
-        } else if matches!(self.auth.jwt.signing_key, JwtKeySource::SiteSecret)
-            && self.secret_key.len() < self.auth.min_secret_len
-        {
+        } else if self.secret_key.len() < self.auth.minimum_secret_length() {
+            let minimum = self.auth.minimum_secret_length();
             errors.push(ConfError::InvalidValue {
                 field: "secret_key".into(),
-                reason: format!(
-                    "must be at least {} characters for auth signing",
-                    self.auth.min_secret_len
-                ),
-                expected: Some(format!("{} or more characters", self.auth.min_secret_len)),
+                reason: format!("must be at least {minimum} characters for authentication"),
+                expected: Some(format!("{minimum} or more characters")),
             });
         }
-        #[cfg(not(debug_assertions))]
-        {
+        if self.deployment == DeploymentMode::Production {
             let default_key = default_secret_key();
             if self.secret_key == default_key {
                 errors.push(ConfError::InvalidValue {
@@ -513,27 +532,12 @@ impl SiteConf {
 
     /// Validates cookie transport and browser isolation settings in production.
     fn validate_production_cookies(&self, errors: &mut Vec<ConfError>) {
-        for (field, cookie) in [
-            ("auth.access_cookie", self.auth.access_cookie.as_ref()),
-            ("auth.refresh_cookie", self.auth.refresh_cookie.as_ref()),
-        ] {
-            let Some(cookie) = cookie else {
-                continue;
-            };
-            if !cookie.secure || !cookie.http_only {
-                errors.push(ConfError::InvalidValue {
-                    field: field.into(),
-                    reason: "must use secure and HTTP-only cookies in production mode".into(),
-                    expected: Some("secure=true, http_only=true".into()),
-                });
-            }
-            if matches!(cookie.same_site, CookieSameSite::None) && !cookie.secure {
-                errors.push(ConfError::InvalidValue {
-                    field: field.into(),
-                    reason: "SameSite=None requires secure cookies".into(),
-                    expected: Some("secure=true".into()),
-                });
-            }
+        if let Err(error) = self.auth.validate_production() {
+            errors.push(ConfError::InvalidValue {
+                field: "auth.providers".into(),
+                reason: error.to_string(),
+                expected: Some("secure credential cookies with usable CSRF policy".into()),
+            });
         }
     }
 
@@ -579,6 +583,9 @@ fn apply_env_patches(conf: &mut SiteConf, prefix: Option<&str>) -> Result<(), Co
                 }
             },
             "secret_key" => conf.secret_key = value,
+            "secret_key_fallbacks" => {
+                conf.secret_key_fallbacks = parse_secret_key_fallbacks(&value)?;
+            }
             "host" => conf.host = value,
             "port" => match value.parse::<u16>() {
                 Ok(p) => conf.port = p,
@@ -603,6 +610,23 @@ fn apply_env_patches(conf: &mut SiteConf, prefix: Option<&str>) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// Parses Django-style secret fallbacks from JSON or a comma-separated env value.
+fn parse_secret_key_fallbacks(value: &str) -> Result<Vec<String>, ConfError> {
+    if value.trim_start().starts_with('[') {
+        return serde_json::from_str(value).map_err(|_| {
+            ConfError::Other(
+                "SECRET_KEY_FALLBACKS must be a JSON string array or comma-separated list".into(),
+            )
+        });
+    }
+    Ok(value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 fn validate_dir_readable(path: &PathBuf, field: &str, errors: &mut Vec<ConfError>) {
@@ -711,5 +735,37 @@ fn validate_file_writable(base: &PathBuf, file: &str, field: &str, errors: &mut 
         } else {
             let _ = std::fs::remove_file(test_file);
         }
+    }
+}
+
+#[cfg(test)]
+mod auth_secret_tests {
+    use super::{SiteConf, parse_secret_key_fallbacks};
+
+    /// Verifies env fallbacks accept both conventional comma and JSON list forms.
+    #[test]
+    fn parses_secret_key_fallback_env_forms() {
+        assert_eq!(
+            parse_secret_key_fallbacks("old-one, old-two").ok(),
+            Some(vec!["old-one".into(), "old-two".into()])
+        );
+        assert_eq!(
+            parse_secret_key_fallbacks(r#"["old-one","old-two"]"#).ok(),
+            Some(vec!["old-one".into(), "old-two".into()])
+        );
+    }
+
+    /// Verifies even debug-only raw configuration serialization cannot expose secret rings.
+    #[test]
+    fn serialized_site_configuration_omits_auth_secrets() -> Result<(), serde_json::Error> {
+        let value = serde_json::to_string(
+            &SiteConf::default()
+                .secret_key("active-production-secret-value")
+                .secret_key_fallbacks(["retired-production-secret-value"]),
+        )?;
+        assert!(!value.contains("active-production-secret-value"));
+        assert!(!value.contains("retired-production-secret-value"));
+        assert!(!value.contains("secret_key"));
+        Ok(())
     }
 }

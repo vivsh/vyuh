@@ -279,7 +279,12 @@ struct RebuildArgs {
     full: bool,
 }
 
-async fn rebuild(site: Site, Data(args): Data<RebuildArgs>) -> Result<(), Error> {
+async fn rebuild(
+    operation_id: OperationId,
+    site: Site,
+    Data(args): Data<RebuildArgs>,
+) -> Result<(), Error> {
+    let _metadata = site.operations().find(operation_id);
     site.tasks()
         .submit_with(RebuildIndex { full: args.full }, Default::default())
         .await

@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>{{ status }} - Vyuh Console</title>
-  <link rel="icon" href="/assets/img/favicon.svg">
+  <link rel="icon" href="{{ asset_root }}/img/favicon.svg">
   <link rel="stylesheet" href="{{ stylesheet_path }}">
 </head>
 <body class="vyuh-page console-body">
   <section class="console-login">
     <article class="vyuh-card console-login-card">
       <a class="vyuh-brand" href="{{ base_path }}/">
-        <img src="/assets/img/vyuh-logo-transparent.png" alt="Vyuh logo">
+        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="Vyuh logo">
         <span>vyuh</span>
       </a>
       <p class="vyuh-kicker console-login-kicker">Console {{ status }}</p>

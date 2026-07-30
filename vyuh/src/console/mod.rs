@@ -1,29 +1,39 @@
 mod api;
-mod auth;
+pub(crate) mod auth;
 mod conf;
 mod middleware;
 mod pages;
 mod query;
 mod schema_view;
-mod status;
+pub(crate) mod status;
 mod types;
 
-use std::{sync::OnceLock, time::Duration};
+use std::sync::OnceLock;
 
 use crate::{Site, bundles, embed, routes::Methods};
 
 pub use auth::{ConsoleRole, ConsoleUser};
-pub use conf::{ConsoleBootstrapMode, ConsoleConf};
-
-pub(crate) use auth::ConsoleRuntime;
+pub use conf::ConsoleConf;
 
 const WEB_ASSETS: embed::Dir = embed::embed_assets!("web", force = true);
-const FALLBACK_STYLESHEET_PATH: &str = "/assets/css/vyuh.css";
+const FALLBACK_STYLESHEET_NAME: &str = "vyuh.css";
+
+/// Browser-facing URLs required by the built-in console templates.
+pub(crate) struct ViewUrls {
+    pub(crate) base_path: String,
+    pub(crate) asset_root: String,
+    pub(crate) stylesheet_path: String,
+}
 
 pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
     web_assets()
-        .merge(home_routes(conf))
-        .merge(routes().with_prefix(&conf.path))
+        .merge(home_routes(conf).with_audience(auth::CONSOLE_AUDIENCE))
+        .merge(
+            protected_routes()
+                .with_audience(auth::CONSOLE_AUDIENCE)
+                .with_prefix(&conf.path),
+        )
+        .merge(public_routes().with_prefix(&conf.path))
         .with_owning_bundle_id()
 }
 
@@ -31,19 +41,41 @@ fn web_assets() -> crate::bundles::Bundle {
     bundles::bundle([bundles::asset_dir(WEB_ASSETS.clone())])
 }
 
-pub(crate) fn stylesheet_path() -> &'static str {
-    static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(resolve_stylesheet_path).as_str()
+pub(crate) fn view_urls(site: &Site) -> ViewUrls {
+    let base_path = site
+        .routes()
+        .reverse_url("console_home", &[])
+        .unwrap_or_else(|| site.conf().console.path.clone());
+    let asset_root = asset_root(&base_path);
+    let stylesheet_path = format!("{asset_root}/css/{}", stylesheet_name());
+    ViewUrls {
+        base_path,
+        asset_root,
+        stylesheet_path,
+    }
 }
 
 pub(crate) fn redacted_config(site: &Site) -> types::ConfigOut {
     types::ConfigOut::from_site(site)
 }
 
-fn resolve_stylesheet_path() -> String {
-    read_stylesheet_name()
-        .map(|name| format!("/assets/css/{name}"))
-        .unwrap_or_else(|| FALLBACK_STYLESHEET_PATH.to_string())
+fn asset_root(console_path: &str) -> String {
+    let parent = console_path
+        .trim_end_matches('/')
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or_default();
+    if parent.is_empty() {
+        "/assets".to_string()
+    } else {
+        format!("{parent}/assets")
+    }
+}
+
+fn stylesheet_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| read_stylesheet_name().unwrap_or_else(|| FALLBACK_STYLESHEET_NAME.into()))
+        .as_str()
 }
 
 fn read_stylesheet_name() -> Option<String> {
@@ -68,7 +100,7 @@ fn home_routes(conf: &ConsoleConf) -> crate::bundles::Bundle {
     )])
 }
 
-fn routes() -> crate::bundles::Bundle {
+fn protected_routes() -> crate::bundles::Bundle {
     macro_rules! route {
         ($name:literal, $path:literal, $methods:expr, $handler:path $(,)?) => {
             bundles::route(
@@ -91,13 +123,6 @@ fn routes() -> crate::bundles::Bundle {
             pages::overview,
         ),
         route!("console_runtime", "/runtime", Methods::GET, pages::runtime),
-        route!(
-            "console_login_page",
-            "/login-page",
-            Methods::GET,
-            pages::login,
-        ),
-        route!("console_login", "/login", Methods::GET, api::login),
         route!("console_logout", "/api/logout", Methods::POST, api::logout),
         route!(
             "console_session",
@@ -167,47 +192,35 @@ fn routes() -> crate::bundles::Bundle {
     ])
 }
 
-pub(crate) fn runtime(conf: &ConsoleConf, bundle_id: uuid::Uuid) -> Option<ConsoleRuntime> {
-    conf.enabled.then(|| {
-        ConsoleRuntime::new(
-            Duration::from_secs(conf.bootstrap_token_ttl_seconds),
-            bundle_id,
-        )
-    })
-}
-
-pub(crate) fn maybe_print_bootstrap_url(site: &Site) {
-    let conf = &site.conf().console;
-    if !conf.enabled || !should_print(conf, &site.conf().host) {
-        return;
-    }
-    let Some(runtime) = site.console_runtime() else {
-        return;
-    };
-    let Some(token) = runtime.bootstrap_token() else {
-        return;
-    };
-    println!(
-        "Vyuh console enabled:\nhttp://{}:{}{}/login?token={}\nToken expires in {} seconds.",
-        site.conf().host,
-        site.conf().port,
-        conf.path,
-        token,
-        conf.bootstrap_token_ttl_seconds
-    );
-}
-
-fn should_print(conf: &ConsoleConf, host: &str) -> bool {
-    match conf.print_bootstrap_url {
-        ConsoleBootstrapMode::Always => true,
-        ConsoleBootstrapMode::Disabled => false,
-        ConsoleBootstrapMode::LocalOnly => matches!(host, "localhost" | "127.0.0.1" | "::1"),
-    }
+fn public_routes() -> crate::bundles::Bundle {
+    bundles::bundle([
+        bundles::route(
+            pages::login,
+            crate::routes::RouteConf {
+                name: "console_login_page".into(),
+                methods: Methods::GET,
+                path: "/login-page".into(),
+                slash: None,
+            },
+        ),
+        bundles::route(
+            api::login,
+            crate::routes::RouteConf {
+                name: "console_login".into(),
+                methods: Methods::POST,
+                path: "/login".into(),
+                slash: None,
+            },
+        ),
+    ])
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{StatusCode, header};
+    use axum::{
+        body::Body,
+        http::{StatusCode, header},
+    };
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
@@ -225,6 +238,27 @@ mod tests {
 
     async fn ping() -> Json<&'static str> {
         Json("pong")
+    }
+
+    fn console_token(site: &Site) -> String {
+        use crate::auth::AuthUser;
+        use crate::console::auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, ConsoleRole};
+        futures::executor::block_on(site.auth().issue_raw(
+            CONSOLE_LOGIN,
+            AuthUser::new("console-token").with_role(ConsoleRole::Admin),
+            &[CONSOLE_AUDIENCE],
+            None,
+        ))
+        .unwrap()
+    }
+
+    async fn login(client: &TestSite, path: &str, token: &str) -> crate::testing::TestResponse {
+        client
+            .post(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("token={token}")))
+            .send()
+            .await
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -279,6 +313,72 @@ mod tests {
         })
     }
 
+    /// Verifies console assets are placed beside the configured console mount.
+    #[test]
+    fn asset_root_follows_console_path() {
+        assert_eq!(super::asset_root("/console"), "/assets");
+        assert_eq!(super::asset_root("/dynrs/console"), "/dynrs/assets");
+        assert_eq!(
+            super::asset_root("/platform/dynrs/console"),
+            "/platform/dynrs/assets"
+        );
+    }
+
+    /// Verifies every rendered console page uses the asset root beside a nested mount.
+    #[tokio::test]
+    async fn nested_console_pages_use_prefixed_assets() {
+        let conf = SiteConf::default()
+            .log_init(false)
+            .console(ConsoleConf::default().enabled(true).path("/dynrs/console"));
+        let site = Site::build(conf, app_bundle()).await.unwrap();
+        let token = console_token(&site);
+        let client = TestSite::new(site);
+
+        let login_page = client.get("/dynrs/console/login-page").send().await;
+        assert_eq!(login_page.status(), StatusCode::OK);
+        assert_console_assets(&login_page.text().await);
+
+        let login = login(&client, "/dynrs/console/login", &token).await;
+        assert_eq!(
+            login.status(),
+            StatusCode::SEE_OTHER,
+            "console login failed"
+        );
+        let cookie = login
+            .header(header::SET_COOKIE.as_str())
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap()
+            .to_string();
+        let overview = client
+            .get("/dynrs/console")
+            .header(header::COOKIE.as_str(), &cookie)
+            .send()
+            .await;
+        assert_eq!(overview.status(), StatusCode::OK);
+        let overview = overview.text().await;
+        assert_console_assets(&overview);
+        assert!(overview.contains("&#x2f;dynrs&#x2f;assets/js/console.js"));
+
+        let error = client
+            .get("/dynrs/console/operations/not-a-uuid")
+            .header(header::COOKIE.as_str(), &cookie)
+            .send()
+            .await;
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_console_assets(&error.text().await);
+    }
+
+    fn assert_console_assets(html: &str) {
+        assert!(html.contains("&#x2f;dynrs&#x2f;assets&#x2f;css&#x2f;"));
+        assert!(html.contains("&#x2f;dynrs&#x2f;assets/img/favicon.svg"));
+        assert!(html.contains("&#x2f;dynrs&#x2f;assets/img/vyuh-logo-transparent.png"));
+        assert!(!html.contains("href=\"/assets/"));
+        assert!(!html.contains("src=\"/assets/"));
+        assert!(!html.contains("href=\"&#x2f;assets/"));
+        assert!(!html.contains("src=\"&#x2f;assets/"));
+    }
+
     #[tokio::test]
     async fn disabled_console_mounts_no_routes() {
         let site = Site::build(
@@ -299,27 +399,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn console_local_debug_allows_direct_access() {
+    async fn console_requires_a_signed_cookie_in_debug_builds() {
         let conf = SiteConf::default().log_init(false);
         let site = Site::build(conf, app_bundle()).await.unwrap();
         let client = TestSite::new(site);
 
         let status = client.get("/console/api/status").send().await;
-        assert_eq!(status.status(), StatusCode::OK);
-
-        let session = client.get("/console/api/session").send().await;
-        assert_eq!(session.status(), StatusCode::OK);
-        let session = session.text().await;
-        assert!(session.contains("local-debug"));
+        assert_eq!(status.status(), StatusCode::UNAUTHORIZED);
 
         let missing = client.get("/console/missing").send().await;
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        let missing = missing.text().await;
-        assert!(missing.contains("Console page not found"));
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn console_bootstrap_cookie_authenticates_api() {
+    async fn console_token_cookie_authenticates_api() {
         let conf = SiteConf::default()
             .host("example.com")
             .log_init(false)
@@ -332,53 +425,41 @@ mod tests {
             })
             .console(ConsoleConf::default().enabled(true));
         let site = Site::build(conf, app_bundle()).await.unwrap();
-        let token = site
-            .console_runtime()
-            .and_then(|runtime| runtime.bootstrap_token())
-            .unwrap();
+        let token = console_token(&site);
         let client = TestSite::new(site);
 
         client
             .get("/console/api/status")
             .send()
             .await
-            .assert_status(StatusCode::FORBIDDEN);
+            .assert_status(StatusCode::UNAUTHORIZED);
         let forbidden = client.get("/console/api/conf").send().await;
-        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-        let forbidden = forbidden.text().await;
-        assert!(forbidden.contains("Console access denied"));
+        assert_eq!(forbidden.status(), StatusCode::UNAUTHORIZED);
         let forbidden_page = client.get("/console/overview").send().await;
-        assert_eq!(forbidden_page.status(), StatusCode::FORBIDDEN);
-        let forbidden_page = forbidden_page.text().await;
-        assert!(forbidden_page.contains("Console access denied"));
+        assert_eq!(forbidden_page.status(), StatusCode::UNAUTHORIZED);
         client
             .get("/console/api/openapi")
             .send()
             .await
-            .assert_status(StatusCode::FORBIDDEN);
+            .assert_status(StatusCode::UNAUTHORIZED);
 
-        let login = client
-            .get(&format!("/console/login?token={token}"))
-            .send()
-            .await;
-        assert_eq!(login.status(), StatusCode::SEE_OTHER);
+        let login_response = login(&client, "/console/login", &token).await;
+        assert_eq!(login_response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            login
+            login_response
                 .header(header::LOCATION.as_str())
                 .and_then(|value| value.to_str().ok()),
             Some("/console")
         );
-        client
-            .get(&format!("/console/login?token={token}"))
-            .send()
+        login(&client, "/console/login", &token)
             .await
-            .assert_status(StatusCode::UNAUTHORIZED);
-        let cookie = login
+            .assert_status(StatusCode::SEE_OTHER);
+        let cookie = login_response
             .header(header::SET_COOKIE.as_str())
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(cookie.contains("Max-Age=28800"));
+        assert!(cookie.contains("Max-Age=5400"));
         let cookie = cookie.split(';').next().unwrap().to_string();
 
         client
@@ -387,6 +468,14 @@ mod tests {
             .send()
             .await
             .assert_ok();
+
+        client
+            .get("/console/api/status")
+            .header(header::COOKIE.as_str(), &cookie)
+            .peer_addr(std::net::SocketAddr::from(([127, 0, 0, 2], 0)))
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
 
         let operations = client
             .get("/console/api/operations?kind=route&q=ping")
@@ -437,30 +526,32 @@ mod tests {
         let bundle = app_bundle().layer(CorsMiddleware::new(CorsLayer::permissive()));
         let site = Site::build(conf, bundle).await.unwrap();
         let ping_id = site
-            .iter_operations()
+            .operations()
+            .list()
             .find(|op| op.name == "ping")
             .map(|op| op.id)
             .unwrap();
         let invoice_signal_id = site
-            .iter_operations()
+            .operations()
+            .list()
             .find(|op| op.name == "invoice_signal")
             .map(|op| op.id)
             .unwrap();
         let console_operation_id = site
-            .iter_operations()
+            .operations()
+            .list()
             .find(|op| op.name == "console_operations")
             .map(|op| op.id)
             .unwrap();
-        let token = site
-            .console_runtime()
-            .and_then(|runtime| runtime.bootstrap_token())
-            .unwrap();
+        let token = console_token(&site);
         let client = TestSite::new(site);
 
-        let login = client
-            .get(&format!("/console/login?token={token}"))
-            .send()
-            .await;
+        let login = login(&client, "/console/login", &token).await;
+        assert_eq!(
+            login.status(),
+            StatusCode::SEE_OTHER,
+            "console login failed"
+        );
         assert_eq!(login.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             login
@@ -473,7 +564,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(cookie.contains("Max-Age=28800"));
+        assert!(cookie.contains("Max-Age=5400"));
         let cookie = cookie.split(';').next().unwrap().to_string();
 
         let overview = client
@@ -644,8 +735,8 @@ mod tests {
         assert!(!openapi.contains("Application routes only"));
         assert!(!openapi.contains("console_operations"));
 
-        let stylesheet = super::stylesheet_path();
-        let css = client.get(stylesheet).send().await;
+        let stylesheet = super::view_urls(&site).stylesheet_path;
+        let css = client.get(&stylesheet).send().await;
         assert_eq!(css.status(), StatusCode::OK, "stylesheet failed");
         assert_eq!(
             css.header(header::CONTENT_TYPE.as_str())
@@ -668,15 +759,9 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let token = site
-            .console_runtime()
-            .and_then(|runtime| runtime.bootstrap_token())
-            .unwrap();
+        let token = console_token(&site);
         let client = TestSite::new(site);
-        let login = client
-            .get(&format!("/console/login?token={token}"))
-            .send()
-            .await;
+        let login = login(&client, "/console/login", &token).await;
         let cookie = login
             .header(header::SET_COOKIE.as_str())
             .unwrap()
@@ -713,11 +798,9 @@ mod tests {
             .log_init(false)
             .console(ConsoleConf::default().enabled(true));
         let site = Site::build(conf, app_bundle()).await.unwrap();
-        let runtime = site.console_runtime().unwrap();
-
-        let first = runtime.status(&site, std::time::Duration::from_secs(5));
+        let first = site.console_status();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let second = runtime.status(&site, std::time::Duration::from_secs(5));
+        let second = site.console_status();
 
         assert_eq!(first.site.uptime_seconds, second.site.uptime_seconds);
     }

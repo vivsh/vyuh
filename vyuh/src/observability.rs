@@ -159,12 +159,14 @@ pub(crate) async fn readiness(State(site): State<Site>) -> StatusCode {
 
 /// Returns Prometheus text exposition for the current process.
 pub(crate) async fn metrics(State(site): State<Site>) -> Response {
+    let mut output = site.observability().render();
+    output.push_str(&site.auth().render_metrics());
     (
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        site.observability().render(),
+        output,
     )
         .into_response()
 }

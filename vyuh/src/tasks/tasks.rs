@@ -6,6 +6,8 @@ use crate::{
     callables::{self, Callable},
 };
 
+use super::{TaskListFilter, TaskListPage, TaskOptions, TaskRecord};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConf {
     pub poll_interval_ms: u32,
@@ -32,6 +34,7 @@ pub struct TaskContext {
     site: Site,
     payload: callables::DataBox,
     record: Arc<TaskRecord>,
+    operation_id: crate::OperationId,
 }
 
 impl callables::IntoDataBox for TaskContext {
@@ -43,6 +46,12 @@ impl callables::IntoDataBox for TaskContext {
 impl callables::HasSite for TaskContext {
     fn site(&self) -> &Site {
         &self.site
+    }
+}
+
+impl callables::FromContextParts<TaskContext> for crate::OperationId {
+    fn from_context_parts(context: &TaskContext) -> Result<Self, callables::CallError> {
+        Ok(context.operation_id)
     }
 }
 
@@ -129,134 +138,6 @@ impl TaskStatus {
             ))),
         }
     }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct TaskHandlerConf {
-    pub name: String,
-}
-
-impl TaskHandlerConf {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct TaskOptions {
-    pub initial_delay: Option<Duration>,
-    pub retry_delay: Option<Duration>,
-    pub lease_duration: Option<Duration>,
-    pub identity: Option<String>,
-    pub max_attempts: Option<i32>,
-    pub state: Option<String>,
-    pub priority: i32,
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskListFilter {
-    pub status: Option<TaskStatus>,
-    pub name: Option<String>,
-    pub priority_min: Option<i32>,
-    pub identity: Option<String>,
-    pub created_from: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_to: Option<chrono::DateTime<chrono::Utc>>,
-    pub q: Option<String>,
-    pub limit: usize,
-    pub offset: usize,
-}
-
-impl Default for TaskListFilter {
-    fn default() -> Self {
-        Self {
-            status: None,
-            name: None,
-            priority_min: None,
-            identity: None,
-            created_from: None,
-            created_to: None,
-            q: None,
-            limit: 50,
-            offset: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskListPage {
-    pub records: Vec<TaskRecord>,
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskRecord {
-    pub id: uuid::Uuid,
-    pub name: String,
-    pub input: String,
-    pub state: Option<String>,
-    pub resume_input: Option<String>,
-    pub output: Option<String>,
-    pub result: Option<String>,
-    pub status: TaskStatus,
-    pub attempts: i32,
-    pub priority: i32,
-    pub max_attempts: Option<i32>,
-    pub retry_delay_ms: Option<i64>,
-    pub lease_duration_ms: Option<i64>,
-    pub last_error: Option<String>,
-    pub identity: Option<String>,
-    pub locked_by: Option<String>,
-    pub leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl TaskRecord {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn input<T>(&self) -> Result<T, TaskError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        serde_json::from_str(&self.input).map_err(TaskError::from)
-    }
-
-    pub fn state<T>(&self) -> Result<Option<T>, TaskError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        self.state
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(TaskError::from)
-    }
-
-    pub fn resume_input<T>(&self) -> Result<Option<T>, TaskError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        self.resume_input
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(TaskError::from)
-    }
-}
-
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-pub(crate) fn sort_claimed_tasks(tasks: &mut [TaskRecord]) {
-    tasks.sort_by_key(|task| {
-        (
-            std::cmp::Reverse(task.priority),
-            task.ready_at.unwrap_or(task.created_at),
-            task.created_at,
-        )
-    });
 }
 
 #[derive(Debug, Clone)]
@@ -523,11 +404,16 @@ pub struct TaskService {
     pub coerce: fn(&str) -> Result<(), TaskError>,
     output: fn(callables::DataBox) -> TaskOutcome,
     handler: TaskHandler,
+    operation: callables::Operation,
 }
 
 impl TaskService {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub(crate) fn operation(&self) -> callables::Operation {
+        self.operation.clone()
     }
 
     pub fn validate_data(&self, data: &str) -> Result<(), TaskError> {
@@ -554,6 +440,7 @@ impl TaskService {
             site,
             payload,
             record,
+            operation_id: self.operation.id,
         };
 
         let data = match self.handler.call(ctx).await {
@@ -580,6 +467,9 @@ impl TaskService {
             + 'static,
     {
         let callable: callables::Callable<TaskContext, Error> = Callable::new(handler);
+        let mut operation =
+            callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
+        operation.name = name.to_string();
         let coerce = |data: &str| -> Result<(), TaskError> {
             let _: T = serde_json::from_str(data)?;
             Ok(())
@@ -591,6 +481,7 @@ impl TaskService {
             coerce,
             output: H::Output::into_task_outcome,
             handler: callable,
+            operation,
         }
     }
 }
@@ -954,6 +845,28 @@ mod tests {
         store
             .commit_outcome(task_id, "runner-a", TaskOutcome::complete(&"done")?)
             .await?;
+        Ok(())
+    }
+
+    /// Verifies a task handler receives the canonical ID stored in its operation metadata.
+    #[tokio::test]
+    async fn task_extracts_operation_id() -> Result<(), String> {
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let captured = Arc::clone(&seen);
+        let handler = move |id: crate::OperationId, _input: Data<DirectJob>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                *captured.lock() = Some(id);
+            }
+        };
+        let service = TaskService::new("operation_job", handler);
+        let expected = service.operation().id;
+        let task =
+            record("operation_job", &DirectJob { id: 1 }).map_err(|error| error.to_string())?;
+        service
+            .execute(test_site().await.map_err(|error| error.to_string())?, task)
+            .await;
+        assert_eq!(*seen.lock(), Some(expected));
         Ok(())
     }
 

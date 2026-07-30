@@ -89,19 +89,17 @@
       <header><h2>Authentication</h2></header>
       <dl class="vyuh-console-kv">
         <div><dt>Issuer</dt><dd>{% if conf.auth.issuer %}{{ conf.auth.issuer }}{% else %}not set{% endif %}</dd></div>
-        <div><dt>Audience</dt><dd>{{ conf.auth.audience }}</dd></div>
-        <div><dt>Access TTL</dt><dd>{{ conf.auth.access_ttl }} seconds</dd></div>
-        <div><dt>Refresh TTL</dt><dd>{{ conf.auth.refresh_ttl }} seconds</dd></div>
+        <div><dt>Default Token TTL</dt><dd>{{ conf.auth.access_ttl }} seconds</dd></div>
+        <div><dt>Configured Providers</dt><dd>{{ conf.auth.provider_count }}</dd></div>
         <div><dt>JWT Algorithm</dt><dd>{{ conf.auth.jwt_algorithm }}</dd></div>
-        <div><dt>API Keys</dt><dd>{{ conf.auth.api_keys_enabled }}</dd></div>
       </dl>
     </article>
     <article id="console-conf" class="vyuh-console-card">
       <header><h2>Console</h2></header>
       <dl class="vyuh-console-kv">
         <div><dt>Path</dt><dd>{{ conf.console.path }}</dd></div>
-        <div><dt>Bootstrap Token TTL</dt><dd>{{ conf.console.bootstrap_token_ttl_seconds }} seconds</dd></div>
-        <div><dt>Session TTL</dt><dd>{{ conf.console.session_ttl_seconds }} seconds</dd></div>
+        <div><dt>Login token lifetime</dt><dd>90 seconds</dd></div>
+        <div><dt>Console credential lifetime</dt><dd>90 minutes</dd></div>
         <div><dt>Cookie Name</dt><dd>{{ conf.console.cookie_name }}</dd></div>
         <div><dt>Status Cache TTL</dt><dd>{{ conf.console.status_cache_ttl_seconds }} seconds</dd></div>
       </dl>

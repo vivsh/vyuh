@@ -31,14 +31,24 @@ The `vyuh` crate is organized around these subsystems:
 - `bundles` is the composition layer for routes, commands, signals, emitters,
   services, migrations, schema contributors, docs, and assets.
 - `routes` defines route metadata, method handling, middleware helpers, and
-  built-in route behavior.
+  built-in route behavior. A built site exposes immutable `Routes` indexes for
+  named reversal and method-aware URL-to-operation resolution.
 - `callables` provides the type-erased invocation model used by routes,
-  commands, signals, emitters, and tasks.
+  commands, signals, emitters, and tasks. Canonical UUID-backed `OperationId`
+  values identify registered metadata independently of OpenAPI string IDs.
 - `db` provides backend-selected SQLx aliases, source-first typed query
   builders, dialect-specific SQL rendering and validation, typed function and
   expression extension hooks, sessions, placeholder handling, mock sessions,
   and database errors.
-- `auth` and `roles` provide JWT authentication and bit-mask role support.
+- `auth` provides complete token and opaque-key providers. One token provider
+  owns access and optional refresh behavior through `TokenKind`, normalizes JWT,
+  Django signing, PASETO, BRANCA, and custom codecs into `AuthToken`, and exposes
+  only `AuthUser` to protected handlers. `roles` provides bit-mask authorization
+  after audience validation. Bundles own an explicit `Audience` descriptor or
+  receive the site's bounded default audience during site construction;
+  omission never grants unrestricted access.
+- `routes::ClientIp` resolves a single forwarded client address when supplied,
+  with TCP peer-address fallback for applications and framework routes.
 - `validation` and `validators` provide typed validation primitives and
   extractor integration.
 - `signals`, `emitters`, and `channels` provide in-process fanout, scheduled
@@ -143,16 +153,38 @@ the client-facing event type uses the payload schema name.
    backend task store; lightweight builds use `MemoryTaskStore`. When enabled,
    observability endpoints are mounted before the site router is finalized and
    request metrics are applied as a site-wide middleware.
-4. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
+4. The authenticator resolves key sources off request threads and builds
+   immutable credential-provider, selector, metric, and typed login-method
+   registries plus the site-secret key ring. Application-owned routes select
+   identity proof with `.via(...)`, while password, Basic, MFA, and optional
+   OIDC methods delegate successful proof to the selected credential provider.
+   Runtime `.using(...)` and `.via(...)` calls retain descriptors without
+   failure; terminal operations resolve them against the immutable registries.
+   Unselected login, refresh, and logout target the default provider, while
+   request extraction alone falls through absent access credentials. Refresh
+   validates and rotates a credential only inside its selected provider. Cookie
+   credentials use provider-managed delivery, CSRF validation, and logout
+   response attachments. Optional lifecycle storage supplies replay protection
+   and revocation without changing handler signatures. Each framework provider
+   implements one private asynchronous runtime contract for authenticate,
+   login, refresh, logout, capabilities, and OpenAPI metadata. Server-side
+   session storage is not implemented, but a stateful provider can fit that
+   contract without changing handler or registration APIs.
+5. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
    private template and schema asset loading. Later asset directories override
    earlier matching paths; schema assets are parsed into the migration registry
-   without modifying the database.
-5. `Site::run` executes one inert command unless it selects `serve`; `serve` and
+   without modifying the database. Console authentication uses signed stateless
+   access credentials and IP-bound token cookies; only its status snapshot is cached
+   in process memory.
+6. `Site::run` executes one inert command unless it selects `serve`; `serve` and
    direct server startup bind the listener, then start task, emitter, and service
    workers before accepting HTTP work.
-6. Axum routes receive `Site` as state and handlers use typed extractors.
-7. Handlers call query builders or services and return typed responses.
-8. OpenAPI and schema metadata are produced from registered operations and
+7. Axum routes receive `Site` as state and handlers use typed extractors.
+   Vyuh-registered routes also receive their `OperationId` as a request
+   extension; task, signal, and command invocation contexts carry the same
+   identity for their own operation.
+8. Handlers call query builders or services and return typed responses.
+9. OpenAPI and schema metadata are produced from registered operations and
    type metadata.
 
 ## Extension Rules

@@ -130,8 +130,9 @@ impl Bundle {
             self.errors.push(e);
             return self;
         }
-        self.inner_router = self.inner_router.route(op.path.as_ref(), router);
         let id = op.id;
+        let router = router.layer(axum::Extension(id));
+        self.inner_router = self.inner_router.route(op.path.as_ref(), router);
         let name = op.name.clone();
         self.ops.insert(id, op);
         self.name_index.insert(name, id);
@@ -278,8 +279,9 @@ where
         + 'static,
 {
     let task = crate::tasks::TaskService::new::<T, H, Args>(&options.name, handler);
+    let op = task.operation().with_conf(&options);
     BundlePart {
-        operation: None,
+        operation: Some(op),
         part: BundlePartInner::Task(task),
     }
 }

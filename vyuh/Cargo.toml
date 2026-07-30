@@ -17,6 +17,9 @@ cors = ["tower-http/cors"]
 argon2 = ["dep:argon2"]
 migrations = ["db_core/migrations"]
 test-support = ["db_core/test-support"]
+paseto = ["dep:pasetors"]
+branca = ["dep:branca"]
+oidc = ["dep:openidconnect"]
 
 [dependencies]
 axum = {workspace = true}
@@ -38,11 +41,16 @@ dotenvy = {workspace = true}
 tower = {workspace = true}
 thiserror = {workspace = true}
 infer = {workspace = true}
+matchit = {workspace = true}
 mime_guess = "2.0.5"
 url = "2.5.4"
 tower-http = {version="0.6.2", features=["catch-panic", "compression-full", "cors", "fs", "trace"]}
 strum = { version = "0.27.1", features = ["derive", "strum_macros"] }
 jsonwebtoken = "9.3.1"
+pasetors = { version = "0.7.8", optional = true, default-features = false, features = ["std", "v4", "paserk", "serde"] }
+branca = { version = "0.10.2", optional = true }
+openidconnect = { version = "4.0.1", optional = true }
+flate2 = "1.1"
 schemars = "1.0.4"
 time = "0.3.41"
 

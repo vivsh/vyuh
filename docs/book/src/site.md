@@ -22,7 +22,7 @@ The main public pieces are:
 - `Site::test(conf, bundle, pool)` for inert tests with an explicit SQLx pool.
 - `site.start()` for serving an already-built site.
 - `Site` accessors such as `db()`, `tasks()`, `templates()`, `service()`,
-  `auth()`, `signals()`, and `reverse()`.
+  `auth()`, `signals()`, `routes()`, and `operations()`.
 - `vyuh::testing::router(&site)` for tests or Axum interop.
 - `SiteConf::http(...)` for global HTTP middleware and slash behavior.
 - `SiteConf::templates(...)` for Minijinja environment behavior.
@@ -179,6 +179,8 @@ let db = site.db();
 let templates = site.templates();
 let tasks = site.tasks();
 let auth = site.auth();
+let routes = site.routes();
+let operations = site.operations();
 let counter = site.service::<CounterService>()?;
 ```
 
@@ -228,14 +230,31 @@ lifecycle. Use `Site::serve` or `site.start()` for serving. Use
 `vyuh::testing::router(&site)` only for tests or interop that truly needs an Axum
 `Router`.
 
-Named routes can be reversed through `Site::reverse`:
+Named routes are reversed through the site route facade:
 
 ```rust
-let url = site.reverse("user_detail", &[("id", "42")]);
+let url = site.routes().reverse_url(
+    "user_detail",
+    &[("id", "42")],
+);
 ```
 
-`reverse` returns `None` when the route name or required parameters do not
-match a registered route.
+`reverse_url` returns `None` when the route name or required parameters do not
+match a registered route. Resolve a URL to its method-specific runtime
+operation through the same facade:
+
+```rust
+let id = site.routes().resolve_url(
+    HttpMethod::GET,
+    "/users/42?tab=profile",
+);
+
+let operation = id.and_then(|id| site.operations().find(id));
+```
+
+`site.operations().list()` iterates over all operation metadata without
+allocating. Hidden framework operations are included and can be filtered with
+`Operation::hidden`.
 
 ## Testing
 

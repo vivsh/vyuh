@@ -3,7 +3,6 @@ use serde::Serialize;
 
 use crate::{
     Operation, OperationKind, Site,
-    auth::JwtKeySource,
     callables::{ArgPart, ArgSpec, ReturnPart, ReturnSpec, TypeSchema},
     console::middleware::{MiddlewareInfo, operation_middleware},
     logging::LogSink,
@@ -185,7 +184,7 @@ fn arg_part(part: &ArgPart) -> (String, Option<String>, Option<String>) {
         ArgPart::Optional(_) => ("optional".into(), None, None),
         ArgPart::Fallible(_) => ("fallible".into(), None, None),
         ArgPart::Zone => ("zone".into(), None, None),
-        ArgPart::Ignore => ("runtime".into(), None, None),
+        ArgPart::Ignore | ArgPart::Authentication => ("runtime".into(), None, None),
     }
 }
 
@@ -377,28 +376,11 @@ impl ConfigOut {
                 url: "<redacted>".to_string(),
             },
             auth: AuthConfigOut {
-                access_ttl: conf.auth.access_ttl,
-                refresh_ttl: conf.auth.refresh_ttl,
-                issuer: conf.auth.issuer.clone(),
-                audience: format!("{:?}", conf.auth.audience),
-                leeway_seconds: conf.auth.leeway_seconds,
-                min_secret_len: conf.auth.min_secret_len,
-                jwt_algorithm: format!("{:?}", conf.auth.jwt.algorithm),
-                jwt_signing_key_source: key_source(&conf.auth.jwt.signing_key),
-                jwt_verifying_key_source: conf.auth.jwt.verifying_key.as_ref().map(key_source),
-                jwt_key_id: conf.auth.jwt.key_id.clone(),
-                api_keys_enabled: conf.auth.api_keys.enabled,
-                api_key_header: conf.auth.api_keys.header.clone(),
-                api_key_authorization_scheme: conf.auth.api_keys.authorization_scheme.clone(),
-                api_key_allow_query_param: conf.auth.api_keys.allow_query_param,
-                api_key_query_param: conf.auth.api_keys.query_param.clone(),
+                summary: conf.auth.summary(),
             },
             console: ConsoleConfigOut {
                 enabled: conf.console.enabled,
                 path: conf.console.path.clone(),
-                bootstrap_token_ttl_seconds: conf.console.bootstrap_token_ttl_seconds,
-                session_ttl_seconds: conf.console.session_ttl_seconds,
-                print_bootstrap_url: format!("{:?}", conf.console.print_bootstrap_url),
                 cookie_name: conf.console.cookie_name.clone(),
                 secure_cookie: conf.console.secure_cookie,
                 page_size_default: conf.console.page_size_default,
@@ -483,30 +465,13 @@ pub struct DatabaseConfigOut {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AuthConfigOut {
-    pub access_ttl: i64,
-    pub refresh_ttl: i64,
-    pub issuer: Option<String>,
-    pub audience: String,
-    pub leeway_seconds: u64,
-    pub min_secret_len: usize,
-    pub jwt_algorithm: String,
-    pub jwt_signing_key_source: String,
-    pub jwt_verifying_key_source: Option<String>,
-    pub jwt_key_id: Option<String>,
-    pub api_keys_enabled: bool,
-    pub api_key_header: String,
-    pub api_key_authorization_scheme: Option<String>,
-    pub api_key_allow_query_param: bool,
-    pub api_key_query_param: String,
+    pub summary: crate::auth::AuthSummary,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ConsoleConfigOut {
     pub enabled: bool,
     pub path: String,
-    pub bootstrap_token_ttl_seconds: u64,
-    pub session_ttl_seconds: u64,
-    pub print_bootstrap_url: String,
     pub cookie_name: String,
     pub secure_cookie: bool,
     pub page_size_default: usize,
@@ -606,15 +571,6 @@ impl From<&crate::logging::LogRule> for LogRuleOut {
             rotation,
             default_filter: rule.default_filter.clone(),
         }
-    }
-}
-
-fn key_source(source: &JwtKeySource) -> String {
-    match source {
-        JwtKeySource::SiteSecret => "site_secret".to_string(),
-        JwtKeySource::Inline(_) => "inline_redacted".to_string(),
-        JwtKeySource::Env(name) => format!("env:{name}"),
-        JwtKeySource::File(path) => format!("file:{path}"),
     }
 }
 

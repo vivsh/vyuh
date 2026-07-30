@@ -73,6 +73,10 @@ impl CommandRegistry {
         self.commands.values()
     }
 
+    pub(crate) fn operations(&self) -> impl Iterator<Item = crate::Operation> + '_ {
+        self.commands.values().map(Command::operation)
+    }
+
     pub fn generate_help(&self, command_name: &str) -> Result<String, CommandError> {
         if command_name == "help" {
             return Ok(help_command_help());
@@ -216,7 +220,7 @@ impl CommandRegistry {
             .get(command_name)
             .ok_or_else(|| CommandError::UnknownCommand(command_name.to_string()))?;
         let payload = (command.parser)(command_name, args, &command.args)?;
-        let ctx = CommandContext::new(site, payload);
+        let ctx = CommandContext::new(site, payload, command.operation().id);
         command
             .handler
             .call(ctx)

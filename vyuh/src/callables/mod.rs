@@ -52,4 +52,4 @@ pub use patch::{ArgPatch, PatchOp, ReturnPatch};
 
 pub use extractors::{Data, FromSite, HasSite};
 
-pub use operations::{Operation, OperationKind};
+pub use operations::{Operation, OperationId, OperationKind, Operations};

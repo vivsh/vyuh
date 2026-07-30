@@ -14,7 +14,9 @@
 
 // ── Core framework types ────────────────────────────────────────────────────
 
-pub use crate::{Data, DeploymentMode, Error, Site, SiteConf, SiteError, Valid, Validate};
+pub use crate::{
+    Data, DeploymentMode, Error, OperationId, Site, SiteConf, SiteError, Valid, Validate,
+};
 
 pub use serde::{Deserialize, Serialize};
 
@@ -31,9 +33,9 @@ pub use crate::observability::ObservabilityConf;
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 pub use crate::routes::{
-    Accepted, AppendHeaders, Created, FileResponse, Form, Html, IntoResponse, Json, NoContent,
-    POLL, Path, PermanentRedirect, Query, Redirect, SSE, State, StatusCode, StreamResponse,
-    Subscriber, TemporaryRedirect, WS, redirect,
+    Accepted, AppendHeaders, ClientIp, Created, FileResponse, Form, Html, HttpMethod, IntoResponse,
+    Json, NoContent, POLL, Path, PermanentRedirect, Query, Redirect, SSE, State, StatusCode,
+    StreamResponse, Subscriber, TemporaryRedirect, WS, redirect,
 };
 
 // ── Tasks ───────────────────────────────────────────────────────────────────

@@ -231,7 +231,7 @@ fn arg_part(part: &ArgPart) -> (String, Option<&TypeSchema>, Option<String>) {
         ArgPart::Optional(_) => ("optional".into(), None, None),
         ArgPart::Fallible(_) => ("fallible".into(), None, None),
         ArgPart::Zone => ("zone".into(), None, None),
-        ArgPart::Ignore => ("runtime".into(), None, None),
+        ArgPart::Ignore | ArgPart::Authentication => ("runtime".into(), None, None),
     }
 }
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use uuid::Uuid;
 
+use crate::OperationId;
 use crate::Site;
 use crate::apidocs::{ApiDocGenerator, ApiMeta, DocViewer, OpenApiVersion};
 use crate::auth::{AuthConf, AuthUser};
@@ -24,8 +24,8 @@ pub struct OpenApiConf {
     pub openapi_version: OpenApiVersion,
     pub viewer: Option<OpenApiViewerConf>,
     /// Optional auth predicate for OpenAPI endpoints.
-    /// When `Some(f)`, the request must carry a valid JWT; the extracted
-    /// `AuthUser` is then passed to `f`. Returning `false` yields `403 Forbidden`.
+    /// When `Some(f)`, the request must carry a valid configured credential; the
+    /// extracted `AuthUser` is then passed to `f`. Returning `false` yields `403 Forbidden`.
     /// `None` (the default) leaves the endpoints publicly accessible.
     pub auth: Option<fn(&AuthUser) -> bool>,
 }
@@ -131,11 +131,11 @@ impl OpenApiConf {
 /// `with_prefix` path updates propagate automatically before `setup` is called.
 pub(super) struct DocNode {
     /// UUID of the hidden spec-route operation in `Bundle::ops`.
-    spec_op_id: Uuid,
+    spec_op_id: OperationId,
     /// UUID of the hidden viewer-route operation in `Bundle::ops`, if any.
-    doc_op_id: Option<Uuid>,
+    doc_op_id: Option<OperationId>,
     /// UUIDs of the visible operations to include in the generated spec.
-    operation_ids: Vec<Uuid>,
+    operation_ids: Vec<OperationId>,
     meta: ApiMeta,
     openapi_version: OpenApiVersion,
     viewer: DocViewer,
@@ -170,7 +170,7 @@ impl DocEngine {
     pub(crate) fn setup(
         &self,
         router: &mut AxumRouter<Site>,
-        ops: &BTreeMap<Uuid, Operation>,
+        ops: &BTreeMap<OperationId, Operation>,
         auth: &AuthConf,
     ) -> Result<(), BundleError> {
         for node in &self.nodes {
@@ -178,6 +178,9 @@ impl DocEngine {
                 .get(&node.spec_op_id)
                 .map(|op| op.path.clone())
                 .unwrap_or_else(|| node.spec_op_id.to_string());
+            let spec_audience = ops
+                .get(&node.spec_op_id)
+                .and_then(|operation| operation.audience_id().cloned());
 
             let views: Vec<&Operation> = node
                 .operation_ids
@@ -191,6 +194,7 @@ impl DocEngine {
             let auth_pred = node.auth;
             let spec_route = {
                 let b = spec_bytes;
+                let audience = spec_audience.clone();
                 axum::routing::get(
                     move |axum::extract::State(site): axum::extract::State<Site>,
                           req: axum::extract::Request| {
@@ -199,8 +203,13 @@ impl DocEngine {
                             use axum::http::{StatusCode, header};
                             use axum::response::IntoResponse;
                             if let Some(pred) = auth_pred {
-                                let (parts, _) = req.into_parts();
-                                match site.auth().extract_user(&parts, &[], false) {
+                                let (mut parts, _) = req.into_parts();
+                                if let Some(audience) = audience.clone() {
+                                    parts.extensions.insert(super::BundleRequestContext {
+                                        audience: Some(audience),
+                                    });
+                                }
+                                match <AuthUser as axum::extract::FromRequestParts<Site>>::from_request_parts(&mut parts, &site).await {
                                     Err(e) => return e.into_response(),
                                     Ok(user) if !pred(&user) => {
                                         return StatusCode::FORBIDDEN.into_response();
@@ -226,9 +235,13 @@ impl DocEngine {
                     .get(&doc_op_id)
                     .map(|op| op.path.clone())
                     .unwrap_or_else(|| doc_op_id.to_string());
+                let viewer_audience = ops
+                    .get(&doc_op_id)
+                    .and_then(|operation| operation.audience_id().cloned());
                 let viewer_html = generate_viewer(&doc_path, &spec_path, node.viewer);
                 let viewer_route = {
                     let h = viewer_html;
+                    let audience = viewer_audience;
                     axum::routing::get(
                         move |axum::extract::State(site): axum::extract::State<Site>,
                               req: axum::extract::Request| {
@@ -237,8 +250,13 @@ impl DocEngine {
                                 use axum::http::{StatusCode, header};
                                 use axum::response::IntoResponse;
                                 if let Some(pred) = auth_pred {
-                                    let (parts, _) = req.into_parts();
-                                    match site.auth().extract_user(&parts, &[], false) {
+                                    let (mut parts, _) = req.into_parts();
+                                    if let Some(audience) = audience.clone() {
+                                        parts.extensions.insert(super::BundleRequestContext {
+                                            audience: Some(audience),
+                                        });
+                                    }
+                                    match <AuthUser as axum::extract::FromRequestParts<Site>>::from_request_parts(&mut parts, &site).await {
                                         Err(e) => return e.into_response(),
                                         Ok(user) if !pred(&user) => {
                                             return StatusCode::FORBIDDEN.into_response();
@@ -275,7 +293,7 @@ impl Bundle {
     /// `DocEngine::setup` resolves them to final paths at startup.
     pub fn with_openapi(mut self, conf: OpenApiConf) -> Self {
         // Snapshot UUIDs of visible operations now; the ops map is the canonical store.
-        let operation_ids: Vec<Uuid> = self
+        let operation_ids: Vec<OperationId> = self
             .ops
             .values()
             .filter(|op| !op.hidden && op.kind == OperationKind::Route)
@@ -353,11 +371,11 @@ mod tests {
 
     fn operation(kind: OperationKind, name: &str, path: &str) -> Operation {
         Operation {
-            id: Uuid::new_v4(),
+            id: OperationId::new(),
             name: name.to_string(),
             description: None,
             summary: None,
-            operation_id: None,
+            openapi_id: None,
             deprecated: false,
             path: path.to_string(),
             kind,
@@ -369,6 +387,7 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
+            audience: None,
             bundle_id: None,
             slash_policy: None,
         }

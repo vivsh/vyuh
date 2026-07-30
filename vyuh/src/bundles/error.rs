@@ -4,6 +4,8 @@ use crate::signals::SignalError;
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum BundleError {
+    #[error("authentication bundle configuration failed: {0}")]
+    Auth(String),
     #[error(transparent)]
     Signal(#[from] Arc<SignalError>),
 
@@ -29,6 +31,9 @@ pub enum BundleError {
     #[error("API doc generation failed: {0}")]
     DocGen(String),
 
+    #[error("route registry construction failed: {0}")]
+    RouteRegistry(String),
+
     #[error("invalid route path for '{name}': {reason}")]
     InvalidRoutePath {
         name: String,
@@ -47,4 +52,7 @@ pub enum BundleError {
 
     #[error("duplicate route path/method: {methods} {path}")]
     DuplicateRoutePathMethod { path: String, methods: String },
+
+    #[error("authenticated operation '{name}' at '{path}' has no bundle audience")]
+    MissingAuthAudience { name: String, path: String },
 }

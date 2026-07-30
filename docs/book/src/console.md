@@ -15,7 +15,7 @@ it as an application admin framework or a command/task execution surface.
 - `ConsoleConf::default()` enables the console in debug builds and disables it
   in release builds.
 - Console roles are separate from application roles.
-- Console auth uses a console-only cookie/session. Normal app JWTs do not grant
+- Console auth uses a console-only signed token cookie. Normal app JWTs do not grant
   console access.
 - The HTML UI is server-rendered with Minijinja and progressively enhanced with
   HTMX. JSON APIs remain available under `/api`.
@@ -41,32 +41,30 @@ Defaults:
 | --- | --- |
 | `enabled` | `cfg!(debug_assertions)` |
 | `path` | `/console` |
-| `bootstrap_token_ttl_seconds` | `300` |
-| `session_ttl_seconds` | `28800` |
-| `print_bootstrap_url` | `LocalOnly` |
 | `cookie_name` | `vyuh_console` |
+| `secure_cookie` | `false` |
 | `page_size_default` | `50` |
 | `page_size_max` | `250` |
 | `status_cache_ttl_seconds` | `5` |
 
-With `LocalOnly`, Vyuh prints a short-lived bootstrap URL only when the serving
-runtime starts on `localhost`, `127.0.0.1`, or `::1`. One-shot commands never
-print a bootstrap URL:
+Generate a short-lived login token from the configured application:
 
 ```text
-Vyuh console enabled:
-http://localhost:8080/console/login?token=...
-Token expires in 300 seconds.
+your-app console-token
 ```
 
-Bootstrap tokens are in-memory and are not persisted. Consuming a bootstrap
-token creates a console session cookie and redirects to the console root. The
-session cookie lasts 8 hours by default.
+The command prints only the token, never a public URL. Open the deployment's
+known console login page and enter it. Login tokens are signed, stateless bearer
+credentials valid for 90 seconds. A successful login creates a signed,
+HTTP-only cookie valid for 90 minutes and bound to the resolved client IP.
 
-In debug builds on `localhost`, `127.0.0.1`, or `::1`, the console also allows
-direct access without a bootstrap token. In release builds, enable the console
-explicitly and keep the bootstrap/session flow or another guarded access policy
-in place.
+The console always requires this login flow, including debug builds. It binds
+the cookie to a single valid `X-Forwarded-For` address when supplied, otherwise
+to the TCP peer address. Vyuh does not infer or print a public URL.
+
+Login also creates a readable CSRF cookie. Unsafe console API requests must copy
+that value into `X-CSRF-Token`; the bundled console JavaScript does this
+automatically.
 
 ## Roles
 
@@ -80,8 +78,8 @@ The roles are `Viewer`, `Operator`, and `Admin`. In this read-only pass,
 `Viewer` can access all console APIs. `Operator` and `Admin` are reserved for
 future guarded operations.
 
-These roles do not affect `AuthUser`, `permit!(...)`, API keys, or application
-authorization.
+These roles are specific to the console provider. They do not affect
+application providers, `AuthUser` role masks, or application authorization.
 
 ## Endpoints
 
@@ -90,8 +88,8 @@ All endpoints are mounted under `ConsoleConf.path`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | canonical status overview page |
-| `GET` | `/login?token=...` | consume bootstrap token, set console cookie, and redirect to `/` |
-| `GET` | `/login-page` | show console login guidance |
+| `POST` | `/login` | exchange a 90-second login token for a 90-minute console cookie |
+| `GET` | `/login-page` | show the console token form |
 | `GET` | `/overview` | status overview page |
 | `GET` | `/runtime` | formatted site, process, and system runtime page |
 | `GET` | `/operations` | operation listing page with in-page inspector |
@@ -101,7 +99,7 @@ All endpoints are mounted under `ConsoleConf.path`.
 | `GET` | `/openapi` | OpenAPI page for non-console routes |
 | `GET` | `/conf` | redacted runtime configuration page |
 | `POST` | `/api/logout` | clear console cookie |
-| `GET` | `/api/session` | inspect current console session |
+| `GET` | `/api/session` | inspect the current authenticated console identity |
 | `GET` | `/api/operations` | list/search operation metadata |
 | `GET` | `/api/operations/{id}` | inspect one operation |
 | `GET` | `/api/tasks` | list task records |
@@ -123,6 +121,11 @@ Console pages use the package-owned `vyuh/web/` assets:
 /assets/img/vyuh-logo-transparent.png
 /assets/js/console.js
 ```
+
+Console asset URLs follow the parent path of `ConsoleConf.path`. A console at
+`/console` uses `/assets/**`; a console mounted at `/dynrs/console` uses
+`/dynrs/assets/**`. Configure the reverse proxy to expose that sibling asset
+path through the same Vyuh deployment.
 
 The HTML templates live under `vyuh/web/templates/console/**` and are loaded
 through the same bundle asset template path used by application templates.
@@ -226,7 +229,7 @@ database URLs.
 ## Current Limitations
 
 - Console is read-only.
-- Console sessions are in-memory, process-local, and expire after
-  `ConsoleConf.session_ttl_seconds`.
+- Console authentication is stateless. Login tokens can be reused during their
+  90-second lifetime; single-use tokens require durable replay state.
 - Pagination uses offset cursors in this pass.
 - Task listing is inspection-only and does not affect task leasing or retries.

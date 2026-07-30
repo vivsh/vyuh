@@ -1,9 +1,21 @@
 document.addEventListener("htmx:configRequest", (event) => {
-  const csrf = document.querySelector("meta[name='csrf-token']");
+  const csrf = csrfToken();
   if (csrf) {
-    event.detail.headers["x-csrf-token"] = csrf.content;
+    event.detail.headers["x-csrf-token"] = csrf;
   }
 });
+
+function csrfToken() {
+  const meta = document.querySelector("meta[name='csrf-token']");
+  if (meta) {
+    return meta.content;
+  }
+  const cookie = document.cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.slice(0, value.indexOf("=")).endsWith("_csrf"));
+  return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf("=") + 1)) : null;
+}
 
 function activateTab(tab) {
   const tablist = tab.closest("[data-console-tabs]");

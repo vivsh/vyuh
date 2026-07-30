@@ -22,11 +22,15 @@ The route pipeline has three parts:
   and other subsystem registrations.
 
 The `vyuh::routes` module provides Vyuh-owned request wrappers such as
-`Json<T>`, `Query<T>`, `Path<T>`, `Form<T>`, and `MultipartForm<T>`. These wrappers are the
+`Json<T>`, `Query<T>`, `Path<T>`, `Form<T>`, `ClientIp`, and `MultipartForm<T>`. These wrappers are the
 recommended route API; Axum remains an internal implementation detail unless an
 application explicitly imports Axum types as an escape hatch. See
 [Request](request.md) for wrapper behavior and [Validation](validation.md)
 for `Valid<E>`.
+
+`ClientIp` resolves one `X-Forwarded-For` address when present, otherwise the
+TCP peer address supplied by the server. Requests with a malformed or multi-hop
+forwarded header are rejected rather than guessed.
 
 ## Macro Sugar And Direct API
 
@@ -61,7 +65,7 @@ generated, feature-gated, or assembled conditionally.
 
 `RouteConf` has four fields:
 
-- `name`: logical route name used by `reverse()`, operation IDs, and diagnostic
+- `name`: logical route name used by `reverse_url()`, operation metadata, and diagnostic
   metadata. Macro routes default to the function name.
 - `path`: Axum-style absolute path, such as `/notes` or `/notes/{id}`.
 - `methods`: a `Methods` filter. Macro routes default to `GET`.
@@ -107,8 +111,8 @@ Common inputs:
 - `MultipartForm<T>` parses file uploads and contributes `multipart/form-data`
   metadata. See [Uploads](uploads.md).
 - `Valid<E>` wraps a request extractor and runs `Validate` after parsing.
-- `AuthUser`, `permit!(Role, Variant)`, and `ApiKey` contribute security
-  metadata.
+- `AuthUser` and `permit!(Role, Variant)` contribute security metadata. They
+  must be registered in a bundle with `with_audience(YOUR_AUDIENCE)`.
 
 Common outputs:
 
@@ -177,6 +181,25 @@ Reverse routing resolves a registered route name to its final path. Path
 parameters are percent-encoded. Missing path arguments return `None`; extra
 arguments are ignored.
 
+Both directions live on `site.routes()`:
+
+```rust
+let url = site.routes().reverse_url("note", &[("id", "42")]);
+let operation_id = site.routes().resolve_url(HttpMethod::GET, "/notes/42");
+```
+
+`resolve_url` is method-aware, ignores query strings and fragments, and returns
+the canonical `OperationId`. Registered slash aliases resolve to the same
+operation.
+
+Every Vyuh route may extract its own ID directly or through Axum's extension:
+
+```rust
+async fn note(operation_id: OperationId) -> Json<String> {
+    Json(operation_id.to_string())
+}
+```
+
 See [Bundles](bundles.md) for `BundlePart`, `bundle!`, cross-module bundle
 organization, validation, composition behavior, and the general patch API.
 
@@ -219,7 +242,7 @@ direct API uses the same runtime bundle validation path.
 
 ## Best Practices
 
-- Give public routes stable names when callers use `reverse()`.
+- Give public routes stable names when callers use `reverse_url()`.
 - Keep route doc comments user-facing because OpenAPI uses them.
 - Use direct registration for generated routes, conditional routes, or
   feature-gated route lists.

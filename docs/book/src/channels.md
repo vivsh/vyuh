@@ -56,6 +56,9 @@ async fn subscribe(
 }
 ```
 
+Because this route extracts `AuthUser`, register it in a bundle with an
+application `Audience`; see [Authentication](auth.md#audiences).
+
 If `allow(...)` is omitted, all transports are allowed:
 
 ```rust

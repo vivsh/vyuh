@@ -276,6 +276,10 @@ pub enum ArgPart {
         join_all: bool,
     },
 
+    /// Internal marker used to validate that authenticated Vyuh routes belong
+    /// to an audience-bearing bundle.
+    Authentication,
+
     /// Response metadata implied by an argument extractor or wrapper.
     Response(Vec<ReturnSpec>),
 
@@ -293,6 +297,15 @@ pub enum ArgPart {
 }
 
 impl ArgPart {
+    pub(crate) fn requires_auth(&self) -> bool {
+        match self {
+            Self::Authentication => true,
+            Self::Composite(parts) => parts.iter().any(Self::requires_auth),
+            Self::Optional(part) | Self::Fallible(part) => part.requires_auth(),
+            _ => false,
+        }
+    }
+
     /// Returns the first request-body schema carried by this part.
     pub fn body_schema(&self) -> Option<&TypeSchema> {
         match self {

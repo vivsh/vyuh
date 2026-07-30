@@ -167,7 +167,7 @@ impl PatchOp {
             op.description = Some(description);
         }
         if let Some(operation_id) = self.operation_id {
-            op.operation_id = Some(operation_id);
+            op.openapi_id = Some(operation_id);
         }
         if let Some(deprecated) = self.deprecated {
             op.deprecated = deprecated;

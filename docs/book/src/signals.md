@@ -78,13 +78,19 @@ handler argument.
 use vyuh::prelude::*;
 
 #[bundles::signal]
-async fn audit_note_change(site: Site, Data(event): Data<NoteChanged>) -> Result<(), vyuh::Error> {
+async fn audit_note_change(
+    operation_id: OperationId,
+    site: Site,
+    Data(event): Data<NoteChanged>,
+) -> Result<(), vyuh::Error> {
+    let _metadata = site.operations().find(operation_id);
     tracing::info!("note {} changed in {:?}", event.id, site.project_dir());
     Ok(())
 }
 ```
 
-`Site` and other site-derived extractors can appear before `Data<T>`.
+`OperationId`, `Site`, and other context extractors can appear before `Data<T>`.
+Each handler for the same signal payload receives its own operation identity.
 Handler logic should return `vyuh::Error` when it can fail. Vyuh logs handler
 errors and continues dispatching later handlers.
 

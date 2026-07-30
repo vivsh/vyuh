@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>{{ title }} - Vyuh Console</title>
-  <link rel="icon" href="/assets/img/favicon.svg">
+  <link rel="icon" href="{{ asset_root }}/img/favicon.svg">
   <link rel="stylesheet" href="{{ stylesheet_path }}">
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
-  <script src="/assets/js/console.js" defer></script>
+  <script src="{{ asset_root }}/js/console.js" defer></script>
 </head>
 <body class="vyuh-page console-body">
   <svg class="vyuh-icon-sprite" aria-hidden="true">
@@ -33,7 +33,7 @@
   <div class="vyuh-console-app">
     <aside class="vyuh-console-sidebar">
       <a class="vyuh-console-brand" href="{{ base_path }}/overview">
-        <img src="/assets/img/vyuh-logo-transparent.png" alt="Vyuh logo">
+        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="Vyuh logo">
         <span>Vyuh</span>
       </a>
       <nav class="vyuh-console-nav" aria-label="Console pages">
@@ -56,7 +56,7 @@
     <main class="vyuh-console-page">
       {% block content %}{% endblock %}
       <footer class="vyuh-console-footer">
-        <img src="/assets/img/vyuh-logo-transparent.png" alt="">
+        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="">
         <span>Vyuh Console v{{ version }}</span>
       </footer>
     </main>

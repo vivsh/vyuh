@@ -5,6 +5,7 @@ extern crate self as vyuh;
 
 pub mod apidocs;
 pub mod assets;
+#[path = "auth/mod.rs"]
 pub mod auth;
 pub mod bundles;
 pub mod callables;
@@ -38,7 +39,7 @@ mod watch;
 
 pub mod routes;
 mod schema_assets;
-pub use callables::{Data, DataValue, Operation, OperationKind};
+pub use callables::{Data, DataValue, Operation, OperationId, OperationKind, Operations};
 pub use commands::CommandError;
 pub use conf::{DeploymentMode, SiteConf};
 pub use errors::{

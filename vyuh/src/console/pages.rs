@@ -7,8 +7,8 @@ use serde_json::json;
 use crate::routes::{Path, Query};
 use crate::{
     Site,
+    auth::AuthUser,
     console::{
-        auth::ConsoleSessionUser,
         query::{
             OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit,
             task_limit_max,
@@ -21,21 +21,21 @@ use crate::{
 };
 
 pub async fn login(site: Site) -> Result<Html<String>, TemplateError> {
+    let urls = crate::console::view_urls(&site);
     render(
         &site,
         "console/login.html",
         json!({
-            "base_path": base_path(&site),
+            "base_path": urls.base_path,
+            "asset_root": urls.asset_root,
             "version": env!("CARGO_PKG_VERSION"),
-            "stylesheet_path": crate::console::stylesheet_path(),
+            "stylesheet_path": urls.stylesheet_path,
+            "login_url": site.routes().reverse_url("console_login", &[]).unwrap_or_else(|| urls.base_path.clone()),
         }),
     )
 }
 
-pub async fn overview(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Result<Html<String>, TemplateError> {
+pub async fn overview(site: Site, _user: AuthUser) -> Result<Html<String>, TemplateError> {
     let status = status_snapshot(&site);
     render_page(
         &site,
@@ -46,10 +46,7 @@ pub async fn overview(
     )
 }
 
-pub async fn runtime(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Result<Html<String>, TemplateError> {
+pub async fn runtime(site: Site, _user: AuthUser) -> Result<Html<String>, TemplateError> {
     let status = status_snapshot(&site);
     render_page(
         &site,
@@ -62,13 +59,13 @@ pub async fn runtime(
 
 pub async fn operations(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Query(query): Query<OperationQuery>,
 ) -> Result<Html<String>, TemplateError> {
     let conf = &site.conf().console;
     let console_bundle_id = console_bundle_id(&site);
     let (items, next_cursor) = filter_operations(
-        site.iter_operations(),
+        site.operations().list(),
         &query,
         console_bundle_id,
         conf.page_size_default,
@@ -96,17 +93,13 @@ pub async fn operations(
     )
 }
 
-pub async fn operation_detail(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-    Path(id): Path<String>,
-) -> Response {
-    let Ok(id) = uuid::Uuid::parse_str(&id) else {
+pub async fn operation_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
+    let Ok(id) = id.parse::<crate::OperationId>() else {
         return not_found(&site);
     };
     let Some(operation) = site
-        .iter_operations()
-        .find(|op| op.id == id)
+        .operations()
+        .find(id)
         .map(|op| OperationOut::from_operation(op, &site))
     else {
         return not_found(&site);
@@ -123,7 +116,7 @@ pub async fn operation_detail(
 
 pub async fn tasks(
     site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
+    _user: AuthUser,
     Query(query): Query<TaskQuery>,
 ) -> Result<Html<String>, StatusCode> {
     if !site.console_has_tasks() {
@@ -145,11 +138,7 @@ pub async fn tasks(
     render_tasks(&site, query, page).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn task_detail(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
     let Ok(id) = uuid::Uuid::parse_str(&id) else {
         return not_found(&site);
     };
@@ -173,10 +162,7 @@ pub async fn task_detail(
     .into_response()
 }
 
-pub async fn conf(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Result<Html<String>, StatusCode> {
+pub async fn conf(site: Site, _user: AuthUser) -> Result<Html<String>, StatusCode> {
     let conf = ConfigOut::from_site(&site);
     let payload =
         serde_json::to_string_pretty(&conf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -190,10 +176,7 @@ pub async fn conf(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn openapi(
-    site: Site,
-    ConsoleSessionUser(_user): ConsoleSessionUser,
-) -> Result<Html<String>, StatusCode> {
+pub async fn openapi(site: Site, _user: AuthUser) -> Result<Html<String>, StatusCode> {
     render_page(
         &site,
         "console/openapi.html",
@@ -204,7 +187,7 @@ pub async fn openapi(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn not_found_page(site: Site, ConsoleSessionUser(_user): ConsoleSessionUser) -> Response {
+pub async fn not_found_page(site: Site, _user: AuthUser) -> Response {
     not_found(&site)
 }
 
@@ -217,17 +200,16 @@ fn render_page(
 ) -> Result<Html<String>, TemplateError> {
     context["active"] = json!(active);
     context["title"] = json!(title);
-    context["base_path"] = json!(base_path(site));
+    let urls = crate::console::view_urls(site);
+    context["base_path"] = json!(urls.base_path);
+    context["asset_root"] = json!(urls.asset_root);
     context["version"] = json!(env!("CARGO_PKG_VERSION"));
-    context["stylesheet_path"] = json!(crate::console::stylesheet_path());
+    context["stylesheet_path"] = json!(urls.stylesheet_path);
     render(site, template, context)
 }
 
 fn status_snapshot(site: &Site) -> StatusOut {
-    let ttl = std::time::Duration::from_secs(site.conf().console.status_cache_ttl_seconds);
-    site.console_runtime()
-        .map(|runtime| runtime.status(site, ttl))
-        .unwrap_or_else(|| crate::console::status::collect(site))
+    site.console_status()
 }
 
 fn runtime_context(status: StatusOut) -> serde_json::Value {
@@ -315,10 +297,12 @@ fn not_found(site: &Site) -> Response {
 }
 
 fn error_page(site: &Site, status: StatusCode, title: &str, message: &str) -> Response {
+    let urls = crate::console::view_urls(site);
     let context = json!({
-        "base_path": base_path(site),
+        "base_path": urls.base_path,
+        "asset_root": urls.asset_root,
         "version": env!("CARGO_PKG_VERSION"),
-        "stylesheet_path": crate::console::stylesheet_path(),
+        "stylesheet_path": urls.stylesheet_path,
         "status": status.as_u16(),
         "title": title,
         "message": message,
@@ -421,14 +405,15 @@ fn selected_operation(
     console_bundle_id: Option<uuid::Uuid>,
 ) -> Option<OperationView> {
     let id = query.selected.as_deref()?;
-    let id = uuid::Uuid::parse_str(id).ok()?;
-    site.iter_operations()
-        .find(|op| op.id == id && !is_console_operation(op, console_bundle_id))
+    let id = id.parse::<crate::OperationId>().ok()?;
+    site.operations()
+        .find(id)
+        .filter(|op| !is_console_operation(op, console_bundle_id))
         .map(|op| OperationView::from_operation(op, site))
 }
 
 fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {
-    site.console_runtime().map(|runtime| runtime.bundle_id())
+    site.console_bundle_id()
 }
 
 fn empty_tasks() -> Page<TaskOut> {
@@ -436,10 +421,6 @@ fn empty_tasks() -> Page<TaskOut> {
         items: Vec::new(),
         next_cursor: None,
     }
-}
-
-fn base_path(site: &Site) -> &str {
-    &site.conf().console.path
 }
 
 fn operation_kinds() -> [&'static str; 9] {

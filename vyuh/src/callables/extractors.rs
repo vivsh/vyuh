@@ -9,21 +9,13 @@ use crate::routes::{
     Path, PermanentRedirect, Query, StreamResponse, TemporaryRedirect,
 };
 use crate::validation::{Valid, Validate, ValidationSchema};
-use crate::{
-    Site,
-    auth::{ApiKey, AuthUser},
-    site,
-};
+use crate::{Site, site};
 use schemars::JsonSchema;
 use std::borrow::Cow;
 use std::sync::Arc;
 
 fn bad_request_response() -> ArgPart {
     ArgPart::Response(vec![ReturnSpec::error(400, "Bad request.")])
-}
-
-fn unauthorized_response() -> ArgPart {
-    ArgPart::Response(vec![ReturnSpec::error(401, "Unauthorized.")])
 }
 
 fn validation_response() -> ArgPart {
@@ -457,32 +449,6 @@ impl<'a> IntoReturnPart for JsonStr {
     }
 }
 
-impl IntoArgPart for AuthUser {
-    fn into_arg_part() -> ArgPart {
-        ArgPart::Composite(vec![
-            ArgPart::Security {
-                scheme: "bearerAuth".into(),
-                join_all: true,
-                scopes: Vec::new(),
-            },
-            unauthorized_response(),
-        ])
-    }
-}
-
-impl IntoArgPart for ApiKey {
-    fn into_arg_part() -> ArgPart {
-        ArgPart::Composite(vec![
-            ArgPart::Security {
-                scheme: "apiKeyAuth".into(),
-                join_all: true,
-                scopes: Vec::new(),
-            },
-            unauthorized_response(),
-        ])
-    }
-}
-
 impl<T> IntoArgPart for Option<T>
 where
     T: IntoArgPart,
@@ -502,6 +468,12 @@ where
 }
 
 impl IntoArgPart for site::Site {
+    fn into_arg_part() -> ArgPart {
+        ArgPart::Ignore
+    }
+}
+
+impl IntoArgPart for axum::extract::Request {
     fn into_arg_part() -> ArgPart {
         ArgPart::Ignore
     }

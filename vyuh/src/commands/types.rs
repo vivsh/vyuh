@@ -39,11 +39,20 @@ pub type CommandHandlerIn = Callable<CommandContext, Error>;
 pub struct CommandContext {
     pub(super) site: Site,
     pub(super) payload: callables::DataBox,
+    pub(super) operation_id: crate::OperationId,
 }
 
 impl CommandContext {
-    pub(super) fn new(site: Site, payload: callables::DataBox) -> Self {
-        Self { site, payload }
+    pub(super) fn new(
+        site: Site,
+        payload: callables::DataBox,
+        operation_id: crate::OperationId,
+    ) -> Self {
+        Self {
+            site,
+            payload,
+            operation_id,
+        }
     }
 }
 
@@ -59,6 +68,12 @@ impl callables::HasSite for CommandContext {
     }
 }
 
+impl callables::FromContextParts<CommandContext> for crate::OperationId {
+    fn from_context_parts(context: &CommandContext) -> Result<Self, callables::CallError> {
+        Ok(context.operation_id)
+    }
+}
+
 // ── command ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -67,13 +82,12 @@ pub(crate) struct Command {
     pub(crate) options: CommandConf,
     pub(crate) args: Vec<CommandArg>,
     pub(crate) parser: fn(&str, &[&str], &[CommandArg]) -> Result<callables::DataBox, CommandError>,
+    operation: callables::Operation,
 }
 
 impl Command {
     pub(crate) fn operation(&self) -> callables::Operation {
-        let spec = self.handler.inspect();
-        callables::Operation::from_specs(callables::OperationKind::Command, spec)
-            .with_conf(&self.options)
+        self.operation.clone().with_conf(&self.options)
     }
 }
 
@@ -98,11 +112,14 @@ where
             Ok(callables::DataBox::new(obj))
         };
     callable.type_id = TypeId::of::<T>();
+    let operation =
+        callables::Operation::from_specs(callables::OperationKind::Command, callable.inspect());
     Ok(Command {
         handler: callable,
         options,
         args: parsed_args,
         parser,
+        operation,
     })
 }
 

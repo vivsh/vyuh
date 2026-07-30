@@ -1,6 +1,8 @@
+mod client_ip;
 mod methods;
 pub mod middleware;
 pub mod multipart;
+mod registry;
 mod subscriber;
 mod types;
 
@@ -32,9 +34,13 @@ pub use axum::body::Body;
 // Local types
 pub use crate::Data;
 pub use crate::validation::Valid;
+pub use client_ip::ClientIp;
+pub(crate) use client_ip::resolve as resolve_client_ip;
 pub use methods::{MethodIter, Methods};
 pub use middleware::{Middleware, RawLayer, layer_from};
 pub use multipart::{JsonPart, MultipartForm, MultipartMap, UploadedFile, UploadedText};
+pub(crate) use registry::RouteRegistry;
+pub use registry::Routes;
 pub use subscriber::{ChannelAttach, Subscriber};
 pub use types::{
     Accepted, BodyBytes, CookieJson, Created, FileResponse, Form, Json, JsonStr, OkJson, OkOut,

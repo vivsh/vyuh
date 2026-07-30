@@ -42,12 +42,15 @@
 //! The tests use Vyuh's `testing::TestSite`, which provisions Mool's
 //! migration-aware test database and exercises routes without binding an HTTP port.
 
-use axum::body::Body;
+use axum::{body::Body, extract::Request};
 use schemars::JsonSchema;
 use tokio_util::io::ReaderStream;
 use vyuh::{
     ErrorKind,
-    auth::{AuthConf, AuthUser, BitRole, check_password, make_password},
+    auth::{
+        AuthConf, AuthUser, BitRole, CookieConf, Jwt, TokenConf, TokenProvider, check_password,
+        make_password,
+    },
     commands::CommandConf,
     console::ConsoleConf,
     db::backend::ReturningExt,
@@ -57,6 +60,17 @@ use vyuh::{
     routes::{CookieJson, FileResponse, MultipartForm, OkJson, OkOut, PageParams, UploadedFile},
     utils::text::{numbered_slug, slugify},
 };
+
+const BLOG: vyuh::auth::Audience = vyuh::auth::Audience::new("blog");
+
+fn blog_auth() -> AuthConf {
+    AuthConf::empty().provider(
+        vyuh::auth::DEFAULT_AUTH_PROVIDER,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .without_refresh()
+            .access(TokenConf::cookie(CookieConf::new("blog_access"))),
+    )
+}
 
 static MIGRATIONS: db::EmbeddedMigrations = db::embed_migrations!("examples/blog/migrations");
 const DEFAULT_PAGE_SIZE: usize = 9;
@@ -347,19 +361,20 @@ async fn login(
         } else {
             0
         };
-    site.auth().login_user(
-        AuthUser::new(&subject, roles),
-        &["blog"],
-        response.response_mut(),
-    )?;
+    let login = site
+        .auth()
+        .login(AuthUser::new(&subject).with_role_mask(roles), &[BLOG])
+        .await?;
+    login.write(response.response_mut());
     Ok(response)
 }
 
 #[bundles::route(path = "/api/session", method = "DELETE")]
-async fn logout(site: Site) -> Result<CookieJson<OkOut>, Error> {
+async fn logout(site: Site, request: Request) -> Result<CookieJson<OkOut>, Error> {
+    let (parts, _) = request.into_parts();
     let mut response = CookieJson::new(OkOut::ok());
-    site.auth().logout(false, response.response_mut());
-    site.auth().logout(true, response.response_mut());
+    let logout = site.auth().logout(&parts).await?;
+    logout.write(response.response_mut());
     Ok(response)
 }
 
@@ -783,6 +798,7 @@ fn app_bundle() -> bundles::Bundle {
         CommandConf::new("users:create-admin").description("Create an administrator account."),
     )]))
     .with_openapi(openapi_conf())
+    .with_audience(BLOG)
 }
 
 fn openapi_conf() -> bundles::OpenApiConf {
@@ -818,7 +834,7 @@ async fn main() -> Result<(), SiteError> {
         .unwrap_or_else(|_| "vyuh-blog-development-secret-change-me-please".to_string());
     let conf = SiteConf::from_env_with_files()?
         .secret_key(secret)
-        .auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
+        .auth(blog_auth())
         .console(ConsoleConf::default().enabled(true))
         .errors(ErrorConf::default().api_json());
     Site::run(conf, app_bundle()).await
@@ -1008,7 +1024,7 @@ mod tests {
     fn test_conf() -> Result<SiteConf, TestError> {
         Ok(SiteConf::default()
             .secret_key("vyuh-blog-test-secret-key-with-enough-entropy")
-            .auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
+            .auth(blog_auth())
             .errors(ErrorConf::default().api_json())
             .log_init(false)
             .database(db::DbConf::from_env()?))

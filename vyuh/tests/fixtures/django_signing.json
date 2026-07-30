@@ -1,0 +1,18 @@
+{
+  "secret": "django-cross-language-secret-32-chars",
+  "django_token": "eyJ2ZXJzaW9uIjoxLCJwcnYiOiJkamFuZ28iLCJraW5kIjoiYWNjZXNzIiwic3ViIjoiZGphbmdvLXVzZXIiLCJyb2xlcyI6MCwiYXVkIjpbInJlcG9ydHMiXSwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDI0NDQ4MDAsImp0aSI6ImRqYW5nby1maXh0dXJlLXRva2VuIiwiZmFtaWx5X2lkIjoiZGphbmdvLWZpeHR1cmUtZmFtaWx5In0:1r31eq:HLJQqbSwbAgJqxpuyyeilSdOuhtYcJYwBRjGzmUBvOU",
+  "legacy_token": "eyJ2ZXJzaW9uIjoxLCJwcnYiOiJkamFuZ28iLCJraW5kIjoiYWNjZXNzIiwic3ViIjoiZGphbmdvLXVzZXIiLCJyb2xlcyI6MCwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDI0NDQ4MDAsImp0aSI6ImRqYW5nby1maXh0dXJlLXRva2VuIiwiZmFtaWx5X2lkIjoiZGphbmdvLWZpeHR1cmUtZmFtaWx5In0:1r31eq:AtQ9Y6etTTNHUoYHjegsXoqfZ4DApr6fWMLnC9OTfyI",
+  "vyuh_token": "eyJ2ZXJzaW9uIjoxLCJwcnYiOiJkamFuZ28iLCJraW5kIjoiYWNjZXNzIiwic3ViIjoiZGphbmdvLXVzZXIiLCJyb2xlcyI6MCwiYXVkIjpbInJlcG9ydHMiXSwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDI0NDQ4MDAsImp0aSI6ImRqYW5nby1maXh0dXJlLXRva2VuIiwiZmFtaWx5X2lkIjoiZGphbmdvLWZpeHR1cmUtZmFtaWx5In0:1r31eq:HLJQqbSwbAgJqxpuyyeilSdOuhtYcJYwBRjGzmUBvOU",
+  "payload": {
+    "version": 1,
+    "prv": "django",
+    "kind": "access",
+    "sub": "django-user",
+    "roles": 0,
+    "aud": ["reports"],
+    "iat": 1700000000,
+    "exp": 4102444800,
+    "jti": "django-fixture-token",
+    "family_id": "django-fixture-family"
+  }
+}

@@ -163,7 +163,6 @@ impl SiteBuilder {
     async fn start_server(site: Site) -> Result<(), SiteError> {
         let listener = Self::bind_listener(&site).await?;
         site.start_runtime().await?;
-        crate::console::maybe_print_bootstrap_url(&site);
         Self::serve_listener(site, listener).await
     }
 
@@ -190,7 +189,8 @@ impl SiteBuilder {
         site: Site,
         listener: tokio::net::TcpListener,
     ) -> Result<(), SiteError> {
-        let make_svc = ServiceExt::<Request>::into_make_service(site.router());
+        let make_svc =
+            ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(site.router());
         let touch_reload = site.inner.conf.touch_reload.clone();
         let shutdown = watch::ShutdownController::new(
             touch_reload,
@@ -228,7 +228,14 @@ impl SiteBuilder {
     ) -> Result<SiteInner, SiteError> {
         self.conf.validate()?;
 
-        let bundle = bundle.into_bundle();
+        let mut bundle = bundle.into_bundle();
+
+        let default_audience = self
+            .conf
+            .auth
+            .default_audience_id()
+            .map_err(|error| conf::ConfError::Other(format!("Auth config error: {error}")))?;
+        bundle.apply_default_audience(default_audience.clone());
 
         bundle.validate()?;
 
@@ -241,16 +248,14 @@ impl SiteBuilder {
             None => Tz::UTC,
         };
 
-        let (bundle, console_runtime) = if self.conf.console.enabled {
+        let mut bundle = if self.conf.console.enabled {
             let console_bundle = crate::console::bundle(&self.conf.console);
-            let console_bundle_id = console_bundle.id();
-            (
-                bundle.merge(console_bundle),
-                crate::console::runtime(&self.conf.console, console_bundle_id),
-            )
+            bundle.merge(console_bundle)
         } else {
-            (bundle, None)
+            bundle
         };
+
+        bundle.apply_default_audience(default_audience);
 
         bundle.validate()?;
 
@@ -288,9 +293,28 @@ impl SiteBuilder {
 
         template_engine.inject_templates(&bundle)?;
 
-        let authenticator =
-            Authenticator::new(&self.conf.auth, &self.conf.secret_key, &project_dir)
-                .map_err(|err| conf::ConfError::Other(format!("Auth config error: {err}")))?;
+        let mut authenticator = Authenticator::new(
+            &self.conf.auth,
+            &self.conf.secret_key,
+            &self.conf.secret_key_fallbacks,
+            &project_dir,
+        )
+        .await
+        .map_err(|err| conf::ConfError::Other(format!("Auth config error: {err}")))?;
+
+        if self.conf.console.enabled {
+            let login = crate::console::auth::login_provider();
+            let cookie = crate::auth::CookieConf::new(&self.conf.console.cookie_name)
+                .path(&self.conf.console.path)
+                .secure(self.conf.console.secure_cookie);
+            let token = crate::console::auth::token_provider(cookie);
+            authenticator
+                .register_provider(crate::console::auth::CONSOLE_LOGIN, login)
+                .map_err(|err| conf::ConfError::Other(format!("Console auth error: {err}")))?;
+            authenticator
+                .register_provider(crate::console::auth::CONSOLE_TOKEN, token)
+                .map_err(|err| conf::ConfError::Other(format!("Console auth error: {err}")))?;
+        }
 
         bundle
             .doc_engine
@@ -303,6 +327,9 @@ impl SiteBuilder {
             )
             .map_err(crate::bundles::BundleError::DocGen)?,
         );
+        let route_registry =
+            crate::routes::RouteRegistry::build(bundle.ops.values(), self.conf.http.slash.policy)
+                .map_err(crate::bundles::BundleError::RouteRegistry)?;
 
         let mut bundle = bundle.with_router_unchecked(router);
 
@@ -363,7 +390,12 @@ impl SiteBuilder {
             &mut bundle.commands,
             crate::commands::CommandRegistry::new(),
         );
-        command_registry.merge(crate::commands::builtin_registry()?)?;
+        let builtins = crate::commands::builtin_registry()?;
+        for mut operation in builtins.operations() {
+            operation.hidden = true;
+            bundle.ops.insert(operation.id, operation);
+        }
+        command_registry.merge(builtins)?;
 
         let logging_guard = if self.conf.log_init {
             logging::init_tracing(&project_dir, &self.conf.logging)?
@@ -385,9 +417,14 @@ impl SiteBuilder {
             authenticator,
             template_engine,
             slash_router,
+            route_registry,
             joinset: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
             channels: LocalChannelBackend::new(self.conf.channels.clone()),
-            console_runtime,
+            console_status_cache: self
+                .conf
+                .console
+                .enabled
+                .then(crate::console::status::ConsoleStatusCache::new),
             bundle,
             #[cfg(feature = "migrations")]
             migration_runner,
@@ -411,9 +448,10 @@ struct SiteInner {
     authenticator: Authenticator,
     pool: DbPool,
     channels: LocalChannelBackend,
-    console_runtime: Option<crate::console::ConsoleRuntime>,
+    console_status_cache: Option<crate::console::status::ConsoleStatusCache>,
     template_engine: TemplateEngine,
     slash_router: Arc<crate::middlewares::SlashRouter>,
+    route_registry: crate::routes::RouteRegistry,
     timezone: Tz,
     bundle: Bundle,
     signal_engine: crate::signals::SignalEngine,
@@ -627,10 +665,9 @@ impl Site {
         self.inner.start_time.elapsed()
     }
 
-    /// Iterate over registered operations from the composed bundle.
-    /// Console, OpenAPI, and diagnostics use this metadata to inspect application surfaces.
-    pub fn iter_operations(&self) -> impl Iterator<Item = &callables::Operation> {
-        self.inner.bundle.iter_operations()
+    /// Returns read-only access to all registered operation metadata.
+    pub fn operations(&self) -> crate::Operations<'_> {
+        crate::Operations::new(&self.inner.bundle.ops)
     }
 
     pub(crate) fn asset_dirs(&self) -> Vec<crate::embed::Dir> {
@@ -736,10 +773,9 @@ impl Site {
         &self.inner.conf
     }
 
-    /// Reverse a named route into a URL path.
-    /// Returns `None` when the route name is unknown or required parameters are missing.
-    pub fn reverse(&self, name: &str, args: &[(&str, &str)]) -> Option<String> {
-        self.inner.bundle.reverse(name, args)
+    /// Returns route reversal and method-aware URL resolution for this site.
+    pub fn routes(&self) -> crate::routes::Routes<'_> {
+        crate::routes::Routes::new(&self.inner.route_registry)
     }
 
     /// Return the template rendering facade for this site.
@@ -776,8 +812,20 @@ impl Site {
         Channels::new(self.inner.channels.clone())
     }
 
-    pub(crate) fn console_runtime(&self) -> Option<crate::console::ConsoleRuntime> {
-        self.inner.console_runtime.clone()
+    pub(crate) fn console_status(&self) -> crate::console::status::StatusOut {
+        let ttl = std::time::Duration::from_secs(self.conf().console.status_cache_ttl_seconds);
+        self.inner
+            .console_status_cache
+            .as_ref()
+            .map(|cache| cache.get(self, ttl))
+            .unwrap_or_else(|| crate::console::status::collect(self))
+    }
+
+    pub(crate) fn console_bundle_id(&self) -> Option<uuid::Uuid> {
+        self.operations()
+            .list()
+            .find(|operation| operation.name == "console_home")
+            .and_then(|operation| operation.bundle_id)
     }
 
     /// Returns the runtime observability registry for framework-owned routes.

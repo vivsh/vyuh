@@ -4,7 +4,10 @@
 //! checked by Cargo instead of drifting as inline markdown.
 
 use schemars::JsonSchema;
-use vyuh::auth::{AuthConf, AuthUser, TokenPair};
+use vyuh::auth::{
+    Audience, AuthConf, AuthError, AuthUser, LoginMethod, PasswordCredentials, PasswordLogin,
+    PasswordVerifier, PresentedSecret,
+};
 use vyuh::commands::CommandConf;
 use vyuh::prelude::*;
 
@@ -25,10 +28,29 @@ struct UserCreated {
     name: String,
 }
 
+const WEB: Audience = Audience::new("web");
+const PASSWORD: LoginMethod<PasswordCredentials> = LoginMethod::new("password");
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct LoginOut {
-    access: String,
-    refresh: String,
+struct PasswordInput {
+    email: String,
+    password: String,
+}
+
+#[derive(Clone, Copy)]
+struct DemoPasswords;
+
+impl PasswordVerifier for DemoPasswords {
+    async fn verify(
+        &self,
+        username: &str,
+        password: &PresentedSecret,
+    ) -> Result<AuthUser, AuthError> {
+        if username != "demo@example.com" || password.expose() != "change-me" {
+            return Err(AuthError::InvalidCredential);
+        }
+        Ok(AuthUser::new("user-123"))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -63,15 +85,21 @@ async fn signup(Valid(Data(input)): Valid<Data<Signup>>) -> Result<Data<UserCrea
 }
 
 #[bundles::route(path = "/login", method = "POST")]
-async fn login(site: Site) -> Result<Data<LoginOut>, Error> {
-    let tokens: TokenPair = site
-        .auth()
-        .create_token_pair(AuthUser::new("user-123", 0), &["web"])?;
+async fn login(
+    site: Site,
+    Json(input): Json<PasswordInput>,
+) -> Result<vyuh::auth::LoginResponse, Error> {
+    let credentials = PasswordCredentials::new(input.email, input.password);
+    Ok(site.auth().via(PASSWORD).login(credentials, &[WEB]).await?)
+}
 
-    Ok(Data::new(LoginOut {
-        access: tokens.access_token,
-        refresh: tokens.refresh_token,
-    }))
+#[bundles::route(path = "/refresh", method = "POST")]
+async fn refresh(
+    site: Site,
+    request: vyuh::routes::Request,
+) -> Result<vyuh::auth::LoginResponse, Error> {
+    let (parts, _) = request.into_parts();
+    Ok(site.auth().refresh(&parts, &[WEB]).await?)
 }
 
 #[bundles::route(path = "/me", method = "GET")]
@@ -112,6 +140,7 @@ fn api_bundle() -> bundles::Bundle {
     bundles::bundle! {
         signup,
         login,
+        refresh,
         me,
         build_report,
         heartbeat,
@@ -127,6 +156,7 @@ fn api_bundle() -> bundles::Bundle {
             .viewer("/docs"),
     )
     .with_prefix("/api")
+    .with_audience(WEB)
 }
 // ANCHOR_END: api_bundle
 
@@ -142,7 +172,7 @@ fn command_bundle() -> bundles::Bundle {
 // ANCHOR: main
 #[tokio::main]
 async fn main() -> Result<(), SiteError> {
-    let auth = AuthConf::default();
+    let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(DemoPasswords));
 
     Site::run(SiteConf::from_env_with_files()?.auth(auth), api_bundle()).await
 }

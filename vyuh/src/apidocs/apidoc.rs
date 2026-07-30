@@ -3,7 +3,7 @@
 //! This module generates OpenAPI 3.0 specifications from view metadata,
 //! leveraging schemars for JSON Schema generation.
 
-use axum::response::Html;
+use axum::{http::header, response::Html};
 use indexmap::IndexMap;
 use openapiv3::{
     Components, Encoding, Info, MediaType, OpenAPI, Operation, Parameter, ParameterData,
@@ -13,7 +13,7 @@ use openapiv3::{
 
 use crate::{
     apidocs::schema::{ComponentRegistry, SchemaConversionError},
-    auth::AuthConf,
+    auth::{AuthConf, CredentialType, ProviderDoc, ProviderDocLocation},
     callables::{
         ArgPart, ArgSpec, LayerSpec, MultipartApiField, MultipartApiFieldKind, MultipartApiSpec,
         ReturnPart, ReturnSpec, TypeSchema,
@@ -664,6 +664,9 @@ fn set_operations_for_methods(
 }
 
 fn fill_operation_docs(op: &mut Operation, method: &str, path: &str) {
+    if matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") {
+        op.extensions.shift_remove("x-vyuh-csrf-header");
+    }
     if op.summary.is_none() {
         op.summary = op
             .operation_id
@@ -713,11 +716,18 @@ fn register_security(
     auth: Option<&AuthConf>,
     optional: bool,
 ) {
+    if scheme == "vyuhAuth" {
+        let Some(auth) = auth else {
+            registry.register_security(scheme.to_string(), scopes, false, optional);
+            return;
+        };
+        for provider in auth.provider_docs() {
+            registry.register_security(provider_scheme_name(&provider), scopes, false, optional);
+        }
+        return;
+    }
     if scheme == "bearerAuth" {
         registry.register_security(scheme.to_string(), scopes, false, optional);
-        if auth.and_then(|conf| conf.access_cookie.as_ref()).is_some() {
-            registry.register_security("cookieAuth".to_string(), scopes, false, optional);
-        }
         return;
     }
     registry.register_security(scheme.to_string(), scopes, join_all, optional);
@@ -778,17 +788,32 @@ fn build_operation(
 
     let security = build_operation_security(registry);
 
+    let mut extensions = IndexMap::new();
+    if let Some(audience) = view.audience() {
+        extensions.insert(
+            "x-vyuh-audience".to_owned(),
+            serde_json::Value::String(audience.to_owned()),
+        );
+        if let Some(auth) = auth.filter(|_| operation_has_unsafe_method(view)) {
+            let headers = auth
+                .provider_docs()
+                .into_iter()
+                .filter_map(|provider| provider.csrf_header)
+                .collect::<std::collections::BTreeSet<_>>();
+            if !headers.is_empty() {
+                extensions.insert(
+                    "x-vyuh-csrf-header".to_owned(),
+                    serde_json::Value::Array(headers.into_iter().map(Into::into).collect()),
+                );
+            }
+        }
+    }
     Ok(Operation {
         tags,
         summary: view.summary.as_ref().map(|s| s.to_string()),
         description: view.description.as_ref().map(|s| s.to_string()),
         external_docs: None,
-        operation_id: Some(
-            view.operation_id
-                .as_deref()
-                .unwrap_or(&view.name)
-                .to_string(),
-        ),
+        operation_id: Some(view.openapi_id.as_deref().unwrap_or(&view.name).to_string()),
         parameters,
         request_body,
         responses,
@@ -796,8 +821,16 @@ fn build_operation(
         deprecated: view.deprecated,
         security,
         servers: vec![],
-        extensions: IndexMap::new(),
+        extensions,
     })
+}
+
+fn operation_has_unsafe_method(operation: &crate::callables::Operation) -> bool {
+    operation
+        .methods
+        .to_vec()
+        .iter()
+        .any(|method| !matches!(*method, "GET" | "HEAD" | "OPTIONS" | "TRACE"))
 }
 
 /// Build parameters from argument specifications.
@@ -831,7 +864,10 @@ fn build_layer_param(
         ArgPart::Header(st) => (st, "header", false),
         ArgPart::Path(st) => (st, "path", true),
         ArgPart::Query(st) => (st, "query", false),
-        ArgPart::Body(_, _) | ArgPart::BodyWith { .. } | ArgPart::Response(_) => return Ok(None),
+        ArgPart::Body(_, _)
+        | ArgPart::BodyWith { .. }
+        | ArgPart::Response(_)
+        | ArgPart::Authentication => return Ok(None),
         ArgPart::Composite(_) | ArgPart::Optional(_) | ArgPart::Fallible(_) => return Ok(None),
         ArgPart::Security {
             scheme,
@@ -903,7 +939,10 @@ fn build_param(
         ArgPart::Header(st) => (st, "header", false),
         ArgPart::Path(st) => (st, "path", true),
         ArgPart::Query(st) => (st, "query", false),
-        ArgPart::Body(_, _) | ArgPart::BodyWith { .. } | ArgPart::Response(_) => {
+        ArgPart::Body(_, _)
+        | ArgPart::BodyWith { .. }
+        | ArgPart::Response(_)
+        | ArgPart::Authentication => {
             return Ok(None);
         }
         ArgPart::Composite(_) | ArgPart::Optional(_) | ArgPart::Fallible(_) => return Ok(None),
@@ -1445,10 +1484,27 @@ fn build_security_schemes(
 
 /// Create a security scheme based on naming convention.
 fn create_security_scheme(name: &str, auth: Option<&AuthConf>) -> openapiv3::SecurityScheme {
+    if let Some(provider) = auth.and_then(|conf| {
+        conf.provider_docs()
+            .into_iter()
+            .find(|provider| provider_scheme_name(provider) == name)
+    }) {
+        return provider_security_scheme(&provider);
+    }
     let lower = name.to_lowercase();
 
     if name == "cookieAuth" {
         return cookie_security(auth);
+    }
+    if name == "basicAuth" {
+        return openapiv3::SecurityScheme::HTTP {
+            scheme: "basic".to_string(),
+            bearer_format: None,
+            description: Some(
+                "HTTP Basic credentials exchanged by an application login route.".into(),
+            ),
+            extensions: IndexMap::new(),
+        };
     }
     if lower.contains("bearer") || lower.contains("jwt") {
         openapiv3::SecurityScheme::HTTP {
@@ -1476,10 +1532,59 @@ fn create_security_scheme(name: &str, auth: Option<&AuthConf>) -> openapiv3::Sec
     }
 }
 
+fn provider_scheme_name(provider: &ProviderDoc) -> String {
+    format!("vyuh_{}", provider.id)
+}
+
+fn provider_security_scheme(provider: &ProviderDoc) -> openapiv3::SecurityScheme {
+    match (&provider.credential_type, &provider.location) {
+        (
+            CredentialType::Token(format),
+            ProviderDocLocation::Header {
+                name,
+                scheme: Some(scheme),
+            },
+        ) if name.eq_ignore_ascii_case(header::AUTHORIZATION.as_str())
+            && scheme.eq_ignore_ascii_case("bearer") =>
+        {
+            openapiv3::SecurityScheme::HTTP {
+                scheme: "bearer".to_owned(),
+                bearer_format: format.clone(),
+                description: Some(format!("Token provider '{}'", provider.id)),
+                extensions: IndexMap::new(),
+            }
+        }
+        (_, ProviderDocLocation::Header { name, .. }) => openapiv3::SecurityScheme::APIKey {
+            location: openapiv3::APIKeyLocation::Header,
+            name: name.clone(),
+            description: Some(format!("Credential provider '{}'", provider.id)),
+            extensions: IndexMap::new(),
+        },
+        (_, ProviderDocLocation::Cookie(name)) => openapiv3::SecurityScheme::APIKey {
+            location: openapiv3::APIKeyLocation::Cookie,
+            name: name.clone(),
+            description: Some(format!("Credential provider '{}'", provider.id)),
+            extensions: IndexMap::new(),
+        },
+        (_, ProviderDocLocation::Query(name)) => openapiv3::SecurityScheme::APIKey {
+            location: openapiv3::APIKeyLocation::Query,
+            name: name.clone(),
+            description: Some(format!("Credential provider '{}'", provider.id)),
+            extensions: IndexMap::new(),
+        },
+    }
+}
+
 fn cookie_security(auth: Option<&AuthConf>) -> openapiv3::SecurityScheme {
     let name = auth
-        .and_then(|conf| conf.access_cookie.as_ref())
-        .map(|cookie| cookie.name.clone())
+        .and_then(|conf| {
+            conf.provider_docs()
+                .into_iter()
+                .find_map(|provider| match provider.location {
+                    ProviderDocLocation::Cookie(name) => Some(name),
+                    _ => None,
+                })
+        })
         .unwrap_or_else(|| "access_token".to_string());
     openapiv3::SecurityScheme::APIKey {
         location: openapiv3::APIKeyLocation::Cookie,
@@ -1490,18 +1595,8 @@ fn cookie_security(auth: Option<&AuthConf>) -> openapiv3::SecurityScheme {
 }
 
 fn api_key_security(name: &str, auth: Option<&AuthConf>) -> openapiv3::SecurityScheme {
-    let Some(conf) = auth.map(|conf| &conf.api_keys) else {
-        return api_key_header(name, "X-API-Key");
-    };
-    if conf.allow_query_param {
-        return openapiv3::SecurityScheme::APIKey {
-            location: openapiv3::APIKeyLocation::Query,
-            name: conf.query_param.clone(),
-            description: Some(format!("API key for {name}")),
-            extensions: IndexMap::new(),
-        };
-    }
-    api_key_header(name, &conf.header)
+    let _ = auth;
+    api_key_header(name, "X-API-Key")
 }
 
 fn api_key_header(name: &str, header: &str) -> openapiv3::SecurityScheme {
@@ -1550,11 +1645,11 @@ mod tests {
 
     fn route_op(name: &str, path: &str, methods: Methods) -> VyuhOperation {
         VyuhOperation {
-            id: uuid::Uuid::new_v4(),
+            id: crate::OperationId::new(),
             name: name.to_string(),
             description: None,
             summary: None,
-            operation_id: None,
+            openapi_id: None,
             deprecated: false,
             path: path.to_string(),
             kind: OperationKind::Route,
@@ -1566,9 +1661,18 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
+            audience: None,
             bundle_id: None,
             slash_policy: None,
         }
+    }
+
+    fn cookie_auth(name: &str) -> AuthConf {
+        AuthConf::empty().provider(
+            crate::auth::DEFAULT_AUTH_PROVIDER,
+            crate::auth::TokenProvider::new(crate::auth::Jwt::hs256_site_secret())
+                .access(crate::auth::TokenConf::cookie(name)),
+        )
     }
 
     #[test]
@@ -1852,28 +1956,59 @@ mod tests {
             description: None,
             position: 0,
             part: ArgPart::Security {
-                scheme: Cow::Borrowed("bearerAuth"),
+                scheme: Cow::Borrowed("vyuhAuth"),
                 scopes: Vec::new(),
                 join_all: true,
             },
         });
 
         let api = ApiDocGenerator::default()
-            .with_auth(AuthConf::cookie_pair("blog_access", "blog_refresh"))
+            .with_auth(cookie_auth("blog_access"))
             .generate(&[&op])
             .unwrap();
         let json = serde_json::to_value(api).unwrap();
         let security = &json["paths"]["/profile"]["get"]["security"];
 
-        assert_eq!(security[0]["bearerAuth"], serde_json::json!([]));
-        assert_eq!(security[1]["cookieAuth"], serde_json::json!([]));
+        assert_eq!(security[0]["vyuh_default"], serde_json::json!([]));
         assert_eq!(
-            json["components"]["securitySchemes"]["cookieAuth"]["in"],
+            json["components"]["securitySchemes"]["vyuh_default"]["in"],
             "cookie"
         );
         assert_eq!(
-            json["components"]["securitySchemes"]["cookieAuth"]["name"],
+            json["components"]["securitySchemes"]["vyuh_default"]["name"],
             "blog_access"
+        );
+    }
+
+    /// Verifies unsafe cookie-authenticated operations expose their CSRF header contract.
+    #[test]
+    fn emits_csrf_metadata_only_for_unsafe_methods() {
+        let mut op = route_op("profile", "/profile", Methods::GET | Methods::POST);
+        op.audience = Some(crate::auth::AudienceId::new("api").unwrap());
+        op.args.push(ArgSpec {
+            name: "auth".to_string(),
+            description: None,
+            position: 0,
+            part: ArgPart::Security {
+                scheme: Cow::Borrowed("vyuhAuth"),
+                scopes: Vec::new(),
+                join_all: true,
+            },
+        });
+        let auth = cookie_auth("access");
+        let api = ApiDocGenerator::default()
+            .with_auth(auth)
+            .generate(&[&op])
+            .unwrap();
+        let json = serde_json::to_value(api).unwrap();
+        assert!(
+            json["paths"]["/profile"]["get"]
+                .get("x-vyuh-csrf-header")
+                .is_none()
+        );
+        assert_eq!(
+            json["paths"]["/profile"]["post"]["x-vyuh-csrf-header"],
+            serde_json::json!(["x-csrf-token"])
         );
     }
 
@@ -1974,7 +2109,7 @@ mod tests {
             description: None,
             tags: Vec::new(),
         })
-        .with_auth(AuthConf::cookie_pair("vyuh_access", "vyuh_refresh"));
+        .with_auth(cookie_auth("vyuh_access"));
         serde_json::to_value(generator.generate(&refs).unwrap()).unwrap()
     }
 
@@ -1990,14 +2125,14 @@ mod tests {
 
     fn production_list_route() -> VyuhOperation {
         let mut op = route_op("list_posts", "/posts", Methods::GET);
-        op.operation_id = Some("list_posts".to_string());
+        op.openapi_id = Some("list_posts".to_string());
         op.returns = vec![json_return::<Vec<ProductionPostOut>>()];
         op
     }
 
     fn production_create_route() -> VyuhOperation {
         let mut op = route_op("create_post", "/posts", Methods::POST);
-        op.operation_id = Some("create_post".to_string());
+        op.openapi_id = Some("create_post".to_string());
         op.args.push(ArgSpec {
             name: "body".to_string(),
             description: Some("Post creation payload.".to_string()),
@@ -2019,14 +2154,14 @@ mod tests {
 
     fn production_admin_route() -> VyuhOperation {
         let mut op = route_op("admin_posts", "/admin/posts", Methods::GET);
-        op.operation_id = Some("admin_posts".to_string());
+        op.openapi_id = Some("admin_posts".to_string());
         op.args.push(ArgSpec {
             name: "auth".to_string(),
             description: Some("Authenticated user.".to_string()),
             position: 0,
             part: ArgPart::Composite(vec![
                 ArgPart::Security {
-                    scheme: Cow::Borrowed("bearerAuth"),
+                    scheme: Cow::Borrowed("vyuhAuth"),
                     scopes: Vec::new(),
                     join_all: true,
                 },
@@ -2039,14 +2174,14 @@ mod tests {
 
     fn production_redirect_route() -> VyuhOperation {
         let mut op = route_op("login_redirect", "/login", Methods::POST);
-        op.operation_id = Some("login_redirect".to_string());
+        op.openapi_id = Some("login_redirect".to_string());
         op.returns = vec![ReturnSpec::new(ReturnPart::Redirect { status_code: 307 })];
         op
     }
 
     fn production_upload_route() -> VyuhOperation {
         let mut op = route_op("upload_post_image", "/posts/{id}/image", Methods::POST);
-        op.operation_id = Some("upload_post_image".to_string());
+        op.openapi_id = Some("upload_post_image".to_string());
         op.args.push(ArgSpec {
             name: "id".to_string(),
             description: Some("Post id.".to_string()),
@@ -2116,12 +2251,12 @@ mod tests {
     fn assert_security_contract(spec: &Value) {
         assert!(spec["paths"]["/posts"]["get"].get("security").is_none());
         assert_eq!(
-            spec["paths"]["/admin/posts"]["get"]["security"][0]["bearerAuth"],
+            spec["paths"]["/admin/posts"]["get"]["security"][0]["vyuh_default"],
             serde_json::json!([])
         );
         assert!(
             spec["components"]["securitySchemes"]
-                .get("cookieAuth")
+                .get("vyuh_default")
                 .is_some()
         );
     }
