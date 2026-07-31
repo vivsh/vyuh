@@ -213,11 +213,13 @@ command failures for a terminal. With no command arguments it runs the built-in
 
 - help output goes to stdout and succeeds;
 - unknown command, unknown flag, missing argument, parse failure, validation
-  failure, and handler failure are rendered to stderr and return non-zero;
-- handler `Error` values are normalized into `ErrorView`.
+  failure, and handler failure return a terminal diagnostic and non-zero status;
+- handler `Error` values retain their complete causal chain for terminal output.
 
 Command parsing and help generation remain `CommandError` concerns. Handler
-logic should return `Error`.
+logic should return `Error`. The terminal renderer preserves that error's
+context and causes, including native Mool, Gaman, and SQLx diagnostics. HTTP
+responses continue to use the normal redacted error view.
 
 Customize command output separately from HTTP rendering:
 
@@ -237,8 +239,9 @@ let conf = SiteConf::default().errors(
 ```
 
 Command renderers receive `ErrorCommandContext`, which includes the command name
-and raw command arguments. They return a string that is written to stderr for
-failures.
+and raw command arguments. `view.message` contains the complete terminal error
+chain for handler failures. Renderers return the diagnostic carried by the
+command failure; the application entrypoint decides how to write it.
 
 Commands do not render `ErrorReport`; command output is terminal text.
 

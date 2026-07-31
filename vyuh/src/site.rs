@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
-use std::{path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 use tokio::sync::{OnceCell, mpsc};
 use tower::ServiceExt as TowerServiceExt;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -68,7 +68,7 @@ impl PartialSite {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SiteError {
     #[error("Database error: {0}")]
     DatabaseError(#[from] DbError),
@@ -120,6 +120,17 @@ pub enum SiteError {
 
     #[error(transparent)]
     CommandError(#[from] crate::commands::CommandError),
+}
+
+impl fmt::Debug for SiteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CommandError(crate::commands::CommandError::Exit(output)) => {
+                formatter.write_str(output.strip_prefix("Error: ").unwrap_or(output))
+            }
+            _ => formatter.write_str(&self.to_string()),
+        }
+    }
 }
 
 struct SiteBuilder {
@@ -227,6 +238,11 @@ impl SiteBuilder {
         bundle: impl IntoBundle,
     ) -> Result<SiteInner, SiteError> {
         self.conf.validate()?;
+
+        #[cfg(feature = "email")]
+        let mail_delivery = crate::email::delivery(&self.conf.mail).map_err(|error| {
+            conf::ConfError::Other(format!("mail configuration error: {error}"))
+        })?;
 
         let mut bundle = bundle.into_bundle();
 
@@ -432,6 +448,8 @@ impl SiteBuilder {
             emitter_engine,
             commands: command_registry,
             task_engine: task_dispatcher,
+            #[cfg(feature = "email")]
+            mail_delivery,
         };
 
         site.load_services().await?;
@@ -465,6 +483,8 @@ struct SiteInner {
     shutdown_notifier: CancellationNotifier,
     _logging_guard: LoggingGuard,
     joinset: Arc<parking_lot::Mutex<tokio::task::JoinSet<()>>>,
+    #[cfg(feature = "email")]
+    mail_delivery: crate::email::SharedMailDelivery,
 }
 
 impl SiteInner {
@@ -787,7 +807,13 @@ impl Site {
     /// Return the outbound SMTP mail facade configured for this site.
     #[cfg(feature = "email")]
     pub fn mail(&self) -> crate::email::Mailer {
-        crate::email::Mailer::new(self.clone())
+        crate::email::Mailer::new(self.clone(), self.inner.mail_delivery.clone())
+    }
+
+    /// Returns the automatically installed test mail outbox.
+    #[cfg(all(feature = "email", feature = "test-support"))]
+    pub fn mail_outbox(&self) -> crate::email::MailOutbox {
+        self.inner.mail_delivery.outbox().unwrap_or_default()
     }
 
     pub(crate) fn template_engine(&self) -> &TemplateEngine {
@@ -1069,6 +1095,9 @@ mod tests {
     #[derive(Clone, Deserialize, JsonSchema, Serialize)]
     struct WaitArgs {}
 
+    #[derive(Clone, Deserialize, JsonSchema, Serialize)]
+    struct FailingArgs {}
+
     async fn emit_runtime_signal() -> Data<RuntimeSignal> {
         Data::new(RuntimeSignal)
     }
@@ -1088,6 +1117,14 @@ mod tests {
             .map_err(Error::other)?;
         tokio::time::sleep(Duration::from_millis(25)).await;
         Ok(())
+    }
+
+    async fn failing_command(_args: Data<FailingArgs>) -> Result<(), Error> {
+        Err(Error::from(crate::db::DbError::Mock {
+            operation: "fetch users",
+            reason: "table users does not exist".to_string(),
+        })
+        .with_context("rebuild user index"))
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -1142,6 +1179,33 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("missing"));
+    }
+
+    /// Verifies a command failure formats as terminal text without enum wrappers.
+    #[tokio::test]
+    async fn command_failure_formats_terminal_text() -> Result<(), String> {
+        let command = bundles::command::<
+            FailingArgs,
+            _,
+            crate::callables::specs::Tuple1<Data<FailingArgs>>,
+        >(failing_command, CommandConf::new("users:reindex"));
+        let result = Site::run_with_args(
+            crate::SiteConf::default().log_init(false),
+            bundles::bundle([command]),
+            strings(&["users:reindex"]),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(()) => return Err("command unexpectedly succeeded".to_string()),
+        };
+        let terminal = format!("Error: {error:?}");
+
+        assert!(terminal.contains("rebuild user index"));
+        assert!(terminal.contains("mock fetch users failed: table users does not exist"));
+        assert!(!terminal.contains("CommandError(Exit"));
+        assert!(!terminal.contains("Error: Error:"));
+        Ok(())
     }
 
     /// Verifies one-shot commands do not activate emitters, signals, or task workers.

@@ -20,7 +20,7 @@ test-support = ["db_core/test-support"]
 paseto = ["dep:pasetors"]
 branca = ["dep:branca"]
 oidc = ["dep:openidconnect"]
-email = ["dep:lettre", "dep:html2text"]
+email = ["dep:lettre"]
 
 [dependencies]
 axum = {workspace = true}
@@ -88,8 +88,8 @@ percent-encoding = "2.3.2"
 sysinfo = "0.33"
 tempfile = "3"
 serde_yaml = "0.9"
-lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"], optional = true }
-html2text = { version = "0.17.1", optional = true }
+lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool"], optional = true }
+html2text = "0.17.1"
 
 [dev-dependencies]
 tokio = { version = "1.46.1", features = ["full", "test-util"] }

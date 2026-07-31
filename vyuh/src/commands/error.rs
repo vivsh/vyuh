@@ -1,5 +1,3 @@
-#[cfg(feature = "migrations")]
-use crate::errors::ErrorSource;
 use crate::{
     Error, callables,
     errors::{ErrorKind, ErrorSourceKind, ErrorView},
@@ -129,39 +127,9 @@ impl CommandError {
 
 /// Builds the command-only error view without changing HTTP error redaction.
 fn handler_error_view(error: &Error) -> ErrorView {
-    #[cfg(feature = "migrations")]
-    if let Some(view) = migration_command_view(error) {
-        return view;
-    }
-    ErrorView::from_error(error)
-}
-
-/// Preserves Mool/Gaman's sanitized migration diagnostic for terminal commands only.
-#[cfg(feature = "migrations")]
-fn migration_command_view(error: &Error) -> Option<ErrorView> {
-    let ErrorSource::Other(source) = error.source.as_ref()? else {
-        return None;
-    };
-    let migration = source.downcast_ref::<crate::db::engine::MigrationCommandError>()?;
-    let diagnostic = migration.diagnostic();
     let mut view = ErrorView::from_error(error);
-    view.message = Cow::Owned(render_migration_diagnostic(&diagnostic));
-    Some(view)
-}
-
-/// Renders Gaman's structured diagnostic in the same concise terminal shape as its CLI.
-#[cfg(feature = "migrations")]
-fn render_migration_diagnostic(diagnostic: &crate::db::engine::CommandDiagnostic) -> String {
-    let mut output = diagnostic.summary.clone();
-    for detail in &diagnostic.details {
-        output.push_str("\n  ");
-        output.push_str(detail);
-    }
-    if let Some(hint) = &diagnostic.hint {
-        output.push_str("\n  hint: ");
-        output.push_str(hint);
-    }
-    output
+    view.message = Cow::Owned(error.display_verbose());
+    view
 }
 
 impl From<callables::CallError> for CommandError {
@@ -173,21 +141,43 @@ impl From<callables::CallError> for CommandError {
     }
 }
 
-#[cfg(all(test, feature = "migrations"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Verifies migration command views retain Gaman's sanitized execution summary and hint.
+    /// Verifies command rendering keeps the native Mool error chain and local context.
     #[test]
-    fn migration_command_view_preserves_diagnostic() {
-        let migration = crate::db::engine::MigrationCommandError::Execution(
-            crate::db::engine::ExecutorError::Connect(
-                "postgres://gaman:secret@localhost/app password=hunter2".to_string(),
-            ),
-        );
-        let error = Error::wrap(ErrorKind::Other, migration)
-            .with_context("migration command failed (ExecutionFailed)");
+    fn command_view_keeps_native_error_chain() {
+        let error = Error::from(crate::db::DbError::Mock {
+            operation: "fetch users",
+            reason: "table users does not exist".to_string(),
+        })
+        .with_context("rebuild user index");
+        let http_view = ErrorView::from_error(&error);
         let view = CommandError::Handler(error).to_view();
+        let rendered = crate::errors::ErrorConf::default().render_command(
+            crate::errors::ErrorCommandContext {
+                command: "users:reindex".to_string(),
+                args: Vec::new(),
+            },
+            view,
+        );
+
+        assert!(rendered.contains("Internal server error"));
+        assert!(rendered.contains("rebuild user index"));
+        assert!(rendered.contains("mock fetch users failed: table users does not exist"));
+        assert!(!http_view.message.contains("mock fetch users failed"));
+    }
+
+    /// Verifies migration command errors use their native causal-chain display.
+    #[cfg(feature = "migrations")]
+    #[test]
+    fn migration_command_uses_native_error_chain() {
+        let migration = crate::db::engine::MigrationCommandError::Execution(
+            crate::db::engine::ExecutorError::Connect("database unavailable".to_string()),
+        );
+        let expected = migration.to_string();
+        let view = CommandError::Handler(Error::wrap(ErrorKind::Other, migration)).to_view();
         let rendered = crate::errors::ErrorConf::default().render_command(
             crate::errors::ErrorCommandContext {
                 command: "migrate".to_string(),
@@ -196,30 +186,6 @@ mod tests {
             view,
         );
 
-        assert!(rendered.contains("Error: database operation failed"));
-        assert!(rendered.contains("hint: check database connectivity"));
-        assert!(!rendered.contains("secret"));
-        assert!(!rendered.contains("Internal server error"));
-    }
-
-    /// Verifies structured migration details retain their ordering and terminal formatting.
-    #[test]
-    fn migration_diagnostic_renders_details_and_hint() {
-        let diagnostic = crate::db::engine::CommandDiagnostic {
-            code: crate::db::engine::DiagnosticCode::ExecutionFailed,
-            summary: "database operation failed".to_string(),
-            details: vec![
-                "migration: 0001_report".to_string(),
-                "apply statement 1: CREATE FUNCTION report()".to_string(),
-                "execute failed [42702]: column reference is ambiguous".to_string(),
-            ],
-            hint: Some("inspect migration '0001_report' with `gaman show 0001_report`".to_string()),
-            retryable: false,
-        };
-
-        assert_eq!(
-            render_migration_diagnostic(&diagnostic),
-            "database operation failed\n  migration: 0001_report\n  apply statement 1: CREATE FUNCTION report()\n  execute failed [42702]: column reference is ambiguous\n  hint: inspect migration '0001_report' with `gaman show 0001_report`"
-        );
+        assert!(rendered.contains(&expected));
     }
 }

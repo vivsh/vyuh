@@ -182,7 +182,7 @@ fn parse_tls(value: &str) -> Result<MailTls, ConfError> {
 
 #[cfg(feature = "email")]
 mod enabled {
-    use std::{path::Path, time::Duration};
+    use std::{path::Path, sync::Arc, time::Duration};
 
     use lettre::{
         AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
@@ -195,6 +195,7 @@ mod enabled {
     use serde::Serialize;
 
     use super::{MailConf, MailTls};
+    use crate::utils::html::html_to_text;
     use crate::{SavedFile, Site, templates::TemplateError};
 
     /// Errors raised while building, rendering, or delivering an email.
@@ -419,29 +420,159 @@ mod enabled {
     }
 
     /// Result metadata from an accepted SMTP delivery.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Delivery;
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Delivery {
+        /// The MIME message identifier assigned during construction.
+        pub message_id: String,
+    }
+
+    pub(crate) type SharedMailDelivery = Arc<dyn MailDelivery>;
+
+    pub(crate) trait MailDelivery: Send + Sync {
+        fn send<'a>(
+            &'a self,
+            message: Message,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Delivery, EmailError>> + Send + 'a>,
+        >;
+        #[cfg(feature = "test-support")]
+        fn outbox(&self) -> Option<MailOutbox> {
+            None
+        }
+    }
+
+    struct SmtpDelivery(AsyncSmtpTransport<Tokio1Executor>);
+
+    impl MailDelivery for SmtpDelivery {
+        fn send<'a>(
+            &'a self,
+            message: Message,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Delivery, EmailError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let message_id = String::new();
+                self.0.send(message).await?;
+                Ok(Delivery { message_id })
+            })
+        }
+    }
+
+    struct DisabledDelivery;
+    impl MailDelivery for DisabledDelivery {
+        fn send<'a>(
+            &'a self,
+            _message: Message,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Delivery, EmailError>> + Send + 'a>,
+        > {
+            Box::pin(async { Err(EmailError::Disabled) })
+        }
+    }
+
+    pub(crate) fn delivery(conf: &MailConf) -> Result<SharedMailDelivery, EmailError> {
+        #[cfg(feature = "test-support")]
+        {
+            let _ = conf;
+            return Ok(Arc::new(OutboxDelivery(MailOutbox::new())));
+        }
+        #[cfg(not(feature = "test-support"))]
+        if !conf.enabled {
+            Ok(Arc::new(DisabledDelivery))
+        } else {
+            Ok(Arc::new(SmtpDelivery(transport(conf)?)))
+        }
+    }
+
+    /// A captured mail message for endpoint integration tests.
+    #[cfg(feature = "test-support")]
+    #[derive(Debug, Clone)]
+    pub struct OutboxMessage {
+        message_id: String,
+        source: String,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl OutboxMessage {
+        /// Returns the generated MIME message identifier.
+        pub fn message_id(&self) -> &str {
+            &self.message_id
+        }
+        /// Returns formatted MIME source for precise test assertions.
+        pub fn source(&self) -> &str {
+            &self.source
+        }
+    }
+
+    /// In-memory mail capture installed while building a test site.
+    #[cfg(feature = "test-support")]
+    #[derive(Debug, Clone, Default)]
+    pub struct MailOutbox(Arc<parking_lot::Mutex<Vec<OutboxMessage>>>);
+
+    #[cfg(feature = "test-support")]
+    impl MailOutbox {
+        /// Creates an empty outbox.
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Returns captured messages in send order.
+        pub fn messages(&self) -> Vec<OutboxMessage> {
+            self.0.lock().clone()
+        }
+        /// Returns the only captured message, if exactly one exists.
+        pub fn single(&self) -> Option<OutboxMessage> {
+            let messages = self.0.lock();
+            (messages.len() == 1).then(|| messages[0].clone())
+        }
+        /// Removes all captured messages.
+        pub fn clear(&self) {
+            self.0.lock().clear();
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    struct OutboxDelivery(MailOutbox);
+
+    #[cfg(feature = "test-support")]
+    impl MailDelivery for OutboxDelivery {
+        fn send<'a>(
+            &'a self,
+            message: Message,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Delivery, EmailError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let message_id = String::new();
+                self.0.0.lock().push(OutboxMessage {
+                    message_id: message_id.clone(),
+                    source: String::from_utf8_lossy(&message.formatted()).into(),
+                });
+                Ok(Delivery { message_id })
+            })
+        }
+
+        fn outbox(&self) -> Option<MailOutbox> {
+            Some(self.0.clone())
+        }
+    }
 
     /// A site-bound SMTP mail facade.
     #[derive(Clone)]
     pub struct Mailer {
         site: Site,
+        runtime: SharedMailDelivery,
     }
 
     impl Mailer {
-        pub(crate) fn new(site: Site) -> Self {
-            Self { site }
+        pub(crate) fn new(site: Site, runtime: SharedMailDelivery) -> Self {
+            Self { site, runtime }
         }
 
         /// Builds MIME content and sends one email through the configured SMTP relay.
         pub async fn send(&self, email: Email) -> Result<Delivery, EmailError> {
             let conf = &self.site.conf().mail;
-            if !conf.enabled {
-                return Err(EmailError::Disabled);
-            }
             let message = email.into_message(&self.site, conf)?;
-            transport(conf)?.send(message).await?;
-            Ok(Delivery)
+            self.runtime.send(message).await
         }
     }
 
@@ -514,7 +645,7 @@ mod enabled {
             ))),
             (None, Some(html)) if html_only => Ok(MimeBody::Single(SinglePart::html(html))),
             (None, Some(html)) => Ok(MimeBody::Multi(MultiPart::alternative_plain_html(
-                html_to_text(&html)?,
+                html_to_text(&html).map_err(|_| EmailError::TextFallback)?,
                 html,
             ))),
             (Some(text), None) => Ok(MimeBody::Single(SinglePart::plain(text))),
@@ -548,20 +679,6 @@ mod enabled {
                 Ok::<_, EmailError>(parts.singlepart(attachment.part()?))
             })?;
         builder.multipart(mixed).map_err(EmailError::from)
-    }
-
-    fn html_to_text(html: &str) -> Result<String, EmailError> {
-        let text =
-            html2text::from_read(html.as_bytes(), 80).map_err(|_| EmailError::TextFallback)?;
-        let text = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        (!text.is_empty())
-            .then_some(text)
-            .ok_or(EmailError::TextFallback)
     }
 
     fn transport(conf: &MailConf) -> Result<AsyncSmtpTransport<Tokio1Executor>, EmailError> {
@@ -650,9 +767,9 @@ mod enabled {
         /// Verifies HTML-only mail receives a non-empty generated text alternative.
         #[test]
         fn html_mail_generates_text() -> Result<(), EmailError> {
-            let text = html_to_text(
-                "<h1>Hello</h1><p>Read <a href=\"https://example.com\">more</a>.</p>",
-            )?;
+            let text =
+                html_to_text("<h1>Hello</h1><p>Read <a href=\"https://example.com\">more</a>.</p>")
+                    .map_err(|_| EmailError::TextFallback)?;
             assert!(text.contains("Hello"));
             assert!(text.contains("https://example.com"));
             Ok(())
@@ -683,7 +800,12 @@ mod enabled {
         /// Verifies non-content HTML cannot create a blank text fallback silently.
         #[test]
         fn empty_html_fallback_fails() {
-            let error = html_to_text("<style>body { color: red; }</style>").err();
+            let error = body(
+                None,
+                Some("<style>body { color: red; }</style>".into()),
+                false,
+            )
+            .err();
             assert!(matches!(error, Some(EmailError::TextFallback)));
         }
 
@@ -706,6 +828,10 @@ mod enabled {
 
 #[cfg(feature = "email")]
 pub use enabled::{Attachment, Delivery, Email, EmailError, Mail, Mailer};
+#[cfg(all(feature = "email", feature = "test-support"))]
+pub use enabled::{MailOutbox, OutboxMessage};
+#[cfg(feature = "email")]
+pub(crate) use enabled::{SharedMailDelivery, delivery};
 
 #[cfg(test)]
 mod conf_tests {

@@ -457,7 +457,7 @@ fn default_command_error(ctx: ErrorCommandContext, view: ErrorView) -> String {
             "Validation failed for command '{}'.\n\nUse '{} --help' for usage.",
             ctx.command, ctx.command
         ),
-        _ => format!("Error: {}", view.message),
+        _ => view.message.into_owned(),
     }
 }
 

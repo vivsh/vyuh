@@ -166,6 +166,10 @@ Result<_, _>`:
 Commands should print normal output to stdout. Diagnostics should go to stderr
 or be returned as errors for the application entrypoint to render.
 
+Command handler failures retain their complete causal chain in terminal output.
+This preserves native diagnostics from Mool, Gaman, SQLx, and application
+errors without changing Vyuh's redacted HTTP error responses.
+
 Each command invocation runs one command in that process. Vyuh does not take a
 global command lock, so separate processes may run commands concurrently. Use
 database locks, transactions, advisory locks, or application-level coordination

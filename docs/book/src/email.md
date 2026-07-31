@@ -55,7 +55,9 @@ let email = Mail::new()
 site.mail().send(email).await?;
 ```
 
-An HTML-only message receives a deterministic generated plain-text alternative.
+An HTML-only message receives a deterministic generated plain-text alternative
+through `vyuh::utils::html::html_to_text`, which applications can also use for
+their own non-email fallbacks.
 An explicit `.text(...)` takes precedence; use `.html_only()` only for the rare
 case where an HTML-only message is required.
 
