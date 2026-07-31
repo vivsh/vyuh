@@ -65,6 +65,9 @@ The `vyuh` crate is organized around these subsystems:
 - `assets`, `templates`, and `embed` provide overlaid embedded assets,
   server-side templates, private bundle resources, desired-schema assets, and
   the shared web asset surface used by the built-in console.
+- `email` is an optional SMTP facade built on Lettre. It renders bundle-owned
+  templates through the site template engine, produces text alternatives for
+  HTML mail, and keeps SMTP transport details outside application APIs.
 - `utils` provides small framework-neutral helpers for common web application
   tasks. Subsystem-specific helpers stay in their owning modules.
 - `collectors` provides URL metadata, asset collection, and selected page

@@ -93,8 +93,8 @@ let conf = vyuh::SiteConf::from_env_with_files()?;
 
 `from_env_with_files()` loads `.env`, then `.env.test`, `.env.dev`, or
 `.env.prod` depending on the build mode. Environment variables currently patch
-common deployment fields such as `DATABASE_URL`, `SECRET_KEY`, `HOST`, `PORT`,
-`TZ`, and `LOG_INIT`.
+common deployment fields such as `DATABASE_URL`, `SMTP_URL`, `SECRET_KEY`,
+`HOST`, `PORT`, `TZ`, and `LOG_INIT`.
 
 ## Lifecycle
 

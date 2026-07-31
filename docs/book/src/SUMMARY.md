@@ -33,6 +33,7 @@
 # Web Platform
 
 - [Templates](templates.md)
+- [Email](email.md)
 - [Assets](assets.md)
 - [Collectors](collectors.md)
 - [Uploads](uploads.md)

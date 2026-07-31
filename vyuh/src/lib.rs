@@ -15,6 +15,7 @@ pub mod commands;
 pub mod console;
 pub mod db;
 mod db_notify;
+pub mod email;
 pub mod embed;
 pub mod emitters;
 pub mod errors;

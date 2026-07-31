@@ -6,9 +6,10 @@
 use std::{ffi::OsString, fmt, path::PathBuf};
 
 use crate::{
-    auth::AuthConf, channels::ChannelConf, console::ConsoleConf, db::DbConf, emitters::EmitterConf,
-    errors::ErrorConf, file_storage::UploadConf, logging, middlewares::HttpConf,
-    observability::ObservabilityConf, tasks::TaskConf, templates::TemplateConf,
+    auth::AuthConf, channels::ChannelConf, console::ConsoleConf, db::DbConf, email::MailConf,
+    emitters::EmitterConf, errors::ErrorConf, file_storage::UploadConf, logging,
+    middlewares::HttpConf, observability::ObservabilityConf, tasks::TaskConf,
+    templates::TemplateConf,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -137,6 +138,9 @@ pub struct SiteConf {
     /// Template environment behavior. Template files are registered through bundles.
     pub templates: TemplateConf,
 
+    /// Outbound SMTP email configuration.
+    pub mail: MailConf,
+
     /// absolute or relative to project_dir
     pub touch_reload: Option<String>,
 
@@ -200,6 +204,7 @@ impl Default for SiteConf {
             secret_key_fallbacks: Vec::new(),
             media_dir: None,
             templates: TemplateConf::default(),
+            mail: MailConf::default(),
             touch_reload: None,
             log_init: true,
             tz: None,
@@ -320,6 +325,12 @@ impl SiteConf {
         self
     }
 
+    /// Sets outbound SMTP email configuration.
+    pub fn mail(mut self, mail: MailConf) -> Self {
+        self.mail = mail;
+        self
+    }
+
     pub fn uploads(mut self, uploads: UploadConf) -> Self {
         self.uploads = uploads;
         self
@@ -395,6 +406,7 @@ impl SiteConf {
         self.validate_paths(&mut errors);
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
+        self.mail.validate(&mut errors);
         self.validate_production(&mut errors);
 
         if errors.is_empty() {
@@ -597,6 +609,38 @@ fn apply_env_patches(conf: &mut SiteConf, prefix: Option<&str>) -> Result<(), Co
                 }
             },
             "tz" => conf.tz = Some(value),
+            "smtp_url" => {
+                conf.mail = MailConf::from_url(&value)?;
+            }
+            "mail_enabled" => {
+                conf.mail.enabled = value.parse::<bool>().map_err(|_| {
+                    ConfError::Other(format!(
+                        "MAIL_ENABLED must be 'true' or 'false', got: {value}"
+                    ))
+                })?;
+            }
+            "mail_host" => conf.mail.host = value,
+            "mail_port" => {
+                conf.mail.port = value.parse::<u16>().map_err(|_| {
+                    ConfError::Other(format!("MAIL_PORT must be a valid u16, got: {value}"))
+                })?;
+            }
+            "mail_username" => conf.mail.username = Some(value),
+            "mail_password" => conf.mail.password = Some(value),
+            "mail_sender" => conf.mail.sender = Some(value),
+            "mail_tls" => {
+                conf.mail.tls =
+                    serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {
+                        ConfError::Other("MAIL_TLS must be 'start_tls', 'tls', or 'none'".into())
+                    })?;
+            }
+            "mail_timeout_seconds" => {
+                conf.mail.timeout_seconds = value.parse::<u64>().map_err(|_| {
+                    ConfError::Other(format!(
+                        "MAIL_TIMEOUT_SECONDS must be a valid u64, got: {value}"
+                    ))
+                })?;
+            }
             "log_init" => match value.parse::<bool>() {
                 Ok(b) => conf.log_init = b,
                 Err(_) => {

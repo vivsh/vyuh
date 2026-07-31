@@ -784,6 +784,12 @@ impl Site {
         Templates::new(self.clone())
     }
 
+    /// Return the outbound SMTP mail facade configured for this site.
+    #[cfg(feature = "email")]
+    pub fn mail(&self) -> crate::email::Mailer {
+        crate::email::Mailer::new(self.clone())
+    }
+
     pub(crate) fn template_engine(&self) -> &TemplateEngine {
         &self.inner.template_engine
     }
