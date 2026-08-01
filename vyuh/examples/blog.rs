@@ -57,7 +57,9 @@ use vyuh::{
     errors::ErrorConf,
     file_storage::StorageName,
     prelude::*,
-    routes::{CookieJson, FileResponse, MultipartForm, OkJson, OkOut, PageParams, UploadedFile},
+    routes::{
+        CookieJson, FileResponse, MultipartForm, OkJson, OkOut, Page, PageParams, UploadedFile,
+    },
     utils::text::{numbered_slug, slugify},
 };
 
@@ -311,7 +313,7 @@ struct AdminSummaryOut {
     post_count: i64,
     user_count: i64,
     comment_count: i64,
-    posts: db::Page<PostOut>,
+    posts: Page<PostOut>,
 }
 
 #[bundles::route(path = "/")]
@@ -383,7 +385,7 @@ async fn list_posts(
     site: Site,
     admin: Option<AdminUser>,
     Query(query): Query<PostsQuery>,
-) -> Result<Json<db::Page<PostOut>>, Error> {
+) -> Result<Json<Page<PostOut>>, Error> {
     let mut db = site.db();
     let include_all = query.all && admin.is_some();
     let page = query.page.resolve(DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
@@ -644,7 +646,7 @@ async fn list_users(
     site: Site,
     user: AdminUser,
     Query(query): Query<PageParams>,
-) -> Result<Json<db::Page<UserOut>>, Error> {
+) -> Result<Json<Page<UserOut>>, Error> {
     let mut db = site.db();
     let _admin = user.into_user();
     let page = query.resolve(DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);

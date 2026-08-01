@@ -33,6 +33,9 @@ pub use axum::body::Body;
 
 // Local types
 pub use crate::Data;
+/// Canonical Mool result envelope for paginated JSON responses.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub use crate::db::Page;
 pub use crate::validation::Valid;
 pub use client_ip::ClientIp;
 pub(crate) use client_ip::resolve as resolve_client_ip;

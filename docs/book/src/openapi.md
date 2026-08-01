@@ -119,6 +119,8 @@ struct Note {
 `Json<CreateNote>` is emitted as an `application/json` request body.
 `Json<Note>` is emitted as an `application/json` response body. Shared schemas
 are emitted into OpenAPI components when schemars produces reusable definitions.
+For database-backed pagination, `Json<routes::Page<Note>>` emits Mool's
+`items`, `total`, `page`, `per_page`, and `total_pages` response schema.
 
 ## Validation Metadata
 

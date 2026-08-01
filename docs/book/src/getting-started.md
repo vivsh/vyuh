@@ -118,6 +118,8 @@ feature.
   recognizably close to each other.
 - Validation is explicit through `Valid<Data<T>>`, not inferred from derives
   alone.
+- JSON resources and bounded lists stay unwrapped; database-backed lists use
+  `Json<routes::Page<T>>` with `PageParams` for the shared pagination shape.
 - Provider auth is explicit through `AuthUser` and a bundle audience, while
   setup stays small with `AuthConf::default()`.
 - OpenAPI is attached once and follows the bundle tree automatically.

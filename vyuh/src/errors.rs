@@ -339,6 +339,36 @@ impl ErrorReport {
         )
     }
 
+    /// Creates the standard framework response for an unmatched route.
+    pub fn not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            ErrorSourceKind::Framework,
+            "not_found",
+            "Resource not found.",
+        )
+    }
+
+    /// Creates the standard framework response for an unsupported route method.
+    pub fn method_not_allowed() -> Self {
+        Self::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            ErrorSourceKind::Framework,
+            "method_not_allowed",
+            "Method not allowed.",
+        )
+    }
+
+    /// Creates the safe standard framework response for an unexpected failure.
+    pub fn internal_error() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorSourceKind::Framework,
+            "internal_error",
+            "Internal server error.",
+        )
+    }
+
     pub fn validation(report: ValidationReport) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -910,6 +940,38 @@ impl From<CallError> for Error {
                 source: Some(ErrorSource::Other(err)),
                 context: SmallVec::new(),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::{ErrorReport, ErrorSourceKind};
+
+    /// Verifies framework fallback reports use stable safe transport metadata.
+    #[test]
+    fn framework_reports_are_safe_and_standardized() {
+        let reports = [
+            (ErrorReport::not_found(), StatusCode::NOT_FOUND, "not_found"),
+            (
+                ErrorReport::method_not_allowed(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+            ),
+            (
+                ErrorReport::internal_error(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+        ];
+
+        for (report, status, code) in reports {
+            assert_eq!(report.status, status);
+            assert_eq!(report.source, ErrorSourceKind::Framework);
+            assert_eq!(report.code, code);
+            assert!(report.errors.is_none());
         }
     }
 }

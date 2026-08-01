@@ -30,6 +30,7 @@ The main public pieces are:
 
 - `DbConf` and `DbPool` for SQLx pool setup.
 - `DBSession` for code that can run against either a pool or transaction.
+- `routes::Page<T>` for Mool's canonical paginated query result envelope.
 - `db::from(&Model::table())` for source-only typed queries.
 - `db::query(sql)` for raw SQL with Vyuh named placeholders.
 - `Statement` for direct SQL with native driver placeholders.
@@ -42,6 +43,11 @@ Typed queries intentionally stay close to SQL while avoiding stringly query
 composition. A source provides typed columns, records describe row/value shapes,
 and terminal methods execute one SQL statement. Use raw SQL when a query is more
 naturally expressed by hand.
+
+For HTTP pagination, resolve `routes::PageParams` and return the result of a
+Mool `.page(...)` query as `Json<routes::Page<T>>`. `PageParams` is request
+input; `Page<T>` is the stable response with `items`, `total`, `page`,
+`per_page`, and `total_pages`.
 
 ## Direct SQLx Access
 

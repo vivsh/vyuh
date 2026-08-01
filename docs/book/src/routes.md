@@ -117,6 +117,9 @@ Common inputs:
 Common outputs:
 
 - `Json<T>` becomes an `application/json` response.
+- `Json<Vec<T>>` is the direct shape for bounded lists.
+- `Json<Page<T>>` is the Mool-backed paginated list shape when a database
+  backend feature is enabled; pair it with `PageParams` (`page`, `per_page`).
 - `Html<String>` becomes a `text/html` response.
 - `StatusCode` and `()` become empty responses.
 - Raw `Response` is allowed but has unknown response metadata unless patched.
@@ -161,7 +164,8 @@ async fn create(Valid(Json(input)): Valid<Json<CreateUser>>) {
 
 Parse failures return `400` through `ErrorReport`. Validation failures return
 `422` through `ErrorReport` with field-oriented `code`, `message`, and `params`
-entries.
+entries. Framework route misses and unsupported methods return `404` and `405`
+through the same JSON envelope when JSON rendering is selected.
 
 For the full request API, see [Request](request.md). For
 validation rules, nested validation, runtime-only rules, and OpenAPI behavior,

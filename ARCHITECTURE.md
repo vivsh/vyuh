@@ -31,7 +31,9 @@ The `vyuh` crate is organized around these subsystems:
 - `bundles` is the composition layer for routes, commands, signals, emitters,
   services, migrations, schema contributors, docs, and assets.
 - `routes` defines route metadata, method handling, middleware helpers, and
-  built-in route behavior. A built site exposes immutable `Routes` indexes for
+  built-in route behavior. It re-exports Mool's `Page<T>` as the canonical
+  database-backed paginated JSON result while keeping ordinary resources and
+  bounded lists unwrapped. A built site exposes immutable `Routes` indexes for
   named reversal and method-aware URL-to-operation resolution.
 - `callables` provides the type-erased invocation model used by routes,
   commands, signals, emitters, and tasks. Canonical UUID-backed `OperationId`
@@ -186,7 +188,10 @@ the client-facing event type uses the payload schema name.
    Vyuh-registered routes also receive their `OperationId` as a request
    extension; task, signal, and command invocation contexts carry the same
    identity for their own operation.
-8. Handlers call query builders or services and return typed responses.
+8. Handlers call query builders or services and return typed responses. Normal
+   JSON resources remain direct, paginated queries return Mool's `Page<T>`, and
+   framework-generated JSON failures normalize into `ErrorReport`; raw responses
+   remain an explicit application escape hatch.
 9. OpenAPI and schema metadata are produced from registered operations and
    type metadata.
 

@@ -613,6 +613,36 @@ mod tests {
         );
     }
 
+    /// Verifies every Vyuh route documents the shared 405 ErrorReport response.
+    #[test]
+    fn route_documents_method_error() -> Result<(), String> {
+        let bundle = crate::bundles::bundle([crate::bundles::route(
+            ping,
+            RouteConf {
+                name: "ping".into(),
+                methods: routes::Methods::GET,
+                path: "/ping".into(),
+                slash: None,
+            },
+        )]);
+        let id = bundle
+            .name_index
+            .get("ping")
+            .ok_or_else(|| "route name was not registered".to_string())?;
+        let operation = bundle
+            .ops
+            .get(id)
+            .ok_or_else(|| "route operation was not registered".to_string())?;
+        let response = operation
+            .returns
+            .iter()
+            .find(|response| response.status_code == Some(405))
+            .ok_or_else(|| "route did not document 405".to_string())?;
+
+        assert_eq!(response.schema_name.as_deref(), Some("ErrorReport"));
+        Ok(())
+    }
+
     #[test]
     fn invalid_prefix_accumulates_error() {
         let bundle = Bundle::new().with_prefix("api");

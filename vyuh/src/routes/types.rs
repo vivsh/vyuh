@@ -516,4 +516,35 @@ mod tests {
         let json = Json(OkOut::ok()).into_response();
         assert_eq!(json.status(), response.status());
     }
+
+    /// Verifies the route pagination export remains Mool's exact result envelope.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    #[test]
+    fn page_reexports_mool_envelope() -> Result<(), serde_json::Error> {
+        let page: crate::routes::Page<&str> = crate::db::Page::new(vec!["one"], 3, 1, 2);
+        let value = serde_json::to_value(page)?;
+        let object = value.as_object();
+
+        assert_eq!(
+            object.and_then(|value| value.get("items")),
+            Some(&serde_json::json!(["one"]))
+        );
+        assert_eq!(
+            object.and_then(|value| value.get("total")),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            object.and_then(|value| value.get("page")),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            object.and_then(|value| value.get("per_page")),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            object.and_then(|value| value.get("total_pages")),
+            Some(&serde_json::json!(2))
+        );
+        Ok(())
+    }
 }

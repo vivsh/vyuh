@@ -62,6 +62,35 @@ async fn show() -> Json<NoteOut> {
 When `T: JsonSchema`, OpenAPI documents the response body as
 `application/json`.
 
+## Resource And List Shapes
+
+Vyuh keeps successful JSON bodies direct. Return `Json<T>` for one resource and
+`Json<Vec<T>>` for an intentionally bounded list; there is no framework-wide
+`data` wrapper.
+
+Database-backed paginated lists use Mool's exact `routes::Page<T>` result
+envelope. It is available when one database backend feature is enabled and
+serializes as:
+
+```json
+{
+  "items": [],
+  "total": 0,
+  "page": 1,
+  "per_page": 20,
+  "total_pages": 0
+}
+```
+
+`PageParams` is the matching route query input. It accepts `page` and
+`per_page`, resolves one-indexed bounded values, and remains separate from the
+response envelope:
+
+```rust,ignore
+let bounds = query.resolve(20, 100);
+// db::from(...).page(bounds.page, bounds.per_page, ...)
+```
+
 Use `JsonStr` only when the body is already serialized JSON:
 
 ```rust
@@ -190,12 +219,13 @@ async fn show() -> Result<Json<String>, Error> {
 }
 ```
 
-Framework errors such as auth, database, template, validation, and extractor
-errors, plus application `vyuh::Error` values, normalize into `ErrorReport`
-before they are rendered. The site error handler can replace the final body,
-status, headers, and content type. Validation `ErrorReport` bodies include
-field-oriented `code`, `message`, and `params` entries. See [Errors](errors.md),
-[Site](site.md), and [Validation](validation.md).
+Framework JSON errors such as route `404`/`405`, auth, database, template,
+validation, extractor, middleware, and panic-containment failures, plus
+application `vyuh::Error` values, normalize into `ErrorReport` before they are
+rendered. The site error handler can replace the final body, status, headers,
+and content type. Validation `ErrorReport` bodies include field-oriented
+`code`, `message`, and `params` entries. See [Errors](errors.md), [Site](site.md),
+and [Validation](validation.md).
 
 ## Raw Responses
 

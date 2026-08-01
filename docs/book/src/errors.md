@@ -18,6 +18,26 @@ The important boundary is this: users return `Error` from handler logic, while
 Vyuh converts that error into `ErrorView` before rendering. `ErrorReport` is
 the default HTTP JSON body, not the universal error abstraction.
 
+## HTTP JSON Contract
+
+All framework-generated JSON failures and route handlers that return
+`Result<T, Error>` use the same `ErrorReport` body:
+
+```json
+{
+  "source": "validation",
+  "code": "validation_error",
+  "detail": "Validation failed.",
+  "errors": { "field": [{ "code": "required", "message": "Required." }] }
+}
+```
+
+`errors` is present only for structured failures such as validation. Route
+lookup and method failures use the same envelope with `not_found` and
+`method_not_allowed` codes. HTML and command renderers remain transport-specific.
+An explicit raw `Response` or status-only handler response is an escape hatch
+and is not rewritten into JSON.
+
 ## Rendering Pipeline
 
 All rendered errors follow the same normalization path:

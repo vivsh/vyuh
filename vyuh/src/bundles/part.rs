@@ -9,6 +9,10 @@ use crate::{
     signals::{self, SignalConf},
     tasks::TaskHandlerConf,
 };
+use axum::{
+    http::{HeaderValue, header},
+    response::IntoResponse,
+};
 
 use super::{Bundle, BundleError};
 
@@ -131,13 +135,28 @@ impl Bundle {
             return self;
         }
         let id = op.id;
-        let router = router.layer(axum::Extension(id));
+        let allow = allow_header(&op.methods);
+        let router = router
+            .fallback(move || method_not_allowed(allow.clone()))
+            .layer(axum::Extension(id));
         self.inner_router = self.inner_router.route(op.path.as_ref(), router);
         let name = op.name.clone();
         self.ops.insert(id, op);
         self.name_index.insert(name, id);
         self
     }
+}
+
+fn allow_header(methods: &crate::routes::Methods) -> Option<HeaderValue> {
+    HeaderValue::from_str(&methods.to_vec().join(", ")).ok()
+}
+
+async fn method_not_allowed(allow: Option<HeaderValue>) -> axum::response::Response {
+    let mut response = crate::ErrorReport::method_not_allowed().into_response();
+    if let Some(allow) = allow {
+        response.headers_mut().insert(header::ALLOW, allow);
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +178,8 @@ where
     op.methods = meta.methods.clone().into();
     op.slash_policy = meta.slash;
     op = op.with_conf(&meta);
+    op.returns
+        .push(callables::ReturnSpec::error(405, "Method not allowed."));
 
     let router = axum::routing::on(meta.methods.into(), handler);
     BundlePart {

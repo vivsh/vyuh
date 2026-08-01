@@ -18,7 +18,7 @@ use crate::{services, watch};
 use axum::ServiceExt;
 use axum::body::{self, Body};
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -48,13 +48,29 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     else {
         return response;
     };
+    let allow = method_error_allow(&response, &report);
     let ctx = crate::errors::ErrorContext {
         method,
         uri,
         path,
         headers,
     };
-    site.inner.conf.errors.render(ctx, report).await
+    let mut rendered = site.inner.conf.errors.render(ctx, report).await;
+    if let Some(allow) = allow {
+        rendered
+            .headers_mut()
+            .insert(axum::http::header::ALLOW, allow);
+    }
+    rendered
+}
+
+fn method_error_allow(
+    response: &Response,
+    report: &crate::errors::ErrorReport,
+) -> Option<axum::http::HeaderValue> {
+    (report.code == "method_not_allowed")
+        .then(|| response.headers().get(axum::http::header::ALLOW).cloned())
+        .flatten()
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +351,8 @@ impl SiteBuilder {
         bundle
             .doc_engine
             .setup(&mut router, &bundle.ops, &self.conf.auth)?;
+
+        router = router.fallback(route_not_found);
 
         let slash_router = Arc::new(
             crate::middlewares::SlashRouter::from_operations(
@@ -957,7 +975,7 @@ impl Site {
             let observability = self.inner.observability.clone();
             router = router.layer(CatchPanicLayer::custom(move |_panic| {
                 observability.record_panic();
-                (StatusCode::INTERNAL_SERVER_ERROR, "Service panicked").into_response()
+                crate::ErrorReport::internal_error().into_response()
             }));
         }
 
@@ -1020,6 +1038,10 @@ impl Site {
     }
 }
 
+async fn route_not_found() -> crate::ErrorReport {
+    crate::ErrorReport::not_found()
+}
+
 /// Prevents framework-owned probe paths from replacing application routes.
 fn validate_observability_paths(
     bundle: &Bundle,
@@ -1073,9 +1095,12 @@ mod tests {
         callables::Data,
         commands::CommandConf,
         emitters::{EmitTarget, PeriodicConf},
+        routes::{Json, Methods, RouteConf},
         signals::SignalConf,
         tasks::TaskHandlerConf,
+        testing::TestSite,
     };
+    use axum::http::StatusCode;
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::{
@@ -1125,6 +1150,97 @@ mod tests {
             reason: "table users does not exist".to_string(),
         })
         .with_context("rebuild user index"))
+    }
+
+    async fn response_probe() -> Json<&'static str> {
+        Json("ok")
+    }
+
+    async fn raw_not_found() -> StatusCode {
+        StatusCode::NOT_FOUND
+    }
+
+    fn response_bundle() -> crate::bundles::Bundle {
+        bundles::bundle([
+            bundles::route(
+                response_probe,
+                RouteConf {
+                    name: "response_probe".into(),
+                    methods: Methods::GET,
+                    path: "/response-probe".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                raw_not_found,
+                RouteConf {
+                    name: "raw_not_found".into(),
+                    methods: Methods::GET,
+                    path: "/raw-not-found".into(),
+                    slash: None,
+                },
+            ),
+        ])
+    }
+
+    /// Verifies unmatched paths and unsupported methods use the ErrorReport JSON contract.
+    #[tokio::test]
+    async fn route_failures_use_error_report() -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            response_bundle(),
+        )
+        .await?;
+        let client = TestSite::new(site);
+
+        let missing = client
+            .get("/missing")
+            .header("accept", "application/json")
+            .send()
+            .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let missing: serde_json::Value = missing.json().await;
+        assert_eq!(missing.get("code"), Some(&serde_json::json!("not_found")));
+        assert_eq!(missing.get("source"), Some(&serde_json::json!("framework")));
+
+        let method = client
+            .post("/response-probe")
+            .header("accept", "application/json")
+            .send()
+            .await;
+        assert_eq!(method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            method
+                .header(axum::http::header::ALLOW.as_str())
+                .and_then(|value| value.to_str().ok()),
+            Some("GET")
+        );
+        let method: serde_json::Value = method.json().await;
+        assert_eq!(
+            method.get("code"),
+            Some(&serde_json::json!("method_not_allowed"))
+        );
+        assert_eq!(method.get("source"), Some(&serde_json::json!("framework")));
+        Ok(())
+    }
+
+    /// Verifies an explicit raw response is not rewritten into the JSON error envelope.
+    #[tokio::test]
+    async fn raw_error_response_is_unchanged() -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            response_bundle(),
+        )
+        .await?;
+        let response = TestSite::new(site)
+            .get("/raw-not-found")
+            .header("accept", "application/json")
+            .send()
+            .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.text().await, "");
+        Ok(())
     }
 
     fn strings(args: &[&str]) -> Vec<String> {

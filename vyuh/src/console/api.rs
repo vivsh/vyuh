@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{
-    Site,
+    Error, ErrorKind, Site,
     auth::AuthUser,
     console::{
         auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, CONSOLE_TOKEN},
@@ -27,7 +27,7 @@ pub async fn login(
     site: Site,
     ClientIp(ip): ClientIp,
     Form(form): Form<LoginForm>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Error> {
     let parts = axum::http::Request::new(axum::body::Body::empty())
         .into_parts()
         .0;
@@ -37,24 +37,24 @@ pub async fn login(
         .await
         .map_err(|error| {
             tracing::debug!(error = %error, "console login credential rejected");
-            StatusCode::UNAUTHORIZED
+            Error::new(ErrorKind::Unauthorized)
         })?;
     let login = site
         .auth()
         .using(CONSOLE_TOKEN)
         .login_bound(user, &[CONSOLE_AUDIENCE], ip.to_string())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(Error::other)?;
     let destination = site
         .routes()
         .reverse_url("console_home", &[])
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| Error::not_found("console home route is unavailable"))?;
     let mut response = Redirect::to(&destination).into_response();
     login.write(&mut response);
     Ok(response)
 }
 
-pub async fn logout(site: Site, _user: AuthUser) -> Result<Response, StatusCode> {
+pub async fn logout(site: Site, _user: AuthUser) -> Result<Response, Error> {
     let parts = axum::http::Request::new(axum::body::Body::empty())
         .into_parts()
         .0;
@@ -64,7 +64,7 @@ pub async fn logout(site: Site, _user: AuthUser) -> Result<Response, StatusCode>
         .using(CONSOLE_TOKEN)
         .logout(&parts)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(Error::other)?;
     logout.write(&mut response);
     Ok(response)
 }
@@ -104,17 +104,17 @@ pub async fn operation_detail(
     site: Site,
     _user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<OperationOut>, StatusCode> {
+) -> Result<Json<OperationOut>, Error> {
     let id = id
         .parse::<crate::OperationId>()
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|_| Error::not_found("operation was not found"))?;
     let console_bundle_id = console_bundle_id(&site);
     site.operations()
         .find(id)
         .filter(|op| !is_console_operation(op, console_bundle_id))
         .map(|op| OperationOut::from_operation(op, &site))
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or_else(|| Error::not_found("operation was not found"))
 }
 
 fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {
@@ -125,14 +125,10 @@ pub async fn tasks(
     site: Site,
     _user: AuthUser,
     Query(query): Query<TaskQuery>,
-) -> Result<Json<Page<TaskOut>>, StatusCode> {
+) -> Result<Json<Page<TaskOut>>, Error> {
     let conf = &site.conf().console;
     let filter = query.to_filter(conf.page_size_default, task_limit_max(conf.page_size_max));
-    let page = site
-        .tasks()
-        .list(filter)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let page = site.tasks().list(filter).await.map_err(Error::other)?;
     Ok(Json(Page {
         items: page.records.iter().map(TaskOut::from).collect(),
         next_cursor: page.next_cursor,
@@ -143,14 +139,14 @@ pub async fn task_detail(
     site: Site,
     _user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<TaskDetailOut>, StatusCode> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| StatusCode::NOT_FOUND)?;
+) -> Result<Json<TaskDetailOut>, Error> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| Error::not_found("task was not found"))?;
     let record = site
         .tasks()
         .get(id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(Error::other)?
+        .ok_or_else(|| Error::not_found("task was not found"))?;
     Ok(Json(TaskDetailOut::from(&record)))
 }
 
@@ -162,8 +158,8 @@ pub async fn conf(site: Site, _user: AuthUser) -> Json<ConfigOut> {
     Json(ConfigOut::from_site(&site))
 }
 
-pub async fn openapi(site: Site, _user: AuthUser) -> Result<Response, StatusCode> {
-    let body = openapi_json(&site).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+pub async fn openapi(site: Site, _user: AuthUser) -> Result<Response, Error> {
+    let body = openapi_json(&site).map_err(|_| Error::new(ErrorKind::Other))?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
