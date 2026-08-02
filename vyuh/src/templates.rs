@@ -95,12 +95,20 @@ pub struct TemplateEngine {
 
 impl TemplateEngine {
     pub fn new() -> Self {
-        Self::from_conf(&TemplateConf::default(), chrono_tz::Tz::UTC)
+        Self::from_conf(
+            &TemplateConf::default(),
+            chrono_tz::Tz::UTC,
+            &crate::assets::AssetUrls::default_url(),
+        )
     }
 
-    pub(crate) fn from_conf(conf: &TemplateConf, timezone: chrono_tz::Tz) -> Self {
+    pub(crate) fn from_conf(
+        conf: &TemplateConf,
+        timezone: chrono_tz::Tz,
+        assets: &crate::assets::AssetUrls,
+    ) -> Self {
         let mut env = minijinja::Environment::new();
-        register_builtin_helpers(&mut env, conf, timezone);
+        register_builtin_helpers(&mut env, conf, timezone, assets.clone());
         TemplateEngine { env }
     }
 
@@ -207,13 +215,19 @@ fn register_builtin_helpers(
     env: &mut minijinja::Environment<'static>,
     conf: &TemplateConf,
     timezone: chrono_tz::Tz,
+    assets: crate::assets::AssetUrls,
 ) {
     env.add_global(
         "STATIC_URL",
-        minijinja::Value::from_safe_string(crate::assets::public_asset_url("")),
+        minijinja::Value::from_safe_string(assets.static_url().to_string()),
     );
-    env.add_function("asset", |path: String| {
-        minijinja::Value::from_safe_string(crate::assets::public_asset_url(&path))
+    env.add_function("asset", move |path: String| {
+        assets
+            .url(&path)
+            .map(minijinja::Value::from_safe_string)
+            .map_err(|error| {
+                minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, error.to_string())
+            })
     });
     env.add_function("now", || chrono::Utc::now().to_rfc3339());
     env.add_filter("linebreaksbr", linebreaksbr_filter);
@@ -702,11 +716,12 @@ mod tests {
     }
 
     #[test]
+    /// Verifies template asset helpers share the configured static asset runtime.
     fn builtin_asset_helpers_use_public_asset_mount() {
         let dir = tempfile::tempdir().unwrap();
         write_file(
             dir.path().join("templates/page.html").as_path(),
-            r#"{{ STATIC_URL }}|{{ asset("css/app.css") }}|{{ asset("/img/logo.png") }}"#,
+            r#"{{ STATIC_URL }}|{{ asset("css/app.css") }}|{{ asset("img/logo.png") }}"#,
         );
         let bundle = bundles::bundle([bundles::asset_dir(embed::Dir::new(rust_silos::Silo::new(
             dir.path().to_str().unwrap(),
@@ -716,7 +731,7 @@ mod tests {
 
         assert_eq!(
             engine.render("page.html", &serde_json::json!({})).unwrap(),
-            "/assets/|/assets/css/app.css|/assets/img/logo.png"
+            "/static/|/static/css/app.css|/static/img/logo.png"
         );
     }
 
@@ -734,7 +749,11 @@ mod tests {
         conf.date_formats.date = "%Y/%m/%d".to_string();
         conf.date_formats.time = "%H:%M".to_string();
         conf.date_formats.datetime = "%Y/%m/%d %H:%M".to_string();
-        let mut engine = TemplateEngine::from_conf(&conf, chrono_tz::Asia::Kolkata);
+        let mut engine = TemplateEngine::from_conf(
+            &conf,
+            chrono_tz::Asia::Kolkata,
+            &crate::assets::AssetUrls::default_url(),
+        );
         engine.inject_templates(&bundle).unwrap();
 
         assert_eq!(

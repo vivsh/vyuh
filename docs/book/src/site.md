@@ -70,6 +70,10 @@ let conf = SiteConf::default()
 
 `project_dir` is the base for relative media, upload, reload, auth key, and log
 paths. Static files and templates belong to bundles through asset dirs.
+`SiteConf::static_url(...)` controls the one public base for bundled
+`public/**` files: it defaults to `/assets`, accepts a root-relative mount such
+as `/static`, or accepts an absolute CDN URL such as
+`https://cdn.example.com/static`.
 `SiteConf::validate()` checks required fields and path readability before the
 site is built.
 

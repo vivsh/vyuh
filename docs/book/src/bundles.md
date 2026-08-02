@@ -129,7 +129,7 @@ mod notes {
 
 mod ops {
     pub fn bundle() -> vyuh::bundles::Bundle {
-        vyuh::bundles::Bundle::new()
+        vyuh::bundles::bundle([])
     }
 }
 
@@ -223,6 +223,10 @@ updates operations for documentation.
 After `Site::build`, route reversal and resolution use `site.routes()`, while
 operation lookup and iteration use `site.operations()`. Bundles retain this
 metadata during composition but do not expose parallel runtime facades.
+
+Each operation receives its origin bundle ID when registered. That identity is
+immutable: merging or prefixing bundles changes composed behavior and paths but
+never rewrites an operation's origin.
 
 ## OpenAPI Order
 

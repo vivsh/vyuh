@@ -1,4 +1,4 @@
-use crate::auth::Authenticator;
+use crate::auth::{AuthConf, Authenticator};
 use crate::bundles::{Bundle, IntoBundle};
 use crate::callables::{self, DataBox};
 use crate::channels::{Channels, LocalChannelBackend};
@@ -20,7 +20,7 @@ use axum::body::{self, Body};
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
@@ -48,6 +48,9 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     else {
         return response;
     };
+    if let Some(location) = site.console_login_redirect(&method, &uri, &report) {
+        return Redirect::to(&location).into_response();
+    }
     let allow = method_error_allow(&response, &report);
     let ctx = crate::errors::ErrorContext {
         method,
@@ -71,6 +74,42 @@ fn method_error_allow(
     (report.code == "method_not_allowed")
         .then(|| response.headers().get(axum::http::header::ALLOW).cloned())
         .flatten()
+}
+
+fn console_cookie(conf: &crate::console::ConsoleConf) -> crate::auth::CookieConf {
+    crate::auth::CookieConf::new(&conf.cookie_name)
+        .path(&conf.path)
+        .secure(conf.secure_cookie)
+}
+
+fn effective_auth(conf: &SiteConf) -> AuthConf {
+    if conf.console.enabled {
+        conf.auth
+            .clone()
+            .provider(
+                crate::console::auth::CONSOLE_LOGIN,
+                crate::console::auth::login_provider(),
+            )
+            .provider(
+                crate::console::auth::CONSOLE_TOKEN,
+                crate::console::auth::token_provider(console_cookie(&conf.console)),
+            )
+    } else {
+        conf.auth.clone()
+    }
+}
+
+fn console_runtime(
+    conf: &crate::console::ConsoleConf,
+    routes: &crate::routes::RouteRegistry,
+    assets: &crate::assets::AssetUrls,
+) -> Result<Option<crate::console::ConsoleRuntime>, crate::bundles::BundleError> {
+    if !conf.enabled {
+        return Ok(None);
+    }
+    crate::console::ConsoleRuntime::new(crate::routes::Routes::new(routes), assets)
+        .map(Some)
+        .map_err(crate::bundles::BundleError::RouteRegistry)
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +293,8 @@ impl SiteBuilder {
         bundle: impl IntoBundle,
     ) -> Result<SiteInner, SiteError> {
         self.conf.validate()?;
+        let asset_urls = crate::assets::AssetUrls::parse(&self.conf.static_url)
+            .map_err(|error| conf::ConfError::Other(error.to_string()))?;
 
         #[cfg(feature = "email")]
         let mail_delivery = crate::email::delivery(&self.conf.mail).map_err(|error| {
@@ -309,13 +350,14 @@ impl SiteBuilder {
                 bundle.asset_dirs.clone(),
                 crate::assets::PUBLIC_ASSETS_FOLDER,
             )
-            .strip_url_prefix(crate::assets::PUBLIC_ASSETS_URL_PREFIX.trim_start_matches('/'))
+            .strip_url_prefix(asset_urls.mount_path().trim_start_matches('/'))
             .precompressed(true)
             .with_etag(true);
-            router = router.nest_service(crate::assets::PUBLIC_ASSETS_URL_PREFIX, assets);
+            router = router.nest_service(asset_urls.mount_path(), assets);
         }
 
-        let mut template_engine = TemplateEngine::from_conf(&self.conf.templates, timezone);
+        let mut template_engine =
+            TemplateEngine::from_conf(&self.conf.templates, timezone, &asset_urls);
 
         let pool = if let Some(pool) = pool {
             DbPool::from_pool(pool)
@@ -325,28 +367,15 @@ impl SiteBuilder {
 
         template_engine.inject_templates(&bundle)?;
 
-        let mut authenticator = Authenticator::new(
-            &self.conf.auth,
+        let auth_conf = effective_auth(&self.conf);
+        let authenticator = Authenticator::new(
+            &auth_conf,
             &self.conf.secret_key,
             &self.conf.secret_key_fallbacks,
             &project_dir,
         )
         .await
         .map_err(|err| conf::ConfError::Other(format!("Auth config error: {err}")))?;
-
-        if self.conf.console.enabled {
-            let login = crate::console::auth::login_provider();
-            let cookie = crate::auth::CookieConf::new(&self.conf.console.cookie_name)
-                .path(&self.conf.console.path)
-                .secure(self.conf.console.secure_cookie);
-            let token = crate::console::auth::token_provider(cookie);
-            authenticator
-                .register_provider(crate::console::auth::CONSOLE_LOGIN, login)
-                .map_err(|err| conf::ConfError::Other(format!("Console auth error: {err}")))?;
-            authenticator
-                .register_provider(crate::console::auth::CONSOLE_TOKEN, token)
-                .map_err(|err| conf::ConfError::Other(format!("Console auth error: {err}")))?;
-        }
 
         bundle
             .doc_engine
@@ -364,6 +393,7 @@ impl SiteBuilder {
         let route_registry =
             crate::routes::RouteRegistry::build(bundle.ops.values(), self.conf.http.slash.policy)
                 .map_err(crate::bundles::BundleError::RouteRegistry)?;
+        let console_runtime = console_runtime(&self.conf.console, &route_registry, &asset_urls)?;
 
         let mut bundle = bundle.with_router_unchecked(router);
 
@@ -454,11 +484,8 @@ impl SiteBuilder {
             route_registry,
             joinset: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
             channels: LocalChannelBackend::new(self.conf.channels.clone()),
-            console_status_cache: self
-                .conf
-                .console
-                .enabled
-                .then(crate::console::status::ConsoleStatusCache::new),
+            console_runtime,
+            asset_urls,
             bundle,
             #[cfg(feature = "migrations")]
             migration_runner,
@@ -484,7 +511,8 @@ struct SiteInner {
     authenticator: Authenticator,
     pool: DbPool,
     channels: LocalChannelBackend,
-    console_status_cache: Option<crate::console::status::ConsoleStatusCache>,
+    console_runtime: Option<crate::console::ConsoleRuntime>,
+    asset_urls: crate::assets::AssetUrls,
     template_engine: TemplateEngine,
     slash_router: Arc<crate::middlewares::SlashRouter>,
     route_registry: crate::routes::RouteRegistry,
@@ -712,6 +740,10 @@ impl Site {
         self.inner.bundle.asset_dirs.clone()
     }
 
+    pub(crate) fn static_asset_path(&self) -> PathBuf {
+        self.inner.asset_urls.output_path()
+    }
+
     #[cfg(feature = "migrations")]
     pub(crate) fn migration_registry(&self) -> &crate::db::MigrationRegistry {
         &self.inner.bundle.migrations
@@ -816,6 +848,11 @@ impl Site {
         crate::routes::Routes::new(&self.inner.route_registry)
     }
 
+    /// Returns validated public URL construction for bundle-owned assets.
+    pub fn assets(&self) -> crate::assets::Assets<'_> {
+        crate::assets::Assets::new(&self.inner.asset_urls)
+    }
+
     /// Return the template rendering facade for this site.
     /// Templates are loaded from bundle-owned private `templates/**` assets.
     pub fn templates(&self) -> Templates {
@@ -844,6 +881,11 @@ impl Site {
         &self.inner.authenticator
     }
 
+    /// Returns the console authentication facade for manual console sign-in and sign-out.
+    pub fn console(&self) -> crate::console::Console<'_> {
+        crate::console::Console::new(self)
+    }
+
     /// Return the configured timezone, defaulting to UTC.
     /// Use this for application date/time rendering and operational timestamps.
     pub fn timezone(&self) -> Tz {
@@ -864,18 +906,43 @@ impl Site {
 
     pub(crate) fn console_status(&self) -> crate::console::status::StatusOut {
         let ttl = std::time::Duration::from_secs(self.conf().console.status_cache_ttl_seconds);
-        self.inner
-            .console_status_cache
-            .as_ref()
-            .map(|cache| cache.get(self, ttl))
-            .unwrap_or_else(|| crate::console::status::collect(self))
+        match &self.inner.console_runtime {
+            Some(runtime) => runtime.status(self, ttl),
+            None => crate::console::status::collect(self),
+        }
     }
 
-    pub(crate) fn console_bundle_id(&self) -> Option<uuid::Uuid> {
-        self.operations()
-            .list()
-            .find(|operation| operation.name == "console_home")
-            .and_then(|operation| operation.bundle_id)
+    pub(crate) fn console_urls(&self) -> Option<&crate::console::ViewUrls> {
+        self.inner
+            .console_runtime
+            .as_ref()
+            .map(crate::console::ConsoleRuntime::urls)
+    }
+
+    /// Returns a login redirect when an unauthenticated request targets a console page.
+    pub(crate) fn console_login_redirect(
+        &self,
+        method: &Method,
+        uri: &axum::http::Uri,
+        report: &crate::errors::ErrorReport,
+    ) -> Option<String> {
+        self.inner.console_runtime.as_ref()?.login_redirect(
+            crate::routes::Routes::new(&self.inner.route_registry),
+            method,
+            uri,
+            report,
+        )
+    }
+
+    /// Returns a validated console page after a successful token login.
+    pub(crate) fn console_destination(&self, next: Option<&str>) -> String {
+        self.inner
+            .console_runtime
+            .as_ref()
+            .map(|runtime| {
+                runtime.destination(crate::routes::Routes::new(&self.inner.route_registry), next)
+            })
+            .unwrap_or_else(|| "/".to_string())
     }
 
     /// Returns the runtime observability registry for framework-owned routes.
@@ -1104,6 +1171,7 @@ mod tests {
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::{
+        path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
@@ -1243,6 +1311,49 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies the public asset facade uses the configured static URL.
+    #[tokio::test]
+    async fn configured_static_url_builds_asset_links() -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default()
+                .log_init(false)
+                .static_url("/public"),
+            bundles::bundle([]),
+        )
+        .await?;
+
+        assert_eq!(site.assets().static_url(), "/public/");
+        assert_eq!(
+            site.assets().url("console/app.js"),
+            Ok("/public/console/app.js".to_string())
+        );
+        Ok(())
+    }
+
+    /// Verifies an absolute static URL keeps its CDN origin while retaining a local mount path.
+    #[tokio::test]
+    async fn cdn_static_url_builds_cdn_asset_links() -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default()
+                .log_init(false)
+                .static_url("https://cdn.example.com/static")
+                .console(crate::console::ConsoleConf::default().enabled(false)),
+            crate::bundles::bundle([]),
+        )
+        .await?;
+
+        assert_eq!(
+            site.assets().static_url(),
+            "https://cdn.example.com/static/"
+        );
+        assert_eq!(
+            site.assets().url("dashboard/app.js"),
+            Ok("https://cdn.example.com/static/dashboard/app.js".to_string())
+        );
+        assert_eq!(site.static_asset_path(), PathBuf::from("static"));
+        Ok(())
+    }
+
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
     }
@@ -1280,7 +1391,7 @@ mod tests {
             .log_init(false)
             .project_dir("/path/that/does/not/exist");
         let result =
-            Site::run_with_args(conf, crate::bundles::Bundle::new(), strings(&["help"])).await;
+            Site::run_with_args(conf, crate::bundles::bundle([]), strings(&["help"])).await;
 
         assert!(result.is_ok(), "command failed: {result:?}");
     }
@@ -1290,7 +1401,7 @@ mod tests {
         let conf = crate::SiteConf::default()
             .log_init(false)
             .project_dir("/path/that/does/not/exist");
-        let err = Site::run_with_args(conf, crate::bundles::Bundle::new(), strings(&["missing"]))
+        let err = Site::run_with_args(conf, crate::bundles::bundle([]), strings(&["missing"]))
             .await
             .unwrap_err();
 

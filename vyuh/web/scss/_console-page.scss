@@ -503,12 +503,42 @@
 }
 
 .console-login-card {
+  display: grid;
+  gap: $vyuh-space-6;
   max-width: 32rem;
   padding: 2rem;
+  width: 100%;
 }
 
-.console-login-kicker {
-  margin-top: $vyuh-space-7;
+.console-login-header {
+  display: grid;
+  gap: $vyuh-space-3;
+}
+
+.console-login-header > * {
+  margin: 0;
+}
+
+.console-login-logo {
+  height: $vyuh-space-10;
+  width: $vyuh-space-10;
+}
+
+.console-login-form {
+  display: grid;
+  gap: $vyuh-space-4;
+}
+
+.console-login-form .vyuh-button {
+  width: 100%;
+}
+
+.console-login-error {
+  margin: 0;
+}
+
+.console-login-card footer {
+  color: $vyuh-muted;
 }
 
 @media (max-width: 76rem) {

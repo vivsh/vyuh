@@ -363,6 +363,7 @@ impl ConfigOut {
             site: SiteConfigOut {
                 host: conf.host.clone(),
                 port: conf.port,
+                static_url: conf.static_url.clone(),
                 project_dir: conf.project_dir.clone(),
                 timezone: conf.tz.clone().unwrap_or_else(|| "UTC".to_string()),
                 log_init: conf.log_init,
@@ -448,6 +449,7 @@ impl ConfigOut {
 pub struct SiteConfigOut {
     pub host: String,
     pub port: u16,
+    pub static_url: String,
     pub project_dir: String,
     pub timezone: String,
     pub log_init: bool,

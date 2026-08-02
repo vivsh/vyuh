@@ -117,10 +117,6 @@ impl Operation {
         }
     }
 
-    pub(crate) fn set_bundle_id(&mut self, id: uuid::Uuid) {
-        self.bundle_id = Some(id);
-    }
-
     /// Returns the audience required by this operation, when it is authenticated.
     pub fn audience(&self) -> Option<&str> {
         self.audience.as_ref().map(AudienceId::as_str)

@@ -12,7 +12,7 @@ use super::types::{CommandConf, command};
 
 async fn make_site() -> Site {
     let conf = SiteConf::default().log_init(false);
-    let bundle = crate::bundles::Bundle::new();
+    let bundle = crate::bundles::bundle([]);
     Site::build(conf, bundle).await.unwrap()
 }
 

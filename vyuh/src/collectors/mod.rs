@@ -172,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn merge_and_prefix_apply_to_url_info() {
         let child = bundles::bundle([bundles::url_info(child_urls)]).with_prefix("/blog");
-        let app = bundles::Bundle::new().merge(child).with_prefix("/site");
+        let app = bundles::bundle([]).merge(child).with_prefix("/site");
         let site = site(app).await;
         let urls = site.url_info().await.unwrap();
 
@@ -405,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn collect_assets_rejects_clean_with_glob() {
         let out = TempDir::new().unwrap();
-        let site = site(bundles::Bundle::new()).await;
+        let site = site(bundles::bundle([])).await;
         let err = collect_assets(
             &site,
             CollectStaticOptions::new(out.path())
@@ -455,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn static_export_reuses_collect_assets_and_detects_conflicts() {
         async fn urls(_: Site) -> Result<Vec<UrlInfo>, Error> {
-            Ok(vec![UrlInfo::static_page("/assets/css/app.css")])
+            Ok(vec![UrlInfo::static_page("/static/css/app.css")])
         }
         async fn css_page() -> Json<&'static str> {
             Json("not css")
@@ -475,7 +475,7 @@ mod tests {
                 css_page,
                 RouteConf {
                     name: Cow::Borrowed("css_page"),
-                    path: Cow::Borrowed("/assets/css/app.css"),
+                    path: Cow::Borrowed("/static/css/app.css"),
                     methods: Methods::GET,
                     slash: None,
                 },
@@ -488,6 +488,45 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("conflicts"));
+    }
+
+    /// Verifies static export derives its local asset directory from an absolute static URL.
+    #[tokio::test]
+    async fn static_export_uses_static_url_path() -> Result<(), String> {
+        let root = TempDir::new().map_err(|error| error.to_string())?;
+        let public = root.path().join("public/css");
+        tokio::fs::create_dir_all(&public)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::fs::write(public.join("app.css"), "body{}")
+            .await
+            .map_err(|error| error.to_string())?;
+        let app = bundles::bundle([
+            bundles::asset_dir(embed::Dir::new(Silo::new(
+                root.path().to_string_lossy().as_ref(),
+            ))),
+            route(home, "home", "/"),
+        ])
+        .merge(bundles::bundle! { macro_urls, });
+        let site = Site::build(
+            SiteConf::default()
+                .log_init(false)
+                .static_url("https://cdn.example.com/static")
+                .console(ConsoleConf::default().enabled(false)),
+            app,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let output = TempDir::new().map_err(|error| error.to_string())?;
+
+        let report = export_static(&site, StaticExportOptions::new(output.path()))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.assets, 1);
+        assert!(output.path().join("static/css/app.css").exists());
+        assert!(!output.path().join("assets/css/app.css").exists());
+        Ok(())
     }
 
     #[tokio::test]

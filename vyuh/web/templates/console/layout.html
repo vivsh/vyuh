@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>{{ title }} - Vyuh Console</title>
-  <link rel="icon" href="{{ asset_root }}/img/favicon.svg">
+  <link rel="icon" href="{{ assets.favicon }}">
   <link rel="stylesheet" href="{{ stylesheet_path }}">
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
-  <script src="{{ asset_root }}/js/console.js" defer></script>
+  <script src="{{ assets.script }}" defer></script>
 </head>
 <body class="vyuh-page console-body">
   <svg class="vyuh-icon-sprite" aria-hidden="true">
@@ -32,21 +32,21 @@
 
   <div class="vyuh-console-app">
     <aside class="vyuh-console-sidebar">
-      <a class="vyuh-console-brand" href="{{ base_path }}/overview">
-        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="Vyuh logo">
+      <a class="vyuh-console-brand" href="{{ urls.overview }}">
+        <img src="{{ assets.logo }}" alt="Vyuh logo">
         <span>Vyuh</span>
       </a>
       <nav class="vyuh-console-nav" aria-label="Console pages">
         <strong>Console</strong>
-        <a href="{{ base_path }}/overview" {% if active == "overview" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-dashboard"></use></svg><span>Overview</span></a>
-        <a href="{{ base_path }}/runtime" {% if active == "runtime" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-monitor"></use></svg><span>System Info</span></a>
-        <a href="{{ base_path }}/tasks" {% if active == "tasks" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-check"></use></svg><span>Tasks</span></a>
-        <a href="{{ base_path }}/operations" {% if active == "operations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Operations</span></a>
-        <a href="{{ base_path }}/openapi" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
+        <a href="{{ urls.overview }}" {% if active == "overview" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-dashboard"></use></svg><span>Overview</span></a>
+        <a href="{{ urls.runtime }}" {% if active == "runtime" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-monitor"></use></svg><span>System Info</span></a>
+        <a href="{{ urls.tasks }}" {% if active == "tasks" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-check"></use></svg><span>Tasks</span></a>
+        <a href="{{ urls.operations }}" {% if active == "operations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Operations</span></a>
+        <a href="{{ urls.openapi }}" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
       </nav>
       <nav class="vyuh-console-nav" aria-label="Console settings">
         <strong>Settings</strong>
-        <a href="{{ base_path }}/conf" {% if active == "conf" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-gear"></use></svg><span>Console Settings</span></a>
+        <a href="{{ urls.conf }}" {% if active == "conf" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-gear"></use></svg><span>Console Settings</span></a>
       </nav>
       <footer class="vyuh-console-sidebar-footer">
         <span><i></i>System Healthy</span>
@@ -56,7 +56,7 @@
     <main class="vyuh-console-page">
       {% block content %}{% endblock %}
       <footer class="vyuh-console-footer">
-        <img src="{{ asset_root }}/img/vyuh-logo-transparent.png" alt="">
+        <img src="{{ assets.logo }}" alt="">
         <span>Vyuh Console v{{ version }}</span>
       </footer>
     </main>

@@ -10,7 +10,7 @@
     <div class="vyuh-console-actions">
       <button class="vyuh-console-icon-button" type="button" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></button>
       <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
-      <a class="vyuh-console-site-button" href="{{ base_path }}/openapi">OpenAPI <svg><use href="#vyuh-icon-external"></use></svg></a>
+      <a class="vyuh-console-site-button" href="{{ urls.openapi }}">OpenAPI <svg><use href="#vyuh-icon-external"></use></svg></a>
     </div>
   </header>
 
@@ -44,7 +44,7 @@
         <div><dt>Timezone</dt><dd>{{ status.site.timezone }}</dd></div>
         <div><dt>Project Dir</dt><dd>{{ status.site.project_dir }}</dd></div>
       </dl>
-      <a class="vyuh-console-card-link" href="{{ base_path }}/runtime">View system info <svg><use href="#vyuh-icon-external"></use></svg></a>
+      <a class="vyuh-console-card-link" href="{{ urls.runtime }}">View system info <svg><use href="#vyuh-icon-external"></use></svg></a>
     </article>
 
     <article class="vyuh-console-card">
@@ -61,10 +61,10 @@
     <article class="vyuh-console-card">
       <header><h2>Quick Access</h2></header>
       <div class="vyuh-console-action-list">
-        <a href="{{ base_path }}/runtime"><svg><use href="#vyuh-icon-monitor"></use></svg><span><strong>System Info</strong><small>Environment &amp; resources</small></span><b>›</b></a>
-        <a href="{{ base_path }}/tasks"><svg><use href="#vyuh-icon-check"></use></svg><span><strong>Tasks</strong><small>Background jobs</small></span><b>›</b></a>
-        <a href="{{ base_path }}/operations"><svg><use href="#vyuh-icon-pulse"></use></svg><span><strong>Operations</strong><small>Registered runtime paths</small></span><b>›</b></a>
-        <a href="{{ base_path }}/openapi"><svg><use href="#vyuh-icon-docs"></use></svg><span><strong>OpenAPI (ReDoc)</strong><small>API documentation</small></span><b>↗</b></a>
+        <a href="{{ urls.runtime }}"><svg><use href="#vyuh-icon-monitor"></use></svg><span><strong>System Info</strong><small>Environment &amp; resources</small></span><b>›</b></a>
+        <a href="{{ urls.tasks }}"><svg><use href="#vyuh-icon-check"></use></svg><span><strong>Tasks</strong><small>Background jobs</small></span><b>›</b></a>
+        <a href="{{ urls.operations }}"><svg><use href="#vyuh-icon-pulse"></use></svg><span><strong>Operations</strong><small>Registered runtime paths</small></span><b>›</b></a>
+        <a href="{{ urls.openapi }}"><svg><use href="#vyuh-icon-docs"></use></svg><span><strong>OpenAPI (ReDoc)</strong><small>API documentation</small></span><b>↗</b></a>
       </div>
     </article>
   </div>

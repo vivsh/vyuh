@@ -33,10 +33,6 @@ impl AuthMetrics {
         }
     }
 
-    pub(crate) fn register_provider(&mut self, provider: &str) {
-        self.providers.register(provider);
-    }
-
     pub(crate) fn record<T>(&self, provider: &str, result: &Result<T, AuthError>) {
         self.providers.increment(provider, outcome(result));
     }

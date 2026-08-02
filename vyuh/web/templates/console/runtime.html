@@ -8,12 +8,12 @@
       <p>Snapshot of the running system</p>
     </div>
     <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ base_path }}/runtime" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
+      <a class="vyuh-console-icon-button" href="{{ urls.runtime }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
       <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
     </div>
   </header>
 
-  <p class="vyuh-console-captured">Captured from the cached status collector <a href="{{ base_path }}/runtime"><svg><use href="#vyuh-icon-refresh"></use></svg>Refresh now</a></p>
+  <p class="vyuh-console-captured">Captured from the cached status collector <a href="{{ urls.runtime }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Refresh now</a></p>
 
   <div class="vyuh-console-stat-grid is-five">
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-clock"></use></svg></span><div><h3>Uptime</h3><strong>{{ status.site.uptime_seconds }}s</strong><p>Site lifetime</p></div></article>

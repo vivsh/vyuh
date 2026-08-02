@@ -593,6 +593,20 @@ impl AuthConf {
         output
     }
 
+    /// Rejects application provider IDs reserved for framework-owned providers.
+    pub(crate) fn validate_provider_names(&self) -> Result<(), AuthError> {
+        let Some(definition) = self
+            .providers
+            .iter()
+            .find(|definition| definition.name.as_str().starts_with("vyuh-"))
+        else {
+            return Ok(());
+        };
+        Err(AuthError::ReservedProviderId(
+            definition.name.as_str().into(),
+        ))
+    }
+
     pub(crate) fn login_definitions(&self) -> Vec<LoginDefinitionInner> {
         self.login_methods.clone()
     }

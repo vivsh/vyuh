@@ -8,7 +8,7 @@
       <p>Snapshot of registered request and execution paths</p>
     </div>
     <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ base_path }}/operations" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
+      <a class="vyuh-console-icon-button" href="{{ urls.operations }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
       <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
     </div>
   </header>
@@ -21,7 +21,7 @@
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-blue"><svg><use href="#vyuh-icon-gear"></use></svg></span><div><h3>Hidden</h3><strong>No</strong><p>Console paths omitted</p></div></article>
   </div>
 
-  <form class="vyuh-console-toolbar" method="get" action="{{ base_path }}/operations">
+  <form class="vyuh-console-toolbar" method="get" action="{{ urls.operations }}">
     <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search by path, method, or operation..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
     <select name="kind">
       <option value="">All Kinds</option>
@@ -32,7 +32,7 @@
     <input type="search" name="owner" placeholder="Owner" value="{% if query.owner %}{{ query.owner }}{% endif %}">
     <input type="search" name="tag" placeholder="Tag" value="{% if query.tag %}{{ query.tag }}{% endif %}">
     <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
-    <a class="vyuh-console-reset" href="{{ base_path }}/operations"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
+    <a class="vyuh-console-reset" href="{{ urls.operations }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
   </form>
 
   <div class="vyuh-console-data-grid">
@@ -45,12 +45,12 @@
             {% for op in page.items %}
             <tr {% if selected_operation and selected_operation.id == op.id %}aria-selected="true"{% endif %}>
               <td><span class="vyuh-console-badge is-info">{{ op.kind }}</span></td>
-              <td><a class="vyuh-console-row-title" href="{{ base_path }}/operations?selected={{ op.id }}">{% if op.summary %}{{ op.summary }}{% else %}{{ op.name }}{% endif %}</a></td>
+              <td><a class="vyuh-console-row-title" href="{{ urls.operations }}?selected={{ op.id }}">{% if op.summary %}{{ op.summary }}{% else %}{{ op.name }}{% endif %}</a></td>
               <td>{% for method in op.methods %}<span class="vyuh-console-badge is-method">{{ method }}</span>{% endfor %}</td>
               <td><code>{{ op.path }}</code></td>
               <td>{% if op.owner %}{{ op.owner }}{% else %}-{% endif %}</td>
               <td>{{ op.hidden }}</td>
-              <td><a href="{{ base_path }}/operations?selected={{ op.id }}">›</a></td>
+              <td><a href="{{ urls.operations }}?selected={{ op.id }}">›</a></td>
             </tr>
             {% else %}
             <tr><td colspan="7"><div class="vyuh-console-empty"><strong>No operations match this filter.</strong><span>Clear the search or choose another operation kind.</span></div></td></tr>
@@ -60,13 +60,13 @@
       </div>
       <footer class="vyuh-console-pagination">
         <span>Showing {{ page.items | length }} operation records</span>
-        <nav>{% if page.next_cursor %}<a href="{{ base_path }}/operations?cursor={{ page.next_cursor }}">Next</a>{% endif %}</nav>
+        <nav>{% if page.next_cursor %}<a href="{{ urls.operations }}?cursor={{ page.next_cursor }}">Next</a>{% endif %}</nav>
       </footer>
     </article>
 
     <aside class="vyuh-console-inspector">
       {% if selected_operation %}
-      <header><h2>Operation Details</h2><a href="{{ base_path }}/operations" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <header><h2>Operation Details</h2><a href="{{ urls.operations }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
       <span class="vyuh-console-badge is-info">{{ selected_operation.kind }}</span>
       <h3>{{ selected_operation.name }}</h3>
       <p>{% if selected_operation.description %}{{ selected_operation.description }}{% elif selected_operation.summary %}{{ selected_operation.summary }}{% else %}No description registered.{% endif %}</p>

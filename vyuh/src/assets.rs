@@ -12,6 +12,7 @@ use std::{
     convert::Infallible,
     future::Future,
     io::Read,
+    path::PathBuf,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -21,17 +22,7 @@ use tower::Service;
 use crate::embed;
 
 pub const PUBLIC_ASSETS_FOLDER: &str = "public";
-pub const PUBLIC_ASSETS_URL_PREFIX: &str = "/assets";
-
-pub fn public_asset_url(path: &str) -> String {
-    let prefix = PUBLIC_ASSETS_URL_PREFIX.trim_end_matches('/');
-    let path = path.trim_start_matches('/');
-    if path.is_empty() {
-        format!("{prefix}/")
-    } else {
-        format!("{prefix}/{path}")
-    }
-}
+pub const DEFAULT_STATIC_URL: &str = "/static";
 
 // Add these deps (recommended):
 // percent-encoding = "2"
@@ -39,7 +30,197 @@ pub fn public_asset_url(path: &str) -> String {
 // blake3 = "1"
 use blake3::Hasher as Blake3;
 use mime_guess::MimeGuess;
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
+use thiserror::Error;
+use url::Url;
+
+const ASSET_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
+
+/// Reports an invalid relative path passed to [`Assets::url`].
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum AssetUrlError {
+    #[error("invalid asset path '{path}': {reason}")]
+    InvalidPath { path: String, reason: &'static str },
+
+    #[error("invalid static URL '{value}': {reason}")]
+    InvalidStaticUrl { value: String, reason: &'static str },
+}
+
+/// Read-only URL construction for this built site's public assets.
+pub struct Assets<'a> {
+    urls: &'a AssetUrls,
+}
+
+impl<'a> Assets<'a> {
+    pub(crate) const fn new(urls: &'a AssetUrls) -> Self {
+        Self { urls }
+    }
+
+    /// Returns the normalized public static URL, including its trailing slash.
+    pub fn static_url(&self) -> &str {
+        self.urls.static_url()
+    }
+
+    /// Returns a public URL for a path relative to bundle-owned `public/` assets.
+    pub fn url(&self, path: &str) -> Result<String, AssetUrlError> {
+        self.urls.url(path)
+    }
+}
+
+/// Validated static URL state shared by the site, templates, and built-in console.
+#[derive(Clone, Debug)]
+pub(crate) struct AssetUrls {
+    static_url: Arc<str>,
+    mount_path: Arc<str>,
+}
+
+impl AssetUrls {
+    pub(crate) fn parse(value: &str) -> Result<Self, AssetUrlError> {
+        if value.starts_with('/') {
+            return Self::relative(value);
+        }
+        Self::absolute(value)
+    }
+
+    pub(crate) fn default_url() -> Self {
+        Self {
+            static_url: Arc::from("/static/"),
+            mount_path: Arc::from(DEFAULT_STATIC_URL),
+        }
+    }
+
+    pub(crate) fn mount_path(&self) -> &str {
+        &self.mount_path
+    }
+
+    pub(crate) fn output_path(&self) -> PathBuf {
+        PathBuf::from(self.mount_path.trim_start_matches('/'))
+    }
+
+    pub(crate) fn static_url(&self) -> &str {
+        &self.static_url
+    }
+
+    pub(crate) fn url(&self, path: &str) -> Result<String, AssetUrlError> {
+        validate_asset_path(path)?;
+        let encoded = path
+            .split('/')
+            .map(|segment| utf8_percent_encode(segment, ASSET_SEGMENT).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        Ok(format!("{}{encoded}", self.static_url))
+    }
+
+    fn relative(value: &str) -> Result<Self, AssetUrlError> {
+        let mount_path = normalize_mount(value)?;
+        Ok(Self {
+            static_url: Arc::from(format!("{mount_path}/")),
+            mount_path: Arc::from(mount_path),
+        })
+    }
+
+    fn absolute(value: &str) -> Result<Self, AssetUrlError> {
+        let mut url = Url::parse(value).map_err(|_| {
+            invalid_static(
+                value,
+                "must be an absolute HTTP(S) URL or root-relative path",
+            )
+        })?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(invalid_static(value, "must use http or https"));
+        }
+        if url.host().is_none() || !url.username().is_empty() || url.password().is_some() {
+            return Err(invalid_static(
+                value,
+                "must include a host and no user credentials",
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(invalid_static(
+                value,
+                "must not contain a query or fragment",
+            ));
+        }
+        let mount_path = normalize_mount(url.path())?;
+        url.set_path(&mount_path);
+        Ok(Self {
+            static_url: Arc::from(format!("{}/", url.as_str().trim_end_matches('/'))),
+            mount_path: Arc::from(mount_path),
+        })
+    }
+}
+
+fn invalid_static(value: &str, reason: &'static str) -> AssetUrlError {
+    AssetUrlError::InvalidStaticUrl {
+        value: value.to_string(),
+        reason,
+    }
+}
+
+fn normalize_mount(value: &str) -> Result<String, AssetUrlError> {
+    if !value.starts_with('/') || value.contains('?') || value.contains('#') {
+        return Err(invalid_static(
+            value,
+            "must be a root-relative path without query or fragment",
+        ));
+    }
+    let mount = value.trim_end_matches('/');
+    if mount.is_empty() {
+        return Err(invalid_static(value, "must not be the site root"));
+    }
+    validate_segments(mount.trim_start_matches('/'), value, invalid_static)?;
+    Ok(mount.to_string())
+}
+
+fn validate_asset_path(path: &str) -> Result<(), AssetUrlError> {
+    if path.is_empty() || path.starts_with('/') || path.contains('?') || path.contains('#') {
+        return Err(AssetUrlError::InvalidPath {
+            path: path.to_string(),
+            reason: "must be a non-empty relative path without query or fragment",
+        });
+    }
+    validate_segments(path, path, |value, reason| AssetUrlError::InvalidPath {
+        path: value.to_string(),
+        reason,
+    })
+}
+
+fn validate_segments<E>(
+    value: &str,
+    original: &str,
+    invalid: impl Fn(&str, &'static str) -> E,
+) -> Result<(), E> {
+    for segment in value.split('/') {
+        let decoded = percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| invalid(original, "must use valid UTF-8 percent encoding"))?;
+        if segment.is_empty() || decoded.is_empty() || matches!(decoded.as_ref(), "." | "..") {
+            return Err(invalid(
+                original,
+                "must not contain empty or traversal segments",
+            ));
+        }
+        if decoded.contains('/') || decoded.contains('\\') || decoded.contains('\0') {
+            return Err(invalid(
+                original,
+                "must not contain path separators or NUL bytes",
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct AssetServe {
@@ -269,7 +450,8 @@ async fn try_read_file(silos: &SiloSet, path: &str) -> Option<Bytes> {
         reader.read_to_end(&mut buf).ok()?;
         Some(Bytes::from(buf))
     } else {
-        tokio::fs::read(file.path()).await.ok().map(Bytes::from)
+        let path = file.absolute_path()?.to_path_buf();
+        tokio::fs::read(path).await.ok().map(Bytes::from)
     }
 }
 
@@ -322,14 +504,18 @@ fn normalize_prefix(folder: &str) -> String {
     s
 }
 
+/// Removes one complete nested-service path prefix without producing a leading slash.
 fn strip_url_prefix(path: String, prefix: &str) -> Option<String> {
     if prefix.is_empty() {
         return Some(path);
     }
-    path.strip_prefix(prefix)
-        .map(str::to_string)
-        .or_else(|| (path == prefix.trim_end_matches('/')).then(String::new))
-        .or(Some(path))
+    if path == prefix.trim_end_matches('/') {
+        return Some(String::new());
+    }
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return Some(path);
+    };
+    rest.strip_prefix('/').map(str::to_string).or(Some(path))
 }
 
 fn join_prefix(prefix: &str, rel: &str) -> String {
@@ -494,5 +680,98 @@ impl AcceptEncoding {
 
         // Otherwise: treat as not allowed
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use rust_silos::{EmbedEntry, Silo, SiloSet};
+
+    use super::AssetUrls;
+
+    static EMBEDDED_ASSETS: [(&str, EmbedEntry); 1] = [(
+        "public/console/app.js",
+        EmbedEntry {
+            path: "public/console/app.js",
+            contents: b"embedded asset",
+            size: b"embedded asset".len(),
+            modified: 0,
+        },
+    )];
+
+    /// Verifies root-relative static URLs build safe relative asset links.
+    #[test]
+    fn relative_static_urls_build_asset_links() {
+        let urls = AssetUrls::parse("/static");
+        assert!(urls.is_ok());
+        let Some(urls) = urls.ok() else {
+            return;
+        };
+
+        assert_eq!(urls.static_url(), "/static/");
+        assert_eq!(urls.mount_path(), "/static");
+        assert_eq!(
+            urls.url("console/js/app file.js"),
+            Ok("/static/console/js/app%20file.js".to_string())
+        );
+    }
+
+    /// Verifies absolute static URLs preserve their configured CDN origin.
+    #[test]
+    fn absolute_static_urls_build_cdn_links() {
+        let urls = AssetUrls::parse("https://cdn.example.com/static");
+        assert!(urls.is_ok());
+        let Some(urls) = urls.ok() else {
+            return;
+        };
+
+        assert_eq!(urls.static_url(), "https://cdn.example.com/static/");
+        assert_eq!(urls.mount_path(), "/static");
+        assert_eq!(
+            urls.url("blog/app.js"),
+            Ok("https://cdn.example.com/static/blog/app.js".to_string())
+        );
+    }
+
+    /// Verifies static URL and asset path traversal attempts are rejected.
+    #[test]
+    fn static_urls_reject_unsafe_paths() {
+        assert!(AssetUrls::parse("/").is_err());
+        assert!(AssetUrls::parse("/static/../private").is_err());
+        let urls = AssetUrls::default_url();
+        assert!(urls.url("/logo.svg").is_err());
+        assert!(urls.url("console/../logo.svg").is_err());
+        assert!(urls.url("console/app.js?cache=1").is_err());
+    }
+
+    /// Verifies embedded assets use their in-memory reader and dynamic assets use absolute paths.
+    #[tokio::test]
+    async fn reads_embedded_and_dynamic_silo_assets() -> Result<(), io::Error> {
+        let embedded = SiloSet::new(vec![Silo::from_embedded(&EMBEDDED_ASSETS, "embedded")]);
+        assert_eq!(
+            super::try_read_file(&embedded, "public/console/app.js").await,
+            Some(bytes::Bytes::from_static(b"embedded asset"))
+        );
+
+        let root = tempfile::tempdir()?;
+        let file = root.path().join("public/console/app.js");
+        std::fs::create_dir_all(
+            file.parent()
+                .ok_or_else(|| io::Error::other("asset parent"))?,
+        )?;
+        std::fs::write(&file, "dynamic asset")?;
+        let root = root
+            .path()
+            .to_str()
+            .ok_or_else(|| io::Error::other("non-UTF-8 asset root"))?;
+        let dynamic = SiloSet::new(vec![Silo::new(root)]);
+
+        assert_eq!(
+            super::try_read_file(&dynamic, "public/console/app.js").await,
+            Some(bytes::Bytes::from_static(b"dynamic asset"))
+        );
+        Ok(())
     }
 }

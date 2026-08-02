@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::routes::{Path, Query};
 use crate::{
-    Site,
+    OperationId, Site,
     auth::AuthUser,
     console::{
         query::{
@@ -20,50 +20,43 @@ use crate::{
     templates::TemplateError,
 };
 
-pub async fn login(site: Site) -> Result<Html<String>, TemplateError> {
-    let urls = crate::console::view_urls(&site);
-    render(
+/// Renders the console overview page or its safe internal-error page.
+pub async fn overview(site: Site, _user: AuthUser) -> Response {
+    render_or_error(
         &site,
-        "console/login.html",
-        json!({
-            "base_path": urls.base_path,
-            "asset_root": urls.asset_root,
-            "version": env!("CARGO_PKG_VERSION"),
-            "stylesheet_path": urls.stylesheet_path,
-            "login_url": site.routes().reverse_url("console_login", &[]).unwrap_or_else(|| urls.base_path.clone()),
-        }),
+        render_page(
+            &site,
+            "console/overview.html",
+            "overview",
+            "Overview",
+            json!({ "status": status_snapshot(&site) }),
+        ),
     )
 }
 
-pub async fn overview(site: Site, _user: AuthUser) -> Result<Html<String>, TemplateError> {
-    let status = status_snapshot(&site);
-    render_page(
+/// Renders the console runtime-inspection page or its safe internal-error page.
+pub async fn runtime(site: Site, _user: AuthUser) -> Response {
+    render_or_error(
         &site,
-        "console/overview.html",
-        "overview",
-        "Overview",
-        json!({ "status": status }),
+        render_page(
+            &site,
+            "console/runtime.html",
+            "runtime",
+            "Runtime",
+            runtime_context(status_snapshot(&site)),
+        ),
     )
 }
 
-pub async fn runtime(site: Site, _user: AuthUser) -> Result<Html<String>, TemplateError> {
-    let status = status_snapshot(&site);
-    render_page(
-        &site,
-        "console/runtime.html",
-        "runtime",
-        "Runtime",
-        runtime_context(status),
-    )
-}
-
+/// Renders the filtered application operation inspector.
 pub async fn operations(
     site: Site,
+    operation_id: OperationId,
     _user: AuthUser,
     Query(query): Query<OperationQuery>,
-) -> Result<Html<String>, TemplateError> {
+) -> Response {
     let conf = &site.conf().console;
-    let console_bundle_id = console_bundle_id(&site);
+    let console_bundle_id = console_bundle_id(&site, operation_id);
     let (items, next_cursor) = filter_operations(
         site.operations().list(),
         &query,
@@ -79,65 +72,74 @@ pub async fn operations(
         next_cursor,
     };
     let selected_operation = selected_operation(&site, &query, console_bundle_id);
-    render_page(
+    render_or_error(
         &site,
-        "console/operations.html",
-        "operations",
-        "Operations",
-        json!({
-            "page": page,
-            "query": query,
-            "kinds": operation_kinds(),
-            "selected_operation": selected_operation,
-        }),
+        render_page(
+            &site,
+            "console/operations.html",
+            "operations",
+            "Operations",
+            json!({
+                "page": page,
+                "query": query,
+                "kinds": operation_kinds(),
+                "selected_operation": selected_operation,
+            }),
+        ),
     )
 }
 
-pub async fn operation_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
+/// Renders one application operation or a console not-found page.
+pub async fn operation_detail(
+    site: Site,
+    operation_id: OperationId,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Response {
     let Ok(id) = id.parse::<crate::OperationId>() else {
         return not_found(&site);
     };
     let Some(operation) = site
         .operations()
         .find(id)
+        .filter(|operation| {
+            !is_console_operation(operation, console_bundle_id(&site, operation_id))
+        })
         .map(|op| OperationOut::from_operation(op, &site))
     else {
         return not_found(&site);
     };
-    render_page(
+    render_or_error(
         &site,
-        "console/operation_detail.html",
-        "operations",
-        "Operation",
-        json!({ "operation": operation }),
+        render_page(
+            &site,
+            "console/operation_detail.html",
+            "operations",
+            "Operation",
+            json!({ "operation": operation }),
+        ),
     )
-    .into_response()
 }
 
-pub async fn tasks(
-    site: Site,
-    _user: AuthUser,
-    Query(query): Query<TaskQuery>,
-) -> Result<Html<String>, StatusCode> {
+/// Renders the task list or a safe console error page when inspection fails.
+pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) -> Response {
     if !site.console_has_tasks() {
-        return render_tasks(&site, query, empty_tasks())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+        return render_or_error(&site, render_tasks(&site, query, empty_tasks()));
     }
 
     let conf = &site.conf().console;
     let filter = query.to_filter(conf.page_size_default, task_limit_max(conf.page_size_max));
-    let page = site
-        .tasks()
-        .list(filter)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Ok(page) = site.tasks().list(filter).await else {
+        return internal_error(&site);
+    };
     let page = Page {
         items: page.records.iter().map(TaskOut::from).collect::<Vec<_>>(),
         next_cursor: page.next_cursor,
     };
-    render_tasks(&site, query, page).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    render_or_error(&site, render_tasks(&site, query, page))
 }
 
+/// Renders one task or an appropriate console error page.
 pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
     let Ok(id) = uuid::Uuid::parse_str(&id) else {
         return not_found(&site);
@@ -145,48 +147,58 @@ pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) ->
     let record = match site.tasks().get(id).await {
         Ok(Some(record)) => record,
         Ok(None) => return not_found(&site),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => return internal_error(&site),
     };
     let detail = TaskDetailOut::from(&record);
     let payload = match serde_json::to_string_pretty(&detail) {
         Ok(payload) => payload,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => return internal_error(&site),
     };
-    render_page(
+    render_or_error(
         &site,
-        "console/task_detail.html",
-        "tasks",
-        "Task",
-        json!({ "task": detail, "payload": payload }),
+        render_page(
+            &site,
+            "console/task_detail.html",
+            "tasks",
+            "Task",
+            json!({ "task": detail, "payload": payload }),
+        ),
     )
-    .into_response()
 }
 
-pub async fn conf(site: Site, _user: AuthUser) -> Result<Html<String>, StatusCode> {
+/// Renders the redacted console configuration page.
+pub async fn conf(site: Site, _user: AuthUser) -> Response {
     let conf = ConfigOut::from_site(&site);
-    let payload =
-        serde_json::to_string_pretty(&conf).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    render_page(
+    let Ok(payload) = serde_json::to_string_pretty(&conf) else {
+        return internal_error(&site);
+    };
+    render_or_error(
         &site,
-        "console/conf.html",
-        "conf",
-        "Config",
-        json!({ "conf": conf, "payload": payload }),
+        render_page(
+            &site,
+            "console/conf.html",
+            "conf",
+            "Config",
+            json!({ "conf": conf, "payload": payload }),
+        ),
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-pub async fn openapi(site: Site, _user: AuthUser) -> Result<Html<String>, StatusCode> {
-    render_page(
+/// Renders the application OpenAPI console page.
+pub async fn openapi(site: Site, _user: AuthUser) -> Response {
+    render_or_error(
         &site,
-        "console/openapi.html",
-        "openapi",
-        "OpenAPI",
-        json!({}),
+        render_page(
+            &site,
+            "console/openapi.html",
+            "openapi",
+            "OpenAPI",
+            json!({}),
+        ),
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// Renders the console-specific not-found page.
 pub async fn not_found_page(site: Site, _user: AuthUser) -> Response {
     not_found(&site)
 }
@@ -200,11 +212,26 @@ fn render_page(
 ) -> Result<Html<String>, TemplateError> {
     context["active"] = json!(active);
     context["title"] = json!(title);
-    let urls = crate::console::view_urls(site);
-    context["base_path"] = json!(urls.base_path);
-    context["asset_root"] = json!(urls.asset_root);
+    let urls = site
+        .console_urls()
+        .ok_or_else(|| TemplateError::NotFound("console runtime".into()))?;
+    context["urls"] = json!({
+        "home": &urls.home,
+        "overview": &urls.overview,
+        "runtime": &urls.runtime,
+        "tasks": &urls.tasks,
+        "operations": &urls.operations,
+        "conf": &urls.conf,
+        "openapi": &urls.openapi,
+        "api_openapi": &urls.api_openapi,
+    });
+    context["assets"] = json!({
+        "favicon": &urls.favicon_path,
+        "logo": &urls.logo_path,
+        "script": &urls.script_path,
+    });
     context["version"] = json!(env!("CARGO_PKG_VERSION"));
-    context["stylesheet_path"] = json!(urls.stylesheet_path);
+    context["stylesheet_path"] = json!(&urls.stylesheet_path);
     render(site, template, context)
 }
 
@@ -296,13 +323,46 @@ fn not_found(site: &Site) -> Response {
     )
 }
 
+/// Converts a console template failure into the console's safe HTML error response.
+fn render_or_error(site: &Site, rendered: Result<Html<String>, TemplateError>) -> Response {
+    match rendered {
+        Ok(page) => page.into_response(),
+        Err(_) => internal_error(site),
+    }
+}
+
+/// Returns the generic console page used when an internal operation fails.
+fn internal_error(site: &Site) -> Response {
+    error_page(
+        site,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Internal Server Error",
+        "The console could not complete this request.",
+    )
+}
+
 fn error_page(site: &Site, status: StatusCode, title: &str, message: &str) -> Response {
-    let urls = crate::console::view_urls(site);
+    let Some(urls) = site.console_urls() else {
+        return (status, title.to_string()).into_response();
+    };
     let context = json!({
-        "base_path": urls.base_path,
-        "asset_root": urls.asset_root,
+        "urls": {
+            "home": &urls.home,
+            "overview": &urls.overview,
+            "runtime": &urls.runtime,
+            "tasks": &urls.tasks,
+            "operations": &urls.operations,
+            "conf": &urls.conf,
+            "openapi": &urls.openapi,
+            "api_openapi": &urls.api_openapi,
+        },
+        "assets": {
+            "favicon": &urls.favicon_path,
+            "logo": &urls.logo_path,
+            "script": &urls.script_path,
+        },
         "version": env!("CARGO_PKG_VERSION"),
-        "stylesheet_path": urls.stylesheet_path,
+        "stylesheet_path": &urls.stylesheet_path,
         "status": status.as_u16(),
         "title": title,
         "message": message,
@@ -406,14 +466,22 @@ fn selected_operation(
 ) -> Option<OperationView> {
     let id = query.selected.as_deref()?;
     let id = id.parse::<crate::OperationId>().ok()?;
-    site.operations()
-        .find(id)
-        .filter(|op| !is_console_operation(op, console_bundle_id))
-        .map(|op| OperationView::from_operation(op, site))
+    operation_view(site, id, console_bundle_id)
 }
 
-fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {
-    site.console_bundle_id()
+fn console_bundle_id(site: &Site, operation_id: OperationId) -> Option<uuid::Uuid> {
+    site.operations().find(operation_id)?.bundle_id
+}
+
+fn operation_view(
+    site: &Site,
+    id: OperationId,
+    console_bundle_id: Option<uuid::Uuid>,
+) -> Option<OperationView> {
+    site.operations()
+        .find(id)
+        .filter(|operation| !is_console_operation(operation, console_bundle_id))
+        .map(|operation| OperationView::from_operation(operation, site))
 }
 
 fn empty_tasks() -> Page<TaskOut> {
@@ -431,4 +499,36 @@ fn operation_kinds() -> [&'static str; 9] {
 
 fn task_statuses() -> [&'static str; 5] {
     ["pending", "running", "suspended", "succeeded", "failed"]
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::render_or_error;
+    use crate::{Site, SiteConf, bundles, console::ConsoleConf, templates::TemplateError};
+
+    /// Verifies failed console page rendering produces the safe console HTML error page.
+    #[tokio::test]
+    async fn render_failure_uses_safe_console_error_page() {
+        let site = Site::build(
+            SiteConf::default()
+                .log_init(false)
+                .console(ConsoleConf::default().enabled(true)),
+            bundles::bundle([]),
+        )
+        .await
+        .expect("console site should build");
+        let response = render_or_error(&site, Err(TemplateError::NotFound("missing".into())));
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error page body should be readable");
+        let body = String::from_utf8_lossy(&body);
+
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("Internal Server Error"));
+        assert!(body.contains("The console could not complete this request."));
+        assert!(!body.contains("missing"));
+    }
 }

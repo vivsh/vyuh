@@ -80,7 +80,7 @@ use vyuh::prelude::*;
 
 # async fn export(site: Site) -> Result<(), Error> {
 site.collectors()
-    .output("dist/assets")
+    .output("dist/static")
     .collect_assets(Some("css/**".to_string()))
     .await
     .map_err(Error::other)?;
@@ -96,13 +96,13 @@ Asset globs match paths after `public/` is stripped, such as `css/app.css` or
 Copy only public assets:
 
 ```sh
-cargo run -- collect_assets --output dist/assets
+cargo run -- collect_assets --output dist/static
 ```
 
 Copy only matching public assets:
 
 ```sh
-cargo run -- collect_assets --output dist/assets --glob 'css/**'
+cargo run -- collect_assets --output dist/static --glob 'css/**'
 ```
 
 Collect all static page URLs and public assets:
@@ -110,6 +110,10 @@ Collect all static page URLs and public assets:
 ```sh
 cargo run -- collect_pages --output dist
 ```
+
+`collect_pages` derives the asset directory from `SiteConf::static_url(...)`.
+The default `/static` writes `dist/static/**`; a CDN `/static` base also writes
+`dist/static/**`.
 
 Update only matching pages:
 

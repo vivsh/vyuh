@@ -101,6 +101,10 @@ fn default_secret_key() -> String {
     )
 }
 
+fn default_static_url() -> String {
+    crate::assets::DEFAULT_STATIC_URL.to_string()
+}
+
 /// Builds the common error for a required production setting.
 fn production_required(field: &str) -> ConfError {
     ConfError::InvalidValue {
@@ -120,6 +124,10 @@ pub struct SiteConf {
     pub host: String,
 
     pub port: u16,
+
+    /// Public URL base used for bundle-owned `public/**` assets.
+    #[serde(default = "default_static_url")]
+    pub static_url: String,
 
     pub project_dir: String,
 
@@ -181,6 +189,7 @@ impl fmt::Debug for SiteConf {
             .field("deployment", &self.deployment)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("static_url", &self.static_url)
             .field("project_dir", &self.project_dir)
             .field("secret_key", &"<redacted>")
             .field("secret_key_fallbacks", &self.secret_key_fallbacks.len())
@@ -198,6 +207,7 @@ impl Default for SiteConf {
             deployment: DeploymentMode::Development,
             host: "localhost".to_string(),
             port: 8080,
+            static_url: default_static_url(),
             project_dir: project_dir().as_os_str().to_string_lossy().to_string(),
             database: Default::default(),
             secret_key,
@@ -287,6 +297,12 @@ impl SiteConf {
 
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Sets the root-relative or absolute public URL used for bundled assets.
+    pub fn static_url(mut self, static_url: impl Into<String>) -> Self {
+        self.static_url = static_url.into();
         self
     }
 
@@ -402,8 +418,10 @@ impl SiteConf {
         let mut errors = Vec::new();
 
         self.validate_required(&mut errors);
+        self.validate_static_url(&mut errors);
         self.validate_database(&mut errors);
         self.validate_paths(&mut errors);
+        self.validate_auth(&mut errors);
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
         self.mail.validate(&mut errors);
@@ -451,6 +469,26 @@ impl SiteConf {
             errors.push(ConfError::RequiredField {
                 field: "host".into(),
                 reason: "cannot be empty".into(),
+            });
+        }
+    }
+
+    fn validate_auth(&self, errors: &mut Vec<ConfError>) {
+        if let Err(error) = self.auth.validate_provider_names() {
+            errors.push(ConfError::InvalidValue {
+                field: "auth.providers".into(),
+                reason: error.to_string(),
+                expected: Some("an application provider ID without the 'vyuh-' prefix".into()),
+            });
+        }
+    }
+
+    fn validate_static_url(&self, errors: &mut Vec<ConfError>) {
+        if let Err(error) = crate::assets::AssetUrls::parse(&self.static_url) {
+            errors.push(ConfError::InvalidValue {
+                field: "static_url".into(),
+                reason: error.to_string(),
+                expected: Some("a root-relative path or absolute HTTP(S) URL".into()),
             });
         }
     }
@@ -599,6 +637,7 @@ fn apply_env_patches(conf: &mut SiteConf, prefix: Option<&str>) -> Result<(), Co
                 conf.secret_key_fallbacks = parse_secret_key_fallbacks(&value)?;
             }
             "host" => conf.host = value,
+            "static_url" => conf.static_url = value,
             "port" => match value.parse::<u16>() {
                 Ok(p) => conf.port = p,
                 Err(_) => {

@@ -36,6 +36,7 @@ pub struct ServeArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct HealthArgs {}
 
+/// Arguments accepted by the short-lived built-in console login credential command.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ConsoleTokenArgs {}
 
@@ -118,7 +119,7 @@ pub struct InspectDbArgs {
 }
 
 fn default_collect_assets_output() -> PathBuf {
-    PathBuf::from("dist/assets")
+    PathBuf::from("dist/static")
 }
 
 fn default_collect_pages_output() -> PathBuf {
@@ -261,6 +262,23 @@ fn register_migration_commands(registry: &mut CommandRegistry) -> Result<(), Com
     Ok(())
 }
 
+/// Prints one short-lived credential accepted by the built-in console login page.
+async fn console_token_command(
+    SiteRef(site): SiteRef,
+    _args: Data<ConsoleTokenArgs>,
+) -> Result<(), Error> {
+    if !site.conf().console.enabled {
+        return Err(Error::invalid("console is not enabled"));
+    }
+    let login = site
+        .console()
+        .login_token(crate::auth::AuthUser::new("vyuh-console-command"))
+        .await
+        .map_err(Error::other)?;
+    println!("{}", login.credentials().access());
+    Ok(())
+}
+
 async fn show_config_command(
     SiteRef(site): SiteRef,
     Data(args): Data<ShowConfigArgs>,
@@ -299,26 +317,6 @@ async fn health_command(SiteRef(site): SiteRef, _args: Data<HealthArgs>) -> Resu
     #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
     println!("database: not configured");
     println!("uptime_seconds: {}", uptime);
-    Ok(())
-}
-
-async fn console_token_command(
-    SiteRef(site): SiteRef,
-    _args: Data<ConsoleTokenArgs>,
-) -> Result<(), Error> {
-    if !site.conf().console.enabled {
-        return Err(Error::invalid("console is not enabled"));
-    }
-    use crate::auth::AuthUser;
-    use crate::console::auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, ConsoleRole};
-
-    let user = AuthUser::new("console-token").with_role(ConsoleRole::Admin);
-    let token = site
-        .auth()
-        .issue_raw(CONSOLE_LOGIN, user, &[CONSOLE_AUDIENCE], None)
-        .await
-        .map_err(Error::other)?;
-    println!("{token}");
     Ok(())
 }
 

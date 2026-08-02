@@ -10,7 +10,7 @@ const UNKNOWN_MFA: LoginMethod<PasswordCredentials, MfaResponse> = LoginMethod::
 /// Verifies provider selectors are infallible and login reports lookup failures.
 #[tokio::test]
 async fn provider_login_errors_are_terminal() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let unknown = site
@@ -31,7 +31,7 @@ async fn provider_login_errors_are_terminal() -> Result<(), AuthError> {
 /// Verifies refresh and logout report provider lookup failures at their terminals.
 #[tokio::test]
 async fn provider_request_errors_are_terminal() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let parts = empty_parts();
@@ -54,7 +54,7 @@ async fn provider_request_errors_are_terminal() -> Result<(), AuthError> {
 async fn flow_provider_errors_are_terminal() -> Result<(), AuthError> {
     let method = PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
     let auth = AuthConf::default().method(PASSWORD_MFA, method);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let selected = site.auth().using(UNKNOWN_PROVIDER).via(PASSWORD_MFA);
@@ -75,7 +75,7 @@ async fn flow_provider_errors_are_terminal() -> Result<(), AuthError> {
 /// Verifies unknown one-step and flow methods fail only at their terminal operations.
 #[tokio::test]
 async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -109,7 +109,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
 #[tokio::test]
 async fn default_refresh_does_not_probe_other_providers() -> Result<(), AuthError> {
     let auth = AuthConf::empty().provider(ALTERNATE, TokenProvider::new(Jwt::hs256_site_secret()));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -143,7 +143,7 @@ async fn default_logout_does_not_touch_other_providers() -> Result<(), AuthError
         .access(TokenConf::cookie("alternate_access"))
         .refresh(TokenConf::cookie("alternate_refresh"));
     let auth = AuthConf::default().provider(ALTERNATE, provider);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let parts = alternate_cookie_parts(&site).await?;
@@ -180,7 +180,7 @@ async fn default_logout_does_not_touch_other_providers() -> Result<(), AuthError
 /// Verifies absent logout is idempotent and its default response is successful JSON.
 #[tokio::test]
 async fn logout_response_is_response_ready() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let response = site.auth().logout(&empty_parts()).await?.into_response();
@@ -195,7 +195,7 @@ async fn logout_response_is_response_ready() -> Result<(), AuthError> {
 /// Verifies a malformed presented credential still fails selected-provider logout.
 #[tokio::test]
 async fn malformed_logout_credential_fails() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let result = site.auth().logout(&bearer_parts("malformed")?).await;

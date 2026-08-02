@@ -2,7 +2,8 @@
 
 Vyuh console is a built-in operational UI and JSON API for inspection. It is
 enabled by default in debug builds at `/console`, disabled by default in release
-builds, isolated from application auth, and read-only in this pass.
+builds, isolated from application credentials by a console-only audience and
+cookie, and read-only in this pass.
 
 Use it for inspecting registered operations, task records, runtime status,
 OpenAPI for application routes, and redacted runtime configuration. Do not use
@@ -14,9 +15,11 @@ it as an application admin framework or a command/task execution surface.
   `ConsoleConf.enabled` is true.
 - `ConsoleConf::default()` enables the console in debug builds and disables it
   in release builds.
-- Console roles are separate from application roles.
-- Console auth uses a console-only signed token cookie. Normal app JWTs do not grant
-  console access.
+- Console auth is two private JWT providers built through the same Vyuh
+  authentication runtime and provider-registration path as application providers.
+- Console credentials use a console-only audience and cookie selector. Normal
+  app credentials do not grant console access, and console credentials cannot
+  satisfy application audiences.
 - The HTML UI is server-rendered with Minijinja and progressively enhanced with
   HTMX. JSON APIs remain available under `/api`.
 
@@ -47,39 +50,50 @@ Defaults:
 | `page_size_max` | `250` |
 | `status_cache_ttl_seconds` | `5` |
 
-Generate a short-lived login token from the configured application:
+Run `vyuh console-token` to print a short-lived login credential, then open the
+console login page. The credential is accepted only at `GET`/`POST /login` and
+is exchanged for the normal console cookie. Browser requests for console HTML
+pages redirect there on `401`; console JSON APIs keep their normal JSON `401`.
+The login credential is stateless and can be reused until it expires.
 
-```text
-your-app console-token
+Applications can create the same short-lived credential when they need to hand
+off a user to the console:
+
+```rust
+let login = site.console().login_token(user).await?;
+let token = login.credentials().access();
 ```
 
-The command prints only the token, never a public URL. Open the deployment's
-known console login page and enter it. Login tokens are signed, stateless bearer
-credentials valid for 90 seconds. A successful login creates a signed,
-HTTP-only cookie valid for 90 minutes and bound to the resolved client IP.
+The login page accepts that value in its form or as `?token=...` for a
+short-lived handoff URL. Query credentials can appear in browser history, proxy
+logs, and referrers, so use the form when that exposure is unacceptable.
 
-The console always requires this login flow, including debug builds. It binds
-the cookie to a single valid `X-Forwarded-For` address when supplied, otherwise
-to the TCP peer address. Vyuh does not infer or print a public URL.
+Applications may instead decide who may access the console through their own
+authentication flow, then write the standard login response directly:
+
+```rust
+async fn open_console(
+    site: Site,
+    user: AuthUser,
+    client_ip: ClientIp,
+) -> Result<Response, Error> {
+    let login = site.console().login(user, client_ip).await?;
+    let mut response = Redirect::to("/console").into_response();
+    login.write(&mut response);
+    Ok(response)
+}
+```
+
+The private login provider uses the site-secret JWT key ring, an
+`x-vyuh-console-login` header, and a 90-second access token. The private browser
+provider uses an HTTP-only cookie valid for 90 minutes and the resolved client
+IP as credential binding. It binds to a single valid `X-Forwarded-For` address
+when supplied, otherwise to the TCP peer address. Neither provider has a refresh
+credential.
 
 Login also creates a readable CSRF cookie. Unsafe console API requests must copy
 that value into `X-CSRF-Token`; the bundled console JavaScript does this
 automatically.
-
-## Roles
-
-Console roles live under `vyuh::console`:
-
-```rust
-use vyuh::console::ConsoleRole;
-```
-
-The roles are `Viewer`, `Operator`, and `Admin`. In this read-only pass,
-`Viewer` can access all console APIs. `Operator` and `Admin` are reserved for
-future guarded operations.
-
-These roles are specific to the console provider. They do not affect
-application providers, `AuthUser` role masks, or application authorization.
 
 ## Endpoints
 
@@ -87,9 +101,8 @@ All endpoints are mounted under `ConsoleConf.path`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET`, `POST` | `/login` | render or submit the console token login exchange |
 | `GET` | `/` | canonical status overview page |
-| `POST` | `/login` | exchange a 90-second login token for a 90-minute console cookie |
-| `GET` | `/login-page` | show the console token form |
 | `GET` | `/overview` | status overview page |
 | `GET` | `/runtime` | formatted site, process, and system runtime page |
 | `GET` | `/operations` | operation listing page with in-page inspector |
@@ -116,16 +129,22 @@ cancel tasks, fire signals, or control services.
 Console pages use the package-owned `vyuh/web/` assets:
 
 ```text
-/assets/css/vyuh.css
-/assets/css/vyuh.<hash>.css
-/assets/img/vyuh-logo-transparent.png
-/assets/js/console.js
+/static/css/vyuh.css
+/static/css/vyuh.<hash>.css
+/static/console/img/vyuh-logo-transparent.png
+/static/console/js/console.js
 ```
 
-Console asset URLs follow the parent path of `ConsoleConf.path`. A console at
-`/console` uses `/assets/**`; a console mounted at `/dynrs/console` uses
-`/dynrs/assets/**`. Configure the reverse proxy to expose that sibling asset
-path through the same Vyuh deployment.
+Console assets use the site's shared `SiteConf::static_url(...)` configuration.
+Changing `ConsoleConf.path` never changes asset URLs: a console at
+`/dynrs/console` still uses `/static/**` by default, or the configured CDN URL.
+The console's CSS, JavaScript, favicon, and logo are bundle-owned assets. HTMX
+and ReDoc remain intentionally hosted by their upstream CDNs for now, so they
+are the only console frontend dependencies outside `static_url`.
+
+Console links are resolved from the finalized site route registry during site
+construction. A missing framework console route is therefore a build error,
+not a silently synthesized fallback URL.
 
 The HTML templates live under `vyuh/web/templates/console/**` and are loaded
 through the same bundle asset template path used by application templates.

@@ -114,8 +114,11 @@ pub struct Bundle {
 }
 
 impl Bundle {
-    /// Creates a new empty bundle.
-    pub fn new() -> Self {
+    /// Creates a new empty bundle with a framework-generated immutable identity.
+    ///
+    /// This constructor is intentionally private. Do not add a caller-supplied
+    /// bundle ID: macro and direct composition must both create a fresh identity.
+    fn new() -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
             audience: None,
@@ -181,13 +184,6 @@ impl Bundle {
                 operation.audience = Some(audience.clone());
             }
         }
-    }
-
-    pub(crate) fn with_owning_bundle_id(mut self) -> Self {
-        for op in self.ops.values_mut() {
-            op.set_bundle_id(self.id);
-        }
-        self
     }
 
     /// Assigns a human-readable label to this bundle, for example in logging or diagnostics.
@@ -434,7 +430,7 @@ impl Default for Bundle {
     }
 }
 
-fn validate_route_path(path: &str) -> Result<(), String> {
+pub(crate) fn validate_route_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("path cannot be empty".to_string());
     }
@@ -444,10 +440,14 @@ fn validate_route_path(path: &str) -> Result<(), String> {
     if path.contains("//") {
         return Err("path cannot contain '//'".to_string());
     }
+    if path.contains(['?', '#']) {
+        return Err("path cannot contain a query or fragment".to_string());
+    }
     Ok(())
 }
 
-fn validate_route_prefix(path: &str) -> Result<(), String> {
+/// Validates a non-root route prefix shared by bundle and site configuration.
+pub(crate) fn validate_route_prefix(path: &str) -> Result<(), String> {
     validate_route_path(path)?;
     if path == "/" {
         return Err("prefix cannot be '/'".to_string());
@@ -567,6 +567,15 @@ mod tests {
             .validate_route_operation(&route_op("bad", "bad", routes::Methods::GET))
             .unwrap_err();
         assert!(matches!(err, BundleError::InvalidRoutePath { .. }));
+    }
+
+    /// Verifies route paths and prefixes reject URL query and fragment syntax.
+    #[test]
+    fn rejects_query_and_fragment_route_syntax() {
+        for path in ["/users?active=true", "/users#details"] {
+            assert!(validate_route_path(path).is_err());
+            assert!(validate_route_prefix(path).is_err());
+        }
     }
 
     #[test]

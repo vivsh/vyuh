@@ -5,7 +5,7 @@ use super::*;
 async fn site_secret_fallback_verifies_old_token() -> Result<(), AuthError> {
     let old = "old-auth-secret-minimum-32-characters";
     let current = "new-auth-secret-minimum-32-characters";
-    let old_site = Site::build(config().secret_key(old), bundles::Bundle::new())
+    let old_site = Site::build(config().secret_key(old), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = old_site
@@ -34,7 +34,7 @@ async fn jwt_rs256_rotation_accepts_retired_key() -> Result<(), AuthError> {
     .key_id("old");
     let old_auth =
         AuthConf::empty().provider(ROTATING, TokenProvider::new(old_codec).without_refresh());
-    let old_site = Site::build(config().auth(old_auth), bundles::Bundle::new())
+    let old_site = Site::build(config().auth(old_auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = old_site
@@ -75,7 +75,7 @@ async fn jwt_rs256_rotation_rejects_unknown_key_id() -> Result<(), AuthError> {
         ROTATING,
         TokenProvider::new(unknown_codec).without_refresh(),
     );
-    let issuer = Site::build(config().auth(issuer_auth), bundles::Bundle::new())
+    let issuer = Site::build(config().auth(issuer_auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = issuer

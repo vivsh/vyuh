@@ -194,7 +194,8 @@ let operation_id = site.routes().resolve_url(HttpMethod::GET, "/notes/42");
 
 `resolve_url` is method-aware, ignores query strings and fragments, and returns
 the canonical `OperationId`. Registered slash aliases resolve to the same
-operation.
+operation. It is intended for application/runtime lookup and diagnostics;
+Vyuh route handlers already receive their own canonical ID directly.
 
 Every Vyuh route may extract its own ID directly or through Axum's extension:
 

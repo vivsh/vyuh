@@ -8,7 +8,7 @@
       <p>Complete redacted SiteConf for this Vyuh application</p>
     </div>
     <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ base_path }}/conf" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
+      <a class="vyuh-console-icon-button" href="{{ urls.conf }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
       <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
     </div>
   </header>
@@ -39,7 +39,7 @@
     <article class="vyuh-console-card">
       <header><h2>Actions</h2></header>
       <div class="vyuh-console-action-list is-flat">
-        <a href="{{ base_path }}/openapi"><svg><use href="#vyuh-icon-external"></use></svg><span>View OpenAPI</span></a>
+        <a href="{{ urls.openapi }}"><svg><use href="#vyuh-icon-external"></use></svg><span>View OpenAPI</span></a>
       </div>
     </article>
 
@@ -51,7 +51,7 @@
     <article class="vyuh-console-card">
       <header><h2>Configuration Sections</h2></header>
       <div class="vyuh-console-section-list">
-        <button type="button"><span>site</span><b>5</b></button>
+        <button type="button"><span>site</span><b>6</b></button>
         <button type="button"><span>database</span><b>4</b></button>
         <button type="button"><span>auth</span><b>8</b></button>
         <button type="button"><span>console</span><b>7</b></button>
@@ -70,6 +70,7 @@
       <header><h2>Site</h2></header>
       <dl class="vyuh-console-kv">
         <div><dt>Address</dt><dd>{{ conf.site.host }}:{{ conf.site.port }}</dd></div>
+        <div><dt>Static URL</dt><dd>{{ conf.site.static_url }}</dd></div>
         <div><dt>Project Dir</dt><dd>{{ conf.site.project_dir }}</dd></div>
         <div><dt>Timezone</dt><dd>{{ conf.site.timezone }}</dd></div>
         <div><dt>Log Init</dt><dd>{{ conf.site.log_init }}</dd></div>

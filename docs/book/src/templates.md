@@ -135,7 +135,8 @@ Generated at {{ now()|format_datetime }}
 
 Helpers:
 
-- `asset(path)` returns `/assets/<path>`.
+- `STATIC_URL` is the normalized configured static base.
+- `asset(path)` resolves a safe path relative to `public/` through that base.
 - `url_for(name, params={})` reverses a named route and fails rendering if the
   route cannot be resolved.
 - `now()` returns the current UTC datetime.

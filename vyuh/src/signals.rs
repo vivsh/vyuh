@@ -300,7 +300,7 @@ mod tests {
         registry.register(signaller);
         let site = crate::Site::build(
             crate::SiteConf::default().log_init(false),
-            crate::bundles::Bundle::new(),
+            crate::bundles::bundle([]),
         )
         .await
         .map_err(|error| error.to_string())?;

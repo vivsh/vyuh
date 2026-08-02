@@ -108,7 +108,7 @@ pub(crate) async fn collect_assets_reserved(
             safe_join(&options.output, &rel).map_err(|()| StaticAssetError::OutputEscape {
                 path: rel.to_string_lossy().to_string(),
             })?;
-        let conflict_path = reserved_base.join("assets").join(&rel);
+        let conflict_path = reserved_base.join(&rel);
         if reserved.contains(&conflict_path) {
             return Err(StaticAssetError::PageConflict {
                 path: conflict_path.clone(),

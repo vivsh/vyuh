@@ -8,17 +8,17 @@
       <p>Background jobs and their current status</p>
     </div>
     <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ base_path }}/tasks" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
+      <a class="vyuh-console-icon-button" href="{{ urls.tasks }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
       <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
     </div>
   </header>
 
   <nav class="vyuh-console-tabs" aria-label="Task sections">
-    <a href="{{ base_path }}/tasks" aria-current="page">Overview</a>
-    <a href="{{ base_path }}/tasks?status=running">Running</a>
-    <a href="{{ base_path }}/tasks?status=pending">Queued</a>
-    <a href="{{ base_path }}/tasks?status=failed">Failed</a>
-    <a href="{{ base_path }}/tasks?status=succeeded">Completed</a>
+    <a href="{{ urls.tasks }}" aria-current="page">Overview</a>
+    <a href="{{ urls.tasks }}?status=running">Running</a>
+    <a href="{{ urls.tasks }}?status=pending">Queued</a>
+    <a href="{{ urls.tasks }}?status=failed">Failed</a>
+    <a href="{{ urls.tasks }}?status=succeeded">Completed</a>
   </nav>
 
   <div class="vyuh-console-stat-grid is-five">
@@ -29,7 +29,7 @@
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-red"><svg><use href="#vyuh-icon-x"></use></svg></span><div><h3>Failed</h3><strong>{{ task_counts.failed }}</strong><p>Needs attention</p></div></article>
   </div>
 
-  <form class="vyuh-console-toolbar" method="get" action="{{ base_path }}/tasks">
+  <form class="vyuh-console-toolbar" method="get" action="{{ urls.tasks }}">
     <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, identity, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
     <select name="status">
       <option value="">All Status</option>
@@ -47,7 +47,7 @@
       {% endfor %}
     </select>
     <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
-    <a class="vyuh-console-reset" href="{{ base_path }}/tasks"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
+    <a class="vyuh-console-reset" href="{{ urls.tasks }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
   </form>
 
   <div class="vyuh-console-data-grid">
@@ -60,13 +60,13 @@
             {% for task in page.items %}
             <tr {% if selected_task and selected_task.id == task.id %}aria-selected="true"{% endif %}>
               <td><span class="vyuh-console-badge is-{{ task.status }}">{{ task.status }}</span></td>
-              <td><a class="vyuh-console-row-title" href="{{ base_path }}/tasks?selected={{ task.id }}">{{ task.name }}</a></td>
+              <td><a class="vyuh-console-row-title" href="{{ urls.tasks }}?selected={{ task.id }}">{{ task.name }}</a></td>
               <td>{% if task.identity %}{{ task.identity }}{% else %}-{% endif %}</td>
               <td>{{ task.attempts }}</td>
               <td>{{ task.priority }}</td>
               <td><time datetime="{{ task.created_at }}">{{ task.created_at_display }}</time></td>
               <td><time datetime="{{ task.updated_at }}">{{ task.updated_at_display }}</time></td>
-              <td><a href="{{ base_path }}/tasks?selected={{ task.id }}">›</a></td>
+              <td><a href="{{ urls.tasks }}?selected={{ task.id }}">›</a></td>
             </tr>
             {% else %}
             <tr><td colspan="8"><div class="vyuh-console-empty"><strong>No task records yet.</strong><span>Registered task handlers and durable task records will appear here when this site uses Vyuh tasks.</span></div></td></tr>
@@ -76,13 +76,13 @@
       </div>
       <footer class="vyuh-console-pagination">
         <span>Showing {{ page.items | length }} task records</span>
-        <nav>{% if page.next_cursor %}<a href="{{ base_path }}/tasks?cursor={{ page.next_cursor }}&limit={{ task_limit }}">Next</a>{% endif %}</nav>
+        <nav>{% if page.next_cursor %}<a href="{{ urls.tasks }}?cursor={{ page.next_cursor }}&limit={{ task_limit }}">Next</a>{% endif %}</nav>
       </footer>
     </article>
 
     <aside class="vyuh-console-inspector">
       {% if selected_task %}
-      <header><h2>Task Details</h2><a href="{{ base_path }}/tasks" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <header><h2>Task Details</h2><a href="{{ urls.tasks }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
       <span class="vyuh-console-badge is-{{ selected_task.status }}">{{ selected_task.status }}</span>
       <h3>{{ selected_task.name }}</h3>
       <p>{{ selected_task.id }}</p>

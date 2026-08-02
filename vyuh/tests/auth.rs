@@ -315,7 +315,7 @@ impl OidcUserMapper for TestOidcMapper {
 #[tokio::test]
 async fn password_login_issues_default_credentials() -> Result<(), AuthError> {
     let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(TestPasswords));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -340,7 +340,7 @@ async fn password_login_uses_explicit_credential_provider() -> Result<(), AuthEr
     let auth = AuthConf::empty()
         .provider(ALTERNATE, provider)
         .method(PASSWORD, PasswordLogin::new(TestPasswords));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -362,7 +362,7 @@ async fn login_method_type_mismatch_is_rejected() -> Result<(), AuthError> {
     const WRONG_PASSWORD: LoginMethod<BasicCredentials> = LoginMethod::new("password");
 
     let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(TestPasswords));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let error = site
@@ -385,7 +385,7 @@ async fn duplicate_login_methods_are_rejected() -> Result<(), AuthError> {
     let auth = AuthConf::default()
         .method(PASSWORD, PasswordLogin::new(TestPasswords))
         .method(PASSWORD, PasswordLogin::new(TestPasswords));
-    let error = Site::build(config().auth(auth), bundles::Bundle::new())
+    let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("duplicate login method was accepted".into()))?;
@@ -477,7 +477,7 @@ async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
 async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
     let method = BasicLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
     let auth = AuthConf::default().method(BASIC_MFA, method);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
@@ -505,7 +505,7 @@ async fn mfa_state_store_rejects_replay() -> Result<(), AuthError> {
     let auth = AuthConf::default()
         .method(PASSWORD_MFA, method)
         .login_state_store(ReplayStore::default());
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let selected = site.auth().via(PASSWORD_MFA);
@@ -538,7 +538,7 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
     let auth = AuthConf::default()
         .provider(ALTERNATE, provider)
         .method(PASSWORD_MFA, method);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
@@ -573,7 +573,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
         config()
             .secret_key("old-login-secret-at-least-32-characters")
             .auth(auth),
-        bundles::Bundle::new(),
+        bundles::Bundle::default(),
     )
     .await
     .map_err(auth_error)?;
@@ -595,7 +595,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
             .secret_key("new-login-secret-at-least-32-characters")
             .secret_key_fallbacks(["old-login-secret-at-least-32-characters"])
             .auth(rotated_auth),
-        bundles::Bundle::new(),
+        bundles::Bundle::default(),
     )
     .await
     .map_err(auth_error)?;
@@ -629,7 +629,7 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
         .scopes(["email", "profile"])
         .mapper(TestOidcMapper);
     let auth = AuthConf::default().method(OIDC, login);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
@@ -669,7 +669,7 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         .redirect_uri(format!("{issuer}/callback"))
         .mapper(TestOidcMapper);
     let auth = AuthConf::default().method(OIDC, login);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let selected = site.auth().via(OIDC);
@@ -712,7 +712,7 @@ async fn oidc_rejects_insecure_remote_endpoints() -> Result<(), AuthError> {
         .redirect_uri("http://app.example.com/callback")
         .mapper(TestOidcMapper);
     let auth = AuthConf::default().method(OIDC, login);
-    let error = Site::build(config().auth(auth), bundles::Bundle::new())
+    let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("insecure OIDC config was accepted".into()))?;
@@ -734,7 +734,7 @@ async fn oidc_discovery_outage_is_provider_unavailable() -> Result<(), AuthError
         .redirect_uri(format!("{issuer}/callback"))
         .mapper(TestOidcMapper);
     let auth = AuthConf::default().method(OIDC, login);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let error = site

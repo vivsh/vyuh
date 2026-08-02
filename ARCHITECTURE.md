@@ -65,8 +65,9 @@ The `vyuh` crate is organized around these subsystems:
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
   operations and types.
 - `assets`, `templates`, and `embed` provide overlaid embedded assets,
-  server-side templates, private bundle resources, desired-schema assets, and
-  the shared web asset surface used by the built-in console.
+  a validated site-wide static URL, server-side templates, private bundle
+  resources, desired-schema assets, and the shared web asset surface used by
+  the built-in console.
 - `email` is an optional SMTP facade built on Lettre. It renders bundle-owned
   templates through the site template engine, produces text alternatives for
   HTML mail, and keeps SMTP transport details outside application APIs.
@@ -175,24 +176,35 @@ the client-facing event type uses the payload schema name.
    login, refresh, logout, capabilities, and OpenAPI metadata. Server-side
    session storage is not implemented, but a stateful provider can fit that
    contract without changing handler or registration APIs.
-5. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
+5. Vyuh validates one site-wide static URL and mounts all bundle `public/**`
+   assets at its local path. Relative URLs use the browser host; absolute URLs
+   support a fixed CDN origin. Templates and the console resolve every asset
+   through that same immutable runtime.
+6. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
    private template and schema asset loading. Later asset directories override
    earlier matching paths; schema assets are parsed into the migration registry
-   without modifying the database. Console authentication uses signed stateless
-   access credentials and IP-bound token cookies; only its status snapshot is cached
-   in process memory.
-6. `Site::run` executes one inert command unless it selects `serve`; `serve` and
+   without modifying the database. Its private short-lived login and IP-bound
+   cookie JWT providers are appended to a per-site effective `AuthConf` before
+   the one immutable authenticator registry is built; application configuration
+   remains unchanged and the console-only audience prevents cross-use with
+   application routes. `console-token` issues the short credential, and the
+   public console login page exchanges it for the browser cookie. Applications
+   may instead call `site.console().login(user, client_ip)`. Console URL values
+   are immutable and its bounded status cache is mutable state owned by that one
+   built site; no console process-global state or fallback route synthesis is used.
+7. `Site::run` executes one inert command unless it selects `serve`; `serve` and
    direct server startup bind the listener, then start task, emitter, and service
    workers before accepting HTTP work.
-7. Axum routes receive `Site` as state and handlers use typed extractors.
+8. Axum routes receive `Site` as state and handlers use typed extractors.
    Vyuh-registered routes also receive their `OperationId` as a request
    extension; task, signal, and command invocation contexts carry the same
-   identity for their own operation.
-8. Handlers call query builders or services and return typed responses. Normal
+   identity for their own operation. Operation bundle origin is assigned once at
+   registration and never rewritten by bundle composition.
+9. Handlers call query builders or services and return typed responses. Normal
    JSON resources remain direct, paginated queries return Mool's `Page<T>`, and
    framework-generated JSON failures normalize into `ErrorReport`; raw responses
    remain an explicit application escape hatch.
-9. OpenAPI and schema metadata are produced from registered operations and
+10. OpenAPI and schema metadata are produced from registered operations and
    type metadata.
 
 ## Extension Rules

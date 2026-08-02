@@ -78,17 +78,10 @@ impl ConsoleConf {
         if !self.enabled {
             return;
         }
-        if !self.path.starts_with('/') || self.path.len() <= 1 {
+        if let Err(reason) = crate::bundles::validate_route_prefix(&self.path) {
             errors.push(ConfError::InvalidValue {
                 field: "console.path".into(),
-                reason: "must be an absolute non-root path".into(),
-                expected: Some("a path such as /console".into()),
-            });
-        }
-        if self.path.ends_with('/') {
-            errors.push(ConfError::InvalidValue {
-                field: "console.path".into(),
-                reason: "must not end with '/'".into(),
+                reason,
                 expected: Some("a path such as /console".into()),
             });
         }

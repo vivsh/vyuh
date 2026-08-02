@@ -36,14 +36,6 @@ pub(super) trait ProviderRuntimeContract: Send + Sync {
         audiences: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>>;
     fn logout<'a>(&'a self, parts: &'a Parts) -> BoxFuture<'a, Result<ResponseHeaders, AuthError>>;
-    fn issue_access<'a>(
-        &'a self,
-        _user: AuthUser,
-        _audiences: Vec<AudienceId>,
-        _binding: Option<String>,
-    ) -> BoxFuture<'a, Result<String, AuthError>> {
-        Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
-    }
 }
 
 pub(super) type ResponseHeaders = Vec<(axum::http::HeaderName, axum::http::HeaderValue)>;

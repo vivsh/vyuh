@@ -11,6 +11,13 @@ password and HTTP Basic token exchange, password plus MFA, and OIDC
 Authorization Code with PKCE. Applications still own user rows, password and
 factor storage, account linking, and every authentication route.
 
+The optional built-in console uses the same JWT provider runtime with private
+console-only login and browser-cookie providers. `vyuh console-token` creates a
+90-second login credential that the console page exchanges for its IP-bound
+cookie. Applications can use `site.console().login_token(user)` for the same
+short-lived handoff, or call `site.console().login(user, client_ip)` directly.
+See [Console](console.md).
+
 ## Audiences and identity
 
 An `Audience` names an API surface. Declare it once and use the same descriptor
@@ -296,6 +303,10 @@ response headers.
 `refresh()`. It does not implement `Debug`, `Display`, or `Serialize`.
 
 ## Complete token providers
+
+An `AuthProvider` name beginning with `vyuh-` is reserved for framework-owned providers and is
+rejected when the site is built. Application providers should use an
+application-specific name such as `app-auth` or `partner-token`.
 
 Use `AuthConf::empty()` when no implicit provider is wanted. An `AuthProvider`
 is a stable name for one complete configured authentication system:

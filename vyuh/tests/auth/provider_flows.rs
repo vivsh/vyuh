@@ -3,7 +3,7 @@ use super::*;
 /// Verifies default login returns access and refresh credentials from one provider.
 #[tokio::test]
 async fn default_login_returns_pair() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -18,7 +18,7 @@ async fn default_login_returns_pair() -> Result<(), AuthError> {
 /// Verifies the default response body exposes both body-delivered credentials.
 #[tokio::test]
 async fn default_login_body_contains_token_pair() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -58,7 +58,7 @@ async fn access_authenticates_user() -> Result<(), AuthError> {
 /// Verifies refresh rotates both credentials and keeps its audiences.
 #[tokio::test]
 async fn refresh_rotates_pair() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -82,7 +82,7 @@ async fn refresh_rotates_pair() -> Result<(), AuthError> {
 /// Verifies an access credential cannot be used through the refresh helper.
 #[tokio::test]
 async fn refresh_rejects_access() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -103,7 +103,7 @@ async fn refresh_rejects_access() -> Result<(), AuthError> {
 /// Verifies refresh may narrow but cannot add audiences.
 #[tokio::test]
 async fn refresh_rejects_escalation() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -132,7 +132,7 @@ async fn selected_provider_is_complete() -> Result<(), AuthError> {
         .access(TokenConf::header("x-access"))
         .refresh(TokenConf::header("x-refresh"));
     let conf = config().auth(AuthConf::empty().provider(ALTERNATE, provider));
-    let site = Site::build(conf, bundles::Bundle::new())
+    let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -232,7 +232,7 @@ async fn mixed_access_and_refresh_codecs_rotate() -> Result<(), AuthError> {
             .codec(DjangoSigning::site_secret()),
     );
     let conf = config().auth(AuthConf::empty().provider(MIXED, provider));
-    let site = Site::build(conf, bundles::Bundle::new())
+    let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -401,7 +401,7 @@ async fn assert_provider_round_trip(
 async fn lifecycle_rejects_replay() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret()).lifecycle(ReplayStore::default());
     let conf = config().auth(AuthConf::empty().provider(ROTATING, provider));
-    let site = Site::build(conf, bundles::Bundle::new())
+    let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -458,7 +458,7 @@ async fn opaque_key_logout_revokes_when_configured() -> Result<(), AuthError> {
     let key =
         AuthKey::header("x-api-key", StaticKeyVerifier).lifecycle(KeyRevoker(revoked.clone()));
     let auth = AuthConf::default().provider(API_KEY, key);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let request = axum::http::Request::builder()
@@ -510,7 +510,7 @@ async fn verify_only_token_provider_is_not_an_issuer() -> Result<(), AuthError> 
 #[tokio::test]
 async fn cookie_login_hides_tokens() -> Result<(), AuthError> {
     let auth = configured_token_auth(TokenConf::cookie("access"), TokenConf::cookie("refresh"));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -527,7 +527,7 @@ async fn cookie_login_hides_tokens() -> Result<(), AuthError> {
 #[tokio::test]
 async fn cookie_login_default_body_is_ok() -> Result<(), AuthError> {
     let auth = configured_token_auth(TokenConf::cookie("access"), TokenConf::cookie("refresh"));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -550,7 +550,7 @@ async fn response_header_delivery_is_explicit() -> Result<(), AuthError> {
         .without_refresh()
         .access(TokenConf::cookie("access").response_header("x-new-auth-token"));
     let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site.auth().login(AuthUser::new("user-1"), &[]).await?;
@@ -599,7 +599,7 @@ async fn cookie_authentication_requires_csrf() -> Result<(), AuthError> {
 #[tokio::test]
 async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
     let auth = configured_token_auth(TokenConf::bearer(), TokenConf::cookie("refresh"));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -627,7 +627,7 @@ async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
 #[tokio::test]
 async fn cookie_logout_clears_complete_provider_state() -> Result<(), AuthError> {
     let auth = configured_token_auth(TokenConf::cookie("access"), TokenConf::cookie("refresh"));
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -682,7 +682,7 @@ fn cookie_parts(cookie: &str, csrf: Option<&str>) -> Result<axum::http::request:
 /// Verifies LoginResponse data replacement preserves credential attachments.
 #[tokio::test]
 async fn login_response_preserves_data() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -698,7 +698,7 @@ async fn login_response_preserves_data() -> Result<(), AuthError> {
 /// Verifies empty audience slices resolve through the site default audience.
 #[tokio::test]
 async fn login_uses_default_for_empty_audiences() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let result = site.auth().login(AuthUser::new("user-1"), &[]).await;
@@ -774,7 +774,7 @@ async fn missing_token_audience_cannot_escalate() -> Result<(), AuthError> {
 /// Verifies a refresh with an empty audience slice preserves only the site default.
 #[tokio::test]
 async fn refresh_empty_audiences_uses_site_default() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site.auth().login(AuthUser::new("user-1"), &[]).await?;
@@ -808,7 +808,7 @@ fn explicit_empty_token_audience_is_invalid() -> Result<(), AuthError> {
 #[tokio::test]
 async fn strict_audience_mode_rejects_empty_login_audiences() -> Result<(), AuthError> {
     let auth = AuthConf::default().require_explicit_audiences();
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let result = site.auth().login(AuthUser::new("user-1"), &[]).await;
@@ -831,7 +831,7 @@ async fn duplicate_access_selector_is_rejected() -> Result<(), AuthError> {
     let duplicate = TokenProvider::new(Jwt::hs256_site_secret());
     let result = Site::build(
         config().auth(AuthConf::default().provider(ALTERNATE, duplicate)),
-        bundles::Bundle::new(),
+        bundles::Bundle::default(),
     )
     .await;
     assert!(result.is_err());
@@ -846,7 +846,7 @@ async fn cross_kind_selector_collision_is_rejected() -> Result<(), AuthError> {
         .refresh(TokenConf::bearer());
     let result = Site::build(
         config().auth(AuthConf::default().provider(ALTERNATE, provider)),
-        bundles::Bundle::new(),
+        bundles::Bundle::default(),
     )
     .await;
     assert!(result.is_err());
@@ -856,7 +856,7 @@ async fn cross_kind_selector_collision_is_rejected() -> Result<(), AuthError> {
 /// Verifies duplicate bearer values fail before refresh token parsing.
 #[tokio::test]
 async fn duplicate_bearer_values_are_rejected() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::new())
+    let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let mut request = axum::http::Request::new(axum::body::Body::empty());
@@ -879,7 +879,7 @@ async fn duplicate_query_credentials_are_rejected() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .refresh(TokenConf::query("token", UnsafeQueryCredentials::allow()));
     let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
-    let site = Site::build(config().auth(auth), bundles::Bundle::new())
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let request = axum::http::Request::builder()

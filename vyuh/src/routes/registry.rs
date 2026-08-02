@@ -11,6 +11,7 @@ use crate::{Operation, OperationId, OperationKind};
 #[derive(Clone)]
 struct RouteEntry {
     path: String,
+    operation: OperationId,
 }
 
 /// Immutable indexes used to reverse and resolve registered routes.
@@ -44,6 +45,7 @@ impl RouteRegistry {
             operation.name.clone(),
             RouteEntry {
                 path: operation.path.clone(),
+                operation: operation.id,
             },
         );
         for (method_name, _) in operation.methods.iter() {
@@ -77,6 +79,10 @@ impl RouteRegistry {
             }
         }
         (!path.contains('{') && !path.contains('}')).then_some(path)
+    }
+
+    fn operation_id(&self, name: &str) -> Option<OperationId> {
+        self.names.get(name).map(|entry| entry.operation)
     }
 
     fn resolve_url(&self, method: &Method, url: &str) -> Option<OperationId> {
@@ -129,6 +135,11 @@ impl<'a> Routes<'a> {
     /// Resolves the operation dispatched for one HTTP method and URL.
     pub fn resolve_url(&self, method: Method, url: &str) -> Option<OperationId> {
         self.registry.resolve_url(&method, url)
+    }
+
+    /// Returns the immutable operation identity registered under one route name.
+    pub(crate) fn operation_id(&self, name: &str) -> Option<OperationId> {
+        self.registry.operation_id(name)
     }
 }
 

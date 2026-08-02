@@ -14,7 +14,7 @@ The main public pieces are:
 
 - `#[bundles::asset_dir]` for registering a bundle asset directory.
 - `vyuh::embed::embed_assets!("path")` for debug-filesystem and release-embedded assets.
-- Runtime serving of `public/**` under `/assets`.
+- Runtime serving of `public/**` under the site's configured static URL.
 - `collect_assets` for copying bundled public assets to a deployment directory.
 - Minijinja loading of private `templates/**` files.
 - Mool/Gaman desired-schema loading from private `schema/**` files.
@@ -26,8 +26,8 @@ Vyuh itself also uses this convention for shared framework web assets. The
 runtime crate owns `vyuh/web/`, which contains public CSS, JavaScript, images,
 landing-page source, and private console templates. When the built-in console is
 enabled, that directory is registered as an internal asset dir so the console can
-serve `/assets/css/vyuh.css`, `/assets/css/vyuh.<hash>.css`, logos, and small helper
-scripts without requiring application projects to copy them.
+serve its stylesheet, logos, and helper scripts without requiring application
+projects to copy them.
 
 ## Directory Layout
 
@@ -62,7 +62,8 @@ desired state; migrations are immutable history. See [Migrations](migrations.md)
 for the migration model.
 
 Public namespacing is done by folders under `public/`. For example,
-`public/dashboard/dashboard.css` is served as `/assets/dashboard/dashboard.css`.
+`public/dashboard/dashboard.css` is served as `/static/dashboard/dashboard.css`
+with the default static URL.
 
 ## Registration
 
@@ -101,17 +102,40 @@ Files below `schema/` are private desired-schema inputs for the migration engine
 
 Schema assets participate in `make_migration`, `--dry-run`, and `--check`. They
 never apply migrations or modify a database while a site starts. They are not
-served under `/assets` and are not copied by `collect_assets`.
+served under `/static` and are not copied by `collect_assets`.
 
 ## Runtime Serving
 
-Vyuh serves bundled public assets under `/assets` by default. The `public/`
-prefix is stripped from the URL:
+Vyuh serves bundled public assets under `/static` by default. Configure one
+site-wide public base when an application uses another local mount or a CDN:
+
+```rust
+let conf = SiteConf::default()
+    .static_url("/static");
+
+let cdn_conf = SiteConf::default()
+    .static_url("https://cdn.example.com/static");
+```
+
+Relative static URLs use the browser's current host. Absolute static URLs keep
+their configured origin. In both cases the URL path is the local development
+mount. The `public/` prefix is stripped from asset paths:
 
 ```text
-public/dashboard/dashboard.css -> /assets/dashboard/dashboard.css
-public/images/logo.svg -> /assets/images/logo.svg
+public/dashboard/dashboard.css -> /static/dashboard/dashboard.css
+public/images/logo.svg -> /static/images/logo.svg
 ```
+
+Use `site.assets()` whenever Rust code needs an asset URL:
+
+```rust
+let script = site.assets().url("dashboard/app.js")?;
+assert_eq!(site.assets().static_url(), "/static/");
+```
+
+Paths are relative to `public/`; leading slashes, traversal segments, query
+strings, and fragments are rejected. URL construction does not require the
+asset to be present, which keeps it suitable for external static deployments.
 
 Only `public/**` participates in runtime serving. Requests cannot reach
 `templates/**`, `sql/**`, or other private folders through the asset route.
@@ -119,8 +143,8 @@ Only `public/**` participates in runtime serving. Requests cannot reach
 Built-in framework assets follow the same rule:
 
 ```text
-vyuh/web/public/css/vyuh.css -> /assets/css/vyuh.css
-vyuh/web/public/img/vyuh-logo-transparent.png -> /assets/img/vyuh-logo-transparent.png
+vyuh/web/public/css/vyuh.css -> /static/css/vyuh.css
+vyuh/web/public/console/js/console.js -> /static/console/js/console.js
 vyuh/web/templates/console/layout.html -> private Minijinja template
 ```
 
@@ -148,7 +172,7 @@ template failure modes.
 A dashboard layout can refer to a public asset like this:
 
 ```html
-<link rel="stylesheet" href="/assets/dashboard/dashboard.css" />
+<link rel="stylesheet" href="{{ asset('dashboard/dashboard.css') }}" />
 ```
 
 ## Collect Assets
@@ -159,14 +183,14 @@ deployment through a CDN, reverse proxy, or dedicated static file host.
 The same behavior is available as a built-in command:
 
 ```sh
-cargo run -- collect_assets --output dist/assets
+cargo run -- collect_assets --output dist/static
 ```
 
 Use `--glob` for a partial asset update. The pattern matches the path after
 `public/` is stripped:
 
 ```sh
-cargo run -- collect_assets --output dist/assets --glob 'dashboard/**'
+cargo run -- collect_assets --output dist/static --glob 'dashboard/**'
 ```
 
 The destination path strips the `public/` prefix:
@@ -179,6 +203,11 @@ public/images/logo.svg -> <output-dir>/images/logo.svg
 `collect_assets` does not copy templates, schema files, SQL files, database
 migrations, or other private resources. It copies the same public asset surface
 that runtime serving exposes.
+
+For `collect_pages`, Vyuh writes collected assets under the configured static
+URL path inside the page-export root. `/static` writes `dist/static/**`, while
+`https://cdn.example.com/static` writes `dist/static/**`; the CDN host is not a
+filesystem path.
 
 Use `collect_assets` when the application server should not serve assets
 directly in production, or when a deployment platform expects a static asset
@@ -193,8 +222,9 @@ behavior by build mode:
 - Release builds serve embedded bytes from the compiled binary.
 
 The logical asset paths stay the same in both modes. A file such as
-`public/dashboard/dashboard.css` is addressed as `/assets/dashboard/dashboard.css` whether it is
-read from disk during development or served from the binary in production.
+`public/dashboard/dashboard.css` is addressed through the configured static URL
+whether it is read from disk during development or served from the binary in
+production.
 
 ## Failure Modes
 

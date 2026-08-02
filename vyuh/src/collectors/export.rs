@@ -141,11 +141,12 @@ pub async fn export_static(
     }
     let urls = site.url_info().await?;
     let rendered_paths = rendered_page_paths(urls)?;
+    let static_path = site.static_asset_path();
     let CollectStaticReport { copied, .. } = collect_assets_reserved(
         site,
-        CollectStaticOptions::new(options.output.join("assets")),
+        CollectStaticOptions::new(options.output.join(&static_path)),
         &rendered_paths,
-        &PathBuf::new(),
+        &static_path,
     )
     .await?;
 

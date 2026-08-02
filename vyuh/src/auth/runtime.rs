@@ -14,15 +14,15 @@ use futures::future::BoxFuture;
 
 use contract::{ProviderCapabilities, ProviderRuntime, ProviderRuntimeContract};
 use indexes::RuntimeIndexes;
-use registry::{build_provider, validate_definitions, validate_login_definitions, validate_new};
+use registry::{build_provider, validate_definitions, validate_login_definitions};
 use validation::*;
 
 use super::{
     Audience, AudienceId, AuthConf, AuthError, AuthMetrics, AuthProvider, AuthToken, AuthUser,
     BindingResolver, CodecDefinition, CodecRuntime, Credentials, ErasedLifecycle,
     ErasedTokenVerifier, KeyRequest, LoginAuth, LoginDefinitionInner, LoginMethod, LoginMethodId,
-    LoginResponse, LogoutResponse, ProviderDefinition, ProviderDefinitionInner, ProviderId,
-    ProviderKind, RefreshMetadata, SecretRing, TokenConf, TokenKind, TokenProvider, build_codec,
+    LoginResponse, LogoutResponse, ProviderDefinitionInner, ProviderId, ProviderKind,
+    RefreshMetadata, SecretRing, TokenConf, TokenKind, TokenProvider, build_codec,
     identity::{DEFAULT_AUTH_PROVIDER, resolve_audiences},
     validate_token_conf,
 };
@@ -271,52 +271,6 @@ impl Authenticator {
         runtime.login(user, audiences, None).await
     }
 
-    pub(crate) fn register_provider<D: ProviderDefinition>(
-        &mut self,
-        name: AuthProvider,
-        provider: D,
-    ) -> Result<(), AuthError> {
-        let definition = ProviderDefinitionInner {
-            name,
-            kind: provider.define(),
-        };
-        validate_new(&definition, &self.providers)?;
-        let runtime = build_provider(definition, &self.secrets, self.default_audience.clone())?;
-        let position = self.providers.len();
-        Arc::make_mut(&mut self.indexes).insert_provider(&runtime, position)?;
-        Arc::make_mut(&mut self.providers).push(runtime);
-        Arc::make_mut(&mut self.metrics).register_provider(name.as_str());
-        Ok(())
-    }
-
-    pub(crate) async fn verify_raw(
-        &self,
-        provider: AuthProvider,
-        raw: &str,
-        parts: &Parts,
-        audience: Audience,
-    ) -> Result<AuthUser, AuthError> {
-        let provider = ProviderId::new(provider.as_str())?;
-        let audience = AudienceId::declared(audience)?;
-        self.provider(&provider)?
-            .authenticate(raw, parts, &audience)
-            .await
-    }
-
-    pub(crate) async fn issue_raw(
-        &self,
-        provider: AuthProvider,
-        user: AuthUser,
-        audiences: &[Audience],
-        binding: Option<String>,
-    ) -> Result<String, AuthError> {
-        let provider = ProviderId::new(provider.as_str())?;
-        let audiences = resolve_audiences(audiences, self.default_audience.as_ref())?;
-        self.provider(&provider)?
-            .issue_access(user, audiences, binding)
-            .await
-    }
-
     pub(crate) fn resolve_login_provider(
         &self,
         provider: AuthProvider,
@@ -354,6 +308,26 @@ impl Authenticator {
 }
 
 impl<'a> ProviderAuth<'a> {
+    /// Authenticates one request through this selected provider only.
+    pub(crate) async fn authenticate(
+        &self,
+        parts: &Parts,
+        audience: Audience,
+    ) -> Result<AuthUser, AuthError> {
+        let result = async {
+            let audience = AudienceId::declared(audience)?;
+            let provider = self.provider()?;
+            let raw = provider
+                .access_location()
+                .extract(parts)?
+                .ok_or(AuthError::NoCredential)?;
+            provider.authenticate(&raw, parts, &audience).await
+        }
+        .await;
+        self.record(&result);
+        result
+    }
+
     /// Retains one identity-proof descriptor with this credential provider.
     pub fn via<Start, Complete>(
         &self,
@@ -513,15 +487,6 @@ impl ProviderRuntime {
         }
         self.0.logout(parts).await
     }
-
-    async fn issue_access(
-        &self,
-        user: AuthUser,
-        audiences: Vec<AudienceId>,
-        binding: Option<String>,
-    ) -> Result<String, AuthError> {
-        self.0.issue_access(user, audiences, binding).await
-    }
 }
 
 impl ProviderRuntimeContract for TokenRuntime {
@@ -587,14 +552,6 @@ impl ProviderRuntimeContract for TokenRuntime {
     ) -> BoxFuture<'a, Result<Vec<(axum::http::HeaderName, axum::http::HeaderValue)>, AuthError>>
     {
         Box::pin(TokenRuntime::logout(self, parts))
-    }
-    fn issue_access<'a>(
-        &'a self,
-        user: AuthUser,
-        audiences: Vec<AudienceId>,
-        binding: Option<String>,
-    ) -> BoxFuture<'a, Result<String, AuthError>> {
-        Box::pin(TokenRuntime::issue_access(self, user, audiences, binding))
     }
 }
 
@@ -717,20 +674,6 @@ impl TokenRuntime {
         let (response, replacement) = self.response(pair).await?;
         self.rotate(&current, replacement.as_ref()).await?;
         Ok(response)
-    }
-
-    async fn issue_access(
-        &self,
-        user: AuthUser,
-        audiences: Vec<AudienceId>,
-        binding: Option<String>,
-    ) -> Result<String, AuthError> {
-        validate_subject(&user)?;
-        validate_issued_binding(self.binding, &binding)?;
-        let pair = self.tokens(&user, audiences, binding, None)?;
-        let encoded = self.access.codec.encode(&pair.access).await?;
-        validate_credential_size(&encoded, self.access.max_credential_bytes)?;
-        Ok(encoded)
     }
 
     async fn accept(

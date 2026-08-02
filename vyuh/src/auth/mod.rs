@@ -102,6 +102,8 @@ pub enum AuthError {
     ProviderNotFound(String),
     #[error("invalid provider identifier '{0}'")]
     InvalidProviderId(String),
+    #[error("provider identifier '{0}' uses the reserved 'vyuh-' prefix")]
+    ReservedProviderId(String),
     #[error("invalid audience '{0}'")]
     InvalidAudience(String),
     #[error("provider '{0}' is registered more than once")]

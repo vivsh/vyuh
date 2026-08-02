@@ -1,70 +1,23 @@
-use axum::{
-    http::{StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
-};
-use schemars::JsonSchema;
-use serde::Deserialize;
-
 use crate::{
-    Error, ErrorKind, Site,
+    Error, ErrorKind, OperationId, Site,
     auth::AuthUser,
     console::{
-        auth::{CONSOLE_AUDIENCE, CONSOLE_LOGIN, CONSOLE_TOKEN},
         query::{
             OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit_max,
         },
         types::{ConfigOut, OperationOut, Page, SessionOut, TaskDetailOut, TaskOut},
     },
-    routes::{ClientIp, Form, Json, Path, Query},
+    routes::{Json, Path, Query, Request},
+};
+use axum::{
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct LoginForm {
-    token: String,
-}
-
-pub async fn login(
-    site: Site,
-    ClientIp(ip): ClientIp,
-    Form(form): Form<LoginForm>,
-) -> Result<Response, Error> {
-    let parts = axum::http::Request::new(axum::body::Body::empty())
-        .into_parts()
-        .0;
-    let user = site
-        .auth()
-        .verify_raw(CONSOLE_LOGIN, &form.token, &parts, CONSOLE_AUDIENCE)
-        .await
-        .map_err(|error| {
-            tracing::debug!(error = %error, "console login credential rejected");
-            Error::new(ErrorKind::Unauthorized)
-        })?;
-    let login = site
-        .auth()
-        .using(CONSOLE_TOKEN)
-        .login_bound(user, &[CONSOLE_AUDIENCE], ip.to_string())
-        .await
-        .map_err(Error::other)?;
-    let destination = site
-        .routes()
-        .reverse_url("console_home", &[])
-        .ok_or_else(|| Error::not_found("console home route is unavailable"))?;
-    let mut response = Redirect::to(&destination).into_response();
-    login.write(&mut response);
-    Ok(response)
-}
-
-pub async fn logout(site: Site, _user: AuthUser) -> Result<Response, Error> {
-    let parts = axum::http::Request::new(axum::body::Body::empty())
-        .into_parts()
-        .0;
+pub async fn logout(site: Site, _user: AuthUser, request: Request) -> Result<Response, Error> {
+    let (parts, _) = request.into_parts();
     let mut response = Json(serde_json::json!({ "ok": true })).into_response();
-    let logout = site
-        .auth()
-        .using(CONSOLE_TOKEN)
-        .logout(&parts)
-        .await
-        .map_err(Error::other)?;
+    let logout = site.console().logout(&parts).await.map_err(Error::other)?;
     logout.write(&mut response);
     Ok(response)
 }
@@ -79,11 +32,12 @@ pub async fn session(user: AuthUser) -> Json<SessionOut> {
 
 pub async fn operations(
     site: Site,
+    operation_id: OperationId,
     _user: AuthUser,
     Query(query): Query<OperationQuery>,
 ) -> Json<Page<OperationOut>> {
     let conf = &site.conf().console;
-    let console_bundle_id = console_bundle_id(&site);
+    let console_bundle_id = console_bundle_id(&site, operation_id);
     let (items, next_cursor) = filter_operations(
         site.operations().list(),
         &query,
@@ -102,13 +56,14 @@ pub async fn operations(
 
 pub async fn operation_detail(
     site: Site,
+    operation_id: OperationId,
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<OperationOut>, Error> {
     let id = id
         .parse::<crate::OperationId>()
         .map_err(|_| Error::not_found("operation was not found"))?;
-    let console_bundle_id = console_bundle_id(&site);
+    let console_bundle_id = console_bundle_id(&site, operation_id);
     site.operations()
         .find(id)
         .filter(|op| !is_console_operation(op, console_bundle_id))
@@ -117,8 +72,8 @@ pub async fn operation_detail(
         .ok_or_else(|| Error::not_found("operation was not found"))
 }
 
-fn console_bundle_id(site: &Site) -> Option<uuid::Uuid> {
-    site.console_bundle_id()
+fn console_bundle_id(site: &Site, operation_id: OperationId) -> Option<uuid::Uuid> {
+    site.operations().find(operation_id)?.bundle_id
 }
 
 pub async fn tasks(
@@ -158,8 +113,12 @@ pub async fn conf(site: Site, _user: AuthUser) -> Json<ConfigOut> {
     Json(ConfigOut::from_site(&site))
 }
 
-pub async fn openapi(site: Site, _user: AuthUser) -> Result<Response, Error> {
-    let body = openapi_json(&site).map_err(|_| Error::new(ErrorKind::Other))?;
+pub async fn openapi(
+    site: Site,
+    operation_id: OperationId,
+    _user: AuthUser,
+) -> Result<Response, Error> {
+    let body = openapi_json(&site, operation_id).map_err(|_| Error::new(ErrorKind::Other))?;
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
@@ -168,8 +127,8 @@ pub async fn openapi(site: Site, _user: AuthUser) -> Result<Response, Error> {
         .into_response())
 }
 
-pub(super) fn openapi_json(site: &Site) -> Result<String, String> {
-    let console_bundle_id = console_bundle_id(site);
+pub(super) fn openapi_json(site: &Site, operation_id: OperationId) -> Result<String, String> {
+    let console_bundle_id = console_bundle_id(site, operation_id);
     let routes = site
         .operations()
         .list()
