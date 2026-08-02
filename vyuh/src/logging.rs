@@ -225,7 +225,7 @@ impl Default for LoggingConf {
                 rules: vec![LogRule {
                     name: "VYUH".into(),
                     sink: LogSink::Stdout { pretty: true },
-                    default_filter: "debug".into(),
+                    default_filter: "debug,sqlx=error".into(),
                 }],
             };
         }
@@ -783,6 +783,7 @@ mod tests {
         assert!(LogLevel::from_str("invalid").is_none());
     }
 
+    /// Verifies debug builds keep Vyuh diagnostics while limiting SQLx to errors.
     #[test]
     fn test_logging_conf_default_in_debug_mode() {
         let conf = LoggingConf::default();
@@ -790,7 +791,7 @@ mod tests {
         if cfg!(debug_assertions) {
             assert_eq!(conf.rules.len(), 1);
             assert_eq!(conf.rules[0].name, "VYUH");
-            assert_eq!(conf.rules[0].default_filter, "debug");
+            assert_eq!(conf.rules[0].default_filter, "debug,sqlx=error");
             assert!(matches!(
                 conf.rules[0].sink,
                 LogSink::Stdout { pretty: true }

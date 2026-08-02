@@ -19,7 +19,9 @@ The main public pieces are:
 - `LoggingError` for validation and initialization failures.
 
 `SiteConf::default()` enables a pretty stdout rule in debug builds and no rules
-in release builds. Release applications should configure logging explicitly.
+in release builds. Its debug filter is `debug,sqlx=error`, so Vyuh diagnostics
+and SQLx failures remain visible without SQLx query noise. Release applications
+should configure logging explicitly.
 
 ## Configuration
 
