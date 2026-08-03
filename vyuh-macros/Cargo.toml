@@ -1,6 +1,6 @@
 [package]
 name = "vyuh-macros"
-version = "0.2.13"
+version = "0.2.14"
 edition = "2024"
 license = "MIT"
 description = "Procedural macros for the Vyuh web framework"
@@ -20,7 +20,7 @@ syn = { version = "2", features = ["full"] }
 darling = "0.20"
 heck = "0.4"
 cron = "0.12"
-mool-macros-impl = { git = "https://github.com/vivsh/mool.git", rev = "0f8628158fa56503948377851bad218be1b8bf96" }
+mool-macros-impl = { git = "https://github.com/vivsh/mool.git", rev = "902b812ad0ccce50d1b460e8ced0d0d4641ef214" }
 rust-silos-macros-impl = "0.1.0"
 
 tokio = {workspace = true}
