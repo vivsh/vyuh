@@ -55,8 +55,11 @@ The `vyuh` crate is organized around these subsystems:
   extractor integration.
 - `signals`, `emitters`, and `channels` provide in-process fanout, scheduled
   or external event sources, and signal-backed client-facing live delivery.
-- `tasks` provides typed background task registration and backend-selected task
-  execution.
+- `tasks` provides typed input, value-less durable background task registration,
+  immediate transactional submission, named concurrency lanes, batched claims
+  and commits, group-owned retry/backoff policy, local runner and store-wide
+  database rate limits, idempotency retention, adaptive polling, lease renewal,
+  and explicit continuation lifecycle control.
 - `observability` owns configured liveness/readiness probes and bounded-label
   Prometheus HTTP metrics. Deployment policy is supplied through `SiteConf`,
   not inferred from a host environment.
@@ -84,10 +87,14 @@ The `vyuh` crate is organized around these subsystems:
   richest backend, and SQLite is supported for Gaman's native safe subset.
   Migration files live in a crate-level `migrations/` directory, not under
   assets.
-- Persistent task stores use Mool models, typed query scopes, transactions, and
-  backend lock extensions. Vyuh owns task lifecycle and claim policy; Mool owns
-  database execution. Task schemas are migration-owned and are never created or
-  altered during site startup.
+- Persistent task stores use Mool models, typed query scopes, batched writes,
+  transactions, and backend lock extensions. Vyuh owns grouped scheduling,
+  leases, idempotency ownership, durable token buckets, and database-relative
+  wake deadlines; Mool owns database execution. A store-wide policy fingerprint
+  prevents incompatible workers from claiming concurrently. Task schemas are
+  migration-owned and are never created or altered during site startup. Store
+  internals live under `tasks::store`; the ordinary site facade exposes only
+  typed submission, resume, reassignment, and read-only inspection.
 - Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.
@@ -111,7 +118,8 @@ compact while feeding metadata into the runtime:
 
 No database backend feature is enabled by default. In that lightweight mode,
 Vyuh has no active SQL dialect or database pool, while tasks use
-`MemoryTaskStore`.
+`MemoryTaskStore`. That store is development-only when tasks are registered;
+production construction requires a durable database backend.
 
 Production applications should enable exactly one database backend feature:
 
@@ -156,7 +164,7 @@ the client-facing event type uses the payload schema name.
 3. `SiteBuilder` creates the database pool, router, template engine,
    authenticator, command registry, channel backend, signal engine, emitter
    engine, services, and task engine. Database-backed builds use the selected
-   backend task store; lightweight builds use `MemoryTaskStore`. When enabled,
+   backend task store; development builds may use `MemoryTaskStore`. When enabled,
    observability endpoints are mounted before the site router is finalized and
    request metrics are applied as a site-wide middleware.
 4. The authenticator resolves key sources off request threads and builds
@@ -194,7 +202,12 @@ the client-facing event type uses the payload schema name.
    built site; no console process-global state or fallback route synthesis is used.
 7. `Site::run` executes one inert command unless it selects `serve`; `serve` and
    direct server startup bind the listener, then start task, emitter, and service
-   workers before accepting HTTP work.
+   workers before accepting HTTP work. One task dispatcher rotates configured
+   groups fairly, fills bounded per-group queues through grouped batch claims,
+   renews active leases, and commits handler outcomes through one common batch.
+   Submission bypasses the runner and commits immediately. Saturated groups use
+   the short poll interval; future readiness, lease, and rate deadlines use
+   database time; otherwise the runner uses the bounded fallback interval.
 8. Axum routes receive `Site` as state and handlers use typed extractors.
    Vyuh-registered routes also receive their `OperationId` as a request
    extension; task, signal, and command invocation contexts carry the same

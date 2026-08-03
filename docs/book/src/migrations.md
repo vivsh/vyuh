@@ -171,6 +171,29 @@ No migration runs implicitly during `serve`, `Site::start`, DB pool creation,
 or bundle construction. Release binaries can apply and inspect embedded
 migrations, but they do not generate new migration files.
 
+## Durable Task Schema Changes
+
+When an application registers task handlers, Vyuh contributes the current
+task-runtime schema to migration planning. Task tables are never created or
+changed by worker startup. Generate the normal application migration, inspect
+its SQL for the selected backend, and commit it with the application.
+
+For the value-less grouped runtime, the generated migration should remove the
+historical priority, identity, output, and result columns; assign existing
+active rows to the `default` group; add idempotency, rate-bucket, and runtime
+policy storage; and add the grouped readiness, lease, history, and ownership
+indexes.
+
+Because this changes the worker persistence contract, deploy in this order:
+
+1. Stop old task workers.
+2. Apply the reviewed migration.
+3. Deploy the new binary.
+4. Restart task workers.
+
+Pending, sleeping, and suspended inputs and continuation state remain usable.
+Historical task output values are deliberately discarded.
+
 ## SQLite
 
 SQLite migrations use the same bundle registration and command surface:

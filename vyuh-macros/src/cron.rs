@@ -17,10 +17,6 @@ struct CronConfMeta {
     /// Cron expression (e.g., "0 0 * * *")
     #[darling(default)]
     expr: Option<String>,
-
-    /// Optional target configuration
-    #[darling(default)]
-    target: Option<String>,
 }
 
 /// Entry point for #[cron] macro.
@@ -46,32 +42,11 @@ fn build_cron_conf(
 
     validate_cron_expr(expr)?;
 
-    let target = if let Some(target_str) = &conf.target {
-        validate_target(target_str)?;
-        quote! { #target_str.parse::<::vyuh::emitters::EmitTarget>().unwrap_or_default() }
-    } else {
-        quote! { ::vyuh::emitters::EmitTarget::default() }
-    };
-
     Ok(quote! {
         ::vyuh::emitters::CronConf {
             expr: #expr.to_string(),
-            target: #target,
         }
     })
-}
-
-fn validate_target(target: &str) -> Result<(), syn::Error> {
-    match target.to_ascii_lowercase().as_str() {
-        "signal" => Ok(()),
-        other => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "Invalid emitter target '{}'. Supported target: \"signal\"",
-                other
-            ),
-        )),
-    }
 }
 
 /// Validate cron expression by parsing it.

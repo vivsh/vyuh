@@ -1,237 +1,280 @@
-use std::{collections::VecDeque, sync::Arc};
+//! Durable task-store contract shared by framework and application stores.
 
-use tokio::sync::OwnedSemaphorePermit;
+use std::{future::Future, sync::Arc, time::Duration};
 
-use crate::{
-    Site,
-    tasks::{
-        TaskDispatcher, TaskError, TaskListFilter, TaskListPage, TaskOutcome, TaskRecord,
-        TaskRegistry,
-    },
-};
+use super::{TaskError, TaskFilter, TaskGroup, TaskGroupConf, TaskId, TaskReceipt};
 
+pub use super::backends::memstore::MemoryTaskStore;
+pub use super::handler::TaskOutcome;
+pub use super::models::TaskRecord;
+pub use super::submission::TaskWrite;
+
+#[cfg(feature = "mysql")]
+pub type MySqlTaskStore = super::persistence::DbTaskStore;
+#[cfg(feature = "postgres")]
+pub type PgTaskStore = super::persistence::DbTaskStore;
+#[cfg(feature = "sqlite")]
+pub type SqliteTaskStore = super::persistence::DbTaskStore;
+
+/// One group's available claim capacity for the current scheduling turn.
+#[derive(Debug, Clone)]
+pub struct GroupClaim {
+    /// Named group to claim.
+    pub group: TaskGroup,
+    /// Maximum candidate rows requested for this group.
+    pub limit: usize,
+}
+
+/// Claimed work and saturation evidence for one group.
+#[derive(Debug, Clone)]
+pub struct GroupPoll {
+    /// Group represented by this result.
+    pub group: TaskGroup,
+    /// Rows successfully claimed for the requesting runner.
+    pub tasks: Vec<TaskRecord>,
+    /// Number of claimed rows reclaimed after an expired lease.
+    pub reclaimed: usize,
+    /// Whether the candidate query filled its requested limit.
+    pub saturated: bool,
+    /// This group's next effective store-relative readiness deadline.
+    pub next_wake_in: Option<Duration>,
+}
+
+/// One grouped store poll and its earliest useful future wake.
+#[derive(Debug, Clone)]
+pub struct TaskPoll {
+    /// Per-group claim results in scheduling order.
+    pub groups: Vec<GroupPoll>,
+}
+
+impl TaskPoll {
+    /// Creates an empty poll with no known future task deadline.
+    pub fn empty() -> Self {
+        Self { groups: Vec::new() }
+    }
+}
+
+/// One completed handler outcome waiting for durable commit.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct TaskCommit {
+    /// Persisted task receiving the lifecycle outcome.
+    pub task_id: TaskId,
+    /// Group whose newly available capacity should be polled after commit.
+    pub group: TaskGroup,
+    /// Payload-free handler lifecycle outcome.
+    pub outcome: TaskOutcome,
+}
+
+/// Runtime policy resolved before a task store starts serving workers.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct TaskStoreConf {
+    /// Stable handler names understood by this worker deployment.
+    pub handlers: Vec<String>,
+    /// Validated named groups; stores coordinate only their global rate policies.
+    pub groups: Vec<TaskGroupConf>,
+    /// Maximum persistence batch size.
+    pub batch_size: usize,
+    /// Lease duration applied consistently by this task runtime.
+    pub lease_duration: Duration,
+    /// Key retention policy shared by all workers.
+    pub idempotency: super::TaskIdempotency,
+    /// Maximum persisted diagnostic error size.
+    pub max_error_bytes: usize,
+}
+
+/// Persistence and coordination boundary for durable task execution.
 pub trait AbstractTaskStore {
-    fn claim_tasks<'a>(
-        &'a self,
-        runner_id: &'a str,
-    ) -> impl Future<Output = Result<Vec<TaskRecord>, TaskError>> + Send + 'a;
-
-    fn commit_outcome<'a>(
-        &'a self,
-        task_id: uuid::Uuid,
-        runner_id: &'a str,
-        outcome: TaskOutcome,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
-
-    fn store_task(
+    /// Validates or initializes store-wide task-group coordination state.
+    fn initialize(
         &self,
-        record: TaskRecord,
+        conf: TaskStoreConf,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + '_;
 
-    fn resume<'a>(
-        &'a self,
-        id: uuid::Uuid,
-        input: String,
-    ) -> impl Future<Output = Result<u64, TaskError>> + Send + 'a;
-
-    fn list_tasks(
-        &self,
-        filter: TaskListFilter,
-    ) -> impl Future<Output = Result<TaskListPage, TaskError>> + Send + '_;
-
-    fn get_task(
-        &self,
-        id: uuid::Uuid,
-    ) -> impl Future<Output = Result<Option<TaskRecord>, TaskError>> + Send + '_;
-
-    #[deprecated(
-        note = "Task schema provisioning is migration-command owned; apply migrations before starting workers"
-    )]
-    fn run_migrations(&self) -> impl Future<Output = Result<(), TaskError>> + Send + '_;
-}
-
-impl<T: AbstractTaskStore + ?Sized> AbstractTaskStore for Arc<T> {
+    /// Claims bounded work for every supplied group and returns its wake hint.
     fn claim_tasks<'a>(
         &'a self,
         runner_id: &'a str,
-    ) -> impl Future<Output = Result<Vec<TaskRecord>, TaskError>> + Send + 'a {
-        (**self).claim_tasks(runner_id)
-    }
+        claims: &'a [GroupClaim],
+    ) -> impl Future<Output = Result<TaskPoll, TaskError>> + Send + 'a;
 
-    fn commit_outcome<'a>(
+    /// Commits multiple outcomes owned by one runner.
+    fn commit_outcomes<'a>(
         &'a self,
-        task_id: uuid::Uuid,
         runner_id: &'a str,
-        outcome: TaskOutcome,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
-        (**self).commit_outcome(task_id, runner_id, outcome)
-    }
+        commits: &'a [TaskCommit],
+    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
 
-    fn store_task(
+    /// Renews leases still owned by one runner and returns ownership losses.
+    fn renew_leases<'a>(
+        &'a self,
+        runner_id: &'a str,
+        task_ids: &'a [TaskId],
+    ) -> impl Future<Output = Result<Vec<TaskId>, TaskError>> + Send + 'a;
+
+    /// Stores a batch of task intents and resolves idempotency receipts.
+    fn store_tasks(
         &self,
-        record: TaskRecord,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + '_ {
-        (**self).store_task(record)
-    }
+        writes: Vec<TaskWrite>,
+    ) -> impl Future<Output = Result<Vec<TaskReceipt>, TaskError>> + Send + '_;
 
+    /// Moves non-running work between configured groups.
+    fn reassign_group<'a>(
+        &'a self,
+        from: &'a str,
+        to: &'a str,
+    ) -> impl Future<Output = Result<u64, TaskError>> + Send + 'a;
+
+    /// Resumes one suspended task with typed serialized input.
     fn resume<'a>(
         &'a self,
-        id: uuid::Uuid,
+        id: TaskId,
         input: String,
-    ) -> impl Future<Output = Result<u64, TaskError>> + Send + 'a {
-        (**self).resume(id, input)
-    }
+    ) -> impl Future<Output = Result<bool, TaskError>> + Send + 'a;
 
+    /// Lists persisted tasks through bounded filters.
     fn list_tasks(
         &self,
-        filter: TaskListFilter,
-    ) -> impl Future<Output = Result<TaskListPage, TaskError>> + Send + '_ {
-        (**self).list_tasks(filter)
-    }
+        filter: TaskFilter,
+    ) -> impl Future<Output = Result<crate::routes::Page<TaskRecord>, TaskError>> + Send + '_;
 
+    /// Reads one persisted task by identifier.
     fn get_task(
         &self,
-        id: uuid::Uuid,
-    ) -> impl Future<Output = Result<Option<TaskRecord>, TaskError>> + Send + '_ {
-        (**self).get_task(id)
-    }
-
-    #[allow(deprecated)]
-    fn run_migrations(&self) -> impl Future<Output = Result<(), TaskError>> + Send + '_ {
-        (**self).run_migrations()
-    }
+        id: TaskId,
+    ) -> impl Future<Output = Result<Option<TaskRecord>, TaskError>> + Send + '_;
 }
 
-pub struct AbstractTaskRunner<S: AbstractTaskStore + Send + Sync + 'static> {
-    task_queue: VecDeque<Arc<TaskRecord>>,
-    capacity: usize,
-    inflight: usize,
-    concurrency: usize,
-    poll_interval: tokio::time::Duration,
-    runner_id: String,
-    notifier: Arc<tokio::sync::Notify>,
-    registry: Arc<TaskRegistry>,
-    store: Arc<S>,
-}
-
-impl<T: AbstractTaskStore + Send + Sync + 'static> std::fmt::Debug for AbstractTaskRunner<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskRunner")
-            .field("capacity", &self.capacity)
-            .field("inflight", &self.inflight)
-            .field("task_queue_len", &self.task_queue.len())
-            .finish()
-    }
-}
-
-impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
-    pub fn new(dispatcher: TaskDispatcher<S>) -> Self {
-        let poll_interval_ms = dispatcher.registry.config.poll_interval_ms;
-        let capacity = dispatcher.registry.config.capacity.max(1);
-        let concurrency = dispatcher.registry.config.concurrency.max(1);
-        Self {
-            task_queue: VecDeque::new(),
-            inflight: 0,
-            capacity,
-            concurrency,
-            poll_interval: tokio::time::Duration::from_millis(poll_interval_ms as u64),
-            runner_id: uuid::Uuid::now_v7().to_string(),
-            notifier: dispatcher.notifier.clone(),
-            store: dispatcher.store.clone(),
-            registry: dispatcher.registry.clone(),
-        }
+impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
+    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskError> {
+        (**self).initialize(conf).await
     }
 
-    fn can_load_tasks(&self) -> bool {
-        self.inflight < self.capacity && self.task_queue.len() < (self.capacity / 2).max(1)
-    }
-
-    fn insert_task(&mut self, task: Arc<TaskRecord>) {
-        self.inflight += 1;
-        self.task_queue.push_back(task);
-    }
-
-    async fn load_tasks(&mut self) -> Option<usize> {
-        if !self.can_load_tasks() {
-            return None;
-        }
-
-        match self.store.claim_tasks(&self.runner_id).await {
-            Ok(tasks) => {
-                let count = tasks.len();
-                for task in tasks {
-                    self.insert_task(Arc::new(task));
-                }
-                Some(count)
-            }
-            Err(e) => {
-                tracing::error!("Failed to load tasks: {}", e);
-                Some(0)
-            }
-        }
-    }
-
-    pub fn run_concurrently(
+    async fn claim_tasks(
         &self,
-        site: Site,
-        permit: OwnedSemaphorePermit,
-        record: Arc<TaskRecord>,
-    ) -> tokio::task::JoinHandle<()> {
-        let engine = self.registry.clone();
-        let store = self.store.clone();
-        let runner_id = self.runner_id.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let task_id = record.id;
-            let outcome = engine.execute(site, record).await;
-            if let Err(err) = store.commit_outcome(task_id, &runner_id, outcome).await {
-                tracing::error!("Failed to commit task {} outcome: {}", task_id, err);
-            }
-        })
+        runner_id: &str,
+        claims: &[GroupClaim],
+    ) -> Result<TaskPoll, TaskError> {
+        (**self).claim_tasks(runner_id, claims).await
     }
 
-    pub async fn run(mut self, site: Site) {
-        let shutdown = site.shutdown_notifier();
-        let mut backoff_delay = self.poll_interval;
-        let max_backoff = self.poll_interval * 32;
-        let sem = Arc::new(tokio::sync::Semaphore::new(self.concurrency));
+    async fn commit_outcomes(
+        &self,
+        runner_id: &str,
+        commits: &[TaskCommit],
+    ) -> Result<(), TaskError> {
+        (**self).commit_outcomes(runner_id, commits).await
+    }
 
-        loop {
-            let loaded = self.load_tasks().await;
-            if let Some(count) = loaded {
-                if count == 0 {
-                    backoff_delay = (backoff_delay * 2).min(max_backoff);
-                    tracing::debug!("No tasks loaded, backing off to {:?}", backoff_delay);
-                } else {
-                    backoff_delay = self.poll_interval;
-                    tracing::info!("Loaded {} tasks", count);
-                }
-            }
+    async fn renew_leases(
+        &self,
+        runner_id: &str,
+        task_ids: &[TaskId],
+    ) -> Result<Vec<TaskId>, TaskError> {
+        (**self).renew_leases(runner_id, task_ids).await
+    }
 
-            tokio::select! {
-                _ = shutdown.notified() => {
-                    tracing::info!("TaskRunner shutting down");
-                    break;
-                },
-                permit_result = sem.clone().acquire_owned(), if !self.task_queue.is_empty() => {
-                    match permit_result {
-                        Ok(permit) => {
-                            if let Some(record) = self.task_queue.pop_front() {
-                                self.inflight = self.inflight.saturating_sub(1);
-                                self.run_concurrently(site.clone(), permit, record);
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to acquire semaphore permit: {}", e);
-                            break;
-                        }
-                    }
-                },
-                _ = self.notifier.notified() => {
-                    backoff_delay = self.poll_interval;
-                },
-                _ = tokio::time::sleep(backoff_delay) => {},
-            }
+    async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
+        (**self).store_tasks(writes).await
+    }
+
+    async fn reassign_group(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+        (**self).reassign_group(from, to).await
+    }
+
+    async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskError> {
+        (**self).resume(id, input).await
+    }
+
+    async fn list_tasks(
+        &self,
+        filter: TaskFilter,
+    ) -> Result<crate::routes::Page<TaskRecord>, TaskError> {
+        (**self).list_tasks(filter).await
+    }
+
+    async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskError> {
+        (**self).get_task(id).await
+    }
+}
+
+/// Produces the durable policy identity shared by every store implementation.
+pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
+    let mut hasher = blake3::Hasher::new();
+    fingerprint_idempotency(&mut hasher, conf.idempotency);
+    let mut handlers = conf.handlers.iter().map(String::as_str).collect::<Vec<_>>();
+    handlers.sort_unstable();
+    for handler in handlers {
+        hasher.update(b"handler\0");
+        hasher.update(handler.as_bytes());
+        hasher.update(&[0xff]);
+    }
+    let mut groups = conf.groups.iter().collect::<Vec<_>>();
+    groups.sort_unstable_by_key(|group| group.group().as_str());
+    for group in groups {
+        hasher.update(b"group\0");
+        hasher.update(group.group().as_str().as_bytes());
+        if let Some(rate) = group.global_rate() {
+            hasher.update(&rate.permits().to_le_bytes());
+            hasher.update(&rate.period().as_nanos().to_le_bytes());
+            hasher.update(&rate.burst_size().to_le_bytes());
         }
+        let retry = group.retry_policy();
+        hasher.update(&retry.max_attempts().to_le_bytes());
+        hasher.update(&retry.initial_delay().as_nanos().to_le_bytes());
+        hasher.update(&retry.maximum_delay().as_nanos().to_le_bytes());
+        hasher.update(&[0xff]);
     }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn fingerprint_idempotency(hasher: &mut blake3::Hasher, policy: super::TaskIdempotency) {
+    match policy {
+        super::TaskIdempotency::ActiveOnly => {
+            hasher.update(b"idempotency-active");
+        }
+        super::TaskIdempotency::RetainFor(duration) => {
+            hasher.update(b"idempotency-retain");
+            hasher.update(&duration.as_nanos().to_le_bytes());
+        }
+    };
+}
+
+/// Bounds handler-controlled lifecycle data before it reaches any store.
+pub(crate) fn normalize_outcome(
+    outcome: TaskOutcome,
+    payload_limit: usize,
+    error_limit: usize,
+) -> TaskOutcome {
+    match outcome {
+        TaskOutcome::Suspend { state } if state.len() > payload_limit => {
+            TaskOutcome::fail("Task continuation state exceeded the configured limit")
+        }
+        TaskOutcome::Sleep { state, .. } if state.len() > payload_limit => {
+            TaskOutcome::fail("Task continuation state exceeded the configured limit")
+        }
+        TaskOutcome::Sleep { delay, .. } if delay > super::config::MAX_TASK_DELAY => {
+            TaskOutcome::fail("Task sleep duration exceeded the configured limit")
+        }
+        TaskOutcome::Retry { error } => TaskOutcome::Retry {
+            error: truncate_utf8(error, error_limit),
+        },
+        TaskOutcome::Fail { error } => TaskOutcome::Fail {
+            error: truncate_utf8(error, error_limit),
+        },
+        other => other,
+    }
+}
+
+fn truncate_utf8(mut value: String, limit: usize) -> String {
+    if value.len() <= limit {
+        return value;
+    }
+    let mut end = limit;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }

@@ -16,6 +16,14 @@ use vyuh::{
     testing::TestSite,
 };
 
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[derive(Clone, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
+struct DurableJob;
+
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[bundles::task]
+async fn durable_job(_: vyuh::Data<DurableJob>) {}
+
 #[bundles::route(path = "/echo", method = "POST")]
 async fn echo(BodyBytes(body): BodyBytes) -> Html<String> {
     Html(body.len().to_string())
@@ -38,6 +46,15 @@ fn production_conf() -> SiteConf {
     SiteConf::production()
         .secret_key("production-auth-secret-at-least-32-characters")
         .log_init(false)
+}
+
+/// Verifies production task workers cannot silently fall back to process-local memory storage.
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[tokio::test]
+async fn production_tasks_require_a_durable_backend() {
+    let result = Site::build(production_conf(), bundles::bundle! { durable_job }).await;
+    let error = result.expect_err("production task sites must configure a database backend");
+    assert!(error.to_string().contains("durable database backend"));
 }
 
 /// Verifies that the production profile exposes the standard probes and bounded metrics output.

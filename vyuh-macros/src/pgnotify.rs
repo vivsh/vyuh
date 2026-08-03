@@ -18,10 +18,6 @@ struct PgNotifyConfMeta {
     #[darling(default)]
     channel: Option<String>,
 
-    /// Optional target configuration
-    #[darling(default)]
-    target: Option<String>,
-
     #[darling(default)]
     debounce: Option<String>,
 
@@ -60,19 +56,11 @@ fn build_pgnotify_conf(
 
     validate_channel_name(channel)?;
 
-    let target = if let Some(target_str) = &conf.target {
-        validate_target(target_str)?;
-        quote! { #target_str.parse::<::vyuh::emitters::EmitTarget>().unwrap_or_default() }
-    } else {
-        quote! { ::vyuh::emitters::EmitTarget::default() }
-    };
-
     let debounce = build_debounce(conf)?;
 
     Ok(quote! {
         ::vyuh::emitters::PgNotifyConf {
             channel: #channel.to_string(),
-            target: #target,
             debounce: #debounce,
         }
     })
@@ -117,19 +105,6 @@ fn build_debounce(conf: &PgNotifyConfMeta) -> Result<proc_macro2::TokenStream, s
             mode: #mode.parse::<::vyuh::emitters::DebounceMode>().unwrap(),
         })
     })
-}
-
-fn validate_target(target: &str) -> Result<(), syn::Error> {
-    match target.to_ascii_lowercase().as_str() {
-        "signal" | "task" => Ok(()),
-        other => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "Invalid emitter target '{}'. Supported targets: \"signal\", \"task\"",
-                other
-            ),
-        )),
-    }
 }
 
 fn validate_debounce_mode(mode: &str) -> Result<(), syn::Error> {
@@ -223,11 +198,5 @@ mod tests {
         };
 
         assert!(build_debounce(&conf).is_err());
-    }
-
-    #[test]
-    fn target_accepts_signal_and_task() {
-        assert!(validate_target("signal").is_ok());
-        assert!(validate_target("task").is_ok());
     }
 }

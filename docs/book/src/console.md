@@ -188,24 +188,24 @@ the console itself is mounted into the same site.
 `/api/tasks` lists task records without claiming or modifying them:
 
 ```text
-/console/api/tasks?status=pending&priority_min=10&created_from=2026-06-01&created_to=2026-06-30&limit=50
+/console/api/tasks?status=pending&group=email&created_from=2026-06-01&created_to=2026-06-30&page=1&per_page=50
 ```
 
 Supported filters:
 
 - `status`: `pending`, `running`, `suspended`, `succeeded`, or `failed`.
 - `name`: registered task name.
-- `priority_min`: minimum task priority.
-- `identity`: task identity.
+- `group`: named task execution group.
+- `idempotency_key`: task-handler-scoped idempotency key.
 - `created_from`: inclusive task creation date in `YYYY-MM-DD` format.
 - `created_to`: inclusive task creation date in `YYYY-MM-DD` format.
-- `q`: text search across name, identity, and last error.
-- `limit` and `cursor`: offset-style pagination.
+- `q`: text search across name, group, idempotency key, and last error.
+- `page` and `per_page`: one-indexed canonical pagination.
 
 `/api/tasks/{id}` returns the safe task detail shape for one task ID, including
-status, attempts, priority, timing, identity, last error, and JSON
-payload/state/resume/output/result fields when they parse as JSON.
-The HTML task page exposes search, status, name, identity, and date-range
+status, attempts, group, timing, idempotency key, last error, and JSON
+input/state/resume fields when they parse as JSON.
+The HTML task page exposes search, status, name, group, idempotency-key, and date-range
 filters and shows selected task details without leaving the list.
 
 ## Status

@@ -30,7 +30,7 @@
   </div>
 
   <form class="vyuh-console-toolbar" method="get" action="{{ urls.tasks }}">
-    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, identity, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, group, key, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
     <select name="status">
       <option value="">All Status</option>
       {% for status in statuses %}
@@ -38,12 +38,13 @@
       {% endfor %}
     </select>
     <input type="search" name="name" placeholder="Task name" value="{% if query.name %}{{ query.name }}{% endif %}">
-    <input type="search" name="identity" placeholder="Identity" value="{% if query.identity %}{{ query.identity }}{% endif %}">
+    <input type="search" name="group" placeholder="Group" value="{% if query.group %}{{ query.group }}{% endif %}">
+    <input type="search" name="idempotency_key" placeholder="Idempotency key" value="{% if query.idempotency_key %}{{ query.idempotency_key }}{% endif %}">
     <input type="date" name="created_from" value="{% if query.created_from %}{{ query.created_from }}{% endif %}">
     <input type="date" name="created_to" value="{% if query.created_to %}{{ query.created_to }}{% endif %}">
-    <select name="limit" aria-label="Tasks per page">
+    <select name="per_page" aria-label="Tasks per page">
       {% for size in page_sizes %}
-      <option value="{{ size }}" {% if task_limit == size %}selected{% endif %}>{{ size }} per page</option>
+      <option value="{{ size }}" {% if task_per_page == size %}selected{% endif %}>{{ size }} per page</option>
       {% endfor %}
     </select>
     <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
@@ -55,15 +56,15 @@
       <header><h2>Recent Tasks <span class="vyuh-console-badge is-success">Live</span></h2></header>
       <div class="vyuh-console-table">
         <table>
-          <thead><tr><th>Status</th><th>Name</th><th>Identity</th><th>Attempts</th><th>Priority</th><th>Created</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th>Status</th><th>Name</th><th>Group</th><th>Attempts</th><th>Idempotency key</th><th>Created</th><th>Updated</th><th></th></tr></thead>
           <tbody>
             {% for task in page.items %}
             <tr {% if selected_task and selected_task.id == task.id %}aria-selected="true"{% endif %}>
               <td><span class="vyuh-console-badge is-{{ task.status }}">{{ task.status }}</span></td>
               <td><a class="vyuh-console-row-title" href="{{ urls.tasks }}?selected={{ task.id }}">{{ task.name }}</a></td>
-              <td>{% if task.identity %}{{ task.identity }}{% else %}-{% endif %}</td>
+              <td>{{ task.group }}</td>
               <td>{{ task.attempts }}</td>
-              <td>{{ task.priority }}</td>
+              <td>{% if task.idempotency_key %}{{ task.idempotency_key }}{% else %}-{% endif %}</td>
               <td><time datetime="{{ task.created_at }}">{{ task.created_at_display }}</time></td>
               <td><time datetime="{{ task.updated_at }}">{{ task.updated_at_display }}</time></td>
               <td><a href="{{ urls.tasks }}?selected={{ task.id }}">›</a></td>
@@ -75,8 +76,11 @@
         </table>
       </div>
       <footer class="vyuh-console-pagination">
-        <span>Showing {{ page.items | length }} task records</span>
-        <nav>{% if page.next_cursor %}<a href="{{ urls.tasks }}?cursor={{ page.next_cursor }}&limit={{ task_limit }}">Next</a>{% endif %}</nav>
+        <span>Showing {{ page.items | length }} of {{ page.total }} task records</span>
+        <nav>
+          {% if page.previous_page %}<a href="{{ urls.tasks }}?page={{ page.previous_page }}&per_page={{ task_per_page }}">Previous</a>{% endif %}
+          {% if page.next_page %}<a href="{{ urls.tasks }}?page={{ page.next_page }}&per_page={{ task_per_page }}">Next</a>{% endif %}
+        </nav>
       </footer>
     </article>
 
@@ -93,10 +97,10 @@
       </nav>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="task-overview-panel" aria-labelledby="task-overview-tab">
         <dl class="vyuh-console-kv">
-          <div><dt>Identity</dt><dd>{% if selected_task.identity %}{{ selected_task.identity }}{% else %}-{% endif %}</dd></div>
+          <div><dt>Group</dt><dd>{{ selected_task.group }}</dd></div>
           <div><dt>Attempts</dt><dd>{{ selected_task.attempts }}</dd></div>
-          <div><dt>Max Attempts</dt><dd>{% if selected_task.max_attempts %}{{ selected_task.max_attempts }}{% else %}-{% endif %}</dd></div>
-          <div><dt>Priority</dt><dd>{{ selected_task.priority }}</dd></div>
+          <div><dt>Idempotency key</dt><dd>{% if selected_task.idempotency_key %}{{ selected_task.idempotency_key }}{% else %}-{% endif %}</dd></div>
+          <div><dt>Key expires</dt><dd>{% if selected_task.idempotency_expires_at %}{{ selected_task.idempotency_expires_at }}{% else %}-{% endif %}</dd></div>
         </dl>
       </section>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="task-timing-panel" aria-labelledby="task-timing-tab" hidden>
@@ -110,7 +114,7 @@
       </section>
       {% else %}
       <header><h2>Task Details</h2></header>
-      <p>Select a task row to inspect identity, attempts, timing, and errors.</p>
+      <p>Select a task row to inspect its group, attempts, timing, and errors.</p>
       {% endif %}
     </aside>
   </div>

@@ -159,6 +159,7 @@ pub struct SiteConf {
     #[serde(skip, default)]
     pub auth: AuthConf,
 
+    #[serde(skip, default)]
     pub tasks: TaskConf,
 
     pub uploads: UploadConf,
@@ -422,6 +423,7 @@ impl SiteConf {
         self.validate_database(&mut errors);
         self.validate_paths(&mut errors);
         self.validate_auth(&mut errors);
+        self.validate_tasks(&mut errors);
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
         self.mail.validate(&mut errors);
@@ -431,6 +433,16 @@ impl SiteConf {
             Ok(())
         } else {
             Err(ConfError::Many(errors))
+        }
+    }
+
+    fn validate_tasks(&self, errors: &mut Vec<ConfError>) {
+        if let Err(error) = self.tasks.validate() {
+            errors.push(ConfError::InvalidValue {
+                field: "tasks".into(),
+                reason: error.to_string(),
+                expected: Some("valid task groups, batching, and polling limits".into()),
+            });
         }
     }
 

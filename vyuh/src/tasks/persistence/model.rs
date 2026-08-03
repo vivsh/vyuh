@@ -7,28 +7,30 @@ use crate::{
 
 /// Private persistence representation for a durable task.
 ///
-/// `TaskRecord` remains Vyuh's public runtime type. This row deliberately
-/// stores status as its stable integer representation so database metadata is
-/// independent of the public task enum's SQLx compatibility derive.
+/// The advanced store contract uses `TaskRecord`; normal application
+/// inspection receives the read-only `TaskInfo` projection. This row stores
+/// status as a stable integer representation independent of SQLx derives.
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_tasks")]
 pub(super) struct TaskRow {
     #[column(primary_key, type = "uuid")]
     pub(super) id: uuid::Uuid,
+    #[column(type = "varchar(191)")]
     pub(super) name: String,
     pub(super) input: String,
     pub(super) state: Option<String>,
     pub(super) resume_input: Option<String>,
-    pub(super) output: Option<String>,
-    pub(super) result: Option<String>,
     pub(super) status: i16,
     pub(super) attempts: i32,
-    pub(super) priority: i32,
-    pub(super) max_attempts: Option<i32>,
-    pub(super) retry_delay_ms: Option<i64>,
+    #[column(type = "varchar(64)", default = "'default'")]
+    pub(super) group_name: String,
     pub(super) lease_duration_ms: Option<i64>,
     pub(super) last_error: Option<String>,
-    pub(super) identity: Option<String>,
+    #[column(type = "varchar(512)")]
+    pub(super) idempotency_key: Option<String>,
+    #[column(type = "varchar(64)")]
+    pub(super) idempotency_fingerprint: Option<String>,
+    pub(super) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) locked_by: Option<String>,
     pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -40,21 +42,19 @@ pub(super) struct TaskRow {
 impl From<TaskRecord> for TaskRow {
     fn from(record: TaskRecord) -> Self {
         Self {
-            id: record.id,
+            id: record.id.into_uuid(),
             name: record.name,
             input: record.input,
             state: record.state,
             resume_input: record.resume_input,
-            output: record.output,
-            result: record.result,
             status: record.status.as_i16(),
             attempts: record.attempts,
-            priority: record.priority,
-            max_attempts: record.max_attempts,
-            retry_delay_ms: record.retry_delay_ms,
+            group_name: record.group,
             lease_duration_ms: record.lease_duration_ms,
             last_error: record.last_error,
-            identity: record.identity,
+            idempotency_key: record.idempotency_key,
+            idempotency_fingerprint: record.idempotency_fingerprint,
+            idempotency_expires_at: record.idempotency_expires_at,
             locked_by: record.locked_by,
             leased_until: record.leased_until,
             ready_at: record.ready_at,
@@ -70,21 +70,19 @@ impl TryFrom<TaskRow> for TaskRecord {
 
     fn try_from(row: TaskRow) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: row.id,
+            id: crate::tasks::TaskId::new(row.id),
             name: row.name,
             input: row.input,
             state: row.state,
             resume_input: row.resume_input,
-            output: row.output,
-            result: row.result,
             status: crate::tasks::TaskStatus::from_i16(row.status)?,
             attempts: row.attempts,
-            priority: row.priority,
-            max_attempts: row.max_attempts,
-            retry_delay_ms: row.retry_delay_ms,
+            group: row.group_name,
             lease_duration_ms: row.lease_duration_ms,
             last_error: row.last_error,
-            identity: row.identity,
+            idempotency_key: row.idempotency_key,
+            idempotency_fingerprint: row.idempotency_fingerprint,
+            idempotency_expires_at: row.idempotency_expires_at,
             locked_by: row.locked_by,
             leased_until: row.leased_until,
             ready_at: row.ready_at,
@@ -95,12 +93,71 @@ impl TryFrom<TaskRow> for TaskRecord {
     }
 }
 
+/// Current owner of one task-handler-scoped idempotency key.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_task_idempotency")]
+pub(super) struct TaskIdempotencyRow {
+    #[column(primary_key, type = "uuid")]
+    pub(super) id: uuid::Uuid,
+    #[column(type = "varchar(191)")]
+    pub(super) task_name: String,
+    #[column(type = "varchar(512)")]
+    pub(super) key_value: String,
+    #[column(type = "varchar(64)")]
+    pub(super) fingerprint: String,
+    #[column(type = "uuid")]
+    pub(super) task_id: uuid::Uuid,
+    pub(super) expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) created_at: chrono::DateTime<chrono::Utc>,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Durable token bucket and policy identity for one globally rate-limited group.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_task_group_rates")]
+pub(super) struct TaskRateRow {
+    #[column(primary_key, type = "uuid")]
+    pub(super) id: uuid::Uuid,
+    #[column(type = "varchar(64)")]
+    pub(super) group_name: String,
+    #[column(type = "varchar(64)")]
+    pub(super) policy_fingerprint: String,
+    pub(super) tokens_micros: i64,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Store-wide task scheduling policy identity shared by all workers.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_task_runtime")]
+pub(super) struct TaskRuntimeRow {
+    #[column(primary_key, type = "uuid")]
+    pub(super) id: uuid::Uuid,
+    #[column(type = "varchar(64)")]
+    pub(super) policy_fingerprint: String,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutable singleton task-runtime policy fields.
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct ClaimPatch {
-    pub(super) status: i16,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+#[table(name = "vyuh_task_runtime")]
+pub(super) struct RuntimePolicyPatch {
+    pub(super) policy_fingerprint: String,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutable rate-bucket reservation fields.
+#[derive(Debug, Clone, db::Record)]
+#[table(name = "vyuh_task_group_rates")]
+pub(super) struct RatePatch {
+    pub(super) tokens_micros: i64,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutable idempotency retention fields.
+#[derive(Debug, Clone, db::Record)]
+#[table(name = "vyuh_task_idempotency")]
+pub(super) struct IdempotencyExpiryPatch {
+    pub(super) expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -110,80 +167,5 @@ pub(super) struct ResumePatch {
     pub(super) status: i16,
     pub(super) resume_input: Option<String>,
     pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct CompletePatch {
-    pub(super) status: i16,
-    pub(super) resume_input: Option<String>,
-    pub(super) output: Option<String>,
-    pub(super) result: Option<String>,
-    pub(super) last_error: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct SuspendPatch {
-    pub(super) status: i16,
-    pub(super) state: String,
-    pub(super) resume_input: Option<String>,
-    pub(super) output: Option<String>,
-    pub(super) result: Option<String>,
-    pub(super) last_error: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct SleepPatch {
-    pub(super) status: i16,
-    pub(super) state: String,
-    pub(super) resume_input: Option<String>,
-    pub(super) output: Option<String>,
-    pub(super) result: Option<String>,
-    pub(super) last_error: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct FailPatch {
-    pub(super) status: i16,
-    pub(super) resume_input: Option<String>,
-    pub(super) output: Option<String>,
-    pub(super) result: Option<String>,
-    pub(super) last_error: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct RetryPatch {
-    pub(super) status: i16,
-    pub(super) attempts: i32,
-    pub(super) last_error: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }

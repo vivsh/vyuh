@@ -23,7 +23,7 @@ pub(super) enum BundlePartInner {
     ),
     Emitter(emitters::Emitter),
     #[allow(dead_code)]
-    Task(crate::tasks::TaskService),
+    Task(crate::tasks::RegisteredTask),
     Signal(signals::Signaller),
     Error(BundleError),
     AssetDir(embed::Dir),
@@ -299,7 +299,7 @@ where
         + Send
         + 'static,
 {
-    let task = crate::tasks::TaskService::new::<T, H, Args>(&options.name, handler);
+    let task = crate::tasks::RegisteredTask::new::<T, H, Args>(&options.name, handler);
     let op = task.operation().with_conf(&options);
     BundlePart {
         operation: Some(op),

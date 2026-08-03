@@ -33,8 +33,10 @@ before `1.0`.
   schema wiring.
 - OpenAPI and console are effectively free: enable them once, and they follow
   the same bundle tree, prefixes, and nesting as the rest of the application.
-- Durable tasks as continuations: tasks can complete, sleep, suspend, resume,
-  retry, and return typed results.
+- Durable tasks as continuations: value-less tasks can complete, sleep, suspend,
+  resume, and request retry, with named isolation lanes owning retry/backoff
+  policy, batched persistence, idempotency retention, and optional local or
+  store-wide start-rate limits.
 - Built-in live delivery: channels let clients subscribe to typed signal
   payloads over SSE, WebSocket, or long polling.
 - Read-only operations console: inspect routes, operations, config, tasks, and
@@ -55,7 +57,8 @@ That keeps the framework mentally small.
 
 - Routes parse request data into handler input.
 - Commands receive typed input.
-- Tasks receive typed input and can return `Data<T>` or `TaskState<T>`.
+- Tasks receive typed input and perform durable value-less work with optional
+  `TaskState` lifecycle control.
 - Signals and emitters exchange typed data. Channels can expose emitted
   signal payloads to clients.
 

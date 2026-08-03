@@ -59,11 +59,6 @@ struct BuildReportJob {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct ReportBuilt {
-    location: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct Tick {
     source: String,
 }
@@ -110,10 +105,12 @@ async fn me(user: AuthUser) -> Result<Data<String>, Error> {
 
 // ANCHOR: runtime_paths
 #[bundles::task]
-async fn build_report(Data(job): Data<BuildReportJob>) -> Data<ReportBuilt> {
-    Data::new(ReportBuilt {
-        location: format!("reports/{}.json", job.account_id),
-    })
+async fn build_report(Data(job): Data<BuildReportJob>) -> Result<(), Error> {
+    println!(
+        "write report for account {} to application storage",
+        job.account_id
+    );
+    Ok(())
 }
 
 #[bundles::cron(expr = "0 */5 * * * * *")]

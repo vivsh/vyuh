@@ -4,10 +4,10 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::{
     db,
-    tasks::{TaskError, TaskListFilter, TaskRecord, TaskStatus},
+    tasks::{TaskError, TaskFilter, TaskRecord, TaskStatus},
 };
 
-use super::model::TaskRow;
+use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow};
 
 /// Mool-backed persistent task store selected by Vyuh's database feature.
 #[derive(Clone)]
@@ -15,6 +15,8 @@ pub struct DbTaskStore {
     pub(super) pool: db::DbPool,
     pub(super) batch_size: usize,
     pub(super) lease_duration: std::time::Duration,
+    pub(super) runtime_conf:
+        std::sync::Arc<tokio::sync::RwLock<Option<crate::tasks::TaskStoreConf>>>,
 }
 
 impl DbTaskStore {
@@ -24,12 +26,28 @@ impl DbTaskStore {
             pool: db::DbPool::from_pool(pool),
             batch_size: batch_size.max(1),
             lease_duration,
+            runtime_conf: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     /// Returns the selected backend's typed task table handle.
     pub(super) fn table() -> db::queries::ModelTable<TaskRow> {
         <TaskRow as db::Model>::table()
+    }
+
+    /// Returns the typed idempotency ownership table.
+    pub(super) fn idempotency_table() -> db::queries::ModelTable<TaskIdempotencyRow> {
+        <TaskIdempotencyRow as db::Model>::table()
+    }
+
+    /// Returns the typed global rate-bucket table.
+    pub(super) fn rate_table() -> db::queries::ModelTable<TaskRateRow> {
+        <TaskRateRow as db::Model>::table()
+    }
+
+    /// Returns the singleton task-runtime policy table.
+    pub(super) fn runtime_table() -> db::queries::ModelTable<TaskRuntimeRow> {
+        <TaskRuntimeRow as db::Model>::table()
     }
 
     /// Selects pending work that is ready or running work whose lease expired.
@@ -50,19 +68,6 @@ impl DbTaskStore {
                 .and(table.leased_until.lte(db::val(Some(now)))),
         );
         pending.or(expired)
-    }
-
-    /// Restricts a mutation to the runner that currently owns a task lease.
-    pub(super) fn owned_predicate(
-        table: &db::queries::ModelTable<TaskRow>,
-        task_id: uuid::Uuid,
-        runner_id: &str,
-    ) -> db::queries::Predicate {
-        table
-            .id
-            .eq(db::val(task_id))
-            .and(table.locked_by.eq(db::val(Some(runner_id.to_owned()))))
-            .and(table.status.eq(db::val(TaskStatus::Running.as_i16())))
     }
 
     /// Calculates an absolute lease deadline while rejecting invalid durations.
@@ -96,29 +101,6 @@ impl DbTaskStore {
     }
 }
 
-/// Resolves explicit retry timing before the retry compare-and-set update.
-pub(super) fn retry_delay(
-    requested: Option<std::time::Duration>,
-    configured_ms: Option<i64>,
-) -> Result<ChronoDuration, TaskError> {
-    match requested {
-        Some(duration) => ChronoDuration::from_std(duration).map_err(|_| {
-            TaskError::TaskExecutionError(
-                "task retry duration is outside the supported range".into(),
-            )
-        }),
-        None => {
-            let milliseconds = configured_ms.unwrap_or_default();
-            if milliseconds < 0 {
-                return Err(TaskError::TaskExecutionError(
-                    "task retry duration cannot be negative".into(),
-                ));
-            }
-            Ok(ChronoDuration::milliseconds(milliseconds))
-        }
-    }
-}
-
 /// Adds a bounded duration without allowing Chrono arithmetic to overflow.
 pub(super) fn add_time(
     now: DateTime<Utc>,
@@ -130,34 +112,11 @@ pub(super) fn add_time(
     })
 }
 
-/// Records an ignored outcome after a lease was lost or reclaimed.
-pub(super) fn log_stale_owner(rows: u64, task_id: uuid::Uuid, runner_id: &str) {
-    if rows == 0 {
-        tracing::warn!(
-            "Task {} outcome ignored because runner {} no longer owns it",
-            task_id,
-            runner_id
-        );
-    }
-}
-
-/// Preserves the task identity conflict as a stable domain error.
-pub(super) fn map_store_error(error: db::DbError) -> TaskError {
-    match &error {
-        db::DbError::Integrity {
-            kind: db::IntegrityKind::Unique,
-            constraint: Some(constraint),
-            ..
-        } if constraint.contains("identity") => TaskError::IdentityError,
-        _ => TaskError::StoreError(error),
-    }
-}
-
 /// Applies every supported task-list filter to one typed query scope.
 pub(super) fn apply_filter(
     mut scope: db::queries::QueryScope,
     table: &db::queries::ModelTable<TaskRow>,
-    filter: &TaskListFilter,
+    filter: &TaskFilter,
 ) -> db::queries::QueryScope {
     if let Some(status) = filter.status {
         scope = scope.filter(table.status.eq(db::val(status.as_i16())));
@@ -165,11 +124,11 @@ pub(super) fn apply_filter(
     if let Some(name) = &filter.name {
         scope = scope.filter(table.name.eq(db::val(name.clone())));
     }
-    if let Some(identity) = &filter.identity {
-        scope = scope.filter(table.identity.eq(db::val(Some(identity.clone()))));
+    if let Some(group) = &filter.group {
+        scope = scope.filter(table.group_name.eq(db::val(group.clone())));
     }
-    if let Some(priority) = filter.priority_min {
-        scope = scope.filter(table.priority.gte(db::val(priority)));
+    if let Some(key) = &filter.idempotency_key {
+        scope = scope.filter(table.idempotency_key.eq(db::val(Some(key.clone()))));
     }
     if let Some(created_from) = filter.created_from {
         scope = scope.filter(table.created_at.gte(db::val(created_from)));
@@ -177,7 +136,7 @@ pub(super) fn apply_filter(
     if let Some(created_to) = filter.created_to {
         scope = scope.filter(table.created_at.lte(db::val(created_to)));
     }
-    if let Some(query) = &filter.q {
+    if let Some(query) = &filter.query {
         scope = scope.filter(text_filter(table, query));
     }
     scope
@@ -187,8 +146,9 @@ pub(super) fn apply_filter(
 fn text_filter(table: &db::queries::ModelTable<TaskRow>, query: &str) -> db::queries::Predicate {
     let pattern = format!("%{}%", query.to_lowercase());
     case_fold_like(table.name.clone(), pattern.clone())
+        .or(case_fold_like(table.group_name.clone(), pattern.clone()))
         .or(case_fold_like_optional(
-            table.identity.clone(),
+            table.idempotency_key.clone(),
             pattern.clone(),
         ))
         .or(case_fold_like_optional(table.last_error.clone(), pattern))

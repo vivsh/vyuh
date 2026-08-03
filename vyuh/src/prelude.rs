@@ -40,7 +40,9 @@ pub use crate::routes::{
 
 // ── Tasks ───────────────────────────────────────────────────────────────────
 
-pub use crate::tasks::{Suspension, TaskOptions, TaskState};
+pub use crate::tasks::{
+    Continuation, DEFAULT_TASK_GROUP, TaskGroup, TaskId, TaskOptions, TaskReceipt, TaskState,
+};
 
 // ── Services ─────────────────────────────────────────────────────────────────
 

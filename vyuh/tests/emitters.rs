@@ -43,7 +43,6 @@ async fn test_periodic(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         move |emitters::IterCount(_it): emitters::IterCount| handler(counter_clone.clone()),
         emitters::PeriodicConf {
             interval: Duration::from_millis(100),
-            target: emitters::EmitTarget::Signal,
         },
     )?;
 
@@ -98,7 +97,6 @@ async fn test_pgnotify_trailing_debounce_uses_last_payload(
         },
         emitters::PgNotifyConf {
             channel: "test_trailing_debounce".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: Some(emitters::DebounceConf {
                 window: Duration::from_millis(100),
                 mode: emitters::DebounceMode::Trailing,
@@ -162,7 +160,6 @@ async fn test_pgnotify_leading_trailing_debounce_emits_first_and_last(
         },
         emitters::PgNotifyConf {
             channel: "test_leading_trailing_debounce".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: Some(emitters::DebounceConf {
                 window: Duration::from_millis(100),
                 mode: emitters::DebounceMode::LeadingAndTrailing,
@@ -224,7 +221,6 @@ async fn test_pgnotify_slow_handler_does_not_block_other_notifications(
         },
         emitters::PgNotifyConf {
             channel: "test_slow_pgnotify".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: None,
         },
     )?;
@@ -238,7 +234,6 @@ async fn test_pgnotify_slow_handler_does_not_block_other_notifications(
         },
         emitters::PgNotifyConf {
             channel: "test_fast_pgnotify".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: None,
         },
     )?;
@@ -290,7 +285,6 @@ async fn test_cron(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         move || handler(counter_clone.clone()),
         emitters::CronConf {
             expr: "* * * * * *".into(), // Every second
-            target: emitters::EmitTarget::Signal,
         },
     )?;
 
@@ -350,7 +344,6 @@ async fn test_pgnotify_debounce_still_postpones_periodic_fallback(
         },
         emitters::PeriodicConf {
             interval: Duration::from_millis(200),
-            target: emitters::EmitTarget::Signal,
         },
     )?;
     let pgnotify = emitters::pgnotify(
@@ -363,7 +356,6 @@ async fn test_pgnotify_debounce_still_postpones_periodic_fallback(
         },
         emitters::PgNotifyConf {
             channel: "test_debounce_periodic_fallback".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: Some(emitters::DebounceConf {
                 window: Duration::from_millis(100),
                 mode: emitters::DebounceMode::Trailing,
@@ -434,7 +426,6 @@ async fn test_pgnotify(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         },
         emitters::PgNotifyConf {
             channel: "test_channel".to_string(),
-            target: emitters::EmitTarget::Signal,
             debounce: None,
         },
     )?;

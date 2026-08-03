@@ -917,6 +917,7 @@ async fn console_html_pages_and_assets_work() -> Result<(), crate::auth::AuthErr
     Ok(())
 }
 
+/// Verifies console task inspection exposes lifecycle data without task values.
 #[tokio::test]
 async fn console_task_pages_show_submitted_tasks() {
     let conf = SiteConf::default()
@@ -932,6 +933,16 @@ async fn console_task_pages_show_submitted_tasks() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let cookie = console_cookie(&site).await.unwrap();
+    let task_id = site
+        .tasks()
+        .list(crate::tasks::TaskFilter::new())
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
     let client = TestSite::new(site);
 
     let api_tasks = client
@@ -942,6 +953,17 @@ async fn console_task_pages_show_submitted_tasks() {
     assert_eq!(api_tasks.status(), StatusCode::OK);
     let api_tasks = api_tasks.text().await;
     assert!(api_tasks.contains("console_test_task"));
+
+    let detail = client
+        .get(&format!("/console/api/tasks/{task_id}"))
+        .header(header::COOKIE.as_str(), &cookie)
+        .send()
+        .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: serde_json::Value = serde_json::from_str(&detail.text().await).unwrap();
+    assert!(detail.get("input").is_some());
+    assert!(detail.get("output").is_none());
+    assert!(detail.get("result").is_none());
 
     let tasks = client
         .get("/console/tasks")

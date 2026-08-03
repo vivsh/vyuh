@@ -10,8 +10,8 @@ use crate::{
     auth::AuthUser,
     console::{
         query::{
-            OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit,
-            task_limit_max,
+            OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit_max,
+            task_per_page,
         },
         schema_view::OperationView,
         status::StatusOut,
@@ -124,7 +124,12 @@ pub async fn operation_detail(
 /// Renders the task list or a safe console error page when inspection fails.
 pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) -> Response {
     if !site.console_has_tasks() {
-        return render_or_error(&site, render_tasks(&site, query, empty_tasks()));
+        let per_page = task_per_page(
+            &query,
+            site.conf().console.page_size_default,
+            site.conf().console.page_size_max,
+        );
+        return render_or_error(&site, render_tasks(&site, query, empty_tasks(per_page)));
     }
 
     let conf = &site.conf().console;
@@ -132,16 +137,13 @@ pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) 
     let Ok(page) = site.tasks().list(filter).await else {
         return internal_error(&site);
     };
-    let page = Page {
-        items: page.records.iter().map(TaskOut::from).collect::<Vec<_>>(),
-        next_cursor: page.next_cursor,
-    };
+    let page = page.map(|record| TaskOut::from(&record));
     render_or_error(&site, render_tasks(&site, query, page))
 }
 
 /// Renders one task or an appropriate console error page.
 pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
-    let Ok(id) = uuid::Uuid::parse_str(&id) else {
+    let Ok(id) = id.parse::<crate::tasks::TaskId>() else {
         return not_found(&site);
     };
     let record = match site.tasks().get(id).await {
@@ -376,13 +378,15 @@ fn error_page(site: &Site, status: StatusCode, title: &str, message: &str) -> Re
 fn render_tasks(
     site: &Site,
     query: TaskQuery,
-    page: Page<TaskOut>,
+    page: crate::routes::Page<TaskOut>,
 ) -> Result<Html<String>, TemplateError> {
     let conf = &site.conf().console;
-    let task_limit = task_limit(&query, conf.page_size_default, conf.page_size_max);
+    let task_per_page = task_per_page(&query, conf.page_size_default, conf.page_size_max);
     let task_items = page.items.iter().map(task_view).collect::<Vec<_>>();
     let selected_task = selected_task(&query, &task_items);
     let task_counts = task_counts(&task_items);
+    let previous_page = (page.page > 1).then(|| page.page - 1);
+    let next_page = (page.page < page.total_pages).then(|| page.page + 1);
     render_page(
         site,
         "console/tasks.html",
@@ -391,12 +395,16 @@ fn render_tasks(
         json!({
             "page": {
                 "items": task_items,
-                "next_cursor": page.next_cursor,
+                "page": page.page,
+                "total": page.total,
+                "total_pages": page.total_pages,
+                "previous_page": previous_page,
+                "next_page": next_page,
             },
             "query": query,
             "statuses": task_statuses(),
             "page_sizes": task_page_sizes(),
-            "task_limit": task_limit,
+            "task_per_page": task_per_page,
             "selected_task": selected_task,
             "task_counts": task_counts,
         }),
@@ -484,11 +492,8 @@ fn operation_view(
         .map(|operation| OperationView::from_operation(operation, site))
 }
 
-fn empty_tasks() -> Page<TaskOut> {
-    Page {
-        items: Vec::new(),
-        next_cursor: None,
-    }
+fn empty_tasks(per_page: usize) -> crate::routes::Page<TaskOut> {
+    crate::routes::Page::new(Vec::new(), 0, 1, per_page)
 }
 
 fn operation_kinds() -> [&'static str; 9] {

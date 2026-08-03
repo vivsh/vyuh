@@ -275,20 +275,18 @@ Return `TaskState::retry(...)` when work should be retried:
 ```rust
 use vyuh::prelude::*;
 
-async fn send_email(Data(job): Data<EmailJob>) -> Result<TaskState<String>, Error> {
+async fn send_email(Data(job): Data<EmailJob>) -> Result<TaskState, Error> {
     match deliver(&job).await {
-        Ok(()) => Ok(TaskState::complete("sent".to_string())?),
-        Err(err) if err.is_transient() => Ok(TaskState::retry(
-            Some(std::time::Duration::from_secs(60)),
-            err.to_string(),
-        )),
+        Ok(()) => Ok(TaskState::complete()),
+        Err(err) if err.is_transient() => Ok(TaskState::retry(err.to_string())),
         Err(err) => Err(Error::unavailable(err.to_string())),
     }
 }
 ```
 
-This keeps retry policy visible in task code instead of hiding it in a broad
-error classification.
+The handler decides whether a failure is retryable. Its configured task group
+owns the attempt limit and exponential-backoff timing, so every task in that
+lane follows one operational policy.
 
 ## ErrorKind Mapping
 

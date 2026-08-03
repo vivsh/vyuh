@@ -6,7 +6,7 @@ use crate::{
     callables::{ArgPart, ArgSpec, ReturnPart, ReturnSpec, TypeSchema},
     console::middleware::{MiddlewareInfo, operation_middleware},
     logging::LogSink,
-    tasks::{TaskRecord, TaskStatus},
+    tasks::{TaskInfo, TaskStatus},
 };
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -281,9 +281,9 @@ pub struct TaskOut {
     pub name: String,
     pub status: TaskStatus,
     pub attempts: i32,
-    pub priority: i32,
-    pub max_attempts: Option<i32>,
-    pub identity: Option<String>,
+    pub group: String,
+    pub idempotency_key: Option<String>,
+    pub idempotency_expires_at: Option<String>,
     pub last_error: Option<String>,
     pub locked_by: Option<String>,
     pub leased_until: Option<String>,
@@ -293,16 +293,18 @@ pub struct TaskOut {
     pub completed_at: Option<String>,
 }
 
-impl From<&TaskRecord> for TaskOut {
-    fn from(record: &TaskRecord) -> Self {
+impl From<&TaskInfo> for TaskOut {
+    fn from(record: &TaskInfo) -> Self {
         Self {
             id: record.id.to_string(),
             name: record.name.clone(),
             status: record.status,
             attempts: record.attempts,
-            priority: record.priority,
-            max_attempts: record.max_attempts,
-            identity: record.identity.clone(),
+            group: record.group.clone(),
+            idempotency_key: record.idempotency_key.clone(),
+            idempotency_expires_at: record
+                .idempotency_expires_at
+                .map(|value| value.to_rfc3339()),
             last_error: record.last_error.clone(),
             locked_by: record.locked_by.clone(),
             leased_until: record.leased_until.map(|value| value.to_rfc3339()),
@@ -321,19 +323,15 @@ pub struct TaskDetailOut {
     pub input: Option<serde_json::Value>,
     pub state: Option<serde_json::Value>,
     pub resume_input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub result: Option<serde_json::Value>,
 }
 
-impl From<&TaskRecord> for TaskDetailOut {
-    fn from(record: &TaskRecord) -> Self {
+impl From<&TaskInfo> for TaskDetailOut {
+    fn from(record: &TaskInfo) -> Self {
         Self {
             task: TaskOut::from(record),
             input: parse_json(&record.input),
             state: record.state.as_deref().and_then(parse_json),
             resume_input: record.resume_input.as_deref().and_then(parse_json),
-            output: record.output.as_deref().and_then(parse_json),
-            result: record.result.as_deref().and_then(parse_json),
         }
     }
 }
@@ -389,11 +387,18 @@ impl ConfigOut {
                 status_cache_ttl_seconds: conf.console.status_cache_ttl_seconds,
             },
             tasks: TaskConfigOut {
-                poll_interval_ms: conf.tasks.poll_interval_ms,
-                capacity: conf.tasks.capacity,
-                concurrency: conf.tasks.concurrency,
-                batch_size: conf.tasks.batch_size,
-                lease_duration_ms: conf.tasks.lease_duration_ms,
+                poll_interval_ms: duration_ms(conf.tasks.poll_interval_value()),
+                fallback_poll_interval_ms: duration_ms(conf.tasks.fallback_interval()),
+                concurrency: conf.tasks.concurrency_value(),
+                batch_size: conf.tasks.batch_size_value(),
+                lease_duration_ms: duration_ms(conf.tasks.lease_duration_value()),
+                idempotency: format!("{:?}", conf.tasks.idempotency_value()),
+                groups: conf
+                    .tasks
+                    .resolved_groups()
+                    .into_iter()
+                    .map(TaskGroupConfigOut::from)
+                    .collect(),
             },
             emitters: EmitterConfigOut {
                 notify_channel_capacity: conf.emitters.notify_channel_capacity,
@@ -483,11 +488,48 @@ pub struct ConsoleConfigOut {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TaskConfigOut {
-    pub poll_interval_ms: u32,
-    pub capacity: usize,
+    pub poll_interval_ms: u64,
+    pub fallback_poll_interval_ms: u64,
     pub concurrency: usize,
     pub batch_size: usize,
-    pub lease_duration_ms: u32,
+    pub lease_duration_ms: u64,
+    pub idempotency: String,
+    pub groups: Vec<TaskGroupConfigOut>,
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    match u64::try_from(duration.as_millis()) {
+        Ok(value) => value,
+        Err(_) => u64::MAX,
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TaskGroupConfigOut {
+    pub name: String,
+    pub concurrency: usize,
+    pub rate_limit: Option<String>,
+    pub global_rate_limit: Option<String>,
+}
+
+impl From<crate::tasks::TaskGroupConf> for TaskGroupConfigOut {
+    fn from(conf: crate::tasks::TaskGroupConf) -> Self {
+        Self {
+            name: conf.group().to_string(),
+            concurrency: conf.concurrency(),
+            rate_limit: conf.rate().map(format_task_rate),
+            global_rate_limit: conf.global_rate().map(format_task_rate),
+        }
+    }
+}
+
+fn format_task_rate(rate: crate::tasks::TaskRate) -> String {
+    format!(
+        "{} per {:?}, burst {}",
+        rate.permits(),
+        rate.period(),
+        rate.burst_size(),
+    )
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

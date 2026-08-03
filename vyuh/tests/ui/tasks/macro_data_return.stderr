@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `vyuh::Data<std::string::String>: IntoTaskOutcomePart` is not satisfied
+ --> tests/ui/tasks/macro_data_return.rs:8:10
+  |
+7 | #[bundles::task]
+  | ---------------- required by a bound introduced by this call
+8 | async fn invalid_task(_: Data<Job>) -> Data<String> {
+  |          ^^^^^^^^^^^^ the trait `IntoTaskOutcomePart` is not implemented for `vyuh::Data<std::string::String>`
+  |
+  = help: the following other types implement trait `IntoTaskOutcomePart`:
+            ()
+            Result<T, E>
+            TaskState
+note: required by a bound in `task`
+ --> src/bundles/part.rs
+  |
+  | pub fn task<T, H, Args>(handler: H, options: TaskHandlerConf) -> BundlePart
+  |        ---- required by a bound in this function
+...
+  |         + crate::tasks::IntoTaskOutcomePart
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `task`

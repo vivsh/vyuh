@@ -125,7 +125,6 @@ fn emitter_bundle() -> vyuh::bundles::Bundle {
         direct_heartbeat,
         bundles::PeriodicConf {
             interval: tokio::time::Duration::from_millis(700),
-            target: vyuh::emitters::EmitTarget::Signal,
         },
     );
 

@@ -57,7 +57,6 @@ let part = bundles::periodic::<Heartbeat, _, _>(
     publish_heartbeat,
     emitters::PeriodicConf {
         interval: std::time::Duration::from_secs(30),
-        target: emitters::EmitTarget::Signal,
     },
 );
 ```
@@ -102,7 +101,6 @@ let part = bundles::cron::<DailyTick, _, _>(
     publish_daily,
     emitters::CronConf {
         expr: "0 0 0 * * *".to_string(),
-        target: emitters::EmitTarget::Signal,
     },
 );
 ```
@@ -129,7 +127,6 @@ let part = bundles::periodic::<QueueTick, _, _>(
     publish_queue_tick,
     emitters::PeriodicConf {
         interval: std::time::Duration::from_millis(1500),
-        target: emitters::EmitTarget::Signal,
     },
 );
 ```
@@ -158,7 +155,6 @@ let part = bundles::pgnotify::<NoteNotification, _, _>(
     publish_note_notification,
     emitters::PgNotifyConf {
         channel: "notes_changed".to_string(),
-        target: emitters::EmitTarget::Signal,
         debounce: None,
     },
 );

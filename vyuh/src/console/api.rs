@@ -80,14 +80,11 @@ pub async fn tasks(
     site: Site,
     _user: AuthUser,
     Query(query): Query<TaskQuery>,
-) -> Result<Json<Page<TaskOut>>, Error> {
+) -> Result<Json<crate::routes::Page<TaskOut>>, Error> {
     let conf = &site.conf().console;
     let filter = query.to_filter(conf.page_size_default, task_limit_max(conf.page_size_max));
     let page = site.tasks().list(filter).await.map_err(Error::other)?;
-    Ok(Json(Page {
-        items: page.records.iter().map(TaskOut::from).collect(),
-        next_cursor: page.next_cursor,
-    }))
+    Ok(Json(page.map(|record| TaskOut::from(&record))))
 }
 
 pub async fn task_detail(
@@ -95,7 +92,9 @@ pub async fn task_detail(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDetailOut>, Error> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| Error::not_found("task was not found"))?;
+    let id = id
+        .parse::<crate::tasks::TaskId>()
+        .map_err(|_| Error::not_found("task was not found"))?;
     let record = site
         .tasks()
         .get(id)

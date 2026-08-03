@@ -45,6 +45,8 @@ pub use multipart::{JsonPart, MultipartForm, MultipartMap, UploadedFile, Uploade
 pub(crate) use registry::RouteRegistry;
 pub use registry::Routes;
 pub use subscriber::{ChannelAttach, Subscriber};
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+pub use types::Page;
 pub use types::{
     Accepted, BodyBytes, CookieJson, Created, FileResponse, Form, Json, JsonStr, OkJson, OkOut,
     PageBounds, PageParams, Path, PermanentRedirect, Query, RouteConf, StreamResponse,

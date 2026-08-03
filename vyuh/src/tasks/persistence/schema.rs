@@ -2,58 +2,84 @@
 
 use crate::db;
 
-use super::model::TaskRow;
+use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow};
 
-/// Builds the validated desired schema for Vyuh's persistent task table.
+/// Builds the desired task, idempotency, rate, and runtime coordination schema.
 pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
-    let mut schema = db::schema().model::<TaskRow>().build()?;
-    for table in schema.tables.values_mut() {
+    let mut schema = db::schema()
+        .model::<TaskRow>()
+        .model::<TaskIdempotencyRow>()
+        .model::<TaskRateRow>()
+        .model::<TaskRuntimeRow>()
+        .build()?;
+    if let Some(table) = schema.tables.get_mut("vyuh_tasks") {
         append_task_indexes(table);
-        #[cfg(feature = "mysql")]
-        append_active_identity(table);
+    }
+    if let Some(table) = schema.tables.get_mut("vyuh_task_idempotency") {
+        append_idempotency_indexes(table);
+    }
+    if let Some(table) = schema.tables.get_mut("vyuh_task_group_rates") {
+        append_rate_indexes(table);
     }
     schema.prepare_loaded(dialect())
 }
 
-/// Adds the query and identity indexes that preserve task claim performance.
+/// Adds grouped readiness, lease, and diagnostic lookup indexes.
 fn append_task_indexes(table: &mut db::Table) {
     table.indexes.extend([
-        task_index(
-            task_index_name("pending_priority_claim"),
-            &["status", "priority", "ready_at", "created_at"],
+        index(
+            "idx_vyuh_tasks_group_pending_ready",
+            &["group_name", "status", "ready_at", "created_at", "id"],
             false,
-            pending_index_predicate(),
+            pending_predicate(),
         ),
-        task_index(
-            task_index_name("running_lease"),
-            &["status", "leased_until"],
+        index(
+            "idx_vyuh_tasks_group_running_lease",
+            &["group_name", "status", "leased_until", "id"],
             false,
-            running_index_predicate(),
+            running_predicate(),
         ),
+        index(
+            "idx_vyuh_tasks_idempotency_key",
+            &["name", "idempotency_key"],
+            false,
+            None,
+        ),
+        index("idx_vyuh_tasks_history", &["created_at", "id"], false, None),
     ]);
-    append_name_status_index(table);
-    append_active_identity_index(table);
 }
 
-/// Adds the portable name/status lookup index where text columns can be indexed directly.
-#[cfg(any(feature = "postgres", feature = "sqlite"))]
-fn append_name_status_index(table: &mut db::Table) {
-    table.indexes.push(task_index(
-        task_index_name("name_status"),
-        &["name", "status"],
-        false,
+/// Adds unique key ownership and bounded archive cleanup indexes.
+fn append_idempotency_indexes(table: &mut db::Table) {
+    table.indexes.extend([
+        index(
+            "idx_vyuh_task_idempotency_owner",
+            &["task_name", "key_value"],
+            true,
+            None,
+        ),
+        index(
+            "idx_vyuh_task_idempotency_expiry",
+            &["expires_at", "id"],
+            false,
+            None,
+        ),
+        index("idx_vyuh_task_idempotency_task", &["task_id"], false, None),
+    ]);
+}
+
+fn append_rate_indexes(table: &mut db::Table) {
+    table.indexes.push(index(
+        "idx_vyuh_task_group_rates_group",
+        &["group_name"],
+        true,
         None,
     ));
 }
 
-/// Omits the lookup index because Mool correctly rejects unprefixed MySQL TEXT indexes.
-#[cfg(feature = "mysql")]
-fn append_name_status_index(_table: &mut db::Table) {}
-
-/// Creates one table index using Mool's portable schema metadata.
-fn task_index(name: String, columns: &[&str], unique: bool, predicate: Option<&str>) -> db::Index {
+fn index(name: &str, columns: &[&str], unique: bool, predicate: Option<&str>) -> db::Index {
     db::Index {
-        name,
+        name: name.into(),
         columns: columns.iter().map(|column| (*column).to_string()).collect(),
         unique,
         predicate: predicate.map(str::to_string),
@@ -61,68 +87,26 @@ fn task_index(name: String, columns: &[&str], unique: bool, predicate: Option<&s
     }
 }
 
-/// Builds the stable index name for the shared task table.
-fn task_index_name(suffix: &str) -> String {
-    format!("idx_vyuh_tasks_{suffix}")
-}
-
-/// Returns the partial predicate for ready pending task candidates.
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
-fn pending_index_predicate() -> Option<&'static str> {
+fn pending_predicate() -> Option<&'static str> {
     Some("status = 0")
 }
 
-/// MySQL expresses the claim predicate through ordinary composite indexes.
 #[cfg(feature = "mysql")]
-fn pending_index_predicate() -> Option<&'static str> {
+fn pending_predicate() -> Option<&'static str> {
     None
 }
 
-/// Returns the partial predicate for expired running task candidates.
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
-fn running_index_predicate() -> Option<&'static str> {
+fn running_predicate() -> Option<&'static str> {
     Some("status = 1")
 }
 
-/// MySQL expresses the lease predicate through ordinary composite indexes.
 #[cfg(feature = "mysql")]
-fn running_index_predicate() -> Option<&'static str> {
+fn running_predicate() -> Option<&'static str> {
     None
 }
 
-/// Adds the backend-specific active identity uniqueness representation.
-fn append_active_identity_index(table: &mut db::Table) {
-    #[cfg(any(feature = "postgres", feature = "sqlite"))]
-    table.indexes.push(task_index(
-        task_index_name("active_identity"),
-        &["identity"],
-        true,
-        Some("identity IS NOT NULL AND status IN (0, 1, 2)"),
-    ));
-
-    #[cfg(feature = "mysql")]
-    table.indexes.push(task_index(
-        task_index_name("identity"),
-        &["active_identity"],
-        true,
-        None,
-    ));
-}
-
-/// Adds MySQL's generated active-identity column used by its unique index.
-#[cfg(feature = "mysql")]
-fn append_active_identity(table: &mut db::Table) {
-    let generated = db::TableBuilder::new(table.name.clone())
-        .column("active_identity", "varchar(255)", |column| {
-            column
-                .generated("CASE WHEN identity IS NOT NULL AND status IN (0, 1, 2) THEN identity ELSE NULL END")
-                .generated_storage(db::schema::GeneratedStorage::Stored)
-        })
-        .build();
-    table.columns.extend(generated.columns);
-}
-
-/// Returns the Mool-selected schema dialect for the active task backend.
 fn dialect() -> db::Dialect {
     #[cfg(feature = "postgres")]
     {
@@ -143,103 +127,78 @@ fn dialect() -> db::Dialect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "postgres")]
-    use std::sync::Arc;
 
-    /// Verifies every backend derives the unqualified shared task table name.
+    /// Verifies all task-runtime tables and group indexes are represented in the desired schema.
     #[test]
-    fn task_schema_uses_shared_table_name() -> Result<(), String> {
+    fn task_schema_contains_grouped_runtime_contract() -> Result<(), String> {
         let schema = task_schema().map_err(|error| error.to_string())?;
-        let table = schema
+        for name in [
+            "vyuh_tasks",
+            "vyuh_task_idempotency",
+            "vyuh_task_group_rates",
+            "vyuh_task_runtime",
+        ] {
+            if !schema.tables.contains_key(name) {
+                return Err(format!("task schema omitted {name}"));
+            }
+        }
+        let tasks = schema
             .tables
             .get("vyuh_tasks")
-            .ok_or_else(|| "task schema did not include vyuh_tasks".to_string())?;
-
-        if table.schema.is_some() {
-            return Err("task table must not use a database schema".to_string());
+            .ok_or("missing task table")?;
+        if tasks.columns.iter().any(|column| {
+            matches!(
+                column.name.as_str(),
+                "priority" | "identity" | "output" | "result" | "max_attempts" | "retry_delay_ms"
+            )
+        }) {
+            return Err("task schema retains a removed task column".into());
         }
-        if schema.tables.contains_key("vyuh.tasks") {
-            return Err("task schema must not retain the legacy vyuh.tasks table".to_string());
-        }
-        Ok(())
-    }
-
-    /// Verifies every task index follows the shared table's stable naming convention.
-    #[test]
-    fn task_schema_uses_shared_index_names() -> Result<(), String> {
-        let schema = task_schema().map_err(|error| error.to_string())?;
-        let table = schema
-            .tables
-            .get("vyuh_tasks")
-            .ok_or_else(|| "task schema did not include vyuh_tasks".to_string())?;
-        let has_invalid_name = table
-            .indexes
+        require_columns(
+            tasks,
+            &["group_name", "ready_at", "leased_until", "idempotency_key"],
+        )?;
+        let group_default = tasks
+            .columns
             .iter()
-            .any(|index| !index.name.starts_with("idx_vyuh_tasks_"));
+            .find(|column| column.name == "group_name")
+            .and_then(|column| column.default.as_deref());
+        if group_default != Some("'default'") {
+            return Err("task group migration does not backfill the default group".into());
+        }
+        require_indexes(
+            tasks,
+            &[
+                "idx_vyuh_tasks_group_pending_ready",
+                "idx_vyuh_tasks_group_running_lease",
+                "idx_vyuh_tasks_history",
+            ],
+        )?;
+        require_indexes(
+            schema
+                .tables
+                .get("vyuh_task_idempotency")
+                .ok_or("missing idempotency table")?,
+            &["idx_vyuh_task_idempotency_owner"],
+        )?;
+        Ok(())
+    }
 
-        if has_invalid_name {
-            return Err("task schema contains an index outside idx_vyuh_tasks_*".to_string());
+    fn require_columns(table: &db::Table, names: &[&str]) -> Result<(), String> {
+        for name in names {
+            if !table.columns.iter().any(|column| column.name == *name) {
+                return Err(format!("table '{}' omitted column '{name}'", table.name));
+            }
         }
         Ok(())
     }
 
-    /// Verifies PostgreSQL migration previews create the shared task table with its identity index.
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn task_migration_preview_targets_shared_table() -> Result<(), String> {
-        use crate::db::engine::{Config, MakeCommand, MigrationCommand, NativeRunnerFactory};
-
-        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let config = Config::new(
-            migration_database_url().to_string(),
-            directory.path().to_path_buf(),
-            directory.path().join("schema.yaml"),
-            dialect(),
-        );
-        let mut runner =
-            NativeRunnerFactory::from_store(config, Arc::new(db::MigrationRegistry::new())).build();
-        let command = MigrationCommand::Make(MakeCommand::Generate {
-            schema: task_schema().map_err(|error| error.to_string())?,
-            name: Some("tasks".to_string()),
-            dry_run: true,
-            decisions: Vec::new(),
-        });
-        let result = runner
-            .run_command(&command)
-            .await
-            .map_err(|error| error.to_string())?;
-        let yaml = preview_yaml(result)?;
-
-        if !yaml.contains("name: vyuh_tasks")
-            || !yaml.contains("name: idx_vyuh_tasks_active_identity")
-        {
-            return Err(
-                "generated task migration does not include vyuh_tasks and its identity index"
-                    .to_string(),
-            );
-        }
-        if yaml.contains("table_name: tasks") || yaml.contains("name: tasks") {
-            return Err("generated task migration retains the legacy tasks table".to_string());
+    fn require_indexes(table: &db::Table, names: &[&str]) -> Result<(), String> {
+        for name in names {
+            if !table.indexes.iter().any(|index| index.name == *name) {
+                return Err(format!("table '{}' omitted index '{name}'", table.name));
+            }
         }
         Ok(())
-    }
-
-    /// Serializes the dry-run migration required for task migration target assertions.
-    #[cfg(feature = "postgres")]
-    fn preview_yaml(result: crate::db::engine::CommandResult) -> Result<String, String> {
-        match result {
-            crate::db::engine::CommandResult::Make(crate::db::engine::MakeResult::Preview(
-                migration,
-            )) => migration
-                .to_yaml_string()
-                .map_err(|error| error.to_string()),
-            _ => Err("task schema generation did not return a migration preview".to_string()),
-        }
-    }
-
-    /// Provides a syntactically valid selected-backend URL for offline migration planning.
-    #[cfg(feature = "postgres")]
-    fn migration_database_url() -> &'static str {
-        "postgres://localhost/vyuh_task_schema"
     }
 }

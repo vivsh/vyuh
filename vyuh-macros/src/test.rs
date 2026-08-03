@@ -137,7 +137,7 @@ fn body_signature(function: &ItemFn, body: &syn::Ident) -> TokenStream2 {
 fn validate_function(function: &ItemFn) -> syn::Result<()> {
     if function.sig.asyncness.is_none() {
         return Err(syn::Error::new_spanned(
-            &function.sig.fn_token,
+            function.sig.fn_token,
             "`#[vyuh::test]` requires an async function",
         ));
     }

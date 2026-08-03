@@ -1,6 +1,6 @@
 [package]
 name = "vyuh"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 license = "MIT"
 description = "Vyuh web framework for Axum and SQLx with handler-first APIs"
@@ -69,7 +69,7 @@ http-serde = "2.1.1"
 serde_urlencoded = "0.7"
 rust-silos = { version = "^0.3.2" }
 
-vyuh-macros = { path = "../vyuh-macros", version = "0.2.12" }
+vyuh-macros = { path = "../vyuh-macros", version = "0.2.13" }
 db_core = { package = "mool", git = "https://github.com/vivsh/mool.git", rev = "0f8628158fa56503948377851bad218be1b8bf96" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"
@@ -99,7 +99,6 @@ sqlx = { workspace = true, features = ["macros", "migrate", "chrono", "runtime-t
 [[example]]
 name = "tasks"
 path = "examples/tasks.rs"
-required-features = ["sqlite"]
 
 [[example]]
 name = "signals_emitters"

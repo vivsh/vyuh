@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Operation, OperationKind,
-    tasks::{TaskListFilter, TaskStatus},
+    tasks::{TaskFilter, TaskStatus},
 };
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -22,29 +22,32 @@ pub struct OperationQuery {
 pub struct TaskQuery {
     pub status: Option<TaskStatus>,
     pub name: Option<String>,
-    pub priority_min: Option<i32>,
-    pub identity: Option<String>,
+    pub group: Option<String>,
+    pub idempotency_key: Option<String>,
     pub created_from: Option<String>,
     pub created_to: Option<String>,
     pub selected: Option<String>,
     pub q: Option<String>,
-    pub limit: Option<usize>,
-    pub cursor: Option<String>,
+    pub page: Option<usize>,
+    pub per_page: Option<usize>,
 }
 
 impl TaskQuery {
-    pub fn to_filter(&self, default_limit: usize, max_limit: usize) -> TaskListFilter {
-        TaskListFilter {
-            status: self.status,
-            name: self.name.clone(),
-            priority_min: self.priority_min,
-            identity: self.identity.clone(),
-            created_from: parse_start(self.created_from.as_deref()),
-            created_to: parse_end(self.created_to.as_deref()),
-            q: self.q.clone(),
-            limit: clamp_limit(self.limit, default_limit, max_limit),
-            offset: parse_cursor(self.cursor.as_deref()),
-        }
+    pub fn to_filter(&self, default_limit: usize, max_limit: usize) -> TaskFilter {
+        let per_page = task_per_page(self, default_limit, max_limit);
+        let page = self.page.unwrap_or(1).max(1);
+        TaskFilter::new()
+            .optional_status(self.status)
+            .optional_name(self.name.clone())
+            .group_name(self.group.clone())
+            .optional_key(self.idempotency_key.clone())
+            .optional_range(
+                parse_start(self.created_from.as_deref()),
+                parse_end(self.created_to.as_deref()),
+            )
+            .optional_search(self.q.clone())
+            .page(page)
+            .per_page(per_page)
     }
 }
 
@@ -52,9 +55,9 @@ pub fn task_limit_max(configured_max: usize) -> usize {
     configured_max.min(100)
 }
 
-pub fn task_limit(query: &TaskQuery, default_limit: usize, configured_max: usize) -> usize {
+pub fn task_per_page(query: &TaskQuery, default_limit: usize, configured_max: usize) -> usize {
     query
-        .limit
+        .per_page
         .unwrap_or(default_limit)
         .clamp(1, task_limit_max(configured_max))
 }

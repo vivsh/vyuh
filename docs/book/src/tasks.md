@@ -39,19 +39,26 @@ Each task record stores:
 - `input`: immutable submitted data.
 - `state`: private continuation state saved by the handler.
 - `resume_input`: optional input supplied when a suspended task is resumed.
-- `output`: optional intermediate output saved while suspended.
-- `result`: final output after completion.
 
 Each wake runs the handler with the latest durable snapshot:
 
 ```text
-input + state + resume_input -> handler -> Data<T> | TaskState<T> | ()
+input + state + resume_input -> handler -> () | TaskState
 ```
 
-Return `Data<T>` or `Result<Data<T>, Error>` when a task completes with a typed
-result and does not need continuation control. Return `TaskState<T>` when the
-handler must suspend, sleep, retry, fail explicitly, or complete from a
-continuation. `TaskOutcome` still exists for low-level store implementors.
+Tasks are value-less: use `()` or `Result<(), Error>` for completed work, and
+`TaskState` or `Result<TaskState, Error>` for explicit lifecycle control.
+`TaskOutcome` remains a payload-free low-level contract under
+`vyuh::tasks::store` for custom stores.
+
+Persist durable artifacts in application records or object storage. Submit
+follow-on work explicitly from domain state, signals, or another task submission,
+using idempotency and an outbox where retries cross external boundaries.
+
+Execution is at least once. Submission idempotency prevents duplicate durable
+intents; it cannot make an external email, payment, or HTTP request exactly
+once. Use a transactional outbox or a domain-owned idempotency key around those
+effects.
 
 Vyuh tasks are durable continuations for a single unit of work. They do not
 provide a workflow DAG engine, child task orchestration, joins, branches, or
@@ -148,44 +155,17 @@ async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> {
 }
 ```
 
-Handlers that complete with a typed result can return `Data<T>`:
-
-```rust
-use schemars::JsonSchema;
-use vyuh::prelude::*;
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ReportJob {
-    account_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct Report {
-    title: String,
-}
-
-#[bundles::task]
-async fn build_report(input: Data<ReportJob>) -> Data<Report> {
-    Data::new(Report {
-        title: format!("report for {}", input.account_id),
-    })
-}
-```
-
-The fallible form is `Result<Data<T>, Error>`. On success, `T` is serialized
-into the task record `result`. On error, the task is committed as failed.
-
 Handlers that need explicit continuation control should return
-`Result<TaskState<T>, Error>`:
+`Result<TaskState, Error>`:
 
 ```rust
 use std::time::Duration;
 use vyuh::prelude::*;
 
 #[bundles::task]
-async fn poll_status(input: Data<PollJob>) -> Result<TaskState<String>, Error> {
+async fn poll_status(input: Data<PollJob>) -> Result<TaskState, Error> {
     if is_ready(input.id).await? {
-        return Ok(TaskState::complete("ready".to_string())?);
+        return Ok(TaskState::complete());
     }
 
     Ok(TaskState::sleep(
@@ -200,9 +180,10 @@ async fn poll_status(input: Data<PollJob>) -> Result<TaskState<String>, Error> {
 `Data<T>` is the immutable submitted input. It stays the same for the lifetime
 of the task.
 
-`Suspension<T>` is an optional handler argument for tasks that can suspend and
-later resume. `suspension.get()` returns `None` on the first run and
-`Some(T)` on a resumed run.
+`Continuation<S, R>` is an optional handler argument for tasks that save state,
+sleep, suspend, or resume. Initial execution has neither value, sleeping work
+has state only, and resumed work has state plus resume input. Its accessors
+borrow values, so continuation types do not need `Clone`.
 
 ```rust
 use schemars::JsonSchema;
@@ -228,11 +209,12 @@ struct PendingApproval {
 
 #[bundles::task(name = "approve_document")]
 async fn approve_document(
-    suspension: Suspension<ApprovalDecision>,
+    continuation: Continuation<PendingApproval, ApprovalDecision>,
     input: Data<ApprovalRequest>,
-) -> Result<TaskState<ApprovalDecision>, Error> {
-    if let Some(decision) = suspension.get() {
-        return Ok(TaskState::complete(decision)?);
+) -> Result<TaskState, Error> {
+    if let Some(decision) = continuation.resume() {
+        apply_decision(&input, decision).await?;
+        return Ok(TaskState::complete());
     }
 
     let state = PendingApproval {
@@ -240,18 +222,12 @@ async fn approve_document(
         title: input.title.clone(),
     };
 
-    Ok(TaskState::suspend(
-        ApprovalDecision::Approved {
-            approver: "(pending)".to_string(),
-        },
-        state,
-    )?)
+    Ok(TaskState::suspend(state)?)
 }
 ```
 
-The generic type on `TaskState<T>` is the output/result type. The state passed
-to `TaskState::suspend` or `TaskState::sleep` may be a different serializable
-type.
+`TaskState` has no result type. The state supplied to `suspend` or `sleep` is
+the only serializable value it carries.
 
 ## Complete, Suspend, Sleep, Retry, And Fail
 
@@ -262,46 +238,46 @@ use vyuh::prelude::*;
 use std::time::Duration;
 use vyuh::tasks::TaskState;
 
-let done = TaskState::complete("ok".to_string())?;
-let suspended = TaskState::suspend("waiting".to_string(), state)?;
-let sleeping = TaskState::<String>::sleep(state, Duration::from_secs(30))?;
-let retry = TaskState::<String>::retry(Some(Duration::from_secs(60)), "try later");
-let failed = TaskState::<String>::fail("permanent failure");
+let done = TaskState::complete();
+let suspended = TaskState::suspend(state)?;
+let sleeping = TaskState::sleep(state, Duration::from_secs(30))?;
+let retry = TaskState::retry("try again using the group's backoff policy");
+let failed = TaskState::fail("permanent failure");
 ```
 
 An `Err(vyuh::Error)` from a handler is committed as a failed task outcome.
 Retry is never inferred from `ErrorKind`; return `TaskState::retry(...)` when
-the task should be tried again later.
+the task should be tried again later. Handlers cannot choose retry timing or
+attempt limits; the selected task group owns both.
 
 ## Suspend And Resume
 
-Suspension is for tasks that cannot continue until something else happens:
+Suspension is the lifecycle state for tasks that cannot continue until something else happens:
 approval, payment confirmation, a webhook, a file upload, or another application
 event.
 
-When a task suspends, it stores private `state` and optional externally visible
-`output`. The task becomes durable and inactive. It does not consume a worker
-slot or keep a Rust future alive.
+When a task suspends, it stores private `state`. The task becomes durable and
+inactive. It does not consume a worker slot or keep a Rust future alive.
 
 Resume targets a specific task ID:
 
 ```rust
-let task_id = site.tasks().submit(ApprovalRequest {
+let receipt = site.tasks().submit(ApprovalRequest {
     document_id: 101,
     title: "Budget".into(),
 }).await?;
 
 let resumed = site
     .tasks()
-    .resume(task_id, ApprovalDecision::Approved {
+    .resume(receipt.id(), ApprovalDecision::Approved {
         approver: "carol".into(),
     })
     .await?;
 ```
 
 `resume` stores the serialized resume input, moves the suspended task back to
-pending, notifies workers, and returns the number of affected records. It
-returns `0` when the task ID does not identify a currently suspended task.
+pending, notifies the local worker, and returns `true` when it changed the task.
+It returns `false` when the ID is absent or no longer suspended.
 
 There are no retained topic events in the current task model. If an application
 needs to resume multiple tasks for one external event, it should keep its own
@@ -313,7 +289,7 @@ Sleep is for timed continuation. The handler saves state, chooses a delay, and
 Vyuh wakes the task after that delay:
 
 ```rust
-TaskState::<String>::sleep(state, Duration::from_secs(30))?
+TaskState::sleep(state, Duration::from_secs(30))?
 ```
 
 Use sleep for polling external systems, chunked imports, slow retries with
@@ -329,98 +305,184 @@ time when workers are running again.
 Submit by registered data type:
 
 ```rust
-site.tasks().submit(SendEmailJob {
+let receipt = site.tasks().submit(SendEmailJob {
     to: "user@example.com".into(),
     subject: "Welcome".into(),
 }).await?;
 ```
 
-Use `submit_with` when the caller needs priority, an initial delay, identity,
-retry policy, lease duration, max attempts, or initial state:
+The receipt is `Queued`, `Existing`, or `Ignored` and always exposes the new or
+existing task ID through `.id()`.
+
+Use `submit_many` to enqueue inputs in one store transaction. Use
+`submit_many_with` for a shared group, delay, and idempotency rule:
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::TaskOptions;
+use vyuh::tasks::{TaskGroup, TaskOptions};
 
-site.tasks()
-    .submit_with(
-        SendEmailJob {
-            to: "user@example.com".into(),
-            subject: "Welcome".into(),
-        },
-        TaskOptions {
-            priority: 10,
-            initial_delay: Some(Duration::from_secs(300)),
-            retry_delay: Some(Duration::from_secs(60)),
-            lease_duration: Some(Duration::from_secs(900)),
-            max_attempts: Some(5),
-            identity: Some("welcome:user@example.com".into()),
-            ..TaskOptions::default()
-        },
+const EMAIL: TaskGroup = TaskGroup::new("email");
+
+let receipts = site.tasks()
+    .submit_many_with(
+        jobs,
+        TaskOptions::new()
+            .group(EMAIL)
+            .delay(Duration::from_secs(300))
+            .idempotency_key(|job: &SendEmailJob| format!("welcome:{}", job.to))
+            .ignore_conflicts(),
     )
     .await?;
 ```
 
-`TaskOptions::identity` is an optional duplicate key. When set, Vyuh allows only
-one active task with that identity. Active means `pending`, `running`, or
-`suspended`; terminal `succeeded` and `failed` tasks release the identity.
+Submission is immediate: the transaction commits before the terminal returns,
+then the local worker is notified. There is no ingress buffer. A bounded bulk
+submission is atomic and its receipts preserve input order; a non-ignored
+conflict or store failure rolls back the whole batch. An empty batch succeeds
+with no receipts.
 
-`TaskOptions::priority` defaults to `0`. Higher values are claimed first. For
-tasks with the same priority, Vyuh orders by eligibility time and creation time.
+All option builders are infallible. Invalid state serialization, group names,
+keys, or durations are reported only by the terminal submission call.
 
-Initial delayed execution is `TaskOptions::initial_delay`, timed continuation is
+Idempotency keys are scoped by registered task handler. Vyuh fingerprints the
+canonical input together with execution-affecting options. Repeating the same
+intent returns `Existing`; reusing the key for a different intent rejects the
+whole batch. `.ignore_conflicts()` keeps non-conflicting entries and returns
+`Ignored` for conflicting entries instead.
+
+The site-wide retention policy defaults to `TaskIdempotency::active_only()`.
+Use `TaskIdempotency::retain_for(Duration::from_secs(30 * 24 * 60 * 60))` when a completed key must
+remain unavailable for an archive window. The window begins when the task
+reaches a terminal state.
+
+Initial delayed execution is `TaskOptions::delay`, timed continuation is
 `TaskState::sleep`, and recurring creation belongs in emitters.
 
-## Concurrency And Leases
+## Groups, Throughput, And Rate Limits
 
-`TaskConf.concurrency` is the maximum number of tasks a runner executes in
-parallel. `TaskConf.batch_size` controls how many tasks a runner claims at a
-time. `TaskConf.lease_duration_ms` controls the default lease duration for
-running tasks. Within each claim batch, eligible tasks are ordered by priority
-first.
+Named groups isolate slow work without introducing priority. Each group owns a
+bounded local queue and per-worker concurrency quota. One dispatcher rotates
+the groups fairly, while one global concurrency limit and one common outcome
+buffer bound the whole runner.
 
 ```rust
 use vyuh::prelude::*;
-use vyuh::tasks::TaskConf;
+use std::time::Duration;
+use vyuh::tasks::{TaskConf, TaskGroup, TaskGroupConf, TaskIdempotency, TaskRate,
+    TaskRetry, DEFAULT_TASK_GROUP};
 
-let conf = SiteConf::default().tasks(TaskConf {
-    concurrency: 4,
-    batch_size: 100,
-    lease_duration_ms: 300_000,
-    ..TaskConf::default()
-});
+const EMAIL: TaskGroup = TaskGroup::new("email");
+const EXPORTS: TaskGroup = TaskGroup::new("exports");
+
+let tasks = TaskConf::default()
+    .concurrency(10)
+    .batch_size(100)
+    .poll_interval(Duration::from_secs(1))
+    .fallback_poll_interval(Duration::from_secs(300))
+    .lease_duration(Duration::from_secs(300))
+    .idempotency(TaskIdempotency::retain_for(Duration::from_secs(30 * 24 * 60 * 60)))
+    .groups([
+        TaskGroupConf::new(DEFAULT_TASK_GROUP, 6),
+        TaskGroupConf::new(EMAIL, 2)
+            .retry(
+                TaskRetry::exponential(5, Duration::from_secs(10))
+                    .max_delay(Duration::from_secs(300)),
+            )
+            .rate_limit(TaskRate::per_second(10).burst(5))
+            .global_rate_limit(TaskRate::per_minute(60).burst(10)),
+        TaskGroupConf::new(EXPORTS, 2),
+    ]);
+let conf = SiteConf::default().tasks(tasks);
 ```
 
-Lease reclaim is conservative: an expired running task is eligible to be claimed
-again and may run another time. Use `TaskOptions::lease_duration` for task
-instances that are expected to run longer than the default lease. A longer lease
-reduces premature duplicate execution for slow work, but it also delays reclaim
-when the worker has actually crashed.
+A site may configure at most 32 groups. Names are stable lowercase descriptors,
+quotas must be positive, and their sum cannot exceed global concurrency.
+Each group also owns its retry limit and exponential backoff. The default is
+five total handler attempts, beginning at one second and capped at five
+minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
+by `max_delay`. This policy cannot be overridden by a submission or handler.
+`rate_limit` is an inexpensive in-memory token bucket owned by the local site
+runner. `global_rate_limit` coordinates starts across workers sharing a durable
+task store. Configure either one independently, or configure both when each
+start must satisfy local smoothing and a shared external quota. Global permits
+are reserved with claimed rows in the same transaction and in batches, so a
+high-throughput group does not require one rate-state write per task. The memory
+store coordinates a global limit only among runners sharing that in-process
+store. Restarting a runner restores its local burst, and adding processes
+multiplies a local-only limit.
+
+Removing a configured group never silently moves its work. Non-terminal orphaned
+tasks prevent worker startup. After running work drains, explicitly call
+`site.tasks().reassign_group(OLD, NEW)` before deploying the configuration that
+removes the old group.
+
+## Adaptive Polling And Leases
+
+`poll_interval` is the short backlog interval. A group whose candidate query
+fills its requested batch is revisited after this interval when it has capacity.
+`fallback_poll_interval` is the maximum idle recheck interval. Future
+`ready_at`, lease-expiry, and rate-token deadlines wake the runner at their
+store-relative database time when they are earlier. Deadlines are tracked per
+group, so activity in one lane does not force an idle or rate-limited lane to
+query early.
+
+Local submission, resume, handler completion, and outcome commit wake the local
+runner immediately. Vyuh intentionally adds no distributed notification
+channel; work submitted by another process may wait until the fallback poll.
+Choose a smaller fallback or an external deployment wake mechanism when that
+latency is unacceptable.
+
+Running leases are renewed in bounded batches before one third of the lease
+remains. A worker that loses ownership cancels its local handler and cannot
+commit its outcome. A crashed worker leaves its lease to expire; reclaiming the
+task consumes another attempt and another rate permit.
+
+When observability is enabled, Vyuh exports bounded-label task counters for
+submission receipts and conflicts, claims and reclaimed leases, handler starts
+and lifecycle outcomes, lease renewals and ownership loss, and store failures.
+Queue, handler, and outcome-commit durations are exported without dynamic
+application-data labels. Handler and group labels come only from the immutable
+site registries.
 
 ## Stores
 
 With a database backend feature enabled, Vyuh stores tasks durably:
 
-- `postgres`: `vyuh.tasks`
+- `postgres`: `vyuh_tasks`
 - `mysql`: `vyuh_tasks`
 - `sqlite`: `vyuh_tasks`
 
-All durable stores keep the lifecycle in one row and index the hot paths for
-claiming pending work, resuming suspended tasks, enforcing active identity
-uniqueness, and reclaiming expired running leases.
+Durable stores use four framework-owned tables: task lifecycle records,
+idempotency ownership, per-group rate buckets, and the store-wide scheduling
+policy fingerprint. The fingerprint prevents workers with incompatible group,
+retry, rate, or idempotency policies from sharing one store.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
 migrations before starting task workers; `Site::build` never creates or alters
 task tables. This makes schema changes reviewable and prevents a replica from
 changing production DDL during startup.
 
+The value-less task revision removes the historical `output` and `result`
+columns. Deploy it by stopping old workers, generating and applying the normal
+application migration, deploying the new binary, then starting workers again.
+Pending, sleeping, and suspended work keeps its input and continuation state;
+only historical task result values are discarded.
+
+Applications implementing a custom persistence backend use the explicit
+`vyuh::tasks::store` namespace. The ordinary prelude does not expose claims,
+commits, runner queues, or persistence records.
+
 Task workers start only in the serving runtime. Commands can submit durable
 tasks, but they do not claim or execute them themselves.
 
 With no backend feature enabled, Vyuh uses `MemoryTaskStore`. This is good for
 quick starts, local experiments, docs, and tests that do not need durability. It
-is not a production durable queue.
+is not a production durable queue. A production site with registered tasks and
+no durable backend is rejected during site construction. Database rate limits
+configured with `global_rate_limit` are store-wide; the memory store coordinates
+them only within its process. `rate_limit` always remains local to one site
+runner regardless of backend.
 
 Use Postgres for production multi-worker deployments by default. SQLite is for
 embedded, local, and single-process durable execution. MySQL is compile
@@ -432,7 +494,7 @@ matches the Postgres and SQLite release gates.
 The canonical runnable task example is:
 
 ```sh
-cargo run -p vyuh --features sqlite --example tasks
+cargo run -p vyuh --example tasks
 ```
 
 It covers:
@@ -440,17 +502,18 @@ It covers:
 - Fire-and-forget task handlers.
 - Fallible task handlers.
 - Direct registration without the task macro.
-- Suspend/resume with `Suspension<T>` and `TaskState<T>`.
+- Suspend/resume with `Continuation<S, R>` and `TaskState`.
 
 ## Failure Modes
 
 - Unregistered task data types return `TaskError::TaskNotFound`.
 - Handler `Err(vyuh::Error)` values are committed as failed task outcomes.
 - Stale workers cannot overwrite tasks they no longer own.
-- Retried tasks become failed when `max_attempts` is reached.
-- Active task identities cannot be duplicated until the active task reaches a
-  terminal state.
-- `resume` returns `0` when the task ID does not identify a suspended task.
+- Retried tasks become failed when their group's maximum attempt count is reached.
+- Conflicting idempotency intents reject the submission batch unless conflict
+  ignoring was explicitly selected.
+- Unknown or orphaned groups fail explicitly and never fall back to `default`.
+- `resume` returns `false` when the task ID does not identify a suspended task.
 
 ## Current Limitations
 

@@ -3,6 +3,7 @@
 mod claim;
 mod common;
 mod model;
+mod runtime;
 #[cfg(feature = "migrations")]
 pub(crate) mod schema;
 mod store;

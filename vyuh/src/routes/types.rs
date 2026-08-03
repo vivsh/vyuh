@@ -62,6 +62,47 @@ pub struct PageBounds {
     pub per_page: usize,
 }
 
+/// Backendless equivalent of Mool's canonical paginated result envelope.
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub total: i64,
+    pub page: usize,
+    pub per_page: usize,
+    pub total_pages: usize,
+}
+
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+impl<T> Page<T> {
+    /// Builds the canonical page metadata for a backendless task store.
+    pub fn new(items: Vec<T>, total: i64, page: usize, per_page: usize) -> Self {
+        let total_pages = if per_page == 0 {
+            0
+        } else {
+            usize::try_from(total.max(0)).map_or(usize::MAX, |value| value.div_ceil(per_page))
+        };
+        Self {
+            items,
+            total,
+            page,
+            per_page,
+            total_pages,
+        }
+    }
+
+    /// Maps page items while preserving pagination metadata.
+    pub fn map<U>(self, mapper: impl FnMut(T) -> U) -> Page<U> {
+        Page {
+            items: self.items.into_iter().map(mapper).collect(),
+            total: self.total,
+            page: self.page,
+            per_page: self.per_page,
+            total_pages: self.total_pages,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BodyBytes(pub Bytes);
 

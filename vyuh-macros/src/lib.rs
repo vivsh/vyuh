@@ -224,7 +224,6 @@ pub fn derive_bitrole(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `expr` - Cron expression (required): `"0 0 * * * *"` (every minute)
-/// - `target` - Optional target. For v0, use `"signal"` or omit it.
 ///
 /// # Examples
 ///
@@ -258,7 +257,6 @@ pub fn cron(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// - `secs` - Interval in seconds (optional)
 /// - `millis` - Interval in milliseconds (optional)
-/// - `target` - Optional target: `"signal"` or `"task"`.
 ///
 /// At least one of `secs` or `millis` must be specified. Both can be used together.
 ///
@@ -299,7 +297,6 @@ pub fn periodic(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `channel` - PostgreSQL channel name (required): `"user_updates"`
-/// - `target` - Optional target. For v0, use `"signal"` or omit it.
 /// - `debounce_millis` / `debounce_secs` - Optional debounce window.
 /// - `debounce` - Optional mode: `"leading"`, `"trailing"`, or
 ///   `"leading_trailing"`. Defaults to `"trailing"` when a debounce window is
@@ -322,12 +319,6 @@ pub fn periodic(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     debounce = "leading_trailing"
 /// )]
 /// async fn publish_debounced_user_update(Data(raw): Data<String>) -> Data<UserUpdate> {
-///     serde_json::from_str::<UserUpdate>(&raw).unwrap().into()
-/// }
-///
-/// // Explicit target selection.
-/// #[pgnotify(channel = "user_updates", target = "task")]
-/// async fn enqueue_user_update(Data(raw): Data<String>) -> Data<UserUpdate> {
 ///     serde_json::from_str::<UserUpdate>(&raw).unwrap().into()
 /// }
 ///
@@ -375,7 +366,7 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// This macro is sugar over `vyuh::bundles::task(handler, TaskHandlerConf)`.
 /// Task handlers accept `Data<T>` as their submitted data argument and return
-/// `TaskOutcome`.
+/// `()`, `Result<(), Error>`, `TaskState`, or `Result<TaskState, Error>`.
 ///
 /// # Attributes
 ///
@@ -386,16 +377,17 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// // Free function with default name
 /// #[task]
-/// async fn send_email(Data(input): Data<EmailData>) -> TaskOutcome {
-///     TaskOutcome::complete(&"sent").unwrap()
+/// async fn send_email(Data(input): Data<EmailData>) -> Result<(), Error> {
+///     deliver(input).await?;
+///     Ok(())
 /// }
 ///
 /// // Method with custom name
 /// impl TaskHandlers {
 ///     #[task(name = "custom_task_name")]
-///     async fn process_order(site: Site, Data(input): Data<Order>) -> TaskOutcome {
+///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<TaskState, Error> {
 ///         // process order
-///         TaskOutcome::complete(&"done").unwrap()
+///         Ok(TaskState::complete())
 ///     }
 /// }
 /// ```

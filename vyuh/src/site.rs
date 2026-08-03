@@ -5,14 +5,13 @@ use crate::channels::{Channels, LocalChannelBackend};
 use crate::commands::CommandRegistry;
 use crate::conf::{self, SiteConf};
 use crate::db::{DbError, DbPool, Notify, PgNotifyDbExt, Pool};
-use crate::emitters::EmitTarget;
 use crate::logging::{self, LoggingGuard};
 use crate::notifiers::CancellationNotifier;
 use crate::observability::Observability;
 use crate::signals::SignalClient;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-use crate::tasks::MemoryTaskStore;
-use crate::tasks::{TaskClient, TaskDispatcher, TaskRunner, TaskStore};
+use crate::tasks::store::MemoryTaskStore;
+use crate::tasks::{TaskDispatcher, TaskRunner, TaskStore, Tasks};
 use crate::templates::{TemplateEngine, TemplateError, Templates};
 use crate::{services, watch};
 use axum::ServiceExt;
@@ -175,6 +174,9 @@ pub enum SiteError {
 
     #[error(transparent)]
     CommandError(#[from] crate::commands::CommandError),
+
+    #[error(transparent)]
+    TaskError(#[from] crate::tasks::TaskError),
 }
 
 impl fmt::Debug for SiteError {
@@ -200,7 +202,8 @@ impl SiteBuilder {
     /// Starts all site-owned background engines exactly once per site runtime.
     async fn start_runtime(site: &Site) -> Result<(), SiteError> {
         if site.inner.task_engine.has_tasks() {
-            let task_runner = TaskRunner::new(site.inner.task_engine.clone());
+            let task_runner = TaskRunner::new(site.inner.task_engine.clone())?;
+            task_runner.initialize().await?;
 
             let signal_site = site.clone();
             let task_site = signal_site.clone();
@@ -267,18 +270,42 @@ impl SiteBuilder {
         let server =
             axum::serve(listener, make_svc).with_graceful_shutdown(shutdown.clone().graceful());
 
-        tokio::select! {
+        let forced_shutdown = tokio::select! {
             result = server => {
-                shutdown.complete();
                 result?;
+                false
             },
             _ = forced.notified() => {
                 tracing::warn!("Forced shutdown requested");
+                true
             },
+        };
+
+        if !forced_shutdown {
+            Self::drain_runtime(&site, forced.clone()).await;
+            shutdown.complete();
         }
 
         Self::abort_runtime(&site);
         Ok(())
+    }
+
+    /// Waits for site-owned engines until they finish or forced shutdown fires.
+    async fn drain_runtime(site: &Site, forced: CancellationNotifier) {
+        loop {
+            let empty = {
+                let mut tasks = site.inner.joinset.lock();
+                while tasks.try_join_next().is_some() {}
+                tasks.is_empty()
+            };
+            if empty {
+                return;
+            }
+            tokio::select! {
+                _ = forced.notified() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+            }
+        }
     }
 
     /// Aborts runtime work after the HTTP server stops accepting requests.
@@ -430,15 +457,25 @@ impl SiteBuilder {
 
         let task_config = self.conf.tasks.clone();
 
+        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+        if self.conf.deployment == crate::conf::DeploymentMode::Production
+            && !bundle.tasks.is_empty()
+        {
+            return Err(conf::ConfError::Other(
+                "production sites with registered tasks require a durable database backend".into(),
+            )
+            .into());
+        }
+
         #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
         let task_store = TaskStore::new(
             pool.as_sqlx().clone(),
-            task_config.batch_size,
-            std::time::Duration::from_millis(task_config.lease_duration_ms as u64),
+            task_config.batch_size_value(),
+            task_config.lease_duration_value(),
         );
 
         #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-        let task_store = MemoryTaskStore::new(task_config.batch_size);
+        let task_store = MemoryTaskStore::new(task_config.batch_size_value());
 
         let task_registry = Arc::new(bundle.tasks.clone().with_config(task_config));
 
@@ -779,6 +816,9 @@ impl Site {
     /// Use this in tests or programmatic shutdown paths that must wait for cleanup.
     pub async fn shutdown_and_wait(&self) {
         self.inner.shutdown_notifier.notify_waiters();
+        let grace = std::time::Duration::from_millis(self.inner.conf.http.shutdown.grace_period_ms);
+        let forced = CancellationNotifier::new();
+        let _ = tokio::time::timeout(grace, SiteBuilder::drain_runtime(self, forced)).await;
         self.inner.joinset.lock().abort_all();
         while let Some(_) = self.inner.joinset.lock().try_join_next() {}
     }
@@ -789,24 +829,13 @@ impl Site {
         SignalClient::new(self.clone(), self.inner.signal_engine.clone())
     }
 
-    pub(crate) async fn dispatch_payload(
-        &self,
-        payload: DataBox,
-        target: EmitTarget,
-    ) -> Result<(), SiteError> {
-        match target {
-            EmitTarget::Signal => {
-                self.inner
-                    .signal_engine
-                    .dispatch_data_fire_and_forget(self.clone(), payload.clone())
-                    .await;
-                if let Err(err) = self.channels().publish_box(&payload).await {
-                    tracing::error!("Error delivering emitted signal to channels: {}", err);
-                }
-            }
-            EmitTarget::Task => {
-                let _ = payload;
-            }
+    pub(crate) async fn dispatch_payload(&self, payload: DataBox) -> Result<(), SiteError> {
+        self.inner
+            .signal_engine
+            .dispatch_data_fire_and_forget(self.clone(), payload.clone())
+            .await;
+        if let Err(err) = self.channels().publish_box(&payload).await {
+            tracing::error!("Error delivering emitted signal to channels: {}", err);
         }
         Ok(())
     }
@@ -1056,8 +1085,12 @@ impl Site {
 
     /// Return the task client for submitting durable background work.
     /// Registered task handlers determine how submitted payloads are executed.
-    pub fn tasks(&self) -> TaskClient<TaskStore> {
-        TaskClient::new(self.inner.task_engine.clone())
+    pub fn tasks(&self) -> Tasks {
+        Tasks::new(self.inner.task_engine.clone())
+    }
+
+    pub(crate) fn task_metrics(&self) -> String {
+        self.inner.task_engine.render_metrics()
     }
 
     pub(crate) async fn execute_command(
@@ -1161,7 +1194,7 @@ mod tests {
         Error, bundles,
         callables::Data,
         commands::CommandConf,
-        emitters::{EmitTarget, PeriodicConf},
+        emitters::PeriodicConf,
         routes::{Json, Methods, RouteConf},
         signals::SignalConf,
         tasks::TaskHandlerConf,
@@ -1446,7 +1479,6 @@ mod tests {
                 emit_runtime_signal,
                 PeriodicConf {
                     interval: Duration::from_millis(1),
-                    target: EmitTarget::Signal,
                 },
             ),
             bundles::task::<RuntimeTask, _, _>(

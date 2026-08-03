@@ -38,12 +38,6 @@ struct ProjectionJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ProjectionOut {
-    name: String,
-    records: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct SignupSignal {
     user_id: i64,
     source: String,
@@ -63,12 +57,6 @@ struct ConsoleTickSignal {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct PrintTickJob {
     tick: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct TickPrintOut {
-    tick: usize,
-    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -119,21 +107,14 @@ async fn send_receipt(Data(job): Data<ReceiptJob>) {
 }
 
 #[bundles::task(name = "rebuild_projection")]
-async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<Data<ProjectionOut>, Error> {
+async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<(), Error> {
     println!("rebuild projection '{}' full={}", job.name, job.full);
-    Ok(Data::new(ProjectionOut {
-        name: job.name.clone(),
-        records: if job.full { 250 } else { 25 },
-    }))
+    Ok(())
 }
 
 #[bundles::task(name = "print_console_tick")]
-async fn print_console_tick(Data(job): Data<PrintTickJob>) -> Data<TickPrintOut> {
+async fn print_console_tick(Data(job): Data<PrintTickJob>) {
     println!("console periodic task fired at tick {}", job.tick);
-    Data::new(TickPrintOut {
-        tick: job.tick,
-        message: format!("printed tick {}", job.tick),
-    })
 }
 
 #[bundles::signal]

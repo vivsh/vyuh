@@ -129,25 +129,6 @@ impl IntoDataBox for EmitterContext {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Copy, Default, Deserialize, Serialize)]
-pub enum EmitTarget {
-    #[default]
-    Signal,
-    Task,
-}
-
-impl std::str::FromStr for EmitTarget {
-    type Err = EmitterError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_ascii_lowercase().as_str() {
-            "signal" => Ok(Self::Signal),
-            "task" => Ok(Self::Task),
-            other => Err(EmitterError::InvalidTarget(other.to_string())),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum EmitterError {
     #[error("Emitter data type mismatch")]
@@ -158,9 +139,6 @@ pub enum EmitterError {
 
     #[error("Emitter with the given type already exists")]
     AlreadyExists,
-
-    #[error("Invalid emitter target: {0}")]
-    InvalidTarget(String),
 
     #[error("Invalid debounce configuration: {0}")]
     InvalidDebounce(String),
@@ -175,7 +153,6 @@ pub enum EmitterError {
 #[derive(Debug)]
 pub struct Emitter {
     type_id: TypeId,
-    target: EmitTarget,
     source: EmitterSource,
 }
 
@@ -264,13 +241,11 @@ impl std::fmt::Debug for EmitterSource {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CronConf {
     pub expr: String,
-    pub target: EmitTarget,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeriodicConf {
     pub interval: tokio::time::Duration,
-    pub target: EmitTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -328,7 +303,6 @@ impl DebounceConf {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PgNotifyConf {
     pub channel: String,
-    pub target: EmitTarget,
     pub debounce: Option<DebounceConf>,
 }
 
@@ -350,7 +324,6 @@ where
     let wrapper = Callable::new(handler);
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
-        target: options.target,
         source: EmitterSource::Cron {
             schedule: options.expr.parse::<cron::Schedule>()?,
             handler: wrapper,
@@ -369,7 +342,6 @@ where
     let wrapper = Callable::new(handler);
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
-        target: options.target,
         source: EmitterSource::Periodic {
             interval: options.interval,
             handler: wrapper,
@@ -391,7 +363,6 @@ where
     let wrapper = Callable::new(handler);
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
-        target: options.target,
         source: EmitterSource::PgNotify {
             channel: options.channel,
             handler: wrapper,
@@ -454,9 +425,9 @@ pub struct EmitterEngine {
 }
 
 impl EmitterEngine {
-    async fn dispatch(&self, site: &Site, payload: DataBox, target: EmitTarget) {
-        if let Err(err) = site.dispatch_payload(payload, target).await {
-            tracing::error!(target = ?target, "Error dispatching emitter payload: {}", err);
+    async fn dispatch(&self, site: &Site, payload: DataBox) {
+        if let Err(err) = site.dispatch_payload(payload).await {
+            tracing::error!("Error dispatching emitter payload: {}", err);
         }
     }
 
@@ -482,7 +453,6 @@ impl EmitterEngine {
                         type_id.clone(),
                         TimerKind::Interval(dur.clone()),
                         handler.clone(),
-                        emitter.target,
                     );
                     timer_tasks.push(work);
                 }
@@ -491,7 +461,6 @@ impl EmitterEngine {
                         type_id.clone(),
                         TimerKind::Schedule(schedule.clone()),
                         handler.clone(),
-                        emitter.target,
                     );
                     timer_tasks.push(work);
                 }
@@ -506,7 +475,6 @@ impl EmitterEngine {
                         type_id.clone(),
                         channel.clone(),
                         handler.clone(),
-                        emitter.target,
                         debounce.clone(),
                     ));
                     notify_tasks
@@ -543,7 +511,6 @@ impl EmitterEngine {
                         HandlerCall {
                             source,
                             handler: work.producer.clone(),
-                            target: work.target,
                             ctx,
                         },
                     );
@@ -563,12 +530,11 @@ impl EmitterEngine {
                 }
                 Some(completion) = completion_rx.recv() => {
                     match completion.result {
-                        Ok(payload) => self.dispatch(&site, payload, completion.target).await,
+                        Ok(payload) => self.dispatch(&site, payload).await,
                         Err(err) => {
                             tracing::error!(
                                 source = completion.source.as_str(),
                                 source_detail = ?completion.source,
-                                target = ?completion.target,
                                 "Emitter handler failed: {}",
                                 err
                             );
@@ -618,7 +584,6 @@ impl EmitterEngine {
                     debounce: call.debounce,
                 },
                 handler: call.handler,
-                target: call.target,
                 ctx: EmitterContext {
                     site: site.clone(),
                     payload: DataBox::new(call.payload),
@@ -640,7 +605,6 @@ impl EmitterEngine {
             tracing::warn!(
                 source = call.source.as_str(),
                 source_detail = ?call.source,
-                target = ?call.target,
                 "Emitter handler skipped because max in-flight handler limit was reached"
             );
             return;
@@ -648,16 +612,11 @@ impl EmitterEngine {
 
         let completion_tx = completion_tx.clone();
         site.spawn(async move {
-            let target = call.target;
             let source = call.source;
             let result = call.handler.call(call.ctx).await;
             drop(permit);
             let _ = completion_tx
-                .send(HandlerCompletion {
-                    source,
-                    target,
-                    result,
-                })
+                .send(HandlerCompletion { source, result })
                 .await;
         });
     }
@@ -666,13 +625,11 @@ impl EmitterEngine {
 struct HandlerCall {
     source: HandlerSource,
     handler: EmitterHandler,
-    target: EmitTarget,
     ctx: EmitterContext,
 }
 
 struct HandlerCompletion {
     source: HandlerSource,
-    target: EmitTarget,
     result: Result<DataBox, Error>,
 }
 
@@ -725,7 +682,6 @@ struct NotifyWork {
     type_id: TypeId,
     channel: String,
     handler: EmitterHandler,
-    target: EmitTarget,
     iter_count: usize,
     last_time: Option<tokio::time::Instant>,
     debounce: Option<DebounceState>,
@@ -737,7 +693,6 @@ impl NotifyWork {
         type_id: TypeId,
         channel: String,
         handler: EmitterHandler,
-        target: EmitTarget,
         debounce: Option<DebounceConf>,
     ) -> Self {
         Self {
@@ -745,7 +700,6 @@ impl NotifyWork {
             type_id,
             channel,
             handler,
-            target,
             iter_count: 0,
             last_time: None,
             debounce: debounce.map(DebounceState::new),
@@ -758,7 +712,6 @@ impl NotifyWork {
             channel: self.channel.clone(),
             debounce: self.debounce.as_ref().map(|state| state.conf.clone()),
             handler: self.handler.clone(),
-            target: self.target,
             iter_count: self.iter_count,
             last_time: self.last_time,
             payload,
@@ -808,7 +761,6 @@ struct NotifyCall {
     channel: String,
     debounce: Option<DebounceConf>,
     handler: EmitterHandler,
-    target: EmitTarget,
     iter_count: usize,
     last_time: Option<tokio::time::Instant>,
     payload: String,
@@ -1008,7 +960,6 @@ struct TimerWork {
     type_id: TypeId,
     last: Option<tokio::time::Instant>,
     kind: TimerKind,
-    target: EmitTarget,
     producer: EmitterHandler,
     deadline: tokio::time::Instant,
     iter_count: usize,
@@ -1016,14 +967,13 @@ struct TimerWork {
 }
 
 impl TimerWork {
-    fn new(type_id: TypeId, kind: TimerKind, producer: EmitterHandler, target: EmitTarget) -> Self {
+    fn new(type_id: TypeId, kind: TimerKind, producer: EmitterHandler) -> Self {
         let deadline = Self::make_deadline(None, &kind);
         Self {
             type_id,
             last: None,
             kind,
             producer,
-            target,
             deadline,
             iter_count: 0,
             last_time: None,
@@ -1169,19 +1119,11 @@ mod tests {
     }
 
     #[test]
-    fn emit_target_parses_signal() {
-        assert_eq!("signal".parse::<EmitTarget>().unwrap(), EmitTarget::Signal);
-        assert_eq!("SIGNAL".parse::<EmitTarget>().unwrap(), EmitTarget::Signal);
-        assert!("unknown".parse::<EmitTarget>().is_err());
-    }
-
-    #[test]
     fn periodic_registration_records_operation() {
         let emitter = periodic::<_, _, TestEvent>(
             publish_event,
             PeriodicConf {
                 interval: tokio::time::Duration::from_secs(30),
-                target: EmitTarget::Signal,
             },
         )
         .unwrap();
@@ -1203,7 +1145,6 @@ mod tests {
             publish_event,
             PeriodicConf {
                 interval: tokio::time::Duration::from_secs(30),
-                target: EmitTarget::Signal,
             },
         )
         .unwrap();
@@ -1211,7 +1152,6 @@ mod tests {
             publish_event,
             PeriodicConf {
                 interval: tokio::time::Duration::from_secs(60),
-                target: EmitTarget::Signal,
             },
         )
         .unwrap();
@@ -1231,7 +1171,6 @@ mod tests {
                 TypeId::of::<TestEvent>(),
                 "events".to_string(),
                 Callable::new(publish_event),
-                EmitTarget::Signal,
                 Some(DebounceConf {
                     window: tokio::time::Duration::from_millis(10),
                     mode,
@@ -1351,7 +1290,6 @@ mod tests {
             },
             PgNotifyConf {
                 channel: "events".to_string(),
-                target: EmitTarget::Signal,
                 debounce: Some(DebounceConf {
                     window: tokio::time::Duration::from_millis(250),
                     mode: DebounceMode::LeadingAndTrailing,
