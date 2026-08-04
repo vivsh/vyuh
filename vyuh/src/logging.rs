@@ -18,6 +18,11 @@ pub enum LoggingError {
     SubscriberInit(#[from] tracing_subscriber::util::TryInitError),
 
     #[error(
+        "Failed to install the legacy log bridge.\nReason: Another global logger is already installed. Disable Vyuh logging with SiteConf::log_init(false), or let Vyuh initialize logging before the application installs a logger."
+    )]
+    LogBridgeInit,
+
+    #[error(
         "Invalid log rule name '{name}': {reason}\nExpected: Name must start with a letter (A-Z or a-z), followed by letters, digits, or underscores. Max length 48 characters."
     )]
     InvalidRuleName { name: String, reason: String },
@@ -237,6 +242,36 @@ impl Default for LoggingConf {
 }
 
 impl LoggingConf {
+    /// Replaces the fallback filter used by every configured logging rule.
+    ///
+    /// Rule-specific and global environment variables still override this
+    /// value at runtime. Calling this method after [`Self::extend_default_filter`]
+    /// deliberately replaces the complete composed fallback.
+    pub fn default_filter(mut self, filter: impl Into<String>) -> Self {
+        let filter = filter.into();
+        for rule in &mut self.rules {
+            rule.default_filter = filter.clone();
+        }
+        self
+    }
+
+    /// Adds tracing directives to every configured rule's fallback filter.
+    ///
+    /// This keeps the existing rule defaults intact, which makes it suitable
+    /// for tuning third-party crate targets such as `reqwest=warn`.
+    pub fn extend_default_filter(mut self, directives: impl AsRef<str>) -> Self {
+        let directives = directives.as_ref().trim();
+        if directives.is_empty() {
+            return self;
+        }
+
+        for rule in &mut self.rules {
+            rule.default_filter = extend_filter(&rule.default_filter, directives);
+        }
+        self
+    }
+
+    /// Returns the environment-variable prefix used for per-rule overrides.
     pub fn resolved_env_prefix(&self) -> &str {
         self.env_prefix.as_deref().unwrap_or("RUST_LOG")
     }
@@ -292,6 +327,15 @@ impl LoggingConf {
         }
         Ok(())
     }
+}
+
+/// Joins two filter directive lists without introducing an empty directive.
+fn extend_filter(base: &str, directives: &str) -> String {
+    let base = base.trim();
+    if base.is_empty() {
+        return directives.to_string();
+    }
+    format!("{base},{directives}")
 }
 
 /// Returned guard must be kept alive until shutdown
@@ -413,11 +457,17 @@ pub(crate) fn init_tracing(
         });
     }
 
+    install_log_bridge()?;
     tracing_subscriber::registry().with(layers).try_init()?;
 
     Ok(LoggingGuard {
         _file_guards: guards,
     })
+}
+
+/// Installs the process-wide `log` facade bridge used by legacy dependencies.
+fn install_log_bridge() -> Result<(), LoggingError> {
+    tracing_log::LogTracer::init().map_err(|_| LoggingError::LogBridgeInit)
 }
 
 #[cfg(test)]
@@ -667,6 +717,100 @@ mod tests {
         assert_eq!(conf.resolved_env_prefix(), "RUST_LOG");
     }
 
+    /// Verifies a shared default filter replaces every configured rule fallback.
+    #[test]
+    fn default_filter_replaces_configured_rule_filters() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![
+                LogRule {
+                    name: "APP".into(),
+                    sink: LogSink::Stdout { pretty: true },
+                    default_filter: "debug".into(),
+                },
+                LogRule {
+                    name: "AUDIT".into(),
+                    sink: LogSink::Stderr { pretty: false },
+                    default_filter: "warn".into(),
+                },
+            ],
+        }
+        .default_filter("info,sqlx=error");
+
+        assert!(
+            conf.rules
+                .iter()
+                .all(|rule| rule.default_filter == "info,sqlx=error")
+        );
+    }
+
+    /// Verifies extensions preserve each rule's configured fallback directives.
+    #[test]
+    fn extend_default_filter_preserves_and_composes_rule_filters() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![
+                LogRule {
+                    name: "APP".into(),
+                    sink: LogSink::Stdout { pretty: true },
+                    default_filter: "debug,sqlx=error".into(),
+                },
+                LogRule {
+                    name: "AUDIT".into(),
+                    sink: LogSink::Stderr { pretty: false },
+                    default_filter: "warn".into(),
+                },
+            ],
+        }
+        .extend_default_filter("reqwest=warn")
+        .extend_default_filter("hyper=error");
+
+        assert_eq!(
+            conf.rules[0].default_filter,
+            "debug,sqlx=error,reqwest=warn,hyper=error"
+        );
+        assert_eq!(
+            conf.rules[1].default_filter,
+            "warn,reqwest=warn,hyper=error"
+        );
+        assert!(conf.validate().is_ok());
+    }
+
+    /// Verifies empty filter extensions leave configured fallbacks unchanged.
+    #[test]
+    fn empty_default_filter_extension_is_a_no_op() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "APP".into(),
+                sink: LogSink::Stdout { pretty: true },
+                default_filter: "info".into(),
+            }],
+        }
+        .extend_default_filter("  ");
+
+        assert_eq!(conf.rules[0].default_filter, "info");
+    }
+
+    /// Verifies malformed extensions are reported through normal build validation.
+    #[test]
+    fn invalid_default_filter_extension_fails_validation() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "APP".into(),
+                sink: LogSink::Stdout { pretty: true },
+                default_filter: "info".into(),
+            }],
+        }
+        .extend_default_filter("invalid[");
+
+        assert!(matches!(
+            conf.validate(),
+            Err(LoggingError::FilterParse { .. })
+        ));
+    }
+
     #[test]
     fn test_log_rule_mixed_case_env_var() {
         let rule = LogRule {
@@ -835,6 +979,9 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unique"));
         assert!(msg.contains("environment"));
+
+        let msg = LoggingError::LogBridgeInit.to_string();
+        assert!(msg.contains("global logger"));
     }
 
     #[test]

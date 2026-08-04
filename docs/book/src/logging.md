@@ -6,7 +6,8 @@ applications route logs to stdout, stderr, or rotating files.
 
 Logging is configuration-driven. Application code uses ordinary `tracing`
 macros such as `tracing::info!`, while `SiteConf.logging` decides which sinks
-receive those events and which filters are active.
+receive those events and which filters are active. Dependencies using Rust's
+older `log` facade are bridged into the same subscriber automatically.
 
 ## Overview
 
@@ -54,6 +55,54 @@ let conf = SiteConf::default().logging(LoggingConf {
 Each rule creates one tracing layer. A rule can be disabled by resolving to
 `off`, `0`, `false`, or `no`.
 
+## Third-party crate filters
+
+Applications can tune dependency targets in code without depending on
+environment variables. `default_filter` replaces the fallback for every
+configured rule; `extend_default_filter` adds directives while preserving the
+existing fallback:
+
+```rust
+use vyuh::logging::{LogRule, LogSink, LoggingConf};
+
+let logging = LoggingConf {
+    env_prefix: None,
+    rules: vec![LogRule {
+        name: "APP".into(),
+        sink: LogSink::Stdout { pretty: true },
+        default_filter: "debug,sqlx=error".into(),
+    }],
+}
+.extend_default_filter("reqwest=warn")
+.extend_default_filter("hyper=warn,tower_http=warn");
+```
+
+The resulting fallback is:
+
+```text
+debug,sqlx=error,reqwest=warn,hyper=warn,tower_http=warn
+```
+
+Use `default_filter` when an application wants a different baseline:
+
+```rust
+let logging = LoggingConf::default()
+    .default_filter("info,sqlx=error")
+    .extend_default_filter("aws_sdk_s3=debug");
+```
+
+Both methods are infallible builders. Vyuh validates the completed filter when
+the site is built. They modify configured rules only: release defaults have no
+implicit sink, so production applications must still configure a stdout,
+stderr, or file rule before logs can be emitted.
+
+Targets normally match a crate or module path. `tracing`-native dependencies
+need no extra setup. Vyuh also installs `tracing_log::LogTracer` when it owns
+logging, so `log::warn!` calls from legacy dependencies follow the exact same
+filters and sinks. If the application has already installed another global
+`log` logger, site construction fails clearly; use `SiteConf::log_init(false)`
+when another component deliberately owns process-wide logging.
+
 ## Environment Overrides
 
 The environment prefix defaults to `RUST_LOG`. For each rule, Vyuh resolves the
@@ -61,7 +110,7 @@ filter in this order:
 
 1. `<PREFIX>_<UPPERCASE_RULE_NAME>`
 2. `<PREFIX>`
-3. `LogRule::default_filter`
+3. the rule's configured fallback filter
 
 For example, with `env_prefix: Some("APP_LOG")` and a rule named `Audit`, Vyuh
 checks:
@@ -81,7 +130,8 @@ APP_LOG_AUDIT=off
 ```
 
 Rule-specific overrides are useful when one sink should be verbose and another
-should stay quiet.
+should stay quiet. Environment values replace the composed code fallback for
+the selected rule, so operators retain a complete deployment-time override.
 
 ## Sinks
 
@@ -161,9 +211,12 @@ environment override names.
 - Invalid filter syntax returns `LoggingError::FilterParse`.
 - File sink directory creation errors return `LoggingError::DirCreation`.
 - A second global tracing initialization returns `LoggingError::SubscriberInit`.
+- A competing global `log` logger returns `LoggingError::LogBridgeInit`.
 
 ## Current Limitations
 
 - Logging is initialized once per process through tracing's global subscriber.
+- Legacy `log` forwarding is also process-global and cannot coexist with a
+  logger installed by another runtime.
 - Vyuh does not currently expose runtime log-level reconfiguration.
 - File logging is JSON-only.
