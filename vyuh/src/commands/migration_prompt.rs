@@ -2,7 +2,10 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 use thiserror::Error;
 
-use crate::db::engine::{Answer, Clarification, Decision, OptionAction, clarification_message};
+use crate::db::{
+    engine::{Answer, Clarification, Decision, OptionAction},
+    gaman::core::{ClarificationOption, clarification_message},
+};
 
 /// Failures while a terminal host gathers Gaman migration decisions.
 #[derive(Debug, Error)]
@@ -77,7 +80,7 @@ fn prompt_one(
 }
 
 fn read_answer(
-    options: &[crate::db::engine::ClarificationOption],
+    options: &[ClarificationOption],
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<Answer, MigrationPromptError> {
@@ -96,15 +99,15 @@ fn read_answer(
 }
 
 fn selected_option<'a>(
-    options: &'a [crate::db::engine::ClarificationOption],
+    options: &'a [ClarificationOption],
     choice: &str,
-) -> Option<&'a crate::db::engine::ClarificationOption> {
+) -> Option<&'a ClarificationOption> {
     let index = choice.parse::<usize>().ok()?.checked_sub(1)?;
     options.get(index)
 }
 
 fn read_option(
-    option: &crate::db::engine::ClarificationOption,
+    option: &ClarificationOption,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<Answer, MigrationPromptError> {

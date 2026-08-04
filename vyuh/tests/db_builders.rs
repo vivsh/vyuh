@@ -1,6 +1,6 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use vyuh::db::mock::{DbCallKind, MockDBSession, PlannedCall, PlannedResponse};
+use vyuh::db::mock::{DbCallKind, MockDbSession, PlannedCall, PlannedResponse, StatementMatcher};
 use vyuh::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, db::Model)]
@@ -119,10 +119,12 @@ fn table_name_defaults_to_snake_case() {
 
 #[tokio::test]
 async fn typed_select_uses_model_metadata() {
-    let mut session = MockDBSession::new();
+    let mut session = MockDbSession::new();
     session.plan(PlannedCall {
         kind: DbCallKind::FetchAll,
-        sql_contains: Some("SELECT user.id, user.email, user.active FROM users user"),
+        matcher: StatementMatcher::Contains(
+            "SELECT users.id, users.email, users.active FROM users".to_string(),
+        ),
         response: PlannedResponse::OkAnyVec(Box::new(Vec::<User>::new())),
     });
 
@@ -139,16 +141,16 @@ async fn typed_select_uses_model_metadata() {
 
 #[tokio::test]
 async fn model_builder_functions_work() {
-    let mut session = MockDBSession::new();
+    let mut session = MockDbSession::new();
     session.plan(PlannedCall {
         kind: DbCallKind::FetchOne,
-        sql_contains: Some("FROM users"),
+        matcher: StatementMatcher::Contains("FROM users".to_string()),
         response: PlannedResponse::OkAny(Box::new((0_i64,))),
     });
-    session.plan_execute_ok("INSERT INTO users", 1);
-    session.plan_execute_ok("UPDATE users SET", 1);
-    session.plan_execute_ok("DELETE FROM users WHERE (id = ", 1);
-    session.plan_execute_ok("DELETE FROM users WHERE (id = ", 1);
+    session.plan_execute_contains("INSERT INTO users", 1);
+    session.plan_execute_contains("UPDATE users SET", 1);
+    session.plan_execute_contains("DELETE FROM users WHERE (id = ", 1);
+    session.plan_execute_contains("DELETE FROM users WHERE (id = ", 1);
 
     let total = db::query("SELECT COUNT(*) FROM users")
         .scalar::<i64>(&mut session)
@@ -196,11 +198,11 @@ async fn model_builder_functions_work() {
 
 #[tokio::test]
 async fn typed_insert_update_delete_and_raw_query_use_named_binds() {
-    let mut session = MockDBSession::new();
-    session.plan_execute_ok("INSERT INTO users (id, email, active) VALUES", 1);
-    session.plan_execute_ok("UPDATE users SET active = ", 1);
-    session.plan_execute_ok("DELETE FROM users WHERE (id = ", 1);
-    session.plan_execute_ok("SELECT * FROM users WHERE id = ", 1);
+    let mut session = MockDbSession::new();
+    session.plan_execute_contains("INSERT INTO users (id, email, active) VALUES", 1);
+    session.plan_execute_contains("UPDATE users SET active = ", 1);
+    session.plan_execute_contains("DELETE FROM users WHERE (id = ", 1);
+    session.plan_execute_contains("SELECT * FROM users WHERE id = ", 1);
 
     let table = User::table();
     let id = db::var::<i64>().named("id");
@@ -240,10 +242,12 @@ async fn typed_insert_update_delete_and_raw_query_use_named_binds() {
 
 #[tokio::test]
 async fn typed_select_resolves_implicit_references() {
-    let mut session = MockDBSession::new();
+    let mut session = MockDbSession::new();
     session.plan(PlannedCall {
         kind: DbCallKind::FetchAll,
-        sql_contains: Some("JOIN users author ON author.id = post.user_id WHERE (post.id >= "),
+        matcher: StatementMatcher::Contains(
+            "JOIN users author ON author.id = posts.user_id WHERE (posts.id >= ".to_string(),
+        ),
         response: PlannedResponse::OkAnyVec(Box::new(Vec::<PostWithAuthor>::new())),
     });
 
@@ -257,9 +261,18 @@ async fn typed_select_resolves_implicit_references() {
         .unwrap();
 
     assert!(rows.is_empty());
-    let sql = &session.recorded[0].stmt.sql;
+    assert_eq!(session.recorded.len(), 1);
     assert!(
-        sql.contains("SELECT post.id, post.user_id, post.title, author.id, author.email, author.active FROM posts post")
+        session
+            .recorded
+            .first()
+            .is_some_and(|call| call.stmt.sql().contains(
+                "SELECT posts.id, posts.user_id, posts.title, author.id, author.email, author.active FROM posts"
+            ))
     );
-    assert!(sql.contains("JOIN users author ON author.id = post.user_id"));
+    assert!(session.recorded.first().is_some_and(|call| {
+        call.stmt
+            .sql()
+            .contains("JOIN users author ON author.id = posts.user_id")
+    }));
 }

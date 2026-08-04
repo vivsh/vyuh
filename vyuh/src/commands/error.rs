@@ -1,6 +1,8 @@
+#[cfg(feature = "migrations")]
+use crate::errors::ErrorSource;
 use crate::{
     Error, callables,
-    errors::{ErrorKind, ErrorSource, ErrorSourceKind, ErrorView},
+    errors::{ErrorKind, ErrorSourceKind, ErrorView},
     validation::ValidationReport,
 };
 use axum::http::StatusCode;
