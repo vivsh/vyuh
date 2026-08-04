@@ -13,14 +13,9 @@ pub enum LoggingError {
     DirCreation(#[from] std::io::Error),
 
     #[error(
-        "Failed to set global subscriber: {0}\nReason: Tracing subscriber already initialized. Ensure init_tracing() is only called once per process."
+        "Failed to initialize global logging: {0}\nReason: A tracing subscriber or legacy log logger is already initialized. Ensure Vyuh initializes logging before another runtime, or disable Vyuh logging with SiteConf::log_init(false)."
     )]
     SubscriberInit(#[from] tracing_subscriber::util::TryInitError),
-
-    #[error(
-        "Failed to install the legacy log bridge.\nReason: Another global logger is already installed. Disable Vyuh logging with SiteConf::log_init(false), or let Vyuh initialize logging before the application installs a logger."
-    )]
-    LogBridgeInit,
 
     #[error(
         "Invalid log rule name '{name}': {reason}\nExpected: Name must start with a letter (A-Z or a-z), followed by letters, digits, or underscores. Max length 48 characters."
@@ -457,17 +452,11 @@ pub(crate) fn init_tracing(
         });
     }
 
-    install_log_bridge()?;
     tracing_subscriber::registry().with(layers).try_init()?;
 
     Ok(LoggingGuard {
         _file_guards: guards,
     })
-}
-
-/// Installs the process-wide `log` facade bridge used by legacy dependencies.
-fn install_log_bridge() -> Result<(), LoggingError> {
-    tracing_log::LogTracer::init().map_err(|_| LoggingError::LogBridgeInit)
 }
 
 #[cfg(test)]
@@ -979,9 +968,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unique"));
         assert!(msg.contains("environment"));
-
-        let msg = LoggingError::LogBridgeInit.to_string();
-        assert!(msg.contains("global logger"));
     }
 
     #[test]

@@ -61,9 +61,8 @@ ring = "0.16"
 argon2 = { version = "0.5", optional = true }
 
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "time", "ansi"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "time", "ansi", "tracing-log"] }
 tracing-appender = "0.2"
-tracing-log = "0.2"
 
 http-serde = "2.1.1"
 serde_urlencoded = "0.7"

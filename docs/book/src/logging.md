@@ -97,11 +97,12 @@ implicit sink, so production applications must still configure a stdout,
 stderr, or file rule before logs can be emitted.
 
 Targets normally match a crate or module path. `tracing`-native dependencies
-need no extra setup. Vyuh also installs `tracing_log::LogTracer` when it owns
-logging, so `log::warn!` calls from legacy dependencies follow the exact same
-filters and sinks. If the application has already installed another global
-`log` logger, site construction fails clearly; use `SiteConf::log_init(false)`
-when another component deliberately owns process-wide logging.
+need no extra setup. Vyuh's tracing subscriber installs the standard
+`tracing_log::LogTracer` bridge, so `log::warn!` calls from legacy dependencies
+follow the exact same filters and sinks. If the application has already
+installed another global `log` logger, site construction fails clearly; use
+`SiteConf::log_init(false)` when another component deliberately owns
+process-wide logging.
 
 ## Environment Overrides
 
@@ -211,7 +212,7 @@ environment override names.
 - Invalid filter syntax returns `LoggingError::FilterParse`.
 - File sink directory creation errors return `LoggingError::DirCreation`.
 - A second global tracing initialization returns `LoggingError::SubscriberInit`.
-- A competing global `log` logger returns `LoggingError::LogBridgeInit`.
+- A competing global `log` logger returns `LoggingError::SubscriberInit`.
 
 ## Current Limitations
 
