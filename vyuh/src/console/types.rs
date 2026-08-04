@@ -281,7 +281,7 @@ pub struct TaskOut {
     pub name: String,
     pub status: TaskStatus,
     pub attempts: i32,
-    pub group: String,
+    pub lane: String,
     pub idempotency_key: Option<String>,
     pub idempotency_expires_at: Option<String>,
     pub last_error: Option<String>,
@@ -300,7 +300,7 @@ impl From<&TaskInfo> for TaskOut {
             name: record.name.clone(),
             status: record.status,
             attempts: record.attempts,
-            group: record.group.clone(),
+            lane: record.lane.clone(),
             idempotency_key: record.idempotency_key.clone(),
             idempotency_expires_at: record
                 .idempotency_expires_at
@@ -393,11 +393,12 @@ impl ConfigOut {
                 batch_size: conf.tasks.batch_size_value(),
                 lease_duration_ms: duration_ms(conf.tasks.lease_duration_value()),
                 idempotency: format!("{:?}", conf.tasks.idempotency_value()),
-                groups: conf
+                readiness: conf.tasks.readiness_policy().as_str().to_string(),
+                lanes: conf
                     .tasks
-                    .resolved_groups()
+                    .resolved_lanes()
                     .into_iter()
-                    .map(TaskGroupConfigOut::from)
+                    .map(TaskLaneConfigOut::from)
                     .collect(),
             },
             emitters: EmitterConfigOut {
@@ -494,7 +495,8 @@ pub struct TaskConfigOut {
     pub batch_size: usize,
     pub lease_duration_ms: u64,
     pub idempotency: String,
-    pub groups: Vec<TaskGroupConfigOut>,
+    pub readiness: String,
+    pub lanes: Vec<TaskLaneConfigOut>,
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {
@@ -505,17 +507,17 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct TaskGroupConfigOut {
+pub struct TaskLaneConfigOut {
     pub name: String,
     pub concurrency: usize,
     pub rate_limit: Option<String>,
     pub global_rate_limit: Option<String>,
 }
 
-impl From<crate::tasks::TaskGroupConf> for TaskGroupConfigOut {
-    fn from(conf: crate::tasks::TaskGroupConf) -> Self {
+impl From<crate::tasks::TaskLaneConf> for TaskLaneConfigOut {
+    fn from(conf: crate::tasks::TaskLaneConf) -> Self {
         Self {
-            name: conf.group().to_string(),
+            name: conf.lane().to_string(),
             concurrency: conf.concurrency(),
             rate_limit: conf.rate().map(format_task_rate),
             global_rate_limit: conf.global_rate().map(format_task_rate),

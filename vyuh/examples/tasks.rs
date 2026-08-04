@@ -8,9 +8,9 @@
 use schemars::JsonSchema;
 use std::time::Duration;
 use vyuh::prelude::*;
-use vyuh::tasks::{TaskConf, TaskGroupConf, TaskIdempotency, TaskOptions, TaskRate, TaskRetry};
+use vyuh::tasks::{TaskConf, TaskIdempotency, TaskLaneConf, TaskOptions, TaskRate, TaskRetry};
 
-const EMAIL: TaskGroup = TaskGroup::new("email");
+const EMAIL: TaskLane = TaskLane::new("email");
 
 // ── Input types ──────────────────────────────────────────────────────────────
 
@@ -119,9 +119,9 @@ async fn main() -> Result<(), Error> {
     let task_conf = TaskConf::default()
         .concurrency(4)
         .batch_size(50)
-        .groups([
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-            TaskGroupConf::new(EMAIL, 2)
+        .lanes([
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+            TaskLaneConf::new(EMAIL, 2)
                 .retry(
                     TaskRetry::exponential(5, Duration::from_secs(2))
                         .max_delay(Duration::from_secs(60)),
@@ -152,7 +152,7 @@ async fn main() -> Result<(), Error> {
                 },
             ],
             TaskOptions::new()
-                .group(EMAIL)
+                .lane(EMAIL)
                 .idempotency_key(|job: &SendEmailJob| format!("welcome:{}", job.to)),
         )
         .await

@@ -57,11 +57,13 @@ The `vyuh` crate is organized around these subsystems:
   or external event sources, and signal-backed client-facing live delivery.
 - `tasks` provides typed input, value-less durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
-  and commits, group-owned retry/backoff policy, local runner and store-wide
+  and commits, lane-owned retry/backoff policy, local runner and store-wide
   database rate limits, idempotency retention, adaptive polling, lease renewal,
   and explicit continuation lifecycle control.
 - `observability` owns configured liveness/readiness probes and bounded-label
-  Prometheus HTTP metrics. Deployment policy is supplied through `SiteConf`,
+  Prometheus HTTP metrics. Task readiness is derived from per-site task runtime
+  state updated by initialization and existing scheduler ticks, never by an
+  additional task-store probe. Deployment policy is supplied through `SiteConf`,
   not inferred from a host environment.
 - `commands` provides typed command registration and command dispatch through a
   built `Site`.
@@ -88,17 +90,19 @@ The `vyuh` crate is organized around these subsystems:
   Migration files live in a crate-level `migrations/` directory, not under
   assets.
 - Persistent task stores use Mool models, typed query scopes, batched writes,
-  transactions, and backend lock extensions. Vyuh owns grouped scheduling,
+  transactions, and backend lock extensions. Vyuh owns lane scheduling,
   leases, idempotency ownership, durable token buckets, and database-relative
   wake deadlines; Mool owns database execution. A store-wide policy fingerprint
   prevents incompatible workers from claiming concurrently. Task schemas are
   migration-owned and are never created or altered during site startup. Store
-  internals live under `tasks::store`; the ordinary site facade exposes only
-  typed submission, resume, reassignment, and read-only inspection.
+  internals are framework-owned; the ordinary site facade exposes only typed
+  submission, resume, reassignment, and read-only inspection.
 - Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.
-- `logging` configures structured tracing output.
+- `logging` configures structured tracing output. Console log inspection reads
+  only configured JSON file sinks through bounded per-site reverse readers; it
+  does not create a second log store or process-global log cache.
 
 ## Macro Crate
 
@@ -203,9 +207,9 @@ the client-facing event type uses the payload schema name.
 7. `Site::run` executes one inert command unless it selects `serve`; `serve` and
    direct server startup bind the listener, then start task, emitter, and service
    workers before accepting HTTP work. One task dispatcher rotates configured
-   groups fairly, fills bounded per-group queues through grouped batch claims,
+   lanes fairly, fills bounded per-lane queues through batched lane claims,
    renews active leases, and commits handler outcomes through one common batch.
-   Submission bypasses the runner and commits immediately. Saturated groups use
+   Submission bypasses the runner and commits immediately. Saturated lanes use
    the short poll interval; future readiness, lease, and rate deadlines use
    database time; otherwise the runner uses the bounded fallback interval.
 8. Axum routes receive `Site` as state and handlers use typed extractors.

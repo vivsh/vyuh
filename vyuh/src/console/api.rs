@@ -2,8 +2,10 @@ use crate::{
     Error, ErrorKind, OperationId, Site,
     auth::AuthUser,
     console::{
+        logs::{LogError, limit as log_limit},
         query::{
-            OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit_max,
+            LogQuery, OperationQuery, TaskQuery, filter_operations, is_console_operation,
+            task_limit_max,
         },
         types::{ConfigOut, OperationOut, Page, SessionOut, TaskDetailOut, TaskOut},
     },
@@ -85,6 +87,38 @@ pub async fn tasks(
     let filter = query.to_filter(conf.page_size_default, task_limit_max(conf.page_size_max));
     let page = site.tasks().list(filter).await.map_err(Error::other)?;
     Ok(Json(page.map(|record| TaskOut::from(&record))))
+}
+
+/// Returns one bounded page of configured JSON file logs.
+pub async fn logs(
+    site: Site,
+    _user: AuthUser,
+    Query(query): Query<LogQuery>,
+) -> Result<Response, Error> {
+    let limit = log_limit(
+        &query,
+        site.conf().console.page_size_default,
+        site.conf().console.page_size_max,
+    );
+    let runtime = site
+        .console_logs()
+        .ok_or_else(|| Error::new(ErrorKind::Other))?;
+    let page = runtime.page(&query, limit).await.map_err(log_error)?;
+    let mut response = Json(page).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+fn log_error(error: LogError) -> Error {
+    match error {
+        LogError::InvalidQuery | LogError::InvalidCursor => {
+            Error::bad_request("Invalid log query.")
+        }
+        LogError::EntryUnavailable | LogError::Unavailable => Error::new(ErrorKind::Other),
+    }
 }
 
 pub async fn task_detail(

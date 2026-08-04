@@ -27,7 +27,7 @@ impl DbTaskStore {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        validate_write_groups(self, &writes).await?;
+        validate_write_lanes(self, &writes).await?;
         let mut transaction = self.pool.begin().await?;
         verify_policy(self, &mut transaction).await?;
         let now = statement_now(&mut transaction).await?;
@@ -49,6 +49,7 @@ impl DbTaskStore {
     }
 
     /// Commits one bounded outcome batch in a shared transaction.
+    #[allow(dead_code)]
     pub(super) async fn commit_outcomes_impl(
         &self,
         runner_id: &str,
@@ -64,14 +65,31 @@ impl DbTaskStore {
             self.runtime_conf.read().await.clone().ok_or_else(|| {
                 TaskError::InvalidConfig("task runtime was not initialized".into())
             })?;
+        self.commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Commits owned outcomes inside an already-authorized scheduler transaction.
+    pub(super) async fn commit_outcomes_tx(
+        &self,
+        mut transaction: &mut db::DbTransaction<'_>,
+        runner_id: &str,
+        commits: &[TaskCommit],
+        conf: &crate::tasks::TaskStoreConf,
+        now: DateTime<Utc>,
+    ) -> Result<(), TaskError> {
+        if commits.is_empty() {
+            return Ok(());
+        }
         let mut outcomes = collect_outcomes(commits)?;
         let ids = outcomes.keys().map(|id| id.into_uuid()).collect::<Vec<_>>();
         let mut rows = load_owned_batch(&mut transaction, ids, runner_id).await?;
-        apply_owned_outcomes(&mut rows, &mut outcomes, &conf.groups, now)?;
+        apply_owned_outcomes(&mut rows, &mut outcomes, &conf.lanes, now)?;
         warn_unowned_outcomes(&outcomes, runner_id);
         update_idempotency_batch(&mut transaction, &mut rows, conf.idempotency, now).await?;
         batch_update_rows(&mut transaction, &rows, self.batch_size).await?;
-        transaction.commit().await?;
         Ok(())
     }
 
@@ -98,6 +116,7 @@ impl DbTaskStore {
     }
 
     /// Extends leases still owned by this runner and reports lost ownership.
+    #[allow(dead_code)]
     pub(super) async fn renew_leases_impl(
         &self,
         runner_id: &str,
@@ -109,6 +128,24 @@ impl DbTaskStore {
         let mut transaction = self.pool.begin().await?;
         verify_policy(self, &mut transaction).await?;
         let now = statement_now(&mut transaction).await?;
+        let lost = self
+            .renew_leases_tx(&mut transaction, runner_id, task_ids, now)
+            .await?;
+        transaction.commit().await?;
+        Ok(lost)
+    }
+
+    /// Renews still-owned leases inside an already-authorized scheduler transaction.
+    pub(super) async fn renew_leases_tx(
+        &self,
+        mut transaction: &mut db::DbTransaction<'_>,
+        runner_id: &str,
+        task_ids: &[TaskId],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TaskId>, TaskError> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let ids = task_ids.iter().map(|id| id.into_uuid()).collect::<Vec<_>>();
         let mut rows = load_owned_batch(&mut transaction, ids, runner_id).await?;
         for row in &mut rows {
@@ -116,26 +153,25 @@ impl DbTaskStore {
             row.updated_at = now;
         }
         batch_renew(&mut transaction, &rows, self.batch_size).await?;
-        transaction.commit().await?;
         Ok(lost_ids(task_ids, &rows))
     }
 
-    /// Reassigns non-running work after verifying the source group has drained.
-    pub(super) async fn reassign_group_impl(&self, from: &str, to: &str) -> Result<u64, TaskError> {
-        require_runtime_group(self, to).await?;
+    /// Reassigns non-running work after verifying the source lane has drained.
+    pub(super) async fn reassign_lane_impl(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+        require_runtime_lane(self, to).await?;
         let mut transaction = self.pool.begin().await?;
         verify_policy(self, &mut transaction).await?;
-        let mut rows = load_active_group_for_update(&mut transaction, from).await?;
+        let mut rows = load_active_lane_for_update(&mut transaction, from).await?;
         if rows
             .iter()
             .any(|row| row.status == TaskStatus::Running.as_i16())
         {
             transaction.rollback().await?;
-            return Err(TaskError::GroupBusy(from.into()));
+            return Err(TaskError::LaneBusy(from.into()));
         }
         let now = statement_now(&mut transaction).await?;
         for row in &mut rows {
-            row.group_name = to.into();
+            row.lane_name = to.into();
             row.updated_at = now;
         }
         let table = Self::table();
@@ -143,7 +179,7 @@ impl DbTaskStore {
             0
         } else {
             db::from(&table)
-                .batch_update(&rows, (&table.group_name, &table.updated_at))
+                .batch_update(&rows, (&table.lane_name, &table.updated_at))
                 .batch_size(self.batch_size)
                 .exec(&mut transaction)
                 .await?
@@ -233,18 +269,16 @@ fn normalize_write(write: &mut TaskWrite, now: DateTime<Utc>) -> Result<(), Task
     Ok(())
 }
 
-/// Rejects low-level writes that bypass the typed client's group validation.
-async fn validate_write_groups(store: &DbTaskStore, writes: &[TaskWrite]) -> Result<(), TaskError> {
+/// Rejects low-level writes that bypass the typed client's lane validation.
+async fn validate_write_lanes(store: &DbTaskStore, writes: &[TaskWrite]) -> Result<(), TaskError> {
     let conf = store.runtime_conf.read().await;
     for write in writes {
-        let group = &write.record.group;
-        let configured = conf.as_ref().is_some_and(|conf| {
-            conf.groups
-                .iter()
-                .any(|entry| entry.group().as_str() == group)
-        });
+        let lane = &write.record.lane;
+        let configured = conf
+            .as_ref()
+            .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
         if !configured {
-            return Err(TaskError::UnknownGroup(group.clone()));
+            return Err(TaskError::UnknownLane(lane.clone()));
         }
         let handler = &write.record.name;
         if !conf
@@ -257,21 +291,17 @@ async fn validate_write_groups(store: &DbTaskStore, writes: &[TaskWrite]) -> Res
     Ok(())
 }
 
-/// Validates one persisted group name against initialized durable policy.
-async fn require_runtime_group(store: &DbTaskStore, group: &str) -> Result<(), TaskError> {
+/// Validates one persisted lane name against initialized durable policy.
+async fn require_runtime_lane(store: &DbTaskStore, lane: &str) -> Result<(), TaskError> {
     let configured = store
         .runtime_conf
         .read()
         .await
         .as_ref()
-        .is_some_and(|conf| {
-            conf.groups
-                .iter()
-                .any(|entry| entry.group().as_str() == group)
-        });
+        .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
     configured
         .then_some(())
-        .ok_or_else(|| TaskError::UnknownGroup(group.into()))
+        .ok_or_else(|| TaskError::UnknownLane(lane.into()))
 }
 
 /// Holds a shared durable policy lock across one mutation transaction.
@@ -314,13 +344,13 @@ pub(super) async fn delete_expired_owners(
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
-/// Locks all active source-group rows before checking whether work drained.
-async fn load_active_group_for_update(
+/// Locks all active source-lane rows before checking whether work drained.
+async fn load_active_lane_for_update(
     transaction: &mut db::DbTransaction<'_>,
-    group: &str,
+    lane: &str,
 ) -> Result<Vec<TaskRow>, TaskError> {
     use crate::db::backend::RowLockExt as _;
-    load_active_group_scope(group)
+    load_active_lane_scope(lane)
         .for_update()
         .all::<TaskRow>()
         .exec(transaction)
@@ -329,20 +359,20 @@ async fn load_active_group_for_update(
 }
 
 #[cfg(feature = "sqlite")]
-/// Loads active source-group rows inside SQLite's serial write transaction.
-async fn load_active_group_for_update(
+/// Loads active source-lane rows inside SQLite's serial write transaction.
+async fn load_active_lane_for_update(
     transaction: &mut db::DbTransaction<'_>,
-    group: &str,
+    lane: &str,
 ) -> Result<Vec<TaskRow>, TaskError> {
-    load_active_group_scope(group)
+    load_active_lane_scope(lane)
         .all::<TaskRow>()
         .exec(transaction)
         .await
         .map_err(TaskError::from)
 }
 
-/// Selects every non-terminal row that must move as one group lifecycle unit.
-fn load_active_group_scope(group: &str) -> db::queries::QueryScope {
+/// Selects every non-terminal row that must move as one lane lifecycle unit.
+fn load_active_lane_scope(lane: &str) -> db::queries::QueryScope {
     let table = DbTaskStore::table();
     let statuses = [
         TaskStatus::Pending.as_i16(),
@@ -350,7 +380,7 @@ fn load_active_group_scope(group: &str) -> db::queries::QueryScope {
         TaskStatus::Suspended.as_i16(),
     ];
     db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(table.status.in_values(statuses))
 }
 
@@ -600,14 +630,14 @@ fn collect_outcomes(
 fn apply_owned_outcomes(
     rows: &mut [TaskRow],
     outcomes: &mut std::collections::HashMap<TaskId, TaskOutcome>,
-    groups: &[crate::tasks::TaskGroupConf],
+    lanes: &[crate::tasks::TaskLaneConf],
     now: DateTime<Utc>,
 ) -> Result<(), TaskError> {
     for row in rows {
         let outcome = outcomes.remove(&TaskId::new(row.id)).ok_or_else(|| {
             TaskError::TaskExecutionError(format!("task {} has no pending outcome", row.id))
         })?;
-        let retry = group_retry(groups, &row.group_name)?;
+        let retry = lane_retry(lanes, &row.lane_name)?;
         apply_outcome(row, outcome, retry, now)?;
     }
     Ok(())
@@ -680,12 +710,12 @@ fn apply_retry(
     Ok(())
 }
 
-fn group_retry(groups: &[crate::tasks::TaskGroupConf], name: &str) -> Result<TaskRetry, TaskError> {
-    groups
+fn lane_retry(lanes: &[crate::tasks::TaskLaneConf], name: &str) -> Result<TaskRetry, TaskError> {
+    lanes
         .iter()
-        .find(|group| group.group().as_str() == name)
-        .map(crate::tasks::TaskGroupConf::retry_policy)
-        .ok_or_else(|| TaskError::UnknownGroup(name.into()))
+        .find(|lane| lane.lane().as_str() == name)
+        .map(crate::tasks::TaskLaneConf::retry_policy)
+        .ok_or_else(|| TaskError::UnknownLane(name.into()))
 }
 
 pub(super) fn finish(

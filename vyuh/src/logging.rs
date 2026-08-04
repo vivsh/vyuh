@@ -307,7 +307,7 @@ impl LoggingGuard {
     }
 }
 
-fn resolve_log_dir(project_dir: &Path, dir: &str) -> PathBuf {
+pub(crate) fn resolve_log_dir(project_dir: &Path, dir: &str) -> PathBuf {
     let path = Path::new(dir);
     if path.is_relative() {
         project_dir.join(path)

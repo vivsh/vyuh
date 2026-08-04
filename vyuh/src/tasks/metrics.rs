@@ -7,14 +7,14 @@ use std::{
     time::Duration,
 };
 
-use super::{TaskOutcome, TaskReceipt};
+use super::{TaskHealthSnapshot, TaskOutcome, TaskReceipt};
 
 const RECEIPTS: [&str; 4] = ["queued", "existing", "ignored", "error"];
 const OUTCOMES: [&str; 5] = ["complete", "suspend", "sleep", "retry", "fail"];
 
 pub(crate) struct TaskMetrics {
     handlers: BTreeMap<String, usize>,
-    groups: BTreeMap<String, usize>,
+    lanes: BTreeMap<String, usize>,
     submissions: Vec<[AtomicU64; 4]>,
     starts: Vec<AtomicU64>,
     outcomes: Vec<[AtomicU64; 5]>,
@@ -38,21 +38,21 @@ struct Timing {
 impl TaskMetrics {
     pub(crate) fn new(
         handlers: impl IntoIterator<Item = String>,
-        groups: impl IntoIterator<Item = String>,
+        lanes: impl IntoIterator<Item = String>,
     ) -> Self {
         let handlers = indexes(handlers);
-        let groups = indexes(groups);
+        let lanes = indexes(lanes);
         Self {
             submissions: atomic_matrix(handlers.len()),
             starts: atomic_vector(handlers.len()),
             outcomes: atomic_outcomes(handlers.len()),
-            claims: atomic_vector(groups.len()),
-            reclaimed: atomic_vector(groups.len()),
+            claims: atomic_vector(lanes.len()),
+            reclaimed: atomic_vector(lanes.len()),
             idempotency_conflicts: atomic_vector(handlers.len()),
-            renewals: atomic_vector(groups.len()),
-            ownership_losses: atomic_vector(groups.len()),
+            renewals: atomic_vector(lanes.len()),
+            ownership_losses: atomic_vector(lanes.len()),
             handlers,
-            groups,
+            lanes,
             queue_micros: Timing::default(),
             handler_micros: Timing::default(),
             commit_micros: Timing::default(),
@@ -88,9 +88,9 @@ impl TaskMetrics {
         }
     }
 
-    pub(crate) fn claimed(&self, group: &str, total: usize, reclaimed: usize) {
-        increment(&self.groups, &self.claims, group, total as u64);
-        increment(&self.groups, &self.reclaimed, group, reclaimed as u64);
+    pub(crate) fn claimed(&self, lane: &str, total: usize, reclaimed: usize) {
+        increment(&self.lanes, &self.claims, lane, total as u64);
+        increment(&self.lanes, &self.reclaimed, lane, reclaimed as u64);
     }
 
     pub(crate) fn started(&self, handler: &str, queue: Duration) {
@@ -105,13 +105,13 @@ impl TaskMetrics {
         self.handler_micros.record(elapsed);
     }
 
-    pub(crate) fn renewed(&self, group: &str, lost: bool) {
+    pub(crate) fn renewed(&self, lane: &str, lost: bool) {
         let counters = if lost {
             &self.ownership_losses
         } else {
             &self.renewals
         };
-        increment(&self.groups, counters, group, 1);
+        increment(&self.lanes, counters, lane, 1);
     }
 
     pub(crate) fn commit(&self, elapsed: Duration, failed: bool) {
@@ -125,10 +125,10 @@ impl TaskMetrics {
         self.store_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn render(&self) -> String {
+    pub(crate) fn render(&self, health: TaskHealthSnapshot) -> String {
         let mut output = String::from("# TYPE vyuh_task_submissions_total counter\n");
         self.render_handler_metrics(&mut output);
-        self.render_group_metrics(&mut output);
+        self.render_lane_metrics(&mut output);
         render_timing(&mut output, "queue", &self.queue_micros);
         render_timing(&mut output, "handler", &self.handler_micros);
         render_timing(&mut output, "commit", &self.commit_micros);
@@ -137,6 +137,7 @@ impl TaskMetrics {
             output,
             "# TYPE vyuh_task_store_failures_total counter\nvyuh_task_store_failures_total {failures}"
         );
+        render_health(&mut output, health);
         output
     }
 
@@ -176,38 +177,66 @@ impl TaskMetrics {
         );
     }
 
-    fn render_group_metrics(&self, output: &mut String) {
+    fn render_lane_metrics(&self, output: &mut String) {
         output.push_str("# TYPE vyuh_task_claims_total counter\n");
         render_vector(
             output,
             "vyuh_task_claims_total",
-            "group",
-            &self.groups,
+            "lane",
+            &self.lanes,
             &self.claims,
         );
         output.push_str("# TYPE vyuh_task_lease_renewals_total counter\n");
         render_vector(
             output,
             "vyuh_task_lease_renewals_total",
-            "group",
-            &self.groups,
+            "lane",
+            &self.lanes,
             &self.renewals,
         );
         output.push_str("# TYPE vyuh_task_reclaimed_leases_total counter\n");
         render_vector(
             output,
             "vyuh_task_reclaimed_leases_total",
-            "group",
-            &self.groups,
+            "lane",
+            &self.lanes,
             &self.reclaimed,
         );
         output.push_str("# TYPE vyuh_task_lease_losses_total counter\n");
         render_vector(
             output,
             "vyuh_task_lease_losses_total",
-            "group",
-            &self.groups,
+            "lane",
+            &self.lanes,
             &self.ownership_losses,
+        );
+    }
+}
+
+/// Renders per-site task health without introducing labels from runtime errors.
+fn render_health(output: &mut String, health: TaskHealthSnapshot) {
+    let _ = writeln!(
+        output,
+        "# TYPE vyuh_task_runtime_ready gauge\nvyuh_task_runtime_ready {}",
+        u8::from(health.ready)
+    );
+    let _ = writeln!(
+        output,
+        "# TYPE vyuh_task_store_consecutive_failures gauge\nvyuh_task_store_consecutive_failures {}",
+        health.consecutive_failures
+    );
+    if let Some(last_success) = health.last_success {
+        let _ = writeln!(
+            output,
+            "# TYPE vyuh_task_last_success_timestamp_seconds gauge\nvyuh_task_last_success_timestamp_seconds {}",
+            last_success.timestamp()
+        );
+    }
+    if let Some(failure) = health.last_failure {
+        let _ = writeln!(
+            output,
+            "# TYPE vyuh_task_last_failure_info gauge\nvyuh_task_last_failure_info{{class=\"{}\"}} 1",
+            failure.as_str()
         );
     }
 }
@@ -336,9 +365,27 @@ mod tests {
         );
         metrics.claimed("unknown", 1, 1);
         metrics.started("unknown", Duration::ZERO);
-        let rendered = metrics.render();
+        let health =
+            super::super::TaskHealth::new(super::super::TaskReadiness::startup_only(), true);
+        health.initialized();
+        let rendered = metrics.render(health.snapshot());
         assert!(rendered.contains("handler=\"known\\\"task\",outcome=\"queued\"} 1"));
         assert!(!rendered.contains("handler=\"unknown\""));
-        assert!(!rendered.contains("group=\"unknown\""));
+        assert!(!rendered.contains("lane=\"unknown\""));
+    }
+
+    /// Verifies task-health diagnostics expose only a fixed failure class label.
+    #[test]
+    fn task_health_metrics_use_safe_failure_class() {
+        let metrics = TaskMetrics::new(Vec::new(), Vec::new());
+        let health =
+            super::super::TaskHealth::new(super::super::TaskReadiness::startup_only(), true);
+        health.initialized();
+        health.store_failed();
+
+        let rendered = metrics.render(health.snapshot());
+
+        assert!(rendered.contains("vyuh_task_last_failure_info{class=\"store\"} 1"));
+        assert!(!rendered.contains("failed to run durable task scheduler"));
     }
 }

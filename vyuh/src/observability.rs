@@ -150,7 +150,7 @@ pub(crate) async fn liveness() -> StatusCode {
 
 /// Checks whether the site and its configured database are ready to serve traffic.
 pub(crate) async fn readiness(State(site): State<Site>) -> StatusCode {
-    if readiness_database(&site).await {
+    if site.task_ready() && readiness_database(&site).await {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

@@ -284,7 +284,7 @@ async fn send_email(Data(job): Data<EmailJob>) -> Result<TaskState, Error> {
 }
 ```
 
-The handler decides whether a failure is retryable. Its configured task group
+The handler decides whether a failure is retryable. Its configured task lane
 owns the attempt limit and exponential-backoff timing, so every task in that
 lane follows one operational policy.
 

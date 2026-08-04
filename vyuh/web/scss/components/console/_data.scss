@@ -57,6 +57,21 @@
   color: $vyuh-ember;
 }
 
+.vyuh-console-log-notice {
+  background: rgba($vyuh-ember, 0.08);
+  border: $vyuh-border-subtle;
+  border-radius: $vyuh-radius-sm;
+  color: $vyuh-muted;
+  margin: $vyuh-space-3 0;
+  padding: $vyuh-space-3 $vyuh-space-4;
+}
+
+.vyuh-console-badge.is-log-error { @include vyuh-status(red); }
+.vyuh-console-badge.is-log-warn { @include vyuh-status(yellow); }
+.vyuh-console-badge.is-log-info { @include vyuh-status(blue); }
+.vyuh-console-badge.is-log-debug { background: rgba($vyuh-ink, 0.08); color: $vyuh-muted; }
+.vyuh-console-badge.is-log-trace { background: rgba($vyuh-ink, 0.04); color: $vyuh-ink-soft; }
+
 .vyuh-console-inspector {
   align-self: start;
   padding: $vyuh-console-card-padding;

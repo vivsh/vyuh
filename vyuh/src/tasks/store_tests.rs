@@ -1,19 +1,19 @@
 use std::time::Duration;
 
 use vyuh::tasks::{
-    DEFAULT_TASK_GROUP, TaskGroup, TaskGroupConf, TaskId, TaskIdempotency, TaskRate, TaskReceipt,
+    DEFAULT_TASK_LANE, TaskId, TaskIdempotency, TaskLane, TaskLaneConf, TaskRate, TaskReceipt,
     TaskRetry, TaskStatus,
     store::{
-        AbstractTaskStore, GroupClaim, MemoryTaskStore, TaskCommit, TaskOutcome, TaskRecord,
+        AbstractTaskStore, LaneClaim, MemoryTaskStore, TaskCommit, TaskOutcome, TaskRecord,
         TaskStoreConf, TaskWrite,
     },
 };
 
-const EMAIL: TaskGroup = TaskGroup::new("email");
-const MISSING: TaskGroup = TaskGroup::new("missing");
+const EMAIL: TaskLane = TaskLane::new("email");
+const MISSING: TaskLane = TaskLane::new("missing");
 
 /// Builds one pending record for direct store-contract tests.
-fn task_record(name: &str, group: TaskGroup) -> TaskRecord {
+fn task_record(name: &str, lane: TaskLane) -> TaskRecord {
     let now = chrono::Utc::now();
     TaskRecord {
         id: uuid::Uuid::now_v7()
@@ -26,7 +26,7 @@ fn task_record(name: &str, group: TaskGroup) -> TaskRecord {
         resume_input: None,
         status: TaskStatus::Pending,
         attempts: 0,
-        group: group.to_string(),
+        lane: lane.to_string(),
         lease_duration_ms: None,
         last_error: None,
         idempotency_key: None,
@@ -50,7 +50,7 @@ fn write(record: TaskRecord) -> TaskWrite {
     }
 }
 
-/// Creates the two-group runtime policy used throughout store tests.
+/// Creates the two-lane runtime policy used throughout store tests.
 fn store_conf(idempotency: TaskIdempotency) -> TaskStoreConf {
     TaskStoreConf {
         handlers: [
@@ -70,26 +70,23 @@ fn store_conf(idempotency: TaskIdempotency) -> TaskStoreConf {
         .into_iter()
         .map(str::to_string)
         .collect(),
-        groups: vec![
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-            TaskGroupConf::new(EMAIL, 2),
+        lanes: vec![
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+            TaskLaneConf::new(EMAIL, 2),
         ],
-        batch_size: 8,
-        lease_duration: Duration::from_secs(30),
         idempotency,
-        max_error_bytes: 8 * 1024,
     }
 }
 
-/// Claims one group and flattens its single result for concise assertions.
+/// Claims one lane and flattens its single result for concise assertions.
 async fn claim(
     store: &MemoryTaskStore,
     runner: &str,
-    group: TaskGroup,
+    lane: TaskLane,
     limit: usize,
 ) -> Result<vyuh::tasks::store::TaskPoll, vyuh::tasks::TaskError> {
     store
-        .claim_tasks(runner, &[GroupClaim { group, limit }])
+        .claim_tasks(runner, &[LaneClaim { lane, limit }])
         .await
 }
 
@@ -112,18 +109,18 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
     );
 
     let poll = claim(&store, "runner-a", EMAIL, 2).await?;
-    let group = poll
-        .groups
+    let lane = poll
+        .lanes
         .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing group poll".into()))?;
-    assert_eq!(group.tasks.len(), 2);
-    assert!(group.saturated);
-    let commits = group
+        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    assert_eq!(lane.tasks.len(), 2);
+    assert!(lane.saturated);
+    let commits = lane
         .tasks
         .iter()
         .map(|task| TaskCommit {
             task_id: task.id,
-            group: EMAIL,
+            lane: EMAIL,
             outcome: TaskOutcome::complete(),
         })
         .collect::<Vec<_>>();
@@ -131,10 +128,7 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
 
     let remaining = claim(&store, "runner-b", EMAIL, 2).await?;
     assert_eq!(
-        remaining
-            .groups
-            .first()
-            .map_or(0, |group| group.tasks.len()),
+        remaining.lanes.first().map_or(0, |lane| lane.tasks.len()),
         1
     );
     Ok(())
@@ -155,44 +149,44 @@ async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::T
         .await?;
 
     let poll = claim(&store, "runner-a", EMAIL, 8).await?;
-    let group = poll
-        .groups
+    let lane = poll
+        .lanes
         .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing group poll".into()))?;
-    assert_eq!(group.tasks.len(), 1);
-    assert!(group.saturated);
+        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    assert_eq!(lane.tasks.len(), 1);
+    assert!(lane.saturated);
     Ok(())
 }
 
-/// Verifies one group never claims work belonging to another configured lane.
+/// Verifies one lane never claims work belonging to another configured lane.
 #[tokio::test]
-async fn memory_store_isolates_named_groups() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TaskIdempotency::ActiveOnly))
         .await?;
     store
         .store_tasks(vec![
-            write(task_record("default-job", DEFAULT_TASK_GROUP)),
+            write(task_record("default-job", DEFAULT_TASK_LANE)),
             write(task_record("email-job", EMAIL)),
         ])
         .await?;
 
     let email = claim(&store, "runner-a", EMAIL, 8).await?;
     let names = email
-        .groups
+        .lanes
         .first()
         .into_iter()
-        .flat_map(|group| &group.tasks)
+        .flat_map(|lane| &lane.tasks)
         .map(|task| task.name.as_str())
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["email-job"]);
     Ok(())
 }
 
-/// Verifies low-level store mutations cannot bypass configured group membership.
+/// Verifies low-level store mutations cannot bypass configured lane membership.
 #[tokio::test]
-async fn memory_store_rejects_unknown_group_mutations() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TaskIdempotency::ActiveOnly))
@@ -201,13 +195,13 @@ async fn memory_store_rejects_unknown_group_mutations() -> Result<(), vyuh::task
         store
             .store_tasks(vec![write(task_record("unknown", MISSING))])
             .await,
-        Err(vyuh::tasks::TaskError::UnknownGroup(group)) if group == MISSING.as_str()
+        Err(vyuh::tasks::TaskError::UnknownLane(lane)) if lane == MISSING.as_str()
     ));
     assert!(matches!(
         store
-            .reassign_group(EMAIL.as_str(), MISSING.as_str())
+            .reassign_lane(EMAIL.as_str(), MISSING.as_str())
             .await,
-        Err(vyuh::tasks::TaskError::UnknownGroup(group)) if group == MISSING.as_str()
+        Err(vyuh::tasks::TaskError::UnknownLane(lane)) if lane == MISSING.as_str()
     ));
     Ok(())
 }
@@ -310,7 +304,7 @@ async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
             "runner-a",
             &[TaskCommit {
                 task_id: first_id,
-                group: EMAIL,
+                lane: EMAIL,
                 outcome: TaskOutcome::complete(),
             }],
         )
@@ -344,7 +338,7 @@ async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
             "runner-a",
             &[TaskCommit {
                 task_id: archived_id,
-                group: EMAIL,
+                lane: EMAIL,
                 outcome: TaskOutcome::complete(),
             }],
         )
@@ -359,11 +353,11 @@ async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
 
 /// Verifies a store-wide bucket reserves starts in a batch and reports its next permit deadline.
 #[tokio::test]
-async fn memory_store_global_rate_limits_group_starts() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_global_rate_limits_lane_starts() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
-        groups: vec![TaskGroupConf::new(EMAIL, 2).global_rate_limit(rate)],
+        lanes: vec![TaskLaneConf::new(EMAIL, 2).global_rate_limit(rate)],
         ..store_conf(TaskIdempotency::ActiveOnly)
     };
     store.initialize(conf).await?;
@@ -375,26 +369,26 @@ async fn memory_store_global_rate_limits_group_starts() -> Result<(), vyuh::task
         .await?;
 
     let first = claim(&store, "runner-a", EMAIL, 8).await?;
-    assert_eq!(first.groups.first().map_or(0, |group| group.tasks.len()), 1);
-    assert!(first.groups.first().is_some_and(|group| !group.saturated));
+    assert_eq!(first.lanes.first().map_or(0, |lane| lane.tasks.len()), 1);
+    assert!(first.lanes.first().is_some_and(|lane| !lane.saturated));
     assert!(
         first
-            .groups
+            .lanes
             .first()
-            .is_some_and(|group| group.next_wake_in.is_some())
+            .is_some_and(|lane| lane.next_wake_in.is_some())
     );
     let second = claim(&store, "runner-b", EMAIL, 8).await?;
     assert!(
         second
-            .groups
+            .lanes
             .first()
-            .is_some_and(|group| group.tasks.is_empty())
+            .is_some_and(|lane| lane.tasks.is_empty())
     );
     assert!(
         second
-            .groups
+            .lanes
             .first()
-            .is_some_and(|group| group.next_wake_in.is_some())
+            .is_some_and(|lane| lane.next_wake_in.is_some())
     );
     Ok(())
 }
@@ -405,7 +399,7 @@ async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::task
     let store = MemoryTaskStore::new(8);
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
-        groups: vec![TaskGroupConf::new(EMAIL, 4).global_rate_limit(rate)],
+        lanes: vec![TaskLaneConf::new(EMAIL, 4).global_rate_limit(rate)],
         ..store_conf(TaskIdempotency::ActiveOnly)
     };
     store.initialize(conf).await?;
@@ -424,8 +418,8 @@ async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::task
     );
     let claimed = [first?, second?]
         .into_iter()
-        .flat_map(|poll| poll.groups)
-        .map(|group| group.tasks.len())
+        .flat_map(|poll| poll.lanes)
+        .map(|lane| lane.tasks.len())
         .sum::<usize>();
     assert_eq!(claimed, 1);
     Ok(())
@@ -444,23 +438,19 @@ async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::Task
     store.store_tasks(vec![delayed]).await?;
 
     let poll = claim(&store, "runner-a", EMAIL, 8).await?;
+    assert!(poll.lanes.first().is_some_and(|lane| lane.tasks.is_empty()));
     assert!(
-        poll.groups
+        poll.lanes
             .first()
-            .is_some_and(|group| group.tasks.is_empty())
-    );
-    assert!(
-        poll.groups
-            .first()
-            .and_then(|group| group.next_wake_in)
+            .and_then(|lane| lane.next_wake_in)
             .is_some_and(|delay| delay <= Duration::from_secs(30))
     );
     Ok(())
 }
 
-/// Verifies removed groups remain explicit and can be reassigned only after running work drains.
+/// Verifies removed lanes remain explicit and can be reassigned only after running work drains.
 #[tokio::test]
-async fn memory_store_reassigns_only_drained_groups() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TaskIdempotency::ActiveOnly))
@@ -470,13 +460,13 @@ async fn memory_store_reassigns_only_drained_groups() -> Result<(), vyuh::tasks:
         .await?;
     let claimed = claim(&store, "runner-a", EMAIL, 1).await?;
     assert!(
-        matches!(store.reassign_group(EMAIL.as_str(), DEFAULT_TASK_GROUP.as_str()).await,
-        Err(vyuh::tasks::TaskError::GroupBusy(group)) if group == EMAIL.as_str())
+        matches!(store.reassign_lane(EMAIL.as_str(), DEFAULT_TASK_LANE.as_str()).await,
+        Err(vyuh::tasks::TaskError::LaneBusy(lane)) if lane == EMAIL.as_str())
     );
     let task_id = claimed
-        .groups
+        .lanes
         .first()
-        .and_then(|group| group.tasks.first())
+        .and_then(|lane| lane.tasks.first())
         .map(|task| task.id)
         .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("task was not claimed".into()))?;
     store
@@ -484,21 +474,21 @@ async fn memory_store_reassigns_only_drained_groups() -> Result<(), vyuh::tasks:
             "runner-a",
             &[TaskCommit {
                 task_id,
-                group: EMAIL,
+                lane: EMAIL,
                 outcome: TaskOutcome::sleep(&"later", Duration::from_secs(1))?,
             }],
         )
         .await?;
     assert_eq!(
         store
-            .reassign_group(EMAIL.as_str(), DEFAULT_TASK_GROUP.as_str())
+            .reassign_lane(EMAIL.as_str(), DEFAULT_TASK_LANE.as_str())
             .await?,
         1
     );
     Ok(())
 }
 
-/// Verifies incompatible worker group or rate policies fail runtime initialization.
+/// Verifies incompatible worker lane or rate policies fail runtime initialization.
 #[tokio::test]
 async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
@@ -506,7 +496,7 @@ async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskE
         .initialize(store_conf(TaskIdempotency::ActiveOnly))
         .await?;
     let incompatible = TaskStoreConf {
-        groups: vec![TaskGroupConf::new(DEFAULT_TASK_GROUP, 2)],
+        lanes: vec![TaskLaneConf::new(DEFAULT_TASK_LANE, 2)],
         ..store_conf(TaskIdempotency::ActiveOnly)
     };
     assert!(matches!(
@@ -525,16 +515,16 @@ async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh:
         .await?;
 
     let mut local_only = store_conf(TaskIdempotency::ActiveOnly);
-    local_only.groups = vec![
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-        TaskGroupConf::new(EMAIL, 2).rate_limit(TaskRate::per_second(1)),
+    local_only.lanes = vec![
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        TaskLaneConf::new(EMAIL, 2).rate_limit(TaskRate::per_second(1)),
     ];
     store.initialize(local_only).await?;
 
     let mut global = store_conf(TaskIdempotency::ActiveOnly);
-    global.groups = vec![
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-        TaskGroupConf::new(EMAIL, 2).global_rate_limit(TaskRate::per_second(1)),
+    global.lanes = vec![
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        TaskLaneConf::new(EMAIL, 2).global_rate_limit(TaskRate::per_second(1)),
     ];
     assert!(matches!(
         store.initialize(global).await,
@@ -543,7 +533,7 @@ async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh:
     Ok(())
 }
 
-/// Verifies group retry configuration participates in the durable worker policy identity.
+/// Verifies lane retry configuration participates in the durable worker policy identity.
 #[tokio::test]
 async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
@@ -551,9 +541,9 @@ async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks:
         .initialize(store_conf(TaskIdempotency::ActiveOnly))
         .await?;
     let mut incompatible = store_conf(TaskIdempotency::ActiveOnly);
-    incompatible.groups = vec![
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-        TaskGroupConf::new(EMAIL, 2).retry(TaskRetry::exponential(3, Duration::from_secs(2))),
+    incompatible.lanes = vec![
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(3, Duration::from_secs(2))),
     ];
     assert!(matches!(
         store.initialize(incompatible).await,
@@ -562,14 +552,14 @@ async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks:
     Ok(())
 }
 
-/// Verifies a retry outcome uses the selected group's exponential delay.
+/// Verifies a retry outcome uses the selected lane's exponential delay.
 #[tokio::test]
-async fn memory_store_applies_group_retry_delay() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     let mut conf = store_conf(TaskIdempotency::ActiveOnly);
-    conf.groups = vec![
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-        TaskGroupConf::new(EMAIL, 2).retry(TaskRetry::exponential(4, Duration::from_secs(2))),
+    conf.lanes = vec![
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(4, Duration::from_secs(2))),
     ];
     store.initialize(conf).await?;
     let receipt = store
@@ -580,9 +570,9 @@ async fn memory_store_applies_group_retry_delay() -> Result<(), vyuh::tasks::Tas
         .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing task receipt".into()))?;
     let claimed = claim(&store, "runner-a", EMAIL, 1).await?;
     let task_id = claimed
-        .groups
+        .lanes
         .first()
-        .and_then(|group| group.tasks.first())
+        .and_then(|lane| lane.tasks.first())
         .map(|task| task.id)
         .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("task was not claimed".into()))?;
     assert_eq!(task_id, receipt.id());
@@ -591,7 +581,7 @@ async fn memory_store_applies_group_retry_delay() -> Result<(), vyuh::tasks::Tas
             "runner-a",
             &[TaskCommit {
                 task_id,
-                group: EMAIL,
+                lane: EMAIL,
                 outcome: TaskOutcome::retry("temporary failure"),
             }],
         )
@@ -610,12 +600,12 @@ async fn memory_store_applies_group_retry_delay() -> Result<(), vyuh::tasks::Tas
 
 /// Verifies an expired lease at its attempt limit becomes terminal without another invocation.
 #[tokio::test]
-async fn memory_store_enforces_group_attempt_limit() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     let mut conf = store_conf(TaskIdempotency::ActiveOnly);
-    conf.groups = vec![
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 2),
-        TaskGroupConf::new(EMAIL, 2).retry(TaskRetry::exponential(1, Duration::from_secs(1))),
+    conf.lanes = vec![
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(1, Duration::from_secs(1))),
     ];
     store.initialize(conf).await?;
     let mut record = task_record("exhausted", EMAIL);
@@ -625,11 +615,7 @@ async fn memory_store_enforces_group_attempt_limit() -> Result<(), vyuh::tasks::
     let id = record.id;
     store.store_tasks(vec![write(record)]).await?;
     let poll = claim(&store, "runner-b", EMAIL, 1).await?;
-    assert!(
-        poll.groups
-            .first()
-            .is_some_and(|group| group.tasks.is_empty())
-    );
+    assert!(poll.lanes.first().is_some_and(|lane| lane.tasks.is_empty()));
     let failed = store.get_task(id).await?.ok_or_else(|| {
         vyuh::tasks::TaskError::TaskExecutionError("exhausted task disappeared".into())
     })?;
@@ -652,12 +638,12 @@ async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::Task
     store.store_tasks(vec![write(record)]).await?;
 
     let poll = claim(&store, "runner-b", EMAIL, 1).await?;
-    let group = poll
-        .groups
+    let lane = poll
+        .lanes
         .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing group poll".into()))?;
-    assert_eq!(group.reclaimed, 1);
-    assert_eq!(group.tasks.first().map(|task| task.attempts), Some(2));
+        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    assert_eq!(lane.reclaimed, 1);
+    assert_eq!(lane.tasks.first().map(|task| task.attempts), Some(2));
     Ok(())
 }
 
@@ -679,12 +665,37 @@ async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::Task
             "runner-a",
             &[TaskCommit {
                 task_id: id,
-                group: EMAIL,
+                lane: EMAIL,
                 outcome: TaskOutcome::complete(),
             }],
         )
         .await?;
     assert_eq!(store.renew_leases("runner-a", &[id]).await?, vec![id]);
+    Ok(())
+}
+
+/// Verifies an unleased historical running row becomes a safe terminal failure at startup.
+#[tokio::test]
+async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::TaskError> {
+    let store = MemoryTaskStore::new(8);
+    let conf = store_conf(TaskIdempotency::ActiveOnly);
+    store.initialize(conf.clone()).await?;
+    let mut record = task_record("email", EMAIL);
+    record.status = TaskStatus::Running;
+    record.locked_by = Some("lost-runner".into());
+    store.store_tasks(vec![write(record)]).await?;
+    store.initialize(conf).await?;
+    let record = store
+        .tasks()
+        .await
+        .into_iter()
+        .find(|task| task.status == TaskStatus::Failed)
+        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing failure".into()))?;
+    assert!(
+        record
+            .last_error
+            .is_some_and(|message| message.contains("lease deadline"))
+    );
     Ok(())
 }
 

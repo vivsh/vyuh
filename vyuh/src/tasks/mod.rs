@@ -1,14 +1,15 @@
-mod backends;
 mod config;
+mod diagnostics;
 mod dispatcher;
 mod handler;
+mod health;
 mod metrics;
 mod models;
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-pub(crate) mod persistence;
 mod rate;
 mod runner;
-pub mod store;
+pub(crate) mod store;
+#[cfg(test)]
+mod store_tests;
 mod submission;
 
 pub use config::*;
@@ -18,12 +19,15 @@ pub use dispatcher::Tasks;
 pub use handler::IntoTaskOutcomePart;
 pub use handler::{Continuation, TaskContext, TaskError, TaskState, TaskStatus};
 pub(crate) use handler::{RegisteredTask, TaskOutcome, TaskRegistry};
+pub(crate) use health::{TaskHealth, TaskHealthSnapshot};
 pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
 pub use models::{TaskFilter, TaskHandlerConf, TaskId, TaskInfo};
 pub(crate) use runner::AbstractTaskRunner;
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+pub(crate) use store::MemoryTaskStore;
 pub(crate) use store::{
-    AbstractTaskStore, GroupClaim, GroupPoll, TaskCommit, TaskPoll, TaskStoreConf,
+    AbstractTaskStore, LaneClaim, LanePoll, TaskCommit, TaskPoll, TaskStoreConf, TaskTick,
 };
 pub(crate) use submission::TaskWrite;
 pub use submission::{TaskOptions, TaskReceipt};

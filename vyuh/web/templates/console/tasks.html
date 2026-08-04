@@ -30,7 +30,7 @@
   </div>
 
   <form class="vyuh-console-toolbar" method="get" action="{{ urls.tasks }}">
-    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, group, key, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, lane, key, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
     <select name="status">
       <option value="">All Status</option>
       {% for status in statuses %}
@@ -38,7 +38,7 @@
       {% endfor %}
     </select>
     <input type="search" name="name" placeholder="Task name" value="{% if query.name %}{{ query.name }}{% endif %}">
-    <input type="search" name="group" placeholder="Group" value="{% if query.group %}{{ query.group }}{% endif %}">
+    <input type="search" name="lane" placeholder="Lane" value="{% if query.lane %}{{ query.lane }}{% endif %}">
     <input type="search" name="idempotency_key" placeholder="Idempotency key" value="{% if query.idempotency_key %}{{ query.idempotency_key }}{% endif %}">
     <input type="date" name="created_from" value="{% if query.created_from %}{{ query.created_from }}{% endif %}">
     <input type="date" name="created_to" value="{% if query.created_to %}{{ query.created_to }}{% endif %}">
@@ -56,13 +56,13 @@
       <header><h2>Recent Tasks <span class="vyuh-console-badge is-success">Live</span></h2></header>
       <div class="vyuh-console-table">
         <table>
-          <thead><tr><th>Status</th><th>Name</th><th>Group</th><th>Attempts</th><th>Idempotency key</th><th>Created</th><th>Updated</th><th></th></tr></thead>
+          <thead><tr><th>Status</th><th>Name</th><th>Lane</th><th>Attempts</th><th>Idempotency key</th><th>Created</th><th>Updated</th><th></th></tr></thead>
           <tbody>
             {% for task in page.items %}
             <tr {% if selected_task and selected_task.id == task.id %}aria-selected="true"{% endif %}>
               <td><span class="vyuh-console-badge is-{{ task.status }}">{{ task.status }}</span></td>
               <td><a class="vyuh-console-row-title" href="{{ urls.tasks }}?selected={{ task.id }}">{{ task.name }}</a></td>
-              <td>{{ task.group }}</td>
+              <td>{{ task.lane }}</td>
               <td>{{ task.attempts }}</td>
               <td>{% if task.idempotency_key %}{{ task.idempotency_key }}{% else %}-{% endif %}</td>
               <td><time datetime="{{ task.created_at }}">{{ task.created_at_display }}</time></td>
@@ -97,7 +97,7 @@
       </nav>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="task-overview-panel" aria-labelledby="task-overview-tab">
         <dl class="vyuh-console-kv">
-          <div><dt>Group</dt><dd>{{ selected_task.group }}</dd></div>
+          <div><dt>Lane</dt><dd>{{ selected_task.lane }}</dd></div>
           <div><dt>Attempts</dt><dd>{{ selected_task.attempts }}</dd></div>
           <div><dt>Idempotency key</dt><dd>{% if selected_task.idempotency_key %}{{ selected_task.idempotency_key }}{% else %}-{% endif %}</dd></div>
           <div><dt>Key expires</dt><dd>{% if selected_task.idempotency_expires_at %}{{ selected_task.idempotency_expires_at }}{% else %}-{% endif %}</dd></div>
@@ -114,7 +114,7 @@
       </section>
       {% else %}
       <header><h2>Task Details</h2></header>
-      <p>Select a task row to inspect its group, attempts, timing, and errors.</p>
+      <p>Select a task row to inspect its lane, attempts, timing, and errors.</p>
       {% endif %}
     </aside>
   </div>

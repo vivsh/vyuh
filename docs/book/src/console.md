@@ -117,7 +117,8 @@ All endpoints are mounted under `ConsoleConf.path`.
 | `GET` | `/api/operations/{id}` | inspect one operation |
 | `GET` | `/api/tasks` | list task records |
 | `GET` | `/api/tasks/{id}` | inspect one task record |
-| `GET` | `/api/status` | combined site, process, and system status |
+| `GET` | `/api/logs` | query bounded configured file logs |
+| `GET` | `/api/status` | combined site, process, system, and safe task-runtime status |
 | `GET` | `/api/openapi` | OpenAPI JSON for non-console routes |
 | `GET` | `/api/conf` | redacted runtime configuration JSON |
 
@@ -188,25 +189,50 @@ the console itself is mounted into the same site.
 `/api/tasks` lists task records without claiming or modifying them:
 
 ```text
-/console/api/tasks?status=pending&group=email&created_from=2026-06-01&created_to=2026-06-30&page=1&per_page=50
+/console/api/tasks?status=pending&lane=email&created_from=2026-06-01&created_to=2026-06-30&page=1&per_page=50
 ```
 
 Supported filters:
 
 - `status`: `pending`, `running`, `suspended`, `succeeded`, or `failed`.
 - `name`: registered task name.
-- `group`: named task execution group.
+- `lane`: named task execution lane.
 - `idempotency_key`: task-handler-scoped idempotency key.
 - `created_from`: inclusive task creation date in `YYYY-MM-DD` format.
 - `created_to`: inclusive task creation date in `YYYY-MM-DD` format.
-- `q`: text search across name, group, idempotency key, and last error.
+- `q`: text search across name, lane, idempotency key, and last error.
 - `page` and `per_page`: one-indexed canonical pagination.
 
 `/api/tasks/{id}` returns the safe task detail shape for one task ID, including
-status, attempts, group, timing, idempotency key, last error, and JSON
+status, attempts, lane, timing, idempotency key, last error, and JSON
 input/state/resume fields when they parse as JSON.
-The HTML task page exposes search, status, name, group, idempotency-key, and date-range
+The HTML task page exposes search, status, name, lane, idempotency-key, and date-range
 filters and shows selected task details without leaving the list.
+
+## Logs
+
+The **Logs** page reads only configured `LogSink::File` JSON logs. It does not
+read stdout or stderr, which are not durable local sources. Add an ordinary
+rotating file rule when console log inspection is wanted:
+
+```rust
+LogSink::File {
+    dir: "logs".into(),
+    rotation: Rotation::Daily,
+}
+```
+
+The page filters by file rule, level, target prefix, inclusive UTC date range,
+and text in messages, event fields, and spans. It reads newest entries first by
+seeking backward through fixed-size file blocks. Each request has fixed file,
+line, output, and scan budgets; broad searches can return partial results with
+a visible truncation notice. Use narrower dates or continue with the opaque
+older-results cursor rather than expecting an unbounded historical scan.
+
+Log files may contain application-sensitive values. Console access is required,
+responses use `Cache-Control: no-store`, and values are escaped before HTML
+rendering, but applications should still avoid writing credentials or secrets
+to logs.
 
 ## Status
 
@@ -226,6 +252,10 @@ The status object includes:
 
 Console never exposes env vars, secrets, JWT keys, API keys, cookies, full
 database URLs, or raw configuration.
+
+It also reports the task runtime's safe health state, consecutive store-failure
+count, last successful scheduler tick, and failure class. Native task error
+chains remain in structured logs and are never retained by the console.
 
 Status is cached in-process for `ConsoleConf.status_cache_ttl_seconds`, default
 5 seconds. Requests inside that window return the previous snapshot instead of

@@ -1,11 +1,11 @@
-//! In-memory reference implementation of the grouped task-store contract.
+//! In-memory reference implementation of the per-lane task-store contract.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::tasks::{
-    AbstractTaskStore, GroupClaim, GroupPoll, TaskCommit, TaskError, TaskFilter, TaskId,
-    TaskIdempotency, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry, TaskStatus,
-    TaskStoreConf, TaskWrite,
+    AbstractTaskStore, LaneClaim, LanePoll, TaskCommit, TaskError, TaskFilter, TaskId,
+    TaskIdempotency, TaskLane, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry,
+    TaskStatus, TaskStoreConf, TaskTick, TaskWrite,
 };
 
 #[derive(Clone)]
@@ -22,6 +22,13 @@ struct MemoryState {
     rates: HashMap<String, RateBucket>,
 }
 
+struct ClaimReservation {
+    claim: LaneClaim,
+    permits: usize,
+    rate_wake: Option<Duration>,
+    candidates: usize,
+}
+
 /// In-memory task store for tests and local development.
 ///
 /// This store is process-local and is not a durable or distributed coordinator.
@@ -34,6 +41,7 @@ pub struct MemoryTaskStore {
 
 impl MemoryTaskStore {
     /// Creates a process-local store with one bounded claim size.
+    #[cfg(test)]
     pub fn new(batch_size: usize) -> Self {
         Self::with_lease_duration(batch_size, Duration::from_secs(300))
     }
@@ -48,11 +56,13 @@ impl MemoryTaskStore {
     }
 
     /// Returns the number of records retained by this store.
+    #[cfg(test)]
     pub async fn task_count(&self) -> usize {
         self.state.lock().await.tasks.len()
     }
 
     /// Returns a snapshot of all retained records.
+    #[cfg(test)]
     pub async fn tasks(&self) -> Vec<TaskRecord> {
         self.state.lock().await.tasks.clone()
     }
@@ -68,9 +78,10 @@ impl AbstractTaskStore for MemoryTaskStore {
             .is_some_and(|value| value != fingerprint)
         {
             return Err(TaskError::InvalidConfig(
-                "task workers use incompatible group or global rate policies".into(),
+                "task workers use incompatible lane or global rate policies".into(),
             ));
         }
+        fail_unleased_running(&mut state.tasks, conf.idempotency, chrono::Utc::now())?;
         reject_orphaned_tasks(&state.tasks, &conf)?;
         initialize_rates(&mut state, &conf);
         state.fingerprint = Some(fingerprint);
@@ -81,46 +92,17 @@ impl AbstractTaskStore for MemoryTaskStore {
     async fn claim_tasks(
         &self,
         runner_id: &str,
-        claims: &[GroupClaim],
+        claims: &[LaneClaim],
     ) -> Result<TaskPoll, TaskError> {
         let mut state = self.state.lock().await;
-        let now = chrono::Utc::now();
-        let lease = configured_lease(&state, self.lease_duration);
-        let mut groups = Vec::with_capacity(claims.len());
-        for claim in claims {
-            let bounded = GroupClaim {
-                group: claim.group,
-                limit: claim.limit.min(self.batch_size),
-            };
-            let idempotency = configured_idempotency(&state);
-            let retry = configured_retry(&state, bounded.group)?;
-            fail_exhausted(
-                &mut state.tasks,
-                bounded.group.as_str(),
-                now,
-                idempotency,
-                retry,
-            )?;
-            let candidates = due_indices(&state.tasks, bounded.group.as_str(), now)
-                .len()
-                .min(bounded.limit);
-            let rate = configured_rate(&state, bounded.group)?;
-            let (permit_limit, rate_wake) =
-                reserve_permits(&mut state, bounded.group, candidates, rate, now)?;
-            let rate_blocked = permit_limit < candidates;
-            let mut poll = claim_group(
-                &mut state.tasks,
-                runner_id,
-                &bounded,
-                permit_limit,
-                now,
-                lease,
-            )?;
-            let task_wake = task_deadline(&state.tasks, bounded.group.as_str(), now);
-            poll.next_wake_in = effective_group_wake(rate_blocked, rate_wake, task_wake);
-            groups.push(poll);
-        }
-        Ok(TaskPoll { groups })
+        claim_tasks_state(
+            &mut state,
+            runner_id,
+            claims,
+            self.batch_size,
+            self.lease_duration,
+            chrono::Utc::now(),
+        )
     }
 
     async fn commit_outcomes(
@@ -129,20 +111,7 @@ impl AbstractTaskStore for MemoryTaskStore {
         commits: &[TaskCommit],
     ) -> Result<(), TaskError> {
         let mut state = self.state.lock().await;
-        let now = chrono::Utc::now();
-        let idempotency = configured_idempotency(&state);
-        for commit in commits {
-            let retry = configured_retry(&state, commit.group)?;
-            let Some(task) = owned_task_mut(&mut state.tasks, commit.task_id, runner_id) else {
-                continue;
-            };
-            if task.group != commit.group.as_str() {
-                return Err(TaskError::UnknownGroup(task.group.clone()));
-            }
-            apply_outcome(task, commit.outcome.clone(), retry, now)?;
-            finalize_idempotency(task, idempotency, now)?;
-        }
-        Ok(())
+        commit_outcomes_state(&mut state, runner_id, commits, chrono::Utc::now())
     }
 
     async fn renew_leases(
@@ -151,23 +120,40 @@ impl AbstractTaskStore for MemoryTaskStore {
         task_ids: &[TaskId],
     ) -> Result<Vec<TaskId>, TaskError> {
         let mut state = self.state.lock().await;
+        renew_leases_state(
+            &mut state,
+            runner_id,
+            task_ids,
+            self.lease_duration,
+            chrono::Utc::now(),
+        )
+    }
+
+    async fn tick(
+        &self,
+        runner_id: &str,
+        claims: &[LaneClaim],
+        commits: &[TaskCommit],
+        renewals: &[TaskId],
+    ) -> Result<TaskTick, TaskError> {
+        let mut state = self.state.lock().await;
         let now = chrono::Utc::now();
-        let lease = configured_lease(&state, self.lease_duration);
-        let mut lost = Vec::new();
-        for task_id in task_ids {
-            if let Some(task) = owned_task_mut(&mut state.tasks, *task_id, runner_id) {
-                task.leased_until = checked_deadline(now, lease)?;
-                task.updated_at = now;
-            } else {
-                lost.push(*task_id);
-            }
-        }
-        Ok(lost)
+        commit_outcomes_state(&mut state, runner_id, commits, now)?;
+        let lost = renew_leases_state(&mut state, runner_id, renewals, self.lease_duration, now)?;
+        let poll = claim_tasks_state(
+            &mut state,
+            runner_id,
+            claims,
+            self.batch_size,
+            self.lease_duration,
+            now,
+        )?;
+        Ok(TaskTick { poll, lost })
     }
 
     async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
         let mut state = self.state.lock().await;
-        validate_write_groups(&state, &writes)?;
+        validate_write_lanes(&state, &writes)?;
         let now = chrono::Utc::now();
         let mut staged = Vec::with_capacity(writes.len());
         let mut receipts = Vec::with_capacity(writes.len());
@@ -179,20 +165,20 @@ impl AbstractTaskStore for MemoryTaskStore {
         Ok(receipts)
     }
 
-    async fn reassign_group(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {
         let mut state = self.state.lock().await;
-        require_group(&state, to)?;
+        require_lane(&state, to)?;
         if state
             .tasks
             .iter()
-            .any(|task| task.group == from && task.status == TaskStatus::Running)
+            .any(|task| task.lane == from && task.status == TaskStatus::Running)
         {
-            return Err(TaskError::GroupBusy(from.into()));
+            return Err(TaskError::LaneBusy(from.into()));
         }
         let mut changed = 0_u64;
         for task in &mut state.tasks {
-            if task.group == from && is_reassignable(task.status) {
-                task.group = to.into();
+            if task.lane == from && is_reassignable(task.status) {
+                task.lane = to.into();
                 task.updated_at = chrono::Utc::now();
                 changed += 1;
             }
@@ -243,16 +229,152 @@ impl AbstractTaskStore for MemoryTaskStore {
     }
 }
 
+/// Claims all requested lanes while holding the in-memory store transaction lock.
+fn claim_tasks_state(
+    state: &mut MemoryState,
+    runner_id: &str,
+    claims: &[LaneClaim],
+    batch_size: usize,
+    lease_duration: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<TaskPoll, TaskError> {
+    let mut lanes = Vec::with_capacity(claims.len());
+    for claim in claims {
+        let bounded = bounded_claim(claim, batch_size);
+        let idempotency = configured_idempotency(state);
+        let retry = configured_retry(state, bounded.lane)?;
+        fail_exhausted(
+            &mut state.tasks,
+            bounded.lane.as_str(),
+            now,
+            idempotency,
+            retry,
+        )?;
+        let candidates = due_count(state, bounded.lane, now);
+        let rate = configured_rate(state, bounded.lane)?;
+        let (permits, rate_wake) = reserve_permits(state, bounded.lane, candidates, rate, now)?;
+        let reservation = ClaimReservation {
+            claim: bounded,
+            permits,
+            rate_wake,
+            candidates,
+        };
+        lanes.push(claim_lane_state(
+            state,
+            runner_id,
+            reservation,
+            lease_duration,
+            now,
+        )?);
+    }
+    Ok(TaskPoll { lanes })
+}
+
+/// Commits one bounded batch of outcomes while the in-memory transaction lock is held.
+fn commit_outcomes_state(
+    state: &mut MemoryState,
+    runner_id: &str,
+    commits: &[TaskCommit],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), TaskError> {
+    let idempotency = configured_idempotency(state);
+    for commit in commits {
+        let retry = configured_retry(state, commit.lane)?;
+        let Some(task) = owned_task_mut(&mut state.tasks, commit.task_id, runner_id) else {
+            continue;
+        };
+        if task.lane != commit.lane.as_str() {
+            return Err(TaskError::UnknownLane(task.lane.clone()));
+        }
+        apply_outcome(task, commit.outcome.clone(), retry, now)?;
+        finalize_idempotency(task, idempotency, now)?;
+    }
+    Ok(())
+}
+
+/// Renews one bounded owned lease set while the in-memory transaction lock is held.
+fn renew_leases_state(
+    state: &mut MemoryState,
+    runner_id: &str,
+    task_ids: &[TaskId],
+    lease_duration: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<TaskId>, TaskError> {
+    let mut lost = Vec::new();
+    for task_id in task_ids {
+        if let Some(task) = owned_task_mut(&mut state.tasks, *task_id, runner_id) {
+            task.leased_until = checked_deadline(now, lease_duration)?;
+            task.updated_at = now;
+        } else {
+            lost.push(*task_id);
+        }
+    }
+    Ok(lost)
+}
+
+fn bounded_claim(claim: &LaneClaim, batch_size: usize) -> LaneClaim {
+    LaneClaim {
+        lane: claim.lane,
+        limit: claim.limit.min(batch_size),
+    }
+}
+
+fn due_count(state: &MemoryState, lane: TaskLane, now: chrono::DateTime<chrono::Utc>) -> usize {
+    due_indices(&state.tasks, lane.as_str(), now).len()
+}
+
+fn claim_lane_state(
+    state: &mut MemoryState,
+    runner_id: &str,
+    reservation: ClaimReservation,
+    lease_duration: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<LanePoll, TaskError> {
+    let mut poll = claim_lane(
+        &mut state.tasks,
+        runner_id,
+        &reservation.claim,
+        reservation.permits,
+        now,
+        lease_duration,
+    )?;
+    let task_wake = task_deadline(&state.tasks, reservation.claim.lane.as_str(), now);
+    poll.next_wake_in = effective_lane_wake(
+        reservation.permits < reservation.candidates,
+        reservation.rate_wake,
+        task_wake,
+    );
+    Ok(poll)
+}
+
+/// Fails legacy running rows that cannot be safely reclaimed by lease expiry.
+fn fail_unleased_running(
+    tasks: &mut [TaskRecord],
+    policy: TaskIdempotency,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), TaskError> {
+    for task in tasks {
+        if task.status != TaskStatus::Running || task.leased_until.is_some() {
+            continue;
+        }
+        fail(task, "Running task has no lease deadline".into(), now);
+        task.locked_by = None;
+        task.updated_at = now;
+        finalize_idempotency(task, policy, now)?;
+    }
+    Ok(())
+}
+
 /// Marks expired leases terminal once their invocation budget is exhausted.
 fn fail_exhausted(
     tasks: &mut [TaskRecord],
-    group: &str,
+    lane: &str,
     now: chrono::DateTime<chrono::Utc>,
     policy: TaskIdempotency,
     retry: TaskRetry,
 ) -> Result<(), TaskError> {
     for task in tasks {
-        let expired = task.group == group
+        let expired = task.lane == lane
             && task.status == TaskStatus::Running
             && task.leased_until.is_some_and(|lease| lease <= now);
         if !expired || !retry.exhausted(task.attempts)? {
@@ -267,10 +389,10 @@ fn fail_exhausted(
     Ok(())
 }
 
-/// Rejects low-level writes that bypass the typed client's group validation.
-fn validate_write_groups(state: &MemoryState, writes: &[TaskWrite]) -> Result<(), TaskError> {
+/// Rejects low-level writes that bypass the typed client's lane validation.
+fn validate_write_lanes(state: &MemoryState, writes: &[TaskWrite]) -> Result<(), TaskError> {
     for write in writes {
-        require_group(state, &write.record.group)?;
+        require_lane(state, &write.record.lane)?;
         require_handler(state, &write.record.name)?;
     }
     Ok(())
@@ -285,30 +407,29 @@ fn require_handler(state: &MemoryState, handler: &str) -> Result<(), TaskError> 
         .ok_or_else(|| TaskError::TaskNotFound(handler.into()))
 }
 
-/// Validates one persisted group name against initialized store policy.
-fn require_group(state: &MemoryState, group: &str) -> Result<(), TaskError> {
-    let configured = state.conf.as_ref().is_some_and(|conf| {
-        conf.groups
-            .iter()
-            .any(|entry| entry.group().as_str() == group)
-    });
+/// Validates one persisted lane name against initialized store policy.
+fn require_lane(state: &MemoryState, lane: &str) -> Result<(), TaskError> {
+    let configured = state
+        .conf
+        .as_ref()
+        .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
     configured
         .then_some(())
-        .ok_or_else(|| TaskError::UnknownGroup(group.into()))
+        .ok_or_else(|| TaskError::UnknownLane(lane.into()))
 }
 
-/// Claims one in-memory group while preserving candidate saturation evidence.
-fn claim_group(
+/// Claims one in-memory lane while preserving candidate saturation evidence.
+fn claim_lane(
     tasks: &mut [TaskRecord],
     runner_id: &str,
-    claim: &GroupClaim,
+    claim: &LaneClaim,
     permit_limit: usize,
     now: chrono::DateTime<chrono::Utc>,
     default_lease: Duration,
-) -> Result<GroupPoll, TaskError> {
+) -> Result<LanePoll, TaskError> {
     let requested = claim.limit;
     let claim_count = requested.min(permit_limit);
-    let mut candidates = due_indices(tasks, claim.group.as_str(), now);
+    let mut candidates = due_indices(tasks, claim.lane.as_str(), now);
     candidates.sort_by_key(|index| tasks.get(*index).map(|task| readiness(task, now)));
     let saturated = requested > 0 && candidates.len() >= requested;
     let reclaimed = candidates
@@ -328,8 +449,8 @@ fn claim_group(
         claim_task(task, runner_id, now, default_lease)?;
         claimed.push(task.clone());
     }
-    Ok(GroupPoll {
-        group: claim.group,
+    Ok(LanePoll {
+        lane: claim.lane,
         tasks: claimed,
         reclaimed,
         saturated,
@@ -337,16 +458,12 @@ fn claim_group(
     })
 }
 
-/// Finds rows eligible by readiness or expired lease within one group.
-fn due_indices(
-    tasks: &[TaskRecord],
-    group: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Vec<usize> {
+/// Finds rows eligible by readiness or expired lease within one lane.
+fn due_indices(tasks: &[TaskRecord], lane: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<usize> {
     tasks
         .iter()
         .enumerate()
-        .filter_map(|(index, task)| (task.group == group && is_due(task, now)).then_some(index))
+        .filter_map(|(index, task)| (task.lane == lane && is_due(task, now)).then_some(index))
         .collect()
 }
 
@@ -397,10 +514,10 @@ fn claim_task(
     Ok(())
 }
 
-/// Refills and reserves one group bucket while holding the store mutex.
+/// Refills and reserves one lane bucket while holding the store mutex.
 fn reserve_permits(
     state: &mut MemoryState,
-    group: crate::tasks::TaskGroup,
+    lane: crate::tasks::TaskLane,
     limit: usize,
     rate: Option<crate::tasks::TaskRate>,
     now: chrono::DateTime<chrono::Utc>,
@@ -411,7 +528,7 @@ fn reserve_permits(
     let Some(rate) = rate else {
         return Ok((limit, None));
     };
-    let bucket = state.rates.entry(group.to_string()).or_insert(RateBucket {
+    let bucket = state.rates.entry(lane.to_string()).or_insert(RateBucket {
         tokens_micros: i64::from(rate.burst_size()).saturating_mul(crate::tasks::rate::TOKEN_SCALE),
         updated_at: now,
     });
@@ -431,26 +548,26 @@ fn reserve_permits(
 /// Resolves global rate policy from initialized store state rather than caller input.
 fn configured_rate(
     state: &MemoryState,
-    group: crate::tasks::TaskGroup,
+    lane: crate::tasks::TaskLane,
 ) -> Result<Option<crate::tasks::TaskRate>, TaskError> {
     state
         .conf
         .as_ref()
-        .and_then(|conf| conf.groups.iter().find(|entry| entry.group() == group))
-        .map(crate::tasks::TaskGroupConf::global_rate)
-        .ok_or_else(|| TaskError::UnknownGroup(group.to_string()))
+        .and_then(|conf| conf.lanes.iter().find(|entry| entry.lane() == lane))
+        .map(crate::tasks::TaskLaneConf::global_rate)
+        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
 }
 
 fn configured_retry(
     state: &MemoryState,
-    group: crate::tasks::TaskGroup,
+    lane: crate::tasks::TaskLane,
 ) -> Result<TaskRetry, TaskError> {
     state
         .conf
         .as_ref()
-        .and_then(|conf| conf.groups.iter().find(|entry| entry.group() == group))
-        .map(crate::tasks::TaskGroupConf::retry_policy)
-        .ok_or_else(|| TaskError::UnknownGroup(group.to_string()))
+        .and_then(|conf| conf.lanes.iter().find(|entry| entry.lane() == lane))
+        .map(crate::tasks::TaskLaneConf::retry_policy)
+        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
 }
 
 /// Applies one submission to a cloned batch so conflicts remain atomic.
@@ -625,12 +742,12 @@ fn owned_task_mut<'a>(
 /// Returns the earliest future readiness or lease-expiry deadline.
 fn task_deadline(
     tasks: &[TaskRecord],
-    group: &str,
+    lane: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<Duration> {
     tasks
         .iter()
-        .filter(|task| task.group == group)
+        .filter(|task| task.lane == lane)
         .filter_map(|task| {
             let deadline = match task.status {
                 TaskStatus::Pending => task.ready_at,
@@ -645,7 +762,7 @@ fn task_deadline(
 }
 
 /// Combines future work and token readiness without polling a blocked lane early.
-fn effective_group_wake(
+fn effective_lane_wake(
     rate_blocked: bool,
     rate_wake: Option<Duration>,
     task_wake: Option<Duration>,
@@ -660,10 +777,7 @@ fn effective_group_wake(
 fn matches_filter(task: &TaskRecord, filter: &TaskFilter) -> bool {
     filter.status.is_none_or(|status| task.status == status)
         && filter.name.as_deref().is_none_or(|name| task.name == name)
-        && filter
-            .group
-            .as_deref()
-            .is_none_or(|group| task.group == group)
+        && filter.lane.as_deref().is_none_or(|lane| task.lane == lane)
         && filter
             .idempotency_key
             .as_deref()
@@ -680,7 +794,7 @@ fn matches_query(task: &TaskRecord, query: Option<&str>) -> bool {
     let Some(query) = query else { return true };
     let query = query.to_lowercase();
     task.name.to_lowercase().contains(&query)
-        || task.group.to_lowercase().contains(&query)
+        || task.lane.to_lowercase().contains(&query)
         || task
             .idempotency_key
             .as_ref()
@@ -709,13 +823,6 @@ fn page(records: Vec<TaskRecord>, filter: &TaskFilter) -> crate::routes::Page<Ta
     crate::routes::Page::new(items, total, filter.page, filter.per_page)
 }
 
-fn configured_lease(state: &MemoryState, fallback: Duration) -> Duration {
-    state
-        .conf
-        .as_ref()
-        .map_or(fallback, |conf| conf.lease_duration)
-}
-
 fn configured_idempotency(state: &MemoryState) -> TaskIdempotency {
     state
         .conf
@@ -723,14 +830,14 @@ fn configured_idempotency(state: &MemoryState) -> TaskIdempotency {
         .map_or(TaskIdempotency::ActiveOnly, |conf| conf.idempotency)
 }
 
-/// Creates buckets only for groups with configured global rate limits.
+/// Creates buckets only for lanes with configured global rate limits.
 fn initialize_rates(state: &mut MemoryState, conf: &TaskStoreConf) {
     let now = chrono::Utc::now();
-    for group in &conf.groups {
-        if let Some(rate) = group.global_rate() {
+    for lane in &conf.lanes {
+        if let Some(rate) = lane.global_rate() {
             state
                 .rates
-                .entry(group.group().to_string())
+                .entry(lane.lane().to_string())
                 .or_insert(RateBucket {
                     tokens_micros: i64::from(rate.burst_size())
                         .saturating_mul(crate::tasks::rate::TOKEN_SCALE),
@@ -740,18 +847,18 @@ fn initialize_rates(state: &mut MemoryState, conf: &TaskStoreConf) {
     }
 }
 
-/// Prevents active work from silently falling into another configured group.
+/// Prevents active work from silently falling into another configured lane.
 fn reject_orphaned_tasks(tasks: &[TaskRecord], conf: &TaskStoreConf) -> Result<(), TaskError> {
     let configured = conf
-        .groups
+        .lanes
         .iter()
-        .map(|group| group.group().as_str())
+        .map(|lane| lane.lane().as_str())
         .collect::<std::collections::HashSet<_>>();
     if let Some(task) = tasks
         .iter()
-        .find(|task| is_active(task.status) && !configured.contains(task.group.as_str()))
+        .find(|task| is_active(task.status) && !configured.contains(task.lane.as_str()))
     {
-        return Err(TaskError::UnknownGroup(task.group.clone()));
+        return Err(TaskError::UnknownLane(task.lane.clone()));
     }
     let handlers = conf
         .handlers

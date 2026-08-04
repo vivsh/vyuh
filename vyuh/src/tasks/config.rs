@@ -1,13 +1,13 @@
-//! Task runner, group, rate-limit, and idempotency configuration.
+//! Task runner, lane, rate-limit, and idempotency configuration.
 
 use std::time::Duration;
 
 use super::TaskError;
 
-/// Framework-owned group used when a submission does not select one.
-pub const DEFAULT_TASK_GROUP: TaskGroup = TaskGroup::new("default");
+/// Framework-owned lane used when a submission does not select one.
+pub const DEFAULT_TASK_LANE: TaskLane = TaskLane::new("default");
 
-const MAX_TASK_GROUPS: usize = 32;
+const MAX_TASK_LANES: usize = 32;
 const MAX_TASK_ATTEMPTS: u32 = 1_000;
 const MAX_CONCURRENCY: usize = 4_096;
 const MAX_BATCH_SIZE: usize = 10_000;
@@ -24,27 +24,27 @@ const DEFAULT_RETRY: TaskRetry = TaskRetry {
 
 /// Stable name for one independently scheduled task lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskGroup(&'static str);
+pub struct TaskLane(&'static str);
 
-impl TaskGroup {
-    /// Declares a reusable task group descriptor.
+impl TaskLane {
+    /// Declares a reusable task lane descriptor.
     pub const fn new(name: &'static str) -> Self {
         Self(name)
     }
 
-    /// Returns the configured group name.
+    /// Returns the configured lane name.
     pub const fn as_str(self) -> &'static str {
         self.0
     }
 }
 
-impl std::fmt::Display for TaskGroup {
+impl std::fmt::Display for TaskLane {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.0)
     }
 }
 
-/// Token-bucket start rate for one task group.
+/// Token-bucket start rate for one task lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskRate {
     permits: u32,
@@ -94,7 +94,7 @@ impl TaskRate {
     }
 }
 
-/// Group-owned retry limit and exponential-backoff policy.
+/// Lane-owned retry limit and exponential-backoff policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskRetry {
     max_attempts: u32,
@@ -133,7 +133,7 @@ impl TaskRetry {
         self.max_delay
     }
 
-    /// Reports whether the completed invocation consumed the group's attempt budget.
+    /// Reports whether the completed invocation consumed the lane's attempt budget.
     pub(crate) fn exhausted(self, attempts: i32) -> Result<bool, TaskError> {
         let attempts = u32::try_from(attempts).map_err(|_| {
             TaskError::TaskExecutionError("task attempt count cannot be negative".into())
@@ -163,21 +163,21 @@ impl Default for TaskRetry {
     }
 }
 
-/// Runtime limits for one named task group.
+/// Runtime limits for one named task lane.
 #[derive(Debug, Clone)]
-pub struct TaskGroupConf {
-    group: TaskGroup,
+pub struct TaskLaneConf {
+    lane: TaskLane,
     concurrency: usize,
     rate: Option<TaskRate>,
     global_rate: Option<TaskRate>,
     retry: TaskRetry,
 }
 
-impl TaskGroupConf {
-    /// Creates one group with its per-worker concurrency quota.
-    pub const fn new(group: TaskGroup, concurrency: usize) -> Self {
+impl TaskLaneConf {
+    /// Creates one lane with its per-worker concurrency quota.
+    pub const fn new(lane: TaskLane, concurrency: usize) -> Self {
         Self {
-            group,
+            lane,
             concurrency,
             rate: None,
             global_rate: None,
@@ -197,15 +197,15 @@ impl TaskGroupConf {
         self
     }
 
-    /// Replaces this group's retry limit and exponential-backoff policy.
+    /// Replaces this lane's retry limit and exponential-backoff policy.
     pub const fn retry(mut self, retry: TaskRetry) -> Self {
         self.retry = retry;
         self
     }
 
-    /// Returns the group descriptor.
-    pub const fn group(&self) -> TaskGroup {
-        self.group
+    /// Returns the lane descriptor.
+    pub const fn lane(&self) -> TaskLane {
+        self.lane
     }
 
     /// Returns this worker's concurrency quota.
@@ -223,7 +223,7 @@ impl TaskGroupConf {
         self.global_rate
     }
 
-    /// Returns this group's retry policy.
+    /// Returns this lane's retry policy.
     pub const fn retry_policy(&self) -> TaskRetry {
         self.retry
     }
@@ -237,6 +237,44 @@ pub enum TaskIdempotency {
     ActiveOnly,
     /// Holds a key for the configured age after terminal completion.
     RetainFor(Duration),
+}
+
+/// Controls how the durable task runtime contributes to site readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskReadiness {
+    /// Require task initialization, but tolerate later transient store failures.
+    #[default]
+    StartupOnly,
+    /// Mark the site unready after this many consecutive scheduler-store failures.
+    AfterFailures(u32),
+    /// Exclude tasks from the site readiness decision.
+    Disabled,
+}
+
+impl TaskReadiness {
+    /// Requires successful task initialization without failing readiness later.
+    pub const fn startup_only() -> Self {
+        Self::StartupOnly
+    }
+
+    /// Fails readiness after a bounded run of scheduler-store failures.
+    pub const fn after_failures(failures: u32) -> Self {
+        Self::AfterFailures(failures)
+    }
+
+    /// Keeps task health visible without changing site readiness.
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    /// Returns the stable configured readiness-policy name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupOnly => "startup_only",
+            Self::AfterFailures(_) => "after_failures",
+            Self::Disabled => "disabled",
+        }
+    }
 }
 
 impl TaskIdempotency {
@@ -261,8 +299,9 @@ pub struct TaskConf {
     lease_duration: Duration,
     max_payload_bytes: usize,
     max_error_bytes: usize,
-    groups: Option<Vec<TaskGroupConf>>,
+    lanes: Option<Vec<TaskLaneConf>>,
     idempotency: TaskIdempotency,
+    readiness: TaskReadiness,
 }
 
 impl Default for TaskConf {
@@ -275,8 +314,9 @@ impl Default for TaskConf {
             lease_duration: Duration::from_secs(300),
             max_payload_bytes: 1024 * 1024,
             max_error_bytes: 8 * 1024,
-            groups: None,
+            lanes: None,
             idempotency: TaskIdempotency::default(),
+            readiness: TaskReadiness::default(),
         }
     }
 }
@@ -294,7 +334,7 @@ impl TaskConf {
         self
     }
 
-    /// Sets the short delay used while a group remains saturated.
+    /// Sets the short delay used while a lane remains saturated.
     pub const fn poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self
@@ -324,9 +364,9 @@ impl TaskConf {
         self
     }
 
-    /// Replaces the implicit default lane with an explicit complete group set.
-    pub fn groups(mut self, groups: impl IntoIterator<Item = TaskGroupConf>) -> Self {
-        self.groups = Some(groups.into_iter().collect());
+    /// Replaces the implicit default lane with an explicit complete lane set.
+    pub fn lanes(mut self, lanes: impl IntoIterator<Item = TaskLaneConf>) -> Self {
+        self.lanes = Some(lanes.into_iter().collect());
         self
     }
 
@@ -336,25 +376,32 @@ impl TaskConf {
         self
     }
 
-    /// Resolves and validates all task groups at site construction.
-    pub(crate) fn validate(&self) -> Result<Vec<TaskGroupConf>, TaskError> {
+    /// Sets how task runtime health contributes to site readiness.
+    pub const fn readiness(mut self, policy: TaskReadiness) -> Self {
+        self.readiness = policy;
+        self
+    }
+
+    /// Resolves and validates all task lanes at site construction.
+    pub(crate) fn validate(&self) -> Result<Vec<TaskLaneConf>, TaskError> {
         validate_scalars(self)?;
-        let groups = self.resolved_groups();
-        validate_groups(&groups, self.concurrency)?;
-        Ok(groups)
+        validate_readiness(self.readiness)?;
+        let lanes = self.resolved_lanes();
+        validate_lanes(&lanes, self.concurrency)?;
+        Ok(lanes)
     }
 
-    pub(crate) fn resolved_groups(&self) -> Vec<TaskGroupConf> {
-        self.groups
+    pub(crate) fn resolved_lanes(&self) -> Vec<TaskLaneConf> {
+        self.lanes
             .clone()
-            .unwrap_or_else(|| vec![TaskGroupConf::new(DEFAULT_TASK_GROUP, self.concurrency)])
+            .unwrap_or_else(|| vec![TaskLaneConf::new(DEFAULT_TASK_LANE, self.concurrency)])
     }
 
-    pub(crate) fn has_group(&self, group: TaskGroup) -> bool {
-        self.groups
+    pub(crate) fn has_lane(&self, lane: TaskLane) -> bool {
+        self.lanes
             .as_ref()
-            .map_or(group == DEFAULT_TASK_GROUP, |groups| {
-                groups.iter().any(|entry| entry.group() == group)
+            .map_or(lane == DEFAULT_TASK_LANE, |lanes| {
+                lanes.iter().any(|entry| entry.lane() == lane)
             })
     }
 
@@ -389,6 +436,10 @@ impl TaskConf {
     pub(crate) const fn idempotency_value(&self) -> TaskIdempotency {
         self.idempotency
     }
+
+    pub(crate) const fn readiness_policy(&self) -> TaskReadiness {
+        self.readiness
+    }
 }
 
 /// Rejects scalar limits that could disable progress or exceed bounded policy.
@@ -418,6 +469,12 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskError> {
             "task lease and payload limits must be non-zero".into(),
         ));
     }
+    let minimum_lease = conf.poll_interval.saturating_mul(3);
+    if conf.lease_duration < minimum_lease {
+        return Err(TaskError::InvalidConfig(
+            "task lease duration must be at least three poll intervals".into(),
+        ));
+    }
     if conf.lease_duration > MAX_LEASE
         || conf.max_payload_bytes > MAX_PAYLOAD_BYTES
         || conf.max_error_bytes > MAX_ERROR_BYTES
@@ -434,43 +491,50 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskError> {
     Ok(())
 }
 
-/// Validates the complete lane set against global concurrency and count limits.
-fn validate_groups(groups: &[TaskGroupConf], concurrency: usize) -> Result<(), TaskError> {
-    if groups.is_empty() || groups.len() > MAX_TASK_GROUPS {
-        return Err(TaskError::InvalidConfig(format!(
-            "task groups must contain between 1 and {MAX_TASK_GROUPS} entries"
-        )));
-    }
-    if !groups
-        .iter()
-        .any(|group| group.group() == DEFAULT_TASK_GROUP)
-    {
+/// Rejects readiness policies that could never transition deterministically.
+fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskError> {
+    if matches!(policy, TaskReadiness::AfterFailures(0)) {
         return Err(TaskError::InvalidConfig(
-            "explicit task groups must include the default group".into(),
-        ));
-    }
-    let mut names = std::collections::HashSet::with_capacity(groups.len());
-    let mut total = 0_usize;
-    for group in groups {
-        validate_group(group, &mut names)?;
-        total = total
-            .checked_add(group.concurrency())
-            .ok_or_else(|| TaskError::InvalidConfig("task group concurrency overflowed".into()))?;
-    }
-    if total > concurrency {
-        return Err(TaskError::InvalidConfig(
-            "task group concurrency exceeds global task concurrency".into(),
+            "task readiness failure threshold must be greater than zero".into(),
         ));
     }
     Ok(())
 }
 
-/// Validates one stable group name, quota, and optional token-bucket policy.
-fn validate_group(
-    conf: &TaskGroupConf,
+/// Validates the complete lane set against global concurrency and count limits.
+fn validate_lanes(lanes: &[TaskLaneConf], concurrency: usize) -> Result<(), TaskError> {
+    if lanes.is_empty() || lanes.len() > MAX_TASK_LANES {
+        return Err(TaskError::InvalidConfig(format!(
+            "task lanes must contain between 1 and {MAX_TASK_LANES} entries"
+        )));
+    }
+    if !lanes.iter().any(|lane| lane.lane() == DEFAULT_TASK_LANE) {
+        return Err(TaskError::InvalidConfig(
+            "explicit task lanes must include the default lane".into(),
+        ));
+    }
+    let mut names = std::collections::HashSet::with_capacity(lanes.len());
+    let mut total = 0_usize;
+    for lane in lanes {
+        validate_lane(lane, &mut names)?;
+        total = total
+            .checked_add(lane.concurrency())
+            .ok_or_else(|| TaskError::InvalidConfig("task lane concurrency overflowed".into()))?;
+    }
+    if total > concurrency {
+        return Err(TaskError::InvalidConfig(
+            "task lane concurrency exceeds global task concurrency".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates one stable lane name, quota, and optional token-bucket policy.
+fn validate_lane(
+    conf: &TaskLaneConf,
     names: &mut std::collections::HashSet<&'static str>,
 ) -> Result<(), TaskError> {
-    let name = conf.group().as_str();
+    let name = conf.lane().as_str();
     let valid_name = !name.is_empty()
         && name.len() <= 64
         && name
@@ -478,7 +542,7 @@ fn validate_group(
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
     if !valid_name || !names.insert(name) || conf.concurrency() == 0 {
         return Err(TaskError::InvalidConfig(format!(
-            "invalid or duplicate task group '{name}'"
+            "invalid or duplicate task lane '{name}'"
         )));
     }
     for (label, rate) in [("local", conf.rate()), ("global", conf.global_rate())] {
@@ -492,7 +556,7 @@ fn validate_group(
         || retry.maximum_delay() > MAX_INTERVAL
     {
         return Err(TaskError::InvalidConfig(format!(
-            "task group '{name}' has an invalid retry policy"
+            "task lane '{name}' has an invalid retry policy"
         )));
     }
     Ok(())
@@ -507,7 +571,7 @@ fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), 
         || period_nanos > u128::from(u64::MAX)
     {
         return Err(TaskError::InvalidConfig(format!(
-            "task group '{name}' has an invalid {label} rate limit"
+            "task lane '{name}' has an invalid {label} rate limit"
         )));
     }
     Ok(())
@@ -517,8 +581,8 @@ fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), 
 mod tests {
     use super::*;
 
-    const FAST: TaskGroup = TaskGroup::new("fast");
-    const SLOW: TaskGroup = TaskGroup::new("slow");
+    const FAST: TaskLane = TaskLane::new("fast");
+    const SLOW: TaskLane = TaskLane::new("slow");
 
     /// Verifies adaptive polling defaults use one-second backlog and five-minute fallback checks.
     #[test]
@@ -526,62 +590,62 @@ mod tests {
         let conf = TaskConf::default();
         assert_eq!(conf.poll_interval_value(), Duration::from_secs(1));
         assert_eq!(conf.fallback_interval(), Duration::from_secs(300));
-        assert!(matches!(conf.validate().map(|groups| groups.len()), Ok(1)));
+        assert!(matches!(conf.validate().map(|lanes| lanes.len()), Ok(1)));
     }
 
-    /// Verifies explicit group quotas may isolate work without exceeding global concurrency.
+    /// Verifies explicit lane quotas may isolate work without exceeding global concurrency.
     #[test]
-    fn task_config_accepts_bounded_named_groups() {
-        let conf = TaskConf::default().concurrency(4).groups([
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 0),
-            TaskGroupConf::new(FAST, 3),
-            TaskGroupConf::new(SLOW, 1).rate_limit(TaskRate::per_minute(60).burst(4)),
+    fn task_config_accepts_bounded_named_lanes() {
+        let conf = TaskConf::default().concurrency(4).lanes([
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 0),
+            TaskLaneConf::new(FAST, 3),
+            TaskLaneConf::new(SLOW, 1).rate_limit(TaskRate::per_minute(60).burst(4)),
         ]);
         assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
 
-        let conf = TaskConf::default().concurrency(4).groups([
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 1),
-            TaskGroupConf::new(FAST, 2),
-            TaskGroupConf::new(SLOW, 1).rate_limit(TaskRate::per_minute(60).burst(4)),
+        let conf = TaskConf::default().concurrency(4).lanes([
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 1),
+            TaskLaneConf::new(FAST, 2),
+            TaskLaneConf::new(SLOW, 1).rate_limit(TaskRate::per_minute(60).burst(4)),
         ]);
-        assert!(matches!(conf.validate().map(|groups| groups.len()), Ok(3)));
+        assert!(matches!(conf.validate().map(|lanes| lanes.len()), Ok(3)));
     }
 
     /// Verifies local and shared-store rate limits remain independently composable.
     #[test]
-    fn task_group_keeps_local_and_global_rates_distinct() {
+    fn task_lane_keeps_local_and_global_rates_distinct() {
         let local = TaskRate::per_second(10).burst(2);
         let global = TaskRate::per_minute(100).burst(20);
-        let group = TaskGroupConf::new(FAST, 1)
+        let lane = TaskLaneConf::new(FAST, 1)
             .rate_limit(local)
             .global_rate_limit(global);
-        assert_eq!(group.rate(), Some(local));
-        assert_eq!(group.global_rate(), Some(global));
+        assert_eq!(lane.rate(), Some(local));
+        assert_eq!(lane.global_rate(), Some(global));
     }
 
-    /// Verifies duplicate names and overcommitted group quotas fail terminal configuration validation.
+    /// Verifies duplicate names and overcommitted lane quotas fail terminal configuration validation.
     #[test]
-    fn task_config_rejects_invalid_group_sets() {
+    fn task_config_rejects_invalid_lane_sets() {
         let missing_default = TaskConf::default()
             .concurrency(1)
-            .groups([TaskGroupConf::new(FAST, 1)]);
+            .lanes([TaskLaneConf::new(FAST, 1)]);
         assert!(matches!(
             missing_default.validate(),
             Err(TaskError::InvalidConfig(_))
         ));
-        let duplicate = TaskConf::default().groups([
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 1),
-            TaskGroupConf::new(FAST, 1),
-            TaskGroupConf::new(FAST, 1),
+        let duplicate = TaskConf::default().lanes([
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 1),
+            TaskLaneConf::new(FAST, 1),
+            TaskLaneConf::new(FAST, 1),
         ]);
         assert!(matches!(
             duplicate.validate(),
             Err(TaskError::InvalidConfig(_))
         ));
-        let overcommitted = TaskConf::default().concurrency(2).groups([
-            TaskGroupConf::new(DEFAULT_TASK_GROUP, 1),
-            TaskGroupConf::new(FAST, 1),
-            TaskGroupConf::new(SLOW, 1),
+        let overcommitted = TaskConf::default().concurrency(2).lanes([
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 1),
+            TaskLaneConf::new(FAST, 1),
+            TaskLaneConf::new(SLOW, 1),
         ]);
         assert!(matches!(
             overcommitted.validate(),
@@ -589,18 +653,18 @@ mod tests {
         ));
     }
 
-    /// Verifies the hard group-count bound rejects accidental queue proliferation.
+    /// Verifies the hard lane-count bound rejects accidental queue proliferation.
     #[test]
-    fn task_config_rejects_more_than_thirty_two_groups() {
+    fn task_config_rejects_more_than_thirty_two_lanes() {
         const NAMES: [&str; 33] = [
             "g00", "g01", "g02", "g03", "g04", "g05", "g06", "g07", "g08", "g09", "g10", "g11",
             "g12", "g13", "g14", "g15", "g16", "g17", "g18", "g19", "g20", "g21", "g22", "g23",
             "g24", "g25", "g26", "g27", "g28", "g29", "g30", "g31", "g32",
         ];
-        let groups = NAMES
+        let lanes = NAMES
             .into_iter()
-            .map(|name| TaskGroupConf::new(TaskGroup::new(name), 1));
-        let conf = TaskConf::default().concurrency(33).groups(groups);
+            .map(|name| TaskLaneConf::new(TaskLane::new(name), 1));
+        let conf = TaskConf::default().concurrency(33).lanes(lanes);
         assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
     }
 
@@ -614,7 +678,16 @@ mod tests {
         assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
     }
 
-    /// Verifies retry delays grow from the group policy and stop at its configured cap.
+    /// Verifies a lease leaves enough time for two missed paced ticks before recovery.
+    #[test]
+    fn task_config_requires_a_recoverable_lease() {
+        let conf = TaskConf::default()
+            .poll_interval(Duration::from_secs(2))
+            .lease_duration(Duration::from_secs(5));
+        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+    }
+
+    /// Verifies retry delays grow from the lane policy and stop at its configured cap.
     #[test]
     fn task_retry_uses_bounded_exponential_backoff() {
         let retry =
@@ -637,9 +710,17 @@ mod tests {
 
     /// Verifies malformed retry policies remain infallible until site configuration validation.
     #[test]
-    fn task_config_rejects_invalid_group_retry_policy() {
-        let conf = TaskConf::default().groups([TaskGroupConf::new(DEFAULT_TASK_GROUP, 1)
+    fn task_config_rejects_invalid_lane_retry_policy() {
+        let conf = TaskConf::default().lanes([TaskLaneConf::new(DEFAULT_TASK_LANE, 1)
             .retry(TaskRetry::exponential(0, Duration::ZERO))]);
+        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+    }
+
+    /// Verifies a task readiness threshold must permit at least one failure.
+    #[test]
+    fn task_config_rejects_zero_readiness_threshold() {
+        let conf = TaskConf::default().readiness(TaskReadiness::after_failures(0));
+
         assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
     }
 }

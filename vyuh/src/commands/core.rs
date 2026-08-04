@@ -371,7 +371,7 @@ async fn make_migration_command(
         .migration_registry()
         .schema_for(None)
         .map_err(migration_schema_error)?;
-    match run_migration_command(&site, make_command(&args, schema)?).await? {
+    match run_make_command(&site, &args, schema).await? {
         crate::db::engine::CommandResult::Make(result) => print_make_result(result),
         result => Err(unexpected_migration_result("make_migration", result)),
     }
@@ -510,13 +510,61 @@ async fn run_migration_command(
     site: &Site,
     command: crate::db::engine::MigrationCommand,
 ) -> Result<crate::db::engine::CommandResult, Error> {
+    run_migration_raw(site, &command)
+        .await?
+        .map_err(migration_command_error)
+}
+
+#[cfg(feature = "migrations")]
+/// Executes one migration command while retaining Mool's typed failure for interactive handling.
+async fn run_migration_raw(
+    site: &Site,
+    command: &crate::db::engine::MigrationCommand,
+) -> Result<Result<crate::db::engine::CommandResult, crate::db::engine::MigrationCommandError>, Error>
+{
     let runner = site
         .migration_runner()
         .ok_or_else(|| Error::invalid("no root migration source is registered"))?;
     let mut runner = runner.lock().await;
-    runner
-        .run_command(&command)
+    Ok(runner.run_command(&command).await)
+}
+
+#[cfg(feature = "migrations")]
+/// Executes a make request again after an interactive Mool clarification round when required.
+async fn run_make_command(
+    site: &Site,
+    args: &MakeMigrationArgs,
+    schema: crate::db::Schema,
+) -> Result<crate::db::engine::CommandResult, Error> {
+    let mut command = make_command(args, schema, Vec::new())?;
+    loop {
+        match run_migration_raw(site, &command).await? {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                command = extend_make_command(command, args, error).await?;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "migrations")]
+/// Adds one terminal clarification round to a pending migration generation command.
+async fn extend_make_command(
+    command: crate::db::engine::MigrationCommand,
+    args: &MakeMigrationArgs,
+    error: crate::db::engine::MigrationCommandError,
+) -> Result<crate::db::engine::MigrationCommand, Error> {
+    let failure = error.failure();
+    if !super::migration_prompt::can_prompt(args.non_interactive)
+        || failure.clarifications.is_empty()
+    {
+        return Err(migration_command_error(error));
+    }
+    let decisions = super::migration_prompt::collect_decisions(failure.clarifications)
         .await
+        .map_err(Error::other)?;
+    command
+        .with_decisions(decisions)
         .map_err(migration_command_error)
 }
 
@@ -583,6 +631,7 @@ pub(crate) fn migration_runner(
 fn make_command(
     args: &MakeMigrationArgs,
     schema: crate::db::Schema,
+    decisions: Vec<crate::db::engine::Decision>,
 ) -> Result<crate::db::engine::MigrationCommand, Error> {
     use crate::db::engine::{MakeCommand, MigrationCommand};
 
@@ -599,14 +648,14 @@ fn make_command(
     if args.check {
         return Ok(MigrationCommand::Make(MakeCommand::Check {
             schema,
-            decisions: Vec::new(),
+            decisions,
         }));
     }
     Ok(MigrationCommand::Make(MakeCommand::Generate {
         schema,
         name: args.name.clone(),
         dry_run: args.dry_run,
-        decisions: Vec::new(),
+        decisions,
     }))
 }
 

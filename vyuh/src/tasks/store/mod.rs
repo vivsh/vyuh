@@ -1,56 +1,79 @@
-//! Durable task-store contract shared by framework and application stores.
+//! Framework-private durable task-store coordination contract.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use super::{TaskError, TaskFilter, TaskGroup, TaskGroupConf, TaskId, TaskReceipt};
+use super::{TaskError, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt};
 
-pub use super::backends::memstore::MemoryTaskStore;
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub(crate) mod database;
+#[cfg(any(
+    test,
+    not(any(feature = "postgres", feature = "mysql", feature = "sqlite"))
+))]
+mod memory;
+
 pub use super::handler::TaskOutcome;
 pub use super::models::TaskRecord;
 pub use super::submission::TaskWrite;
+#[cfg(any(
+    test,
+    not(any(feature = "postgres", feature = "mysql", feature = "sqlite"))
+))]
+pub(crate) use memory::MemoryTaskStore;
 
 #[cfg(feature = "mysql")]
-pub type MySqlTaskStore = super::persistence::DbTaskStore;
+pub(crate) type MySqlTaskStore = database::DbTaskStore;
 #[cfg(feature = "postgres")]
-pub type PgTaskStore = super::persistence::DbTaskStore;
+pub(crate) type PgTaskStore = database::DbTaskStore;
 #[cfg(feature = "sqlite")]
-pub type SqliteTaskStore = super::persistence::DbTaskStore;
+pub(crate) type SqliteTaskStore = database::DbTaskStore;
 
-/// One group's available claim capacity for the current scheduling turn.
+/// One lane's available claim capacity for the current scheduling turn.
 #[derive(Debug, Clone)]
-pub struct GroupClaim {
-    /// Named group to claim.
-    pub group: TaskGroup,
-    /// Maximum candidate rows requested for this group.
+pub struct LaneClaim {
+    /// Named lane to claim.
+    pub lane: TaskLane,
+    /// Maximum candidate rows requested for this lane.
     pub limit: usize,
 }
 
-/// Claimed work and saturation evidence for one group.
+/// Claimed work and saturation evidence for one lane.
 #[derive(Debug, Clone)]
-pub struct GroupPoll {
-    /// Group represented by this result.
-    pub group: TaskGroup,
+pub struct LanePoll {
+    /// Lane represented by this result.
+    pub lane: TaskLane,
     /// Rows successfully claimed for the requesting runner.
     pub tasks: Vec<TaskRecord>,
     /// Number of claimed rows reclaimed after an expired lease.
     pub reclaimed: usize,
     /// Whether the candidate query filled its requested limit.
     pub saturated: bool,
-    /// This group's next effective store-relative readiness deadline.
+    /// This lane's next effective store-relative readiness deadline.
     pub next_wake_in: Option<Duration>,
 }
 
-/// One grouped store poll and its earliest useful future wake.
+/// One per-lane store poll and its earliest useful future wake.
 #[derive(Debug, Clone)]
 pub struct TaskPoll {
-    /// Per-group claim results in scheduling order.
-    pub groups: Vec<GroupPoll>,
+    /// Per-lane claim results in scheduling order.
+    pub lanes: Vec<LanePoll>,
 }
 
+/// One paced scheduler turn, including ownership maintenance and new claims.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct TaskTick {
+    /// Work claimed after owned outcomes and leases were durably processed.
+    pub poll: TaskPoll,
+    /// Running tasks that no longer belong to this runner.
+    pub lost: Vec<TaskId>,
+}
+
+#[cfg(test)]
 impl TaskPoll {
     /// Creates an empty poll with no known future task deadline.
     pub fn empty() -> Self {
-        Self { groups: Vec::new() }
+        Self { lanes: Vec::new() }
     }
 }
 
@@ -60,8 +83,8 @@ impl TaskPoll {
 pub struct TaskCommit {
     /// Persisted task receiving the lifecycle outcome.
     pub task_id: TaskId,
-    /// Group whose newly available capacity should be polled after commit.
-    pub group: TaskGroup,
+    /// Lane whose newly available capacity should be polled after commit.
+    pub lane: TaskLane,
     /// Payload-free handler lifecycle outcome.
     pub outcome: TaskOutcome,
 }
@@ -72,31 +95,26 @@ pub struct TaskCommit {
 pub struct TaskStoreConf {
     /// Stable handler names understood by this worker deployment.
     pub handlers: Vec<String>,
-    /// Validated named groups; stores coordinate only their global rate policies.
-    pub groups: Vec<TaskGroupConf>,
-    /// Maximum persistence batch size.
-    pub batch_size: usize,
-    /// Lease duration applied consistently by this task runtime.
-    pub lease_duration: Duration,
+    /// Validated named lanes; stores coordinate only their global rate policies.
+    pub lanes: Vec<TaskLaneConf>,
     /// Key retention policy shared by all workers.
     pub idempotency: super::TaskIdempotency,
-    /// Maximum persisted diagnostic error size.
-    pub max_error_bytes: usize,
 }
 
 /// Persistence and coordination boundary for durable task execution.
-pub trait AbstractTaskStore {
-    /// Validates or initializes store-wide task-group coordination state.
+#[allow(dead_code)]
+pub(crate) trait AbstractTaskStore {
+    /// Validates or initializes store-wide task-lane coordination state.
     fn initialize(
         &self,
         conf: TaskStoreConf,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + '_;
 
-    /// Claims bounded work for every supplied group and returns its wake hint.
+    /// Claims bounded work for every supplied lane and returns its wake hint.
     fn claim_tasks<'a>(
         &'a self,
         runner_id: &'a str,
-        claims: &'a [GroupClaim],
+        claims: &'a [LaneClaim],
     ) -> impl Future<Output = Result<TaskPoll, TaskError>> + Send + 'a;
 
     /// Commits multiple outcomes owned by one runner.
@@ -113,14 +131,23 @@ pub trait AbstractTaskStore {
         task_ids: &'a [TaskId],
     ) -> impl Future<Output = Result<Vec<TaskId>, TaskError>> + Send + 'a;
 
+    /// Runs one atomic scheduler turn for one runner.
+    fn tick<'a>(
+        &'a self,
+        runner_id: &'a str,
+        claims: &'a [LaneClaim],
+        commits: &'a [TaskCommit],
+        renewals: &'a [TaskId],
+    ) -> impl Future<Output = Result<TaskTick, TaskError>> + Send + 'a;
+
     /// Stores a batch of task intents and resolves idempotency receipts.
     fn store_tasks(
         &self,
         writes: Vec<TaskWrite>,
     ) -> impl Future<Output = Result<Vec<TaskReceipt>, TaskError>> + Send + '_;
 
-    /// Moves non-running work between configured groups.
-    fn reassign_group<'a>(
+    /// Moves non-running work between configured lanes.
+    fn reassign_lane<'a>(
         &'a self,
         from: &'a str,
         to: &'a str,
@@ -154,7 +181,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
     async fn claim_tasks(
         &self,
         runner_id: &str,
-        claims: &[GroupClaim],
+        claims: &[LaneClaim],
     ) -> Result<TaskPoll, TaskError> {
         (**self).claim_tasks(runner_id, claims).await
     }
@@ -175,12 +202,22 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         (**self).renew_leases(runner_id, task_ids).await
     }
 
+    async fn tick(
+        &self,
+        runner_id: &str,
+        claims: &[LaneClaim],
+        commits: &[TaskCommit],
+        renewals: &[TaskId],
+    ) -> Result<TaskTick, TaskError> {
+        (**self).tick(runner_id, claims, commits, renewals).await
+    }
+
     async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
         (**self).store_tasks(writes).await
     }
 
-    async fn reassign_group(&self, from: &str, to: &str) -> Result<u64, TaskError> {
-        (**self).reassign_group(from, to).await
+    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+        (**self).reassign_lane(from, to).await
     }
 
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskError> {
@@ -210,17 +247,17 @@ pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
         hasher.update(handler.as_bytes());
         hasher.update(&[0xff]);
     }
-    let mut groups = conf.groups.iter().collect::<Vec<_>>();
-    groups.sort_unstable_by_key(|group| group.group().as_str());
-    for group in groups {
-        hasher.update(b"group\0");
-        hasher.update(group.group().as_str().as_bytes());
-        if let Some(rate) = group.global_rate() {
+    let mut lanes = conf.lanes.iter().collect::<Vec<_>>();
+    lanes.sort_unstable_by_key(|lane| lane.lane().as_str());
+    for lane in lanes {
+        hasher.update(b"lane\0");
+        hasher.update(lane.lane().as_str().as_bytes());
+        if let Some(rate) = lane.global_rate() {
             hasher.update(&rate.permits().to_le_bytes());
             hasher.update(&rate.period().as_nanos().to_le_bytes());
             hasher.update(&rate.burst_size().to_le_bytes());
         }
-        let retry = group.retry_policy();
+        let retry = lane.retry_policy();
         hasher.update(&retry.max_attempts().to_le_bytes());
         hasher.update(&retry.initial_delay().as_nanos().to_le_bytes());
         hasher.update(&retry.maximum_delay().as_nanos().to_le_bytes());

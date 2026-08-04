@@ -124,8 +124,8 @@ pub(super) fn apply_filter(
     if let Some(name) = &filter.name {
         scope = scope.filter(table.name.eq(db::val(name.clone())));
     }
-    if let Some(group) = &filter.group {
-        scope = scope.filter(table.group_name.eq(db::val(group.clone())));
+    if let Some(lane) = &filter.lane {
+        scope = scope.filter(table.lane_name.eq(db::val(lane.clone())));
     }
     if let Some(key) = &filter.idempotency_key {
         scope = scope.filter(table.idempotency_key.eq(db::val(Some(key.clone()))));
@@ -146,7 +146,7 @@ pub(super) fn apply_filter(
 fn text_filter(table: &db::queries::ModelTable<TaskRow>, query: &str) -> db::queries::Predicate {
     let pattern = format!("%{}%", query.to_lowercase());
     case_fold_like(table.name.clone(), pattern.clone())
-        .or(case_fold_like(table.group_name.clone(), pattern.clone()))
+        .or(case_fold_like(table.lane_name.clone(), pattern.clone()))
         .or(case_fold_like_optional(
             table.idempotency_key.clone(),
             pattern.clone(),

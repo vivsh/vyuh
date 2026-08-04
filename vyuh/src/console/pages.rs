@@ -3,15 +3,17 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use serde_json::json;
+use url::form_urlencoded;
 
 use crate::routes::{Path, Query};
 use crate::{
     OperationId, Site,
     auth::AuthUser,
     console::{
+        logs::limit as log_limit,
         query::{
-            OperationQuery, TaskQuery, filter_operations, is_console_operation, task_limit_max,
-            task_per_page,
+            LogQuery, OperationQuery, TaskQuery, filter_operations, is_console_operation,
+            task_limit_max, task_per_page,
         },
         schema_view::OperationView,
         status::StatusOut,
@@ -141,6 +143,63 @@ pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) 
     render_or_error(&site, render_tasks(&site, query, page))
 }
 
+/// Renders bounded configured file logs with the standard console inspector layout.
+pub async fn logs(site: Site, _user: AuthUser, Query(query): Query<LogQuery>) -> Response {
+    let limit = log_limit(
+        &query,
+        site.conf().console.page_size_default,
+        site.conf().console.page_size_max,
+    );
+    let Some(runtime) = site.console_logs() else {
+        return internal_error(&site);
+    };
+    let page = match runtime.page(&query, limit).await {
+        Ok(page) => page,
+        Err(_) => return internal_error(&site),
+    };
+    let selected = match runtime.selected(&query).await {
+        Ok(value) => value,
+        Err(_) => return internal_error(&site),
+    };
+    let rendered = render_page(
+        &site,
+        "console/logs.html",
+        "logs",
+        "Logs",
+        json!({
+            "page": page,
+            "query": query,
+            "selected_log": selected,
+            "next_url": log_url(site.console_urls().map(|urls| urls.logs.as_str()), &query, page.next_cursor.as_deref()),
+        }),
+    );
+    no_store(render_or_error(&site, rendered))
+}
+
+fn log_url(base: Option<&str>, query: &LogQuery, cursor: Option<&str>) -> Option<String> {
+    let base = base?;
+    let mut pairs = form_urlencoded::Serializer::new(String::new());
+    append_log_pair(&mut pairs, "rule", query.rule.as_deref());
+    append_log_pair(&mut pairs, "level", query.level.as_deref());
+    append_log_pair(&mut pairs, "target", query.target.as_deref());
+    append_log_pair(&mut pairs, "from", query.from.as_deref());
+    append_log_pair(&mut pairs, "to", query.to.as_deref());
+    append_log_pair(&mut pairs, "q", query.q.as_deref());
+    append_log_pair(&mut pairs, "cursor", cursor);
+    let encoded = pairs.finish();
+    (!encoded.is_empty()).then(|| format!("{base}?{encoded}"))
+}
+
+fn append_log_pair(
+    serializer: &mut form_urlencoded::Serializer<'_, String>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        serializer.append_pair(key, value);
+    }
+}
+
 /// Renders one task or an appropriate console error page.
 pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
     let Ok(id) = id.parse::<crate::tasks::TaskId>() else {
@@ -223,6 +282,7 @@ fn render_page(
         "runtime": &urls.runtime,
         "tasks": &urls.tasks,
         "operations": &urls.operations,
+        "logs": &urls.logs,
         "conf": &urls.conf,
         "openapi": &urls.openapi,
         "api_openapi": &urls.api_openapi,
@@ -331,6 +391,14 @@ fn render_or_error(site: &Site, rendered: Result<Html<String>, TemplateError>) -
         Ok(page) => page.into_response(),
         Err(_) => internal_error(site),
     }
+}
+
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Returns the generic console page used when an internal operation fails.

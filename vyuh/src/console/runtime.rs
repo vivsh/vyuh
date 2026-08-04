@@ -1,6 +1,6 @@
 //! Per-site runtime data used by the built-in console.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use axum::http::{Method, StatusCode, Uri};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -8,27 +8,37 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use crate::{
     OperationId, Site,
     assets::AssetUrls,
+    auth::SecretRing,
     errors::{ErrorReport, ErrorSourceKind},
+    logging::LoggingConf,
     routes::Routes,
 };
 
-use super::{FALLBACK_STYLESHEET_NAME, WEB_ASSETS, status::ConsoleStatusCache};
+use super::{FALLBACK_STYLESHEET_NAME, WEB_ASSETS, logs::LogRuntime, status::ConsoleStatusCache};
 
 /// Immutable console links and bounded status state for one built site.
 pub(crate) struct ConsoleRuntime {
     urls: ViewUrls,
     status: ConsoleStatusCache,
     page_operations: BTreeSet<OperationId>,
+    logs: LogRuntime,
 }
 
 impl ConsoleRuntime {
     /// Creates console state after the site's immutable route registry is available.
-    pub(crate) fn new(routes: Routes<'_>, assets: &AssetUrls) -> Result<Self, String> {
+    pub(crate) fn new(
+        routes: Routes<'_>,
+        assets: &AssetUrls,
+        logging: &LoggingConf,
+        project_dir: &Path,
+        secrets: &SecretRing,
+    ) -> Result<Self, String> {
         let urls = ViewUrls::new(&routes, assets)?;
         Ok(Self {
             page_operations: page_operations(&routes)?,
             urls,
             status: ConsoleStatusCache::new(),
+            logs: LogRuntime::new(logging, project_dir, secrets)?,
         })
     }
 
@@ -40,6 +50,11 @@ impl ConsoleRuntime {
     /// Returns a status snapshot using this site's bounded cache.
     pub(crate) fn status(&self, site: &Site, ttl: Duration) -> super::status::StatusOut {
         self.status.get(site, ttl)
+    }
+
+    /// Returns the per-site bounded console log runtime.
+    pub(crate) const fn logs(&self) -> &LogRuntime {
+        &self.logs
     }
 
     /// Builds a safe login redirect for an unauthenticated console HTML route.
@@ -87,6 +102,7 @@ pub(crate) struct ViewUrls {
     pub(crate) runtime: String,
     pub(crate) tasks: String,
     pub(crate) operations: String,
+    pub(crate) logs: String,
     pub(crate) conf: String,
     pub(crate) openapi: String,
     pub(crate) api_openapi: String,
@@ -109,6 +125,7 @@ impl ViewUrls {
             runtime: required_url(&routes, "console_runtime")?,
             tasks: required_url(&routes, "console_tasks")?,
             operations: required_url(&routes, "console_operations")?,
+            logs: required_url(&routes, "console_logs")?,
             conf: required_url(&routes, "console_conf")?,
             openapi: required_url(&routes, "console_openapi")?,
             api_openapi: required_url(&routes, "console_api_openapi")?,
@@ -133,6 +150,7 @@ fn page_operations(routes: &Routes<'_>) -> Result<BTreeSet<OperationId>, String>
         "console_overview",
         "console_runtime",
         "console_operations",
+        "console_logs",
         "console_operation_detail",
         "console_tasks",
         "console_task_detail",
@@ -173,21 +191,37 @@ fn read_stylesheet_name() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{middlewares::SlashPolicy, routes::RouteRegistry};
+    use std::path::Path;
+
+    use crate::{
+        auth::SecretRing, logging::LoggingConf, middlewares::SlashPolicy, routes::RouteRegistry,
+    };
 
     use super::ConsoleRuntime;
 
     /// Verifies console URL setup rejects an incomplete finalized route registry.
     #[test]
     fn missing_console_route_is_an_error() {
+        let secrets = SecretRing::new(
+            "a sufficiently long test secret",
+            &[],
+            Path::new("/tmp"),
+            16,
+        )
+        .map_err(|error| error.to_string());
         let registry = RouteRegistry::build(std::iter::empty(), SlashPolicy::Exact)
             .map_err(|error| error.to_string());
         let error = registry
             .and_then(|registry| {
-                ConsoleRuntime::new(
-                    crate::routes::Routes::new(&registry),
-                    &crate::assets::AssetUrls::default_url(),
-                )
+                secrets.and_then(|secrets| {
+                    ConsoleRuntime::new(
+                        crate::routes::Routes::new(&registry),
+                        &crate::assets::AssetUrls::default_url(),
+                        &LoggingConf::default(),
+                        Path::new("/tmp"),
+                        &secrets,
+                    )
+                })
             })
             .err();
 

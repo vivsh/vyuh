@@ -18,24 +18,24 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
     if let Some(table) = schema.tables.get_mut("vyuh_task_idempotency") {
         append_idempotency_indexes(table);
     }
-    if let Some(table) = schema.tables.get_mut("vyuh_task_group_rates") {
+    if let Some(table) = schema.tables.get_mut("vyuh_task_lane_rates") {
         append_rate_indexes(table);
     }
     schema.prepare_loaded(dialect())
 }
 
-/// Adds grouped readiness, lease, and diagnostic lookup indexes.
+/// Adds per-lane readiness, lease, and diagnostic lookup indexes.
 fn append_task_indexes(table: &mut db::Table) {
     table.indexes.extend([
         index(
-            "idx_vyuh_tasks_group_pending_ready",
-            &["group_name", "status", "ready_at", "created_at", "id"],
+            "idx_vyuh_tasks_lane_pending_ready",
+            &["lane_name", "status", "ready_at", "created_at", "id"],
             false,
             pending_predicate(),
         ),
         index(
-            "idx_vyuh_tasks_group_running_lease",
-            &["group_name", "status", "leased_until", "id"],
+            "idx_vyuh_tasks_lane_running_lease",
+            &["lane_name", "status", "leased_until", "id"],
             false,
             running_predicate(),
         ),
@@ -70,8 +70,8 @@ fn append_idempotency_indexes(table: &mut db::Table) {
 
 fn append_rate_indexes(table: &mut db::Table) {
     table.indexes.push(index(
-        "idx_vyuh_task_group_rates_group",
-        &["group_name"],
+        "idx_vyuh_task_lane_rates_lane",
+        &["lane_name"],
         true,
         None,
     ));
@@ -128,14 +128,14 @@ fn dialect() -> db::Dialect {
 mod tests {
     use super::*;
 
-    /// Verifies all task-runtime tables and group indexes are represented in the desired schema.
+    /// Verifies all task-runtime tables and lane indexes are represented in the desired schema.
     #[test]
-    fn task_schema_contains_grouped_runtime_contract() -> Result<(), String> {
+    fn task_schema_contains_lane_runtime_contract() -> Result<(), String> {
         let schema = task_schema().map_err(|error| error.to_string())?;
         for name in [
             "vyuh_tasks",
             "vyuh_task_idempotency",
-            "vyuh_task_group_rates",
+            "vyuh_task_lane_rates",
             "vyuh_task_runtime",
         ] {
             if !schema.tables.contains_key(name) {
@@ -156,21 +156,21 @@ mod tests {
         }
         require_columns(
             tasks,
-            &["group_name", "ready_at", "leased_until", "idempotency_key"],
+            &["lane_name", "ready_at", "leased_until", "idempotency_key"],
         )?;
-        let group_default = tasks
+        let lane_default = tasks
             .columns
             .iter()
-            .find(|column| column.name == "group_name")
+            .find(|column| column.name == "lane_name")
             .and_then(|column| column.default.as_deref());
-        if group_default != Some("'default'") {
-            return Err("task group migration does not backfill the default group".into());
+        if lane_default != Some("'default'") {
+            return Err("task lane migration does not backfill the default lane".into());
         }
         require_indexes(
             tasks,
             &[
-                "idx_vyuh_tasks_group_pending_ready",
-                "idx_vyuh_tasks_group_running_lease",
+                "idx_vyuh_tasks_lane_pending_ready",
+                "idx_vyuh_tasks_lane_running_lease",
                 "idx_vyuh_tasks_history",
             ],
         )?;

@@ -51,6 +51,17 @@ pub struct StatusOut {
     pub site: SiteStatus,
     pub process: ProcessStatus,
     pub system: SystemStatus,
+    pub tasks: TaskRuntimeStatus,
+}
+
+/// Safe per-site task-runner health for console diagnostics.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TaskRuntimeStatus {
+    pub state: String,
+    pub ready: bool,
+    pub consecutive_failures: u32,
+    pub last_success: Option<String>,
+    pub last_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -115,6 +126,7 @@ pub fn collect(site: &Site) -> StatusOut {
     let process = system.process(Pid::from_u32(pid));
     let conf = site.conf();
     let load = System::load_average();
+    let task_health = site.task_health();
 
     StatusOut {
         site: SiteStatus {
@@ -166,6 +178,15 @@ pub fn collect(site: &Site) -> StatusOut {
             total_swap_bytes: system.total_swap(),
             used_swap_bytes: system.used_swap(),
             boot_time_seconds: System::boot_time(),
+        },
+        tasks: TaskRuntimeStatus {
+            state: task_health.state.as_str().to_string(),
+            ready: task_health.ready,
+            consecutive_failures: task_health.consecutive_failures,
+            last_success: task_health.last_success.map(|value| value.to_rfc3339()),
+            last_failure: task_health
+                .last_failure
+                .map(|failure| failure.as_str().to_string()),
         },
     }
 }

@@ -93,6 +93,12 @@ fn inspection_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             pages::tasks,
         ),
         route(
+            "console_logs",
+            path(prefix, "/logs"),
+            Methods::GET,
+            pages::logs,
+        ),
+        route(
             "console_task_detail",
             path(prefix, "/tasks/{id}"),
             Methods::GET,
@@ -133,6 +139,12 @@ fn api_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             path(prefix, "/api/tasks"),
             Methods::GET,
             api::tasks,
+        ),
+        route(
+            "console_api_logs",
+            path(prefix, "/api/logs"),
+            Methods::GET,
+            api::logs,
         ),
         route(
             "console_api_task_detail",

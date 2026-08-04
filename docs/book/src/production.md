@@ -39,7 +39,7 @@ The profile exposes these routes by default:
 | Route | Purpose |
 | --- | --- |
 | `/healthz` | Liveness: the process has started serving requests. |
-| `/readyz` | Readiness: startup completed and, with a database feature, a bounded `SELECT 1` succeeds. |
+| `/readyz` | Readiness: startup completed, task readiness policy passes, and, with a database feature, a bounded `SELECT 1` succeeds. |
 | `/metrics` | Prometheus text exposition. |
 
 Set `ObservabilityConf` if these paths collide with an application route or

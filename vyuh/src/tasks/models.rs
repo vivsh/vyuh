@@ -64,7 +64,7 @@ impl TaskHandlerConf {
 pub struct TaskFilter {
     pub(crate) status: Option<TaskStatus>,
     pub(crate) name: Option<String>,
-    pub(crate) group: Option<String>,
+    pub(crate) lane: Option<String>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) created_from: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) created_to: Option<chrono::DateTime<chrono::Utc>>,
@@ -91,14 +91,14 @@ impl TaskFilter {
         self
     }
 
-    /// Selects one configured execution group.
-    pub fn group(mut self, group: super::TaskGroup) -> Self {
-        self.group = Some(group.to_string());
+    /// Selects one configured execution lane.
+    pub fn lane(mut self, lane: super::TaskLane) -> Self {
+        self.lane = Some(lane.to_string());
         self
     }
 
-    pub(crate) fn group_name(mut self, group: Option<String>) -> Self {
-        self.group = group;
+    pub(crate) fn lane_name(mut self, lane: Option<String>) -> Self {
+        self.lane = lane;
         self
     }
 
@@ -178,9 +178,9 @@ impl TaskFilter {
         self.name.as_deref()
     }
 
-    /// Returns the requested group-name constraint for an advanced store.
-    pub fn requested_group(&self) -> Option<&str> {
-        self.group.as_deref()
+    /// Returns the requested lane-name constraint for an advanced store.
+    pub fn requested_lane(&self) -> Option<&str> {
+        self.lane.as_deref()
     }
 
     /// Returns the requested idempotency-key constraint for an advanced store.
@@ -219,7 +219,7 @@ impl Default for TaskFilter {
         Self {
             status: None,
             name: None,
-            group: None,
+            lane: None,
             idempotency_key: None,
             created_from: None,
             created_to: None,
@@ -240,7 +240,7 @@ pub struct TaskRecord {
     pub resume_input: Option<String>,
     pub status: TaskStatus,
     pub attempts: i32,
-    pub group: String,
+    pub lane: String,
     pub lease_duration_ms: Option<i64>,
     pub last_error: Option<String>,
     pub idempotency_key: Option<String>,
@@ -308,7 +308,7 @@ pub struct TaskInfo {
     pub(crate) resume_input: Option<String>,
     pub(crate) status: TaskStatus,
     pub(crate) attempts: i32,
-    pub(crate) group: String,
+    pub(crate) lane: String,
     pub(crate) last_error: Option<String>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -336,9 +336,9 @@ impl TaskInfo {
         self.status
     }
 
-    /// Returns the configured execution group name.
-    pub fn group(&self) -> &str {
-        &self.group
+    /// Returns the configured execution lane name.
+    pub fn lane(&self) -> &str {
+        &self.lane
     }
 
     /// Returns the number of handler invocations claimed so far.
@@ -412,7 +412,7 @@ impl From<TaskRecord> for TaskInfo {
             resume_input: record.resume_input,
             status: record.status,
             attempts: record.attempts,
-            group: record.group,
+            lane: record.lane,
             last_error: record.last_error,
             idempotency_key: record.idempotency_key,
             idempotency_expires_at: record.idempotency_expires_at,

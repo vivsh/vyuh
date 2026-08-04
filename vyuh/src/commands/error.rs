@@ -1,6 +1,6 @@
 use crate::{
     Error, callables,
-    errors::{ErrorKind, ErrorSourceKind, ErrorView},
+    errors::{ErrorKind, ErrorSource, ErrorSourceKind, ErrorView},
     validation::ValidationReport,
 };
 use axum::http::StatusCode;
@@ -127,9 +127,54 @@ impl CommandError {
 
 /// Builds the command-only error view without changing HTTP error redaction.
 fn handler_error_view(error: &Error) -> ErrorView {
+    #[cfg(feature = "migrations")]
+    if let Some(view) = migration_command_view(error) {
+        return view;
+    }
+
     let mut view = ErrorView::from_error(error);
     view.message = Cow::Owned(error.display_verbose());
     view
+}
+
+#[cfg(feature = "migrations")]
+/// Preserves Mool migration diagnostics for terminal commands without HTTP error redaction.
+fn migration_command_view(error: &Error) -> Option<ErrorView> {
+    let ErrorSource::Other(source) = error.source.as_ref()? else {
+        return None;
+    };
+    let migration = source.downcast_ref::<crate::db::engine::MigrationCommandError>()?;
+    let mut view = ErrorView::from_error(error);
+    view.message = Cow::Owned(render_migration_diagnostic(migration));
+    Some(view)
+}
+
+#[cfg(feature = "migrations")]
+/// Formats Mool's diagnostic and prompt definition for a non-interactive terminal host.
+fn render_migration_diagnostic(error: &crate::db::engine::MigrationCommandError) -> String {
+    let diagnostic = error.diagnostic();
+    let mut output = diagnostic.summary;
+    for detail in diagnostic.details {
+        output.push_str("\n  ");
+        output.push_str(&detail);
+    }
+    let clarifications = error.failure().clarifications;
+    if !clarifications.is_empty() {
+        output.push_str("\n  clarification input is required:");
+        for clarification in &clarifications {
+            output.push_str("\n  - ");
+            output.push_str(&clarification.id);
+            output.push_str(": ");
+            output.push_str(&super::migration_prompt::render_clarification(
+                clarification,
+            ));
+        }
+    }
+    if let Some(hint) = diagnostic.hint {
+        output.push_str("\n  hint: ");
+        output.push_str(&hint);
+    }
+    output
 }
 
 impl From<callables::CallError> for CommandError {
@@ -187,5 +232,34 @@ mod tests {
         );
 
         assert!(rendered.contains(&expected));
+    }
+
+    /// Verifies a non-interactive clarification reports Mool's canonical question and choice.
+    #[cfg(feature = "migrations")]
+    #[test]
+    fn migration_clarification_keeps_prompt_context() {
+        let migration = crate::db::engine::MigrationCommandError::NeedsInput(vec![
+            crate::db::engine::Clarification {
+                id: "rename_column:users:email".to_string(),
+                severity: crate::db::engine::Severity::Suggestion,
+                kind: crate::db::engine::ClarificationKind::RenameColumn {
+                    table: "users".to_string(),
+                    old: "email".to_string(),
+                    candidates: vec!["email_address".to_string()],
+                },
+            },
+        ]);
+        let view = CommandError::Handler(Error::wrap(ErrorKind::Invalid, migration)).to_view();
+        let rendered = crate::errors::ErrorConf::default().render_command(
+            crate::errors::ErrorCommandContext {
+                command: "make_migration".to_string(),
+                args: Vec::new(),
+            },
+            view,
+        );
+
+        assert!(rendered.contains("Column 'email' was removed from 'users'"));
+        assert!(rendered.contains("email_address"));
+        assert!(!rendered.contains("Validation failed"));
     }
 }

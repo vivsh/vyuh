@@ -5,7 +5,7 @@ use std::{any::TypeId, sync::Arc, time::Duration};
 use serde::Serialize;
 
 use super::{
-    AbstractTaskStore, RegisteredTask, TaskError, TaskFilter, TaskGroup, TaskId, TaskInfo,
+    AbstractTaskStore, RegisteredTask, TaskError, TaskFilter, TaskId, TaskInfo, TaskLane,
     TaskOptions, TaskReceipt, TaskRecord, TaskRegistry, TaskStatus, TaskWrite,
     submission::canonical_json,
 };
@@ -18,6 +18,7 @@ pub struct TaskDispatcher<S: AbstractTaskStore + Send + Sync + 'static> {
     pub(crate) registry: Arc<TaskRegistry>,
     pub(crate) initialized: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) metrics: Arc<super::TaskMetrics>,
+    pub(crate) health: super::TaskHealth,
 }
 
 /// Site facade for durable task submission and inspection.
@@ -67,9 +68,9 @@ impl Tasks {
         self.dispatcher.resume(id, input).await
     }
 
-    /// Explicitly moves non-running work between configured groups.
-    pub async fn reassign_group(&self, from: TaskGroup, to: TaskGroup) -> Result<u64, TaskError> {
-        self.dispatcher.reassign_group(from, to).await
+    /// Explicitly moves non-running work between configured lanes.
+    pub async fn reassign_lane(&self, from: TaskLane, to: TaskLane) -> Result<u64, TaskError> {
+        self.dispatcher.reassign_lane(from, to).await
     }
 
     /// Lists persisted tasks through bounded filters.
@@ -139,7 +140,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .tasks
             .get(name)
             .ok_or_else(|| TaskError::TaskNotFound(name.to_string()))?;
-        self.require_group(options.group)?;
+        self.require_lane(options.lane)?;
         let writes = build_writes(service, name, inputs, &options, &self.registry.config)?;
         self.ensure_initialized().await?;
         let result = self.store.store_tasks(writes).await;
@@ -166,14 +167,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         Ok(changed)
     }
 
-    /// Moves pending, sleeping, and suspended work to another configured group.
-    pub async fn reassign_group(&self, from: TaskGroup, to: TaskGroup) -> Result<u64, TaskError> {
-        self.require_group(to)?;
+    /// Moves pending, sleeping, and suspended work to another configured lane.
+    pub async fn reassign_lane(&self, from: TaskLane, to: TaskLane) -> Result<u64, TaskError> {
+        self.require_lane(to)?;
         self.ensure_initialized().await?;
-        let count = self
-            .store
-            .reassign_group(from.as_str(), to.as_str())
-            .await?;
+        let count = self.store.reassign_lane(from.as_str(), to.as_str()).await?;
         if count > 0 {
             self.notifier.notify_waiters();
         }
@@ -202,35 +200,56 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .ok_or_else(|| TaskError::TaskNotFound("Unknown task type".into()))
     }
 
-    fn require_group(&self, group: TaskGroup) -> Result<(), TaskError> {
+    fn require_lane(&self, lane: TaskLane) -> Result<(), TaskError> {
         self.registry
             .config
-            .has_group(group)
+            .has_lane(lane)
             .then_some(())
-            .ok_or_else(|| TaskError::UnknownGroup(group.to_string()))
+            .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
     }
 
     pub(crate) async fn ensure_initialized(&self) -> Result<(), TaskError> {
         let conf = self.store_conf()?;
-        self.initialized
+        let result = self
+            .initialized
             .get_or_try_init(|| self.store.initialize(conf))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        self.record_initialization(&result);
+        result
     }
 
     pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskError> {
         Ok(super::TaskStoreConf {
             handlers: self.registry.tasks.keys().cloned().collect(),
-            groups: self.registry.config.validate()?,
-            batch_size: self.registry.config.batch_size_value(),
-            lease_duration: self.registry.config.lease_duration_value(),
+            lanes: self.registry.config.validate()?,
             idempotency: self.registry.config.idempotency_value(),
-            max_error_bytes: self.registry.config.error_limit(),
         })
     }
 
     pub(crate) fn render_metrics(&self) -> String {
-        self.metrics.render()
+        self.metrics.render(self.health.snapshot())
+    }
+
+    pub(crate) fn readiness(&self) -> bool {
+        self.health.is_ready()
+    }
+
+    pub(crate) fn health_snapshot(&self) -> super::TaskHealthSnapshot {
+        self.health.snapshot()
+    }
+
+    fn record_initialization(&self, result: &Result<(), TaskError>) {
+        match result {
+            Ok(()) => self.health.initialized(),
+            Err(error) => {
+                self.health.initialization_failed();
+                super::diagnostics::log_runtime_error(
+                    error,
+                    "durable task runtime initialization failed",
+                );
+            }
+        }
     }
 }
 
@@ -303,7 +322,7 @@ fn build_record<T>(
         resume_input: None,
         status: TaskStatus::Pending,
         attempts: 0,
-        group: options.group.to_string(),
+        lane: options.lane.to_string(),
         lease_duration_ms: None,
         last_error: None,
         idempotency_key: key,
@@ -321,7 +340,7 @@ fn build_record<T>(
 /// Fingerprints canonical input and every execution-affecting option.
 fn fingerprint<T>(name: &str, input: &str, options: &TaskOptions<T>) -> Result<String, TaskError> {
     let mut hasher = blake3::Hasher::new();
-    for part in [name, input, options.group.as_str()] {
+    for part in [name, input, options.lane.as_str()] {
         hasher.update(part.as_bytes());
         hasher.update(&[0]);
     }
@@ -353,7 +372,7 @@ fn validate_filter(filter: &TaskFilter) -> Result<(), TaskError> {
     }
     for (value, limit, label) in [
         (filter.name.as_deref(), 191, "task name"),
-        (filter.group.as_deref(), 64, "task group"),
+        (filter.lane.as_deref(), 64, "task lane"),
         (
             filter.idempotency_key.as_deref(),
             512,

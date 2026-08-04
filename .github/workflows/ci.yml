@@ -110,7 +110,7 @@ jobs:
       - name: Run PostgreSQL migration and task contracts
         env:
           DATABASE_URL: postgres://vyuh:vyuh@localhost:5432/vyuh_ci
-        run: cargo test -p vyuh --no-default-features --features postgres,migrations --test task_stores
+        run: cargo test -p vyuh --no-default-features --features postgres,migrations --lib tasks::store_tests
 
   sqlite-contracts:
     runs-on: ubuntu-latest
@@ -120,7 +120,7 @@ jobs:
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@stable
       - name: Run SQLite migration and task contracts
-        run: cargo test -p vyuh --no-default-features --features sqlite,migrations --test task_stores
+        run: cargo test -p vyuh --no-default-features --features sqlite,migrations --lib tasks::store_tests
 
   docs:
     runs-on: ubuntu-latest

@@ -27,6 +27,7 @@
     <symbol id="vyuh-icon-refresh" viewBox="0 0 24 24"><path d="M18 8a7 7 0 1 0 1 6M18 4v4h-4"></path></symbol>
     <symbol id="vyuh-icon-external" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8"></path><path d="M17 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4"></path></symbol>
     <symbol id="vyuh-icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"></circle><path d="m15 15 4 4"></path></symbol>
+    <symbol id="vyuh-icon-terminal" viewBox="0 0 24 24"><path d="m5 7 4 5-4 5M11 17h8"></path></symbol>
     <symbol id="vyuh-icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></symbol>
   </svg>
 
@@ -42,6 +43,7 @@
         <a href="{{ urls.runtime }}" {% if active == "runtime" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-monitor"></use></svg><span>System Info</span></a>
         <a href="{{ urls.tasks }}" {% if active == "tasks" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-check"></use></svg><span>Tasks</span></a>
         <a href="{{ urls.operations }}" {% if active == "operations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Operations</span></a>
+        <a href="{{ urls.logs }}" {% if active == "logs" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-terminal"></use></svg><span>Logs</span></a>
         <a href="{{ urls.openapi }}" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
       </nav>
       <nav class="vyuh-console-nav" aria-label="Console settings">

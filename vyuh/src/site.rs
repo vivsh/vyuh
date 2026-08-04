@@ -10,7 +10,7 @@ use crate::notifiers::CancellationNotifier;
 use crate::observability::Observability;
 use crate::signals::SignalClient;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-use crate::tasks::store::MemoryTaskStore;
+use crate::tasks::MemoryTaskStore;
 use crate::tasks::{TaskDispatcher, TaskRunner, TaskStore, Tasks};
 use crate::templates::{TemplateEngine, TemplateError, Templates};
 use crate::{services, watch};
@@ -102,13 +102,22 @@ fn console_runtime(
     conf: &crate::console::ConsoleConf,
     routes: &crate::routes::RouteRegistry,
     assets: &crate::assets::AssetUrls,
+    logging: &crate::logging::LoggingConf,
+    project_dir: &Path,
+    secrets: &crate::auth::SecretRing,
 ) -> Result<Option<crate::console::ConsoleRuntime>, crate::bundles::BundleError> {
     if !conf.enabled {
         return Ok(None);
     }
-    crate::console::ConsoleRuntime::new(crate::routes::Routes::new(routes), assets)
-        .map(Some)
-        .map_err(crate::bundles::BundleError::RouteRegistry)
+    crate::console::ConsoleRuntime::new(
+        crate::routes::Routes::new(routes),
+        assets,
+        logging,
+        project_dir,
+        secrets,
+    )
+    .map(Some)
+    .map_err(crate::bundles::BundleError::RouteRegistry)
 }
 
 #[derive(Debug, Clone)]
@@ -420,7 +429,14 @@ impl SiteBuilder {
         let route_registry =
             crate::routes::RouteRegistry::build(bundle.ops.values(), self.conf.http.slash.policy)
                 .map_err(crate::bundles::BundleError::RouteRegistry)?;
-        let console_runtime = console_runtime(&self.conf.console, &route_registry, &asset_urls)?;
+        let console_runtime = console_runtime(
+            &self.conf.console,
+            &route_registry,
+            &asset_urls,
+            &self.conf.logging,
+            &project_dir,
+            authenticator.secret_ring(),
+        )?;
 
         let mut bundle = bundle.with_router_unchecked(router);
 
@@ -442,7 +458,7 @@ impl SiteBuilder {
             .migrations
             .register_schema(crate::db::crate_schema(
                 "vyuh",
-                crate::tasks::persistence::schema::task_schema,
+                crate::tasks::store::database::schema::task_schema,
             ))
             .map_err(|error| crate::bundles::BundleError::Migration(Arc::new(error)))?;
 
@@ -475,7 +491,10 @@ impl SiteBuilder {
         );
 
         #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-        let task_store = MemoryTaskStore::new(task_config.batch_size_value());
+        let task_store = MemoryTaskStore::with_lease_duration(
+            task_config.batch_size_value(),
+            task_config.lease_duration_value(),
+        );
 
         let task_registry = Arc::new(bundle.tasks.clone().with_config(task_config));
 
@@ -948,6 +967,14 @@ impl Site {
             .map(crate::console::ConsoleRuntime::urls)
     }
 
+    /// Returns the built per-site console log reader when the console is enabled.
+    pub(crate) fn console_logs(&self) -> Option<&crate::console::logs::LogRuntime> {
+        self.inner
+            .console_runtime
+            .as_ref()
+            .map(crate::console::ConsoleRuntime::logs)
+    }
+
     /// Returns a login redirect when an unauthenticated request targets a console page.
     pub(crate) fn console_login_redirect(
         &self,
@@ -1093,6 +1120,14 @@ impl Site {
         self.inner.task_engine.render_metrics()
     }
 
+    pub(crate) fn task_ready(&self) -> bool {
+        self.inner.task_engine.readiness()
+    }
+
+    pub(crate) fn task_health(&self) -> crate::tasks::TaskHealthSnapshot {
+        self.inner.task_engine.health_snapshot()
+    }
+
     pub(crate) async fn execute_command(
         &self,
         name: &str,
@@ -1191,10 +1226,11 @@ impl axum::extract::FromRequestParts<Site> for SiteConfig {
 mod tests {
     use super::Site;
     use crate::{
-        Error, bundles,
+        Error, SiteError, bundles,
         callables::Data,
         commands::CommandConf,
         emitters::PeriodicConf,
+        observability::ObservabilityConf,
         routes::{Json, Methods, RouteConf},
         signals::SignalConf,
         tasks::TaskHandlerConf,
@@ -1500,5 +1536,31 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(RUNTIME_SIGNALS.load(Ordering::SeqCst), 0);
         assert_eq!(RUNTIME_TASKS.load(Ordering::SeqCst), 0);
+    }
+
+    /// Verifies task readiness changes from in-memory runtime state without a second store probe.
+    #[tokio::test]
+    async fn task_readiness_waits_for_runtime_initialization() -> Result<(), SiteError> {
+        let bundle = bundles::bundle([bundles::task::<RuntimeTask, _, _>(
+            count_runtime_task,
+            TaskHandlerConf::new("readiness-task"),
+        )]);
+        let site = Site::build(
+            crate::SiteConf::default()
+                .log_init(false)
+                .observability(ObservabilityConf::production()),
+            bundle,
+        )
+        .await?;
+        let client = TestSite::new(site);
+
+        assert_eq!(
+            client.get("/readyz").send().await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        client.start_runtime().await?;
+        assert_eq!(client.get("/readyz").send().await.status(), StatusCode::OK);
+        client.shutdown_and_wait().await;
+        Ok(())
     }
 }

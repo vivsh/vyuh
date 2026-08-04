@@ -4,6 +4,7 @@ mod api;
 pub(crate) mod auth;
 mod conf;
 mod login;
+pub(crate) mod logs;
 mod middleware;
 mod pages;
 mod query;

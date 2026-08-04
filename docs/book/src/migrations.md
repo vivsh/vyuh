@@ -146,6 +146,12 @@ cargo run --features postgres,migrations -- make_migration add_projects --non-in
 cargo run --features postgres,migrations -- make_migration merge_heads --merge
 ```
 
+When Gaman needs a decision—for example, whether a removed column was
+renamed—`make_migration` prompts on an interactive terminal and reruns the
+request with the selected decisions. Use `--non-interactive` in CI or other
+non-terminal automation; it never reads standard input and instead reports the
+pending clarification and its available choices.
+
 The composed app consumes child crate migrations but does not generate them.
 To generate migrations for a reusable crate, run that crate's own migration
 setup while developing that crate. This keeps ownership obvious: dependency
@@ -180,7 +186,7 @@ its SQL for the selected backend, and commit it with the application.
 
 For the value-less grouped runtime, the generated migration should remove the
 historical priority, identity, output, and result columns; assign existing
-active rows to the `default` group; add idempotency, rate-bucket, and runtime
+active rows to the `default` lane; add idempotency, rate-bucket, and runtime
 policy storage; and add the grouped readiness, lease, history, and ownership
 indexes.
 

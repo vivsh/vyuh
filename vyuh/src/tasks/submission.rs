@@ -4,14 +4,14 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use serde::Serialize;
 
-use super::{DEFAULT_TASK_GROUP, TaskError, TaskGroup, TaskId, TaskRecord};
+use super::{DEFAULT_TASK_LANE, TaskError, TaskId, TaskLane, TaskRecord};
 
 type KeyFn<T> = Arc<dyn Fn(&T) -> String + Send + Sync + 'static>;
 
 /// Submission policy evaluated before one or more task records are stored.
 pub struct TaskOptions<T> {
     pub(crate) initial_delay: Option<Duration>,
-    pub(crate) group: TaskGroup,
+    pub(crate) lane: TaskLane,
     pub(crate) key: Option<KeyFn<T>>,
     pub(crate) ignore_conflicts: bool,
 }
@@ -28,9 +28,9 @@ impl<T> TaskOptions<T> {
         self
     }
 
-    /// Selects the named execution group.
-    pub const fn group(mut self, group: TaskGroup) -> Self {
-        self.group = group;
+    /// Selects the named execution lane.
+    pub const fn lane(mut self, lane: TaskLane) -> Self {
+        self.lane = lane;
         self
     }
 
@@ -85,7 +85,7 @@ impl<T> Default for TaskOptions<T> {
     fn default() -> Self {
         Self {
             initial_delay: None,
-            group: DEFAULT_TASK_GROUP,
+            lane: DEFAULT_TASK_LANE,
             key: None,
             ignore_conflicts: false,
         }
@@ -96,7 +96,7 @@ impl<T> Clone for TaskOptions<T> {
     fn clone(&self) -> Self {
         Self {
             initial_delay: self.initial_delay,
-            group: self.group,
+            lane: self.lane,
             key: self.key.clone(),
             ignore_conflicts: self.ignore_conflicts,
         }
@@ -108,7 +108,7 @@ impl<T> fmt::Debug for TaskOptions<T> {
         formatter
             .debug_struct("TaskOptions")
             .field("initial_delay", &self.initial_delay)
-            .field("group", &self.group)
+            .field("lane", &self.lane)
             .field("has_idempotency_key", &self.key.is_some())
             .field("ignore_conflicts", &self.ignore_conflicts)
             .finish_non_exhaustive()

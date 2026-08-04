@@ -97,6 +97,12 @@ resolved under `SiteConf.project_dir`; absolute directories are used as-is.
 File sinks use non-blocking writers. Vyuh stores the writer guards inside the
 built `Site`, so logs continue flushing for the site lifetime.
 
+When the built-in console is enabled, configured file sinks are available on
+its protected **Logs** page and `/console/api/logs`. The viewer reads the JSON
+files directly with bounded reverse scans; it does not retain a second log
+store, index stdout/stderr, or stream logs to browsers. Search results can be
+partial when their fixed scan budget is reached.
+
 ## Rotation
 
 File sinks support:

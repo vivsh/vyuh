@@ -2,6 +2,8 @@ pub(crate) mod core;
 
 mod args;
 mod error;
+#[cfg(feature = "migrations")]
+mod migration_prompt;
 mod registry;
 mod types;
 

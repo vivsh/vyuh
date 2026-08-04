@@ -22,7 +22,7 @@ pub struct OperationQuery {
 pub struct TaskQuery {
     pub status: Option<TaskStatus>,
     pub name: Option<String>,
-    pub group: Option<String>,
+    pub lane: Option<String>,
     pub idempotency_key: Option<String>,
     pub created_from: Option<String>,
     pub created_to: Option<String>,
@@ -32,6 +32,20 @@ pub struct TaskQuery {
     pub per_page: Option<usize>,
 }
 
+/// Bounded filters accepted by the console's file-log views.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct LogQuery {
+    pub rule: Option<String>,
+    pub level: Option<String>,
+    pub target: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub q: Option<String>,
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+    pub selected: Option<String>,
+}
+
 impl TaskQuery {
     pub fn to_filter(&self, default_limit: usize, max_limit: usize) -> TaskFilter {
         let per_page = task_per_page(self, default_limit, max_limit);
@@ -39,7 +53,7 @@ impl TaskQuery {
         TaskFilter::new()
             .optional_status(self.status)
             .optional_name(self.name.clone())
-            .group_name(self.group.clone())
+            .lane_name(self.lane.clone())
             .optional_key(self.idempotency_key.clone())
             .optional_range(
                 parse_start(self.created_from.as_deref()),

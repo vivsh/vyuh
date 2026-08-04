@@ -1,4 +1,4 @@
-//! Grouped batch claiming, durable rate permits, and database-relative wake hints.
+//! Laneed batch claiming, durable rate permits, and database-relative wake hints.
 
 use std::time::Duration;
 
@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use crate::{
     db,
     tasks::{
-        GroupClaim, GroupPoll, TaskError, TaskIdempotency, TaskPoll, TaskRate, TaskRecord,
-        TaskRetry, TaskStatus,
+        LaneClaim, LanePoll, TaskError, TaskIdempotency, TaskPoll, TaskRate, TaskRecord, TaskRetry,
+        TaskStatus,
     },
 };
 
@@ -20,11 +20,12 @@ use super::{
 use crate::tasks::rate::{TOKEN_SCALE, next_permit, refill};
 
 impl DbTaskStore {
-    /// Claims all requested groups in one transaction and returns store-relative timing evidence.
+    /// Claims all requested lanes in one transaction and returns store-relative timing evidence.
+    #[allow(dead_code)]
     pub(super) async fn claim_tasks_impl(
         &self,
         runner_id: &str,
-        claims: &[GroupClaim],
+        claims: &[LaneClaim],
     ) -> Result<TaskPoll, TaskError> {
         let mut transaction = self.pool.begin().await?;
         let conf =
@@ -33,54 +34,69 @@ impl DbTaskStore {
             })?;
         super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
         let now = statement_now(&mut transaction).await?;
+        let poll = self
+            .claim_tasks_tx(&mut transaction, runner_id, claims, &conf, now)
+            .await?;
+        transaction.commit().await?;
+        Ok(poll)
+    }
+
+    /// Claims one fair lane batch inside an already-authorized scheduler transaction.
+    pub(super) async fn claim_tasks_tx(
+        &self,
+        mut transaction: &mut db::DbTransaction<'_>,
+        runner_id: &str,
+        claims: &[LaneClaim],
+        conf: &crate::tasks::TaskStoreConf,
+        now: DateTime<Utc>,
+    ) -> Result<TaskPoll, TaskError> {
         let mut ordered = claims.iter().collect::<Vec<_>>();
-        ordered.sort_unstable_by_key(|claim| claim.group.as_str());
-        let mut groups = Vec::with_capacity(claims.len());
+        ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
+        let mut lanes = Vec::with_capacity(claims.len());
         for claim in ordered {
-            let group_conf = configured_group(&conf, claim.group)?;
-            let group = self
-                .claim_group(
+            let lane_conf = configured_lane(&conf, claim.lane)?;
+            let lane = self
+                .claim_lane(
                     &mut transaction,
                     runner_id,
                     claim,
-                    group_conf.global_rate(),
-                    group_conf.retry_policy(),
+                    lane_conf.global_rate(),
+                    lane_conf.retry_policy(),
                     conf.idempotency,
                     now,
                 )
                 .await?;
-            groups.push(group);
+            lanes.push(lane);
         }
         super::writes::delete_expired_owners(&mut transaction, now, self.batch_size).await?;
-        groups.sort_by_key(|group| {
+        lanes.sort_by_key(|lane| {
             claims
                 .iter()
-                .position(|claim| claim.group == group.group)
+                .position(|claim| claim.lane == lane.lane)
                 .unwrap_or(usize::MAX)
         });
-        transaction.commit().await?;
-        Ok(TaskPoll { groups })
+        Ok(TaskPoll { lanes })
     }
 
-    /// Claims one group's bounded candidates and reserves its durable permits.
-    async fn claim_group(
+    /// Claims one lane's bounded candidates and reserves its durable permits.
+    async fn claim_lane(
         &self,
         transaction: &mut db::DbTransaction<'_>,
         runner_id: &str,
-        claim: &GroupClaim,
+        claim: &LaneClaim,
         rate: Option<TaskRate>,
         retry: TaskRetry,
         idempotency: TaskIdempotency,
         now: DateTime<Utc>,
-    ) -> Result<GroupPoll, TaskError> {
+    ) -> Result<LanePoll, TaskError> {
         let limit = claim.limit.min(self.batch_size);
-        let probed = probe_candidates(transaction, now, claim.group.as_str(), limit).await?;
+        let probed = probe_candidates(transaction, now, claim.lane.as_str(), limit).await?;
         let saturated = limit > 0 && probed.len() == limit;
         let runnable_count = runnable_count(&probed, retry)?;
         let (permits, rate_wake) = self
-            .reserve_rate(transaction, claim.group, rate, runnable_count, now)
+            .reserve_rate(transaction, claim.lane, rate, runnable_count, now)
             .await?;
-        let selected = select_candidates(transaction, now, claim.group.as_str(), limit).await?;
+        let selected = select_candidates(transaction, now, claim.lane.as_str(), limit).await?;
         let (mut exhausted, mut candidates) = split_exhausted(selected, retry)?;
         self.fail_exhausted(transaction, &mut exhausted, idempotency, now)
             .await?;
@@ -93,13 +109,13 @@ impl DbTaskStore {
         let tasks = self
             .claim_candidates(transaction, candidates, runner_id, now)
             .await?;
-        let task_wake = next_task_deadline(transaction, claim.group.as_str(), now).await?;
-        Ok(GroupPoll {
-            group: claim.group,
+        let task_wake = next_task_deadline(transaction, claim.lane.as_str(), now).await?;
+        Ok(LanePoll {
+            lane: claim.lane,
             tasks,
             reclaimed,
             saturated,
-            next_wake_in: effective_group_wake(rate_blocked, rate_wake, task_wake),
+            next_wake_in: effective_lane_wake(rate_blocked, rate_wake, task_wake),
         })
     }
 
@@ -172,11 +188,11 @@ impl DbTaskStore {
         Self::into_records(candidates)
     }
 
-    /// Reserves durable group permits in the same transaction as task claims.
+    /// Reserves durable lane permits in the same transaction as task claims.
     async fn reserve_rate(
         &self,
         transaction: &mut db::DbTransaction<'_>,
-        group: crate::tasks::TaskGroup,
+        lane: crate::tasks::TaskLane,
         rate: Option<TaskRate>,
         requested: usize,
         now: DateTime<Utc>,
@@ -187,12 +203,12 @@ impl DbTaskStore {
         let Some(rate) = rate else {
             return Ok((requested, None));
         };
-        let mut row = load_rate_for_update(transaction, group.as_str())
+        let mut row = load_rate_for_update(transaction, lane.as_str())
             .await?
             .ok_or_else(|| {
                 TaskError::InvalidConfig(format!(
-                    "task rate state for group '{}' is not initialized",
-                    group
+                    "task rate state for lane '{}' is not initialized",
+                    lane
                 ))
             })?;
         refill(&mut row.tokens_micros, &mut row.updated_at, rate, now)?;
@@ -215,7 +231,7 @@ impl DbTaskStore {
 async fn probe_candidates(
     transaction: &mut db::DbTransaction<'_>,
     now: DateTime<Utc>,
-    group: &str,
+    lane: &str,
     limit: usize,
 ) -> Result<Vec<TaskRow>, TaskError> {
     if limit == 0 {
@@ -223,7 +239,7 @@ async fn probe_candidates(
     }
     let table = DbTaskStore::table();
     db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(DbTaskStore::due_predicate(&table, now))
         .order_by(table.ready_at.asc())
         .order_by(table.created_at.asc())
@@ -260,17 +276,17 @@ fn split_exhausted(
     Ok((exhausted, runnable))
 }
 
-fn configured_group(
+fn configured_lane(
     conf: &crate::tasks::TaskStoreConf,
-    group: crate::tasks::TaskGroup,
-) -> Result<&crate::tasks::TaskGroupConf, TaskError> {
-    conf.groups
+    lane: crate::tasks::TaskLane,
+) -> Result<&crate::tasks::TaskLaneConf, TaskError> {
+    conf.lanes
         .iter()
-        .find(|entry| entry.group() == group)
-        .ok_or_else(|| TaskError::UnknownGroup(group.to_string()))
+        .find(|entry| entry.lane() == lane)
+        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
 }
 
-/// Writes one group's reserved fixed-point balance while its row is locked.
+/// Writes one lane's reserved fixed-point balance while its row is locked.
 async fn persist_rate(
     transaction: &mut db::DbTransaction<'_>,
     row: &TaskRateRow,
@@ -288,6 +304,7 @@ async fn persist_rate(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn statement_now(
     transaction: &mut db::DbTransaction<'_>,
 ) -> Result<DateTime<Utc>, TaskError> {
@@ -297,15 +314,15 @@ async fn statement_now(
         .await?)
 }
 
-/// Finds the earliest future ready task or reclaimable lease for polled groups.
+/// Finds the earliest future ready task or reclaimable lease for polled lanes.
 async fn next_task_deadline(
     transaction: &mut db::DbTransaction<'_>,
-    group: &str,
+    lane: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<Duration>, TaskError> {
     let table = DbTaskStore::table();
     let pending = db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(table.status.eq(db::val(TaskStatus::Pending.as_i16())))
         .filter(table.ready_at.gt(db::val(Some(now))))
         .order_by(table.ready_at.asc())
@@ -313,7 +330,7 @@ async fn next_task_deadline(
         .exec(&mut *transaction)
         .await?;
     let running = db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(table.status.eq(db::val(TaskStatus::Running.as_i16())))
         .filter(table.leased_until.gt(db::val(Some(now))))
         .order_by(table.leased_until.asc())
@@ -331,7 +348,7 @@ async fn next_task_deadline(
 }
 
 /// Combines future work and token readiness without polling a blocked lane early.
-fn effective_group_wake(
+fn effective_lane_wake(
     rate_blocked: bool,
     rate_wake: Option<Duration>,
     task_wake: Option<Duration>,
@@ -347,7 +364,7 @@ fn effective_group_wake(
 async fn select_candidates(
     transaction: &mut db::DbTransaction<'_>,
     now: DateTime<Utc>,
-    group: &str,
+    lane: &str,
     limit: usize,
 ) -> Result<Vec<TaskRow>, TaskError> {
     if limit == 0 {
@@ -356,7 +373,7 @@ async fn select_candidates(
     use crate::db::backend::{LockWaitExt as _, RowLockExt as _};
     let table = DbTaskStore::table();
     Ok(db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(DbTaskStore::due_predicate(&table, now))
         .order_by(table.ready_at.asc())
         .order_by(table.created_at.asc())
@@ -373,7 +390,7 @@ async fn select_candidates(
 async fn select_candidates(
     transaction: &mut db::DbTransaction<'_>,
     now: DateTime<Utc>,
-    group: &str,
+    lane: &str,
     limit: usize,
 ) -> Result<Vec<TaskRow>, TaskError> {
     if limit == 0 {
@@ -381,7 +398,7 @@ async fn select_candidates(
     }
     let table = DbTaskStore::table();
     Ok(db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .filter(DbTaskStore::due_predicate(&table, now))
         .order_by(table.ready_at.asc())
         .order_by(table.created_at.asc())
@@ -395,12 +412,12 @@ async fn select_candidates(
 /// Locks one durable rate row before refilling and reserving permits.
 async fn load_rate_for_update(
     transaction: &mut db::DbTransaction<'_>,
-    group: &str,
+    lane: &str,
 ) -> Result<Option<TaskRateRow>, TaskError> {
     use crate::db::backend::RowLockExt as _;
     let table = DbTaskStore::rate_table();
     Ok(db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .for_update()
         .first::<TaskRateRow>()
         .exec(transaction)
@@ -411,11 +428,11 @@ async fn load_rate_for_update(
 /// Loads one durable rate row inside SQLite's serial write transaction.
 async fn load_rate_for_update(
     transaction: &mut db::DbTransaction<'_>,
-    group: &str,
+    lane: &str,
 ) -> Result<Option<TaskRateRow>, TaskError> {
     let table = DbTaskStore::rate_table();
     Ok(db::from(&table)
-        .filter(table.group_name.eq(db::val(group.to_string())))
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
         .first::<TaskRateRow>()
         .exec(transaction)
         .await?)
@@ -433,7 +450,7 @@ mod tests {
         let now = started + chrono::Duration::seconds(1);
         let mut row = TaskRateRow {
             id: uuid::Uuid::now_v7(),
-            group_name: "slow".into(),
+            lane_name: "slow".into(),
             policy_fingerprint: "policy".into(),
             tokens_micros: 0,
             updated_at: started,

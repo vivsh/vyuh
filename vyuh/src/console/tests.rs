@@ -438,6 +438,47 @@ async fn console_cookie_authenticates_api() {
     assert!(!openapi.contains("\"origin\""));
 }
 
+/// Verifies the protected logs views explain the file-sink requirement without caching output.
+#[tokio::test]
+async fn console_logs_require_file_sink() {
+    let site = Site::build(
+        SiteConf::default()
+            .log_init(false)
+            .console(ConsoleConf::default().enabled(true)),
+        app_bundle(),
+    )
+    .await
+    .unwrap();
+    let cookie = console_cookie(&site).await.unwrap();
+    let client = TestSite::new(site);
+
+    let page = client
+        .get("/console/logs")
+        .header(header::COOKIE.as_str(), &cookie)
+        .send()
+        .await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(
+        page.header(header::CACHE_CONTROL.as_str())
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert!(page.text().await.contains("File logging is not configured"));
+
+    let api = client
+        .get("/console/api/logs")
+        .header(header::COOKIE.as_str(), &cookie)
+        .send()
+        .await;
+    assert_eq!(api.status(), StatusCode::OK);
+    assert_eq!(
+        api.header(header::CACHE_CONTROL.as_str())
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert!(api.text().await.contains("\"configured\":false"));
+}
+
 /// Verifies console pages redirect unauthenticated browsers while APIs retain JSON failures.
 #[tokio::test]
 async fn console_login_exchanges_a_private_token_for_a_cookie() {

@@ -10,7 +10,7 @@
     <table class="console-table">
       <tbody>
         <tr><th>Attempts</th><td>{{ task.attempts }}</td></tr>
-        <tr><th>Group</th><td>{{ task.group }}</td></tr>
+        <tr><th>Lane</th><td>{{ task.lane }}</td></tr>
         <tr><th>Idempotency key</th><td>{{ task.idempotency_key | default(value="") }}</td></tr>
         <tr><th>Idempotency expires</th><td>{{ task.idempotency_expires_at | default(value="") }}</td></tr>
         <tr><th>Last error</th><td>{{ task.last_error | default(value="") }}</td></tr>

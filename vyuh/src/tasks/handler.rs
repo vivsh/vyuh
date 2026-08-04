@@ -74,14 +74,14 @@ pub enum TaskError {
     #[error("Invalid task submission options: {0}")]
     InvalidOptions(String),
 
-    #[error("Task group '{0}' is not configured")]
-    UnknownGroup(String),
+    #[error("Task lane '{0}' is not configured")]
+    UnknownLane(String),
 
     #[error("Idempotency key conflicts with task {0}")]
     IdempotencyConflict(super::TaskId),
 
-    #[error("Task group '{0}' still has running work")]
-    GroupBusy(String),
+    #[error("Task lane '{0}' still has running work")]
+    LaneBusy(String),
 
     #[error(transparent)]
     CallError(#[from] crate::callables::CallError),
@@ -141,7 +141,7 @@ impl TaskStatus {
     }
 }
 
-/// Payload-free lifecycle outcome committed by custom task stores.
+/// Payload-free lifecycle outcome committed by Vyuh's internal task store.
 ///
 /// Task handlers return [`TaskState`] rather than this low-level store contract.
 #[derive(Debug, Clone)]
@@ -179,7 +179,7 @@ impl TaskOutcome {
         })
     }
 
-    /// Retries a task using its group's exponential-backoff policy.
+    /// Retries a task using its lane's exponential-backoff policy.
     pub fn retry(error: impl Into<String>) -> Self {
         Self::Retry {
             error: error.into(),
@@ -193,8 +193,8 @@ impl TaskOutcome {
         }
     }
 
-    pub(crate) fn fail_error(error: &Error) -> Self {
-        Self::fail(error.display_verbose())
+    pub(crate) fn handler_failed() -> Self {
+        Self::fail("Task handler failed")
     }
 }
 
@@ -273,7 +273,7 @@ impl TaskState {
         })
     }
 
-    /// Requests another attempt under the selected task group's retry policy.
+    /// Requests another attempt under the selected task lane's retry policy.
     pub fn retry(error: impl Into<String>) -> Self {
         Self {
             inner: TaskOutcome::Retry {
@@ -405,19 +405,25 @@ impl RegisteredTask {
     pub async fn execute(&self, site: Site, record: Arc<TaskRecord>) -> TaskOutcome {
         let payload = match self.handler.deserialize_input(&record.input) {
             Ok(value) => value,
-            Err(e) => return TaskOutcome::fail(format!("Task input error: {}", e)),
+            Err(error) => {
+                log_handler_error(&record, self.operation.id, &error);
+                return TaskOutcome::fail("Task input is invalid");
+            }
         };
 
         let ctx = TaskContext {
             site,
             payload,
-            record,
+            record: record.clone(),
             operation_id: self.operation.id,
         };
 
         let data = match self.handler.call(ctx).await {
             Ok(data) => data,
-            Err(e) => return TaskOutcome::fail_error(&e),
+            Err(error) => {
+                log_handler_error(&record, self.operation.id, &error);
+                return TaskOutcome::handler_failed();
+            }
         };
 
         (self.outcome)(data)
@@ -451,6 +457,37 @@ impl RegisteredTask {
             operation,
         }
     }
+}
+
+/// Logs one native handler failure while keeping durable task state generic.
+fn log_handler_error(
+    record: &TaskRecord,
+    operation_id: crate::OperationId,
+    error: &(dyn std::error::Error + 'static),
+) {
+    tracing::error!(
+        task_id = %record.id(),
+        operation_id = %operation_id,
+        lane = %record.lane,
+        attempt = record.attempts,
+        error = %error_chain(error),
+        "durable task handler failed"
+    );
+}
+
+/// Builds an operator-only causal chain without retaining it in task history.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    for _ in 0..16 {
+        let Some(current) = source else {
+            break;
+        };
+        chain.push_str(": ");
+        chain.push_str(&current.to_string());
+        source = current.source();
+    }
+    chain
 }
 
 #[derive(Clone)]
@@ -514,9 +551,9 @@ impl TaskRegistry {
         let metrics = Arc::new(super::TaskMetrics::new(
             self.tasks.keys().cloned(),
             self.config
-                .resolved_groups()
+                .resolved_lanes()
                 .into_iter()
-                .map(|group| group.group().to_string()),
+                .map(|lane| lane.lane().to_string()),
         ));
         TaskDispatcher {
             store,
@@ -524,6 +561,7 @@ impl TaskRegistry {
             notifier: Arc::new(tokio::sync::Notify::new()),
             initialized: Arc::new(tokio::sync::OnceCell::new()),
             metrics,
+            health: super::TaskHealth::new(self.config.readiness_policy(), !self.is_empty()),
         }
     }
 
@@ -570,8 +608,8 @@ mod tests {
     use crate::{
         Data, SiteError,
         tasks::{
-            DEFAULT_TASK_GROUP, GroupClaim, TaskCommit, TaskGroup, TaskId, TaskOptions,
-            TaskReceipt, store::AbstractTaskStore, store::MemoryTaskStore,
+            DEFAULT_TASK_LANE, LaneClaim, TaskCommit, TaskId, TaskLane, TaskOptions, TaskReceipt,
+            store::AbstractTaskStore, store::MemoryTaskStore,
         },
     };
 
@@ -590,6 +628,10 @@ mod tests {
         Ok(())
     }
 
+    async fn failed_job(_input: Data<DirectJob>) -> Result<(), crate::Error> {
+        Err(crate::Error::invalid("secret task detail"))
+    }
+
     fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskError> {
         let now = chrono::Utc::now();
         Ok(Arc::new(TaskRecord {
@@ -600,7 +642,7 @@ mod tests {
             resume_input: None,
             status: TaskStatus::Running,
             attempts: 0,
-            group: DEFAULT_TASK_GROUP.to_string(),
+            lane: DEFAULT_TASK_LANE.to_string(),
             lease_duration_ms: None,
             last_error: None,
             idempotency_key: None,
@@ -635,16 +677,16 @@ mod tests {
         let claimed = store
             .claim_tasks(
                 "runner-a",
-                &[GroupClaim {
-                    group: DEFAULT_TASK_GROUP,
+                &[LaneClaim {
+                    lane: DEFAULT_TASK_LANE,
                     limit: 10,
                 }],
             )
             .await?;
         let task = claimed
-            .groups
+            .lanes
             .first()
-            .and_then(|group| group.tasks.first())
+            .and_then(|lane| lane.tasks.first())
             .ok_or_else(|| TaskError::TaskExecutionError("task was not claimed".into()))?;
 
         assert_eq!(task.id, task_id);
@@ -656,7 +698,7 @@ mod tests {
                 "runner-a",
                 &[TaskCommit {
                     task_id,
-                    group: DEFAULT_TASK_GROUP,
+                    lane: DEFAULT_TASK_LANE,
                     outcome: TaskOutcome::complete(),
                 }],
             )
@@ -664,16 +706,16 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies invalid groups and oversized durations surface only from submission terminals.
+    /// Verifies invalid lanes and oversized durations surface only from submission terminals.
     #[tokio::test]
     async fn task_options_defer_errors_to_submission() -> Result<(), TaskError> {
         let mut registry = TaskRegistry::new();
         registry.register(RegisteredTask::new("direct_job", direct_job))?;
         let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)));
-        let unknown = TaskOptions::new().group(TaskGroup::new("missing"));
+        let unknown = TaskOptions::new().lane(TaskLane::new("missing"));
         assert!(matches!(
             dispatcher.submit_with(DirectJob { id: 1 }, unknown).await,
-            Err(TaskError::UnknownGroup(_))
+            Err(TaskError::UnknownLane(_))
         ));
         let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
         assert!(matches!(
@@ -774,6 +816,24 @@ mod tests {
             .await;
 
         assert!(matches!(outcome, TaskOutcome::Complete));
+        Ok(())
+    }
+
+    /// Verifies handler errors retain no native detail in durable task outcomes.
+    #[tokio::test]
+    async fn task_handler_failure_uses_safe_summary() -> Result<(), String> {
+        let service = RegisteredTask::new("failed_job", failed_job);
+        let outcome = service
+            .execute(
+                test_site().await.map_err(|error| error.to_string())?,
+                record("failed_job", &DirectJob { id: 7 }).map_err(|error| error.to_string())?,
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            TaskOutcome::Fail { ref error } if error == "Task handler failed"
+        ));
         Ok(())
     }
 

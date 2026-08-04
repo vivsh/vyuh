@@ -48,8 +48,8 @@ input + state + resume_input -> handler -> () | TaskState
 
 Tasks are value-less: use `()` or `Result<(), Error>` for completed work, and
 `TaskState` or `Result<TaskState, Error>` for explicit lifecycle control.
-`TaskOutcome` remains a payload-free low-level contract under
-`vyuh::tasks::store` for custom stores.
+Task persistence is framework-owned; applications compose work through
+`site.tasks()` rather than implementing a scheduler store.
 
 Persist durable artifacts in application records or object storage. Submit
 follow-on work explicitly from domain state, signals, or another task submission,
@@ -241,14 +241,18 @@ use vyuh::tasks::TaskState;
 let done = TaskState::complete();
 let suspended = TaskState::suspend(state)?;
 let sleeping = TaskState::sleep(state, Duration::from_secs(30))?;
-let retry = TaskState::retry("try again using the group's backoff policy");
+let retry = TaskState::retry("try again using the lane's backoff policy");
 let failed = TaskState::fail("permanent failure");
 ```
 
-An `Err(vyuh::Error)` from a handler is committed as a failed task outcome.
+An `Err(vyuh::Error)` from a handler is committed as `Task handler failed`.
+Vyuh writes the native causal chain only to structured logs with task, operation,
+lane, and attempt context; it never retains that chain in task history or the
+console. Messages passed explicitly to `TaskState::retry` and `TaskState::fail`
+are application-owned durable summaries and must not contain secrets.
 Retry is never inferred from `ErrorKind`; return `TaskState::retry(...)` when
 the task should be tried again later. Handlers cannot choose retry timing or
-attempt limits; the selected task group owns both.
+attempt limits; the selected task lane owns both.
 
 ## Suspend And Resume
 
@@ -315,20 +319,20 @@ The receipt is `Queued`, `Existing`, or `Ignored` and always exposes the new or
 existing task ID through `.id()`.
 
 Use `submit_many` to enqueue inputs in one store transaction. Use
-`submit_many_with` for a shared group, delay, and idempotency rule:
+`submit_many_with` for a shared lane, delay, and idempotency rule:
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::{TaskGroup, TaskOptions};
+use vyuh::tasks::{TaskLane, TaskOptions};
 
-const EMAIL: TaskGroup = TaskGroup::new("email");
+const EMAIL: TaskLane = TaskLane::new("email");
 
 let receipts = site.tasks()
     .submit_many_with(
         jobs,
         TaskOptions::new()
-            .group(EMAIL)
+            .lane(EMAIL)
             .delay(Duration::from_secs(300))
             .idempotency_key(|job: &SendEmailJob| format!("welcome:{}", job.to))
             .ignore_conflicts(),
@@ -342,7 +346,7 @@ submission is atomic and its receipts preserve input order; a non-ignored
 conflict or store failure rolls back the whole batch. An empty batch succeeds
 with no receipts.
 
-All option builders are infallible. Invalid state serialization, group names,
+All option builders are infallible. Invalid state serialization, lane names,
 keys, or durations are reported only by the terminal submission call.
 
 Idempotency keys are scoped by registered task handler. Vyuh fingerprints the
@@ -359,21 +363,27 @@ reaches a terminal state.
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
 `TaskState::sleep`, and recurring creation belongs in emitters.
 
-## Groups, Throughput, And Rate Limits
+## Lanes, Throughput, And Rate Limits
 
-Named groups isolate slow work without introducing priority. Each group owns a
+Named lanes isolate slow work without introducing priority. Each lane owns a
 bounded local queue and per-worker concurrency quota. One dispatcher rotates
-the groups fairly, while one global concurrency limit and one common outcome
+the lanes fairly, while one global concurrency limit and one common outcome
 buffer bound the whole runner.
+
+Queue prefetch uses a fixed hysteresis rule: Vyuh refills a lane only when its
+queued work is below half of that lane's concurrency quota, then claims up to
+the lane's normal free capacity. The paced store tick still runs for commits,
+lease renewal, and other lanes; a well-buffered lane is simply skipped rather
+than queried again.
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::{TaskConf, TaskGroup, TaskGroupConf, TaskIdempotency, TaskRate,
-    TaskRetry, DEFAULT_TASK_GROUP};
+use vyuh::tasks::{TaskConf, TaskLane, TaskLaneConf, TaskIdempotency, TaskRate,
+    TaskRetry, DEFAULT_TASK_LANE};
 
-const EMAIL: TaskGroup = TaskGroup::new("email");
-const EXPORTS: TaskGroup = TaskGroup::new("exports");
+const EMAIL: TaskLane = TaskLane::new("email");
+const EXPORTS: TaskLane = TaskLane::new("exports");
 
 let tasks = TaskConf::default()
     .concurrency(10)
@@ -382,23 +392,23 @@ let tasks = TaskConf::default()
     .fallback_poll_interval(Duration::from_secs(300))
     .lease_duration(Duration::from_secs(300))
     .idempotency(TaskIdempotency::retain_for(Duration::from_secs(30 * 24 * 60 * 60)))
-    .groups([
-        TaskGroupConf::new(DEFAULT_TASK_GROUP, 6),
-        TaskGroupConf::new(EMAIL, 2)
+    .lanes([
+        TaskLaneConf::new(DEFAULT_TASK_LANE, 6),
+        TaskLaneConf::new(EMAIL, 2)
             .retry(
                 TaskRetry::exponential(5, Duration::from_secs(10))
                     .max_delay(Duration::from_secs(300)),
             )
             .rate_limit(TaskRate::per_second(10).burst(5))
             .global_rate_limit(TaskRate::per_minute(60).burst(10)),
-        TaskGroupConf::new(EXPORTS, 2),
+        TaskLaneConf::new(EXPORTS, 2),
     ]);
 let conf = SiteConf::default().tasks(tasks);
 ```
 
-A site may configure at most 32 groups. Names are stable lowercase descriptors,
+A site may configure at most 32 lanes. Names are stable lowercase descriptors,
 quotas must be positive, and their sum cannot exceed global concurrency.
-Each group also owns its retry limit and exponential backoff. The default is
+Each lane also owns its retry limit and exponential backoff. The default is
 five total handler attempts, beginning at one second and capped at five
 minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
 by `max_delay`. This policy cannot be overridden by a submission or handler.
@@ -407,29 +417,30 @@ runner. `global_rate_limit` coordinates starts across workers sharing a durable
 task store. Configure either one independently, or configure both when each
 start must satisfy local smoothing and a shared external quota. Global permits
 are reserved with claimed rows in the same transaction and in batches, so a
-high-throughput group does not require one rate-state write per task. The memory
+high-throughput lane does not require one rate-state write per task. The memory
 store coordinates a global limit only among runners sharing that in-process
 store. Restarting a runner restores its local burst, and adding processes
 multiplies a local-only limit.
 
-Removing a configured group never silently moves its work. Non-terminal orphaned
+Removing a configured lane never silently moves its work. Non-terminal orphaned
 tasks prevent worker startup. After running work drains, explicitly call
-`site.tasks().reassign_group(OLD, NEW)` before deploying the configuration that
-removes the old group.
+`site.tasks().reassign_lane(OLD, NEW)` before deploying the configuration that
+removes the old lane.
 
 ## Adaptive Polling And Leases
 
-`poll_interval` is the short backlog interval. A group whose candidate query
+`poll_interval` is the short backlog interval. A lane whose candidate query
 fills its requested batch is revisited after this interval when it has capacity.
 `fallback_poll_interval` is the maximum idle recheck interval. Future
 `ready_at`, lease-expiry, and rate-token deadlines wake the runner at their
 store-relative database time when they are earlier. Deadlines are tracked per
-group, so activity in one lane does not force an idle or rate-limited lane to
+lane, so activity in one lane does not force an idle or rate-limited lane to
 query early.
 
-Local submission, resume, handler completion, and outcome commit wake the local
-runner immediately. Vyuh intentionally adds no distributed notification
-channel; work submitted by another process may wait until the fallback poll.
+Local submission, resume, handler completion, and outcome commit mark the local
+runner for its next eligible tick; they never create an early background store
+query. Vyuh intentionally adds no distributed notification channel; work
+submitted by another process may wait until the fallback poll.
 Choose a smaller fallback or an external deployment wake mechanism when that
 latency is unacceptable.
 
@@ -442,8 +453,35 @@ When observability is enabled, Vyuh exports bounded-label task counters for
 submission receipts and conflicts, claims and reclaimed leases, handler starts
 and lifecycle outcomes, lease renewals and ownership loss, and store failures.
 Queue, handler, and outcome-commit durations are exported without dynamic
-application-data labels. Handler and group labels come only from the immutable
+application-data labels. Handler and lane labels come only from the immutable
 site registries.
+
+## Runtime Health
+
+Task runtime health is updated from initialization and existing scheduler-store
+ticks; readiness checks never issue an additional task-store query. The default
+requires successful task initialization and then tolerates transient tick
+failures:
+
+```rust
+use vyuh::tasks::{TaskConf, TaskReadiness};
+
+let tasks = TaskConf::default()
+    .readiness(TaskReadiness::startup_only());
+```
+
+For task-critical sites, make readiness fail after a consecutive failure
+threshold and recover after the next successful tick:
+
+```rust
+let tasks = TaskConf::default()
+    .readiness(TaskReadiness::after_failures(3));
+```
+
+`TaskReadiness::disabled()` keeps task health visible in metrics and the
+console but excludes it from `/readyz`. Metrics expose the current readiness
+gauge, consecutive store failures, and the last successful scheduler tick.
+The console exposes only safe state and failure-class diagnostics.
 
 ## Stores
 
@@ -454,8 +492,8 @@ With a database backend feature enabled, Vyuh stores tasks durably:
 - `sqlite`: `vyuh_tasks`
 
 Durable stores use four framework-owned tables: task lifecycle records,
-idempotency ownership, per-group rate buckets, and the store-wide scheduling
-policy fingerprint. The fingerprint prevents workers with incompatible group,
+idempotency ownership, per-lane rate buckets, and the store-wide scheduling
+policy fingerprint. The fingerprint prevents workers with incompatible lane,
 retry, rate, or idempotency policies from sharing one store.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
@@ -469,9 +507,9 @@ application migration, deploying the new binary, then starting workers again.
 Pending, sleeping, and suspended work keeps its input and continuation state;
 only historical task result values are discarded.
 
-Applications implementing a custom persistence backend use the explicit
-`vyuh::tasks::store` namespace. The ordinary prelude does not expose claims,
-commits, runner queues, or persistence records.
+Claims, commits, runner queues, and persistence records remain internal. The
+ordinary task API exposes only typed submission, resumption, reassignment, and
+read-only inspection.
 
 Task workers start only in the serving runtime. Commands can submit durable
 tasks, but they do not claim or execute them themselves.
@@ -509,10 +547,14 @@ It covers:
 - Unregistered task data types return `TaskError::TaskNotFound`.
 - Handler `Err(vyuh::Error)` values are committed as failed task outcomes.
 - Stale workers cannot overwrite tasks they no longer own.
-- Retried tasks become failed when their group's maximum attempt count is reached.
+- A crashed worker's running task is reclaimed only after its lease expires;
+  the replacement invocation consumes another attempt and may repeat effects.
+- A malformed historical running row without a lease deadline is marked failed
+  during task-runtime initialization rather than being retried unsafely.
+- Retried tasks become failed when their lane's maximum attempt count is reached.
 - Conflicting idempotency intents reject the submission batch unless conflict
   ignoring was explicitly selected.
-- Unknown or orphaned groups fail explicitly and never fall back to `default`.
+- Unknown or orphaned lanes fail explicitly and never fall back to `default`.
 - `resume` returns `false` when the task ID does not identify a suspended task.
 
 ## Current Limitations

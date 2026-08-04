@@ -14349,6 +14349,40 @@ body {
   color: #ec5b1a;
 }
 
+.vyuh-console-log-notice {
+  background: rgba(236, 91, 26, 0.08);
+  border: 1px solid rgba(16, 24, 39, 0.08);
+  border-radius: 0.5rem;
+  color: #5d6875;
+  margin: 0.75rem 0;
+  padding: 0.75rem 1rem;
+}
+
+.vyuh-console-badge.is-log-error {
+  background: rgba(184, 50, 50, 0.1);
+  color: #b83232;
+}
+
+.vyuh-console-badge.is-log-warn {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+.vyuh-console-badge.is-log-info {
+  background: rgba(35, 116, 171, 0.1);
+  color: #2374ab;
+}
+
+.vyuh-console-badge.is-log-debug {
+  background: rgba(16, 24, 39, 0.08);
+  color: #5d6875;
+}
+
+.vyuh-console-badge.is-log-trace {
+  background: rgba(16, 24, 39, 0.04);
+  color: rgba(16, 24, 39, 0.72);
+}
+
 .vyuh-console-inspector {
   align-self: start;
   padding: 1rem;

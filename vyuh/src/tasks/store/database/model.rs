@@ -7,9 +7,9 @@ use crate::{
 
 /// Private persistence representation for a durable task.
 ///
-/// The advanced store contract uses `TaskRecord`; normal application
-/// inspection receives the read-only `TaskInfo` projection. This row stores
-/// status as a stable integer representation independent of SQLx derives.
+/// Application inspection receives the read-only `TaskInfo` projection. This
+/// row stores status as a stable integer representation independent of SQLx
+/// derives.
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_tasks")]
 pub(super) struct TaskRow {
@@ -23,7 +23,7 @@ pub(super) struct TaskRow {
     pub(super) status: i16,
     pub(super) attempts: i32,
     #[column(type = "varchar(64)", default = "'default'")]
-    pub(super) group_name: String,
+    pub(super) lane_name: String,
     pub(super) lease_duration_ms: Option<i64>,
     pub(super) last_error: Option<String>,
     #[column(type = "varchar(512)")]
@@ -49,7 +49,7 @@ impl From<TaskRecord> for TaskRow {
             resume_input: record.resume_input,
             status: record.status.as_i16(),
             attempts: record.attempts,
-            group_name: record.group,
+            lane_name: record.lane,
             lease_duration_ms: record.lease_duration_ms,
             last_error: record.last_error,
             idempotency_key: record.idempotency_key,
@@ -77,7 +77,7 @@ impl TryFrom<TaskRow> for TaskRecord {
             resume_input: row.resume_input,
             status: crate::tasks::TaskStatus::from_i16(row.status)?,
             attempts: row.attempts,
-            group: row.group_name,
+            lane: row.lane_name,
             lease_duration_ms: row.lease_duration_ms,
             last_error: row.last_error,
             idempotency_key: row.idempotency_key,
@@ -112,14 +112,14 @@ pub(super) struct TaskIdempotencyRow {
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Durable token bucket and policy identity for one globally rate-limited group.
+/// Durable token bucket and policy identity for one globally rate-limited lane.
 #[derive(Debug, Clone, db::Model)]
-#[table(name = "vyuh_task_group_rates")]
+#[table(name = "vyuh_task_lane_rates")]
 pub(super) struct TaskRateRow {
     #[column(primary_key, type = "uuid")]
     pub(super) id: uuid::Uuid,
     #[column(type = "varchar(64)")]
-    pub(super) group_name: String,
+    pub(super) lane_name: String,
     #[column(type = "varchar(64)")]
     pub(super) policy_fingerprint: String,
     pub(super) tokens_micros: i64,
@@ -147,7 +147,7 @@ pub(super) struct RuntimePolicyPatch {
 
 /// Mutable rate-bucket reservation fields.
 #[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_task_group_rates")]
+#[table(name = "vyuh_task_lane_rates")]
 pub(super) struct RatePatch {
     pub(super) tokens_micros: i64,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
