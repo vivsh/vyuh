@@ -272,9 +272,15 @@ impl DbTaskStore {
         let table = Self::table();
         let mut pool = self.pool.clone();
         let page = apply_filter(db::from(&table), &table, &filter)
-            .order_by(table.created_at.desc())
-            .order_by(table.id.desc())
-            .page::<TaskRow, _>(filter.page, filter.per_page, &mut pool)
+            .sort(table.created_at.desc())
+            .sort(table.id.desc())
+            .page::<TaskRow, _>(
+                db::Pagination {
+                    page_num: filter.page,
+                    page_size: filter.per_page,
+                },
+                &mut pool,
+            )
             .await?;
         let records = page
             .items
@@ -403,7 +409,7 @@ pub(super) async fn delete_expired_owners(
     let table = DbTaskStore::idempotency_table();
     let expired = db::from(&table)
         .filter(table.expires_at.lte(db::val(Some(now))))
-        .order_by(table.expires_at.asc())
+        .sort(table.expires_at.asc())
         .slice::<TaskIdempotencyRow>(0, limit)
         .exec(&mut *transaction)
         .await?;
@@ -555,7 +561,7 @@ async fn load_key_owners(
         return Ok(Vec::new());
     }
     owner_scope(rows)?
-        .order_by(DbTaskStore::idempotency_table().id.asc())
+        .sort(DbTaskStore::idempotency_table().id.asc())
         .for_update()
         .all::<TaskIdempotencyRow>()
         .exec(transaction)
@@ -573,7 +579,7 @@ async fn load_key_owners(
         return Ok(Vec::new());
     }
     owner_scope(rows)?
-        .order_by(DbTaskStore::idempotency_table().id.asc())
+        .sort(DbTaskStore::idempotency_table().id.asc())
         .all::<TaskIdempotencyRow>()
         .exec(transaction)
         .await
