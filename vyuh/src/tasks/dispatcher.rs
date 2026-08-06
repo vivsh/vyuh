@@ -4,10 +4,13 @@ use std::{any::TypeId, sync::Arc, time::Duration};
 
 use serde::Serialize;
 
+use crate::callables::DataBox;
+
 use super::{
-    AbstractTaskStore, RegisteredTask, TaskError, TaskFilter, TaskId, TaskInfo, TaskLane,
-    TaskOptions, TaskReceipt, TaskRecord, TaskRegistry, TaskStatus, TaskWrite,
-    submission::canonical_json,
+    AbstractTaskStore, RegisteredTask, ScheduledTaskWrite, TaskError, TaskFilter, TaskId, TaskInfo,
+    TaskLane, TaskOptions, TaskReceipt, TaskRecord, TaskRegistry, TaskScheduleConf, TaskStatus,
+    TaskWrite,
+    submission::{canonical_json, canonical_json_value},
 };
 
 /// Shared task registry, store, and local worker wake channel.
@@ -19,6 +22,7 @@ pub struct TaskDispatcher<S: AbstractTaskStore + Send + Sync + 'static> {
     pub(crate) initialized: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) metrics: Arc<super::TaskMetrics>,
     pub(crate) health: super::TaskHealth,
+    pub(crate) schedules: Arc<[TaskScheduleConf]>,
 }
 
 /// Site facade for durable task submission and inspection.
@@ -95,6 +99,28 @@ impl Tasks {
     /// Returns the immutable effective lane configuration selected during site construction.
     pub(crate) fn lane_configs(&self) -> &[super::TaskLaneConf] {
         self.dispatcher.registry.lanes()
+    }
+
+    /// Returns immutable task-targeted emitter schedule metadata for diagnostics.
+    pub(crate) fn schedule_configs(&self) -> &[TaskScheduleConf] {
+        self.dispatcher.schedules.as_ref()
+    }
+
+    /// Reads the durable submission cursors for configured task schedules.
+    pub(crate) async fn schedule_snapshot(
+        &self,
+        names: &[String],
+    ) -> Result<super::TaskScheduleSnapshot, TaskError> {
+        self.dispatcher.schedule_snapshot(names).await
+    }
+
+    /// Returns the finalized lane selected for one registered task handler.
+    pub(crate) fn task_lane(&self, task: &str) -> Option<&str> {
+        self.dispatcher
+            .registry
+            .tasks
+            .get(task)
+            .map(|registered| registered.effective_lane().as_str())
     }
 }
 
@@ -204,6 +230,18 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .ok_or_else(|| TaskError::TaskNotFound("Unknown task type".into()))
     }
 
+    fn task_for_payload(&self, payload: &DataBox) -> Result<&RegisteredTask, TaskError> {
+        let name = self
+            .registry
+            .typed_map
+            .get(&payload.payload_type_id())
+            .ok_or_else(|| TaskError::TaskNotFound("Unknown task type".into()))?;
+        self.registry
+            .tasks
+            .get(name)
+            .ok_or_else(|| TaskError::TaskNotFound(name.clone()))
+    }
+
     fn require_lane(&self, lane: TaskLane) -> Result<(), TaskError> {
         self.registry
             .lanes()
@@ -229,7 +267,55 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             handlers: self.registry.tasks.keys().cloned().collect(),
             lanes: self.registry.lanes().to_vec(),
             idempotency: self.registry.idempotency_conf()?,
+            schedules: self.schedules.to_vec(),
         })
+    }
+
+    /// Reads durable schedule cursors with the store-relative current time.
+    pub(crate) async fn schedule_snapshot(
+        &self,
+        names: &[String],
+    ) -> Result<super::TaskScheduleSnapshot, TaskError> {
+        self.ensure_initialized().await?;
+        self.store.schedule_snapshot(names).await
+    }
+
+    /// Stores one emitter payload and advances its cursor in the same transaction.
+    pub(crate) async fn submit_scheduled(
+        &self,
+        schedule: &str,
+        occurrence: chrono::DateTime<chrono::Utc>,
+        payload: DataBox,
+    ) -> Result<Option<TaskReceipt>, TaskError> {
+        let service = self.task_for_payload(&payload)?;
+        self.require_schedule_target(schedule, service.name())?;
+        let write = build_box_write(service, &payload, &self.registry.config)?;
+        self.ensure_initialized().await?;
+        let result = self
+            .store
+            .store_scheduled(ScheduledTaskWrite {
+                name: schedule.into(),
+                occurrence,
+                write,
+            })
+            .await;
+        if matches!(result, Ok(Some(TaskReceipt::Queued(_)))) {
+            self.notifier.notify_one();
+        }
+        result
+    }
+
+    /// Ensures framework-owned schedule metadata still targets this task type.
+    fn require_schedule_target(&self, schedule: &str, task: &str) -> Result<(), TaskError> {
+        match self.schedules.iter().find(|entry| entry.name == schedule) {
+            Some(entry) if entry.task == task => Ok(()),
+            Some(_) => Err(TaskError::TaskExecutionError(
+                "task schedule payload type does not match its configured target".into(),
+            )),
+            None => Err(TaskError::TaskExecutionError(
+                "task schedule is not registered by this site".into(),
+            )),
+        }
     }
 
     pub(crate) fn render_metrics(&self) -> String {
@@ -299,6 +385,42 @@ fn build_writes<T: Serialize + 'static>(
         });
     }
     Ok(writes)
+}
+
+/// Converts one verified type-erased emitter output into a normal task write.
+fn build_box_write(
+    service: &RegisteredTask,
+    input: &DataBox,
+    config: &super::TaskConf,
+) -> Result<TaskWrite, TaskError> {
+    service.validate_box(input)?;
+    let value = input
+        .to_json()
+        .ok_or_else(|| TaskError::TaskExecutionError("emitter data cannot be serialized".into()))?
+        .map_err(TaskError::TaskExecutionError)?;
+    let key = service.idempotency_key_box(input.as_any())?;
+    let serialized = if key.is_some() {
+        canonical_json_value(value)?
+    } else {
+        serde_json::to_string(&value)?
+    };
+    validate_payload(&serialized, config.payload_limit())?;
+    validate_key(key.as_deref())?;
+    let fingerprint = key
+        .as_ref()
+        .map(|_| fingerprint(service.name(), &serialized, service))
+        .transpose()?;
+    Ok(TaskWrite {
+        record: build_record(
+            service.name(),
+            serialized,
+            key,
+            fingerprint,
+            service.effective_lane(),
+        )?,
+        ignore_conflicts: false,
+        initial_delay: None,
+    })
 }
 
 /// Surfaces all accumulated builder failures at the submission terminal.

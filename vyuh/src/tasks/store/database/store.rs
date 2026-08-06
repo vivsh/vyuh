@@ -1,8 +1,8 @@
 //! `AbstractTaskStore` adapter over Mool-native persistence modules.
 
 use crate::tasks::{
-    AbstractTaskStore, LaneClaim, TaskCommit, TaskError, TaskFilter, TaskId, TaskPoll, TaskReceipt,
-    TaskRecord, TaskStoreConf, TaskTick, TaskWrite,
+    AbstractTaskStore, LaneClaim, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter, TaskId,
+    TaskPoll, TaskReceipt, TaskRecord, TaskStoreConf, TaskTick, TaskWrite,
 };
 
 use super::common::DbTaskStore;
@@ -86,6 +86,20 @@ impl AbstractTaskStore for DbTaskStore {
 
     async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
         self.store_tasks_impl(writes).await
+    }
+
+    async fn schedule_snapshot(
+        &self,
+        names: &[String],
+    ) -> Result<crate::tasks::TaskScheduleSnapshot, TaskError> {
+        self.schedule_snapshot_impl(names).await
+    }
+
+    async fn store_scheduled(
+        &self,
+        write: ScheduledTaskWrite,
+    ) -> Result<Option<TaskReceipt>, TaskError> {
+        self.store_scheduled_impl(write).await
     }
 
     async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {

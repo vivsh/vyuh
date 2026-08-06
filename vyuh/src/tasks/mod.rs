@@ -27,7 +27,8 @@ pub(crate) use runner::AbstractTaskRunner;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 pub(crate) use store::MemoryTaskStore;
 pub(crate) use store::{
-    AbstractTaskStore, LaneClaim, LanePoll, TaskCommit, TaskPoll, TaskStoreConf, TaskTick,
+    AbstractTaskStore, LaneClaim, LanePoll, ScheduledTaskWrite, TaskCommit, TaskPoll,
+    TaskScheduleConf, TaskScheduleSnapshot, TaskStoreConf, TaskTick,
 };
 pub(crate) use submission::TaskWrite;
 pub use submission::{TaskOptions, TaskReceipt};

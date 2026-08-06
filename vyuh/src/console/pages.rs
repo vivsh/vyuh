@@ -8,13 +8,14 @@ use url::form_urlencoded;
 use crate::routes::{Path, Query};
 use crate::{
     OperationId, Site,
-    auth::AuthUser,
     console::{
+        access::ConsoleGuard,
         logs::limit as log_limit,
         query::{
             LogQuery, OperationQuery, TaskQuery, filter_operations, is_console_operation,
             task_limit_max, task_per_page,
         },
+        schedules::{ScheduleOut, ScheduleQuery, page as schedule_page},
         schema_view::OperationView,
         status::StatusOut,
         types::{ConfigOut, OperationOut, Page, TaskDetailOut, TaskOut},
@@ -23,7 +24,7 @@ use crate::{
 };
 
 /// Renders the console overview page or its safe internal-error page.
-pub async fn overview(site: Site, _user: AuthUser) -> Response {
+pub async fn overview(site: Site, _guard: ConsoleGuard) -> Response {
     render_or_error(
         &site,
         render_page(
@@ -37,7 +38,7 @@ pub async fn overview(site: Site, _user: AuthUser) -> Response {
 }
 
 /// Renders the console runtime-inspection page or its safe internal-error page.
-pub async fn runtime(site: Site, _user: AuthUser) -> Response {
+pub async fn runtime(site: Site, _guard: ConsoleGuard) -> Response {
     render_or_error(
         &site,
         render_page(
@@ -54,7 +55,7 @@ pub async fn runtime(site: Site, _user: AuthUser) -> Response {
 pub async fn operations(
     site: Site,
     operation_id: OperationId,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Query(query): Query<OperationQuery>,
 ) -> Response {
     let conf = &site.conf().console;
@@ -95,7 +96,7 @@ pub async fn operations(
 pub async fn operation_detail(
     site: Site,
     operation_id: OperationId,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Path(id): Path<String>,
 ) -> Response {
     let Ok(id) = id.parse::<crate::OperationId>() else {
@@ -124,7 +125,7 @@ pub async fn operation_detail(
 }
 
 /// Renders the task list or a safe console error page when inspection fails.
-pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) -> Response {
+pub async fn tasks(site: Site, _guard: ConsoleGuard, Query(query): Query<TaskQuery>) -> Response {
     if !site.console_has_tasks() {
         let per_page = task_per_page(
             &query,
@@ -143,8 +144,22 @@ pub async fn tasks(site: Site, _user: AuthUser, Query(query): Query<TaskQuery>) 
     render_or_error(&site, render_tasks(&site, query, page))
 }
 
+/// Renders immutable task schedule definitions and their durable cursors.
+pub async fn schedules(
+    site: Site,
+    _guard: ConsoleGuard,
+    Query(query): Query<ScheduleQuery>,
+) -> Response {
+    let conf = &site.conf().console;
+    let Ok(page) = schedule_page(&site, &query, conf.page_size_default, conf.page_size_max).await
+    else {
+        return internal_error(&site);
+    };
+    render_or_error(&site, render_schedules(&site, query, page))
+}
+
 /// Renders bounded configured file logs with the standard console inspector layout.
-pub async fn logs(site: Site, _user: AuthUser, Query(query): Query<LogQuery>) -> Response {
+pub async fn logs(site: Site, _guard: ConsoleGuard, Query(query): Query<LogQuery>) -> Response {
     let limit = log_limit(
         &query,
         site.conf().console.page_size_default,
@@ -201,7 +216,7 @@ fn append_log_pair(
 }
 
 /// Renders one task or an appropriate console error page.
-pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) -> Response {
+pub async fn task_detail(site: Site, _guard: ConsoleGuard, Path(id): Path<String>) -> Response {
     let Ok(id) = id.parse::<crate::tasks::TaskId>() else {
         return not_found(&site);
     };
@@ -228,7 +243,7 @@ pub async fn task_detail(site: Site, _user: AuthUser, Path(id): Path<String>) ->
 }
 
 /// Renders the redacted console configuration page.
-pub async fn conf(site: Site, _user: AuthUser) -> Response {
+pub async fn conf(site: Site, _guard: ConsoleGuard) -> Response {
     let conf = ConfigOut::from_site(&site);
     let Ok(payload) = serde_json::to_string_pretty(&conf) else {
         return internal_error(&site);
@@ -246,7 +261,7 @@ pub async fn conf(site: Site, _user: AuthUser) -> Response {
 }
 
 /// Renders the application OpenAPI console page.
-pub async fn openapi(site: Site, _user: AuthUser) -> Response {
+pub async fn openapi(site: Site, _guard: ConsoleGuard) -> Response {
     render_or_error(
         &site,
         render_page(
@@ -260,7 +275,7 @@ pub async fn openapi(site: Site, _user: AuthUser) -> Response {
 }
 
 /// Renders the console-specific not-found page.
-pub async fn not_found_page(site: Site, _user: AuthUser) -> Response {
+pub async fn not_found_page(site: Site, _guard: ConsoleGuard) -> Response {
     not_found(&site)
 }
 
@@ -281,6 +296,7 @@ fn render_page(
         "overview": &urls.overview,
         "runtime": &urls.runtime,
         "tasks": &urls.tasks,
+        "schedules": &urls.schedules,
         "operations": &urls.operations,
         "logs": &urls.logs,
         "conf": &urls.conf,
@@ -294,6 +310,7 @@ fn render_page(
     });
     context["version"] = json!(env!("CARGO_PKG_VERSION"));
     context["stylesheet_path"] = json!(&urls.stylesheet_path);
+    context["development_access"] = json!(site.conf().console.development_access());
     render(site, template, context)
 }
 
@@ -421,6 +438,7 @@ fn error_page(site: &Site, status: StatusCode, title: &str, message: &str) -> Re
             "overview": &urls.overview,
             "runtime": &urls.runtime,
             "tasks": &urls.tasks,
+            "schedules": &urls.schedules,
             "operations": &urls.operations,
             "conf": &urls.conf,
             "openapi": &urls.openapi,
@@ -477,6 +495,74 @@ fn render_tasks(
             "task_counts": task_counts,
         }),
     )
+}
+
+/// Builds the template context for the read-only durable schedule inspector.
+fn render_schedules(
+    site: &Site,
+    query: ScheduleQuery,
+    page: crate::console::schedules::SchedulePage,
+) -> Result<Html<String>, TemplateError> {
+    let previous_page = (page.page > 1).then(|| page.page - 1);
+    let next_page = (page.page < page.total_pages).then(|| page.page + 1);
+    let selected = selected_schedule(&query, &page.items);
+    let items = page.items.iter().map(schedule_view).collect::<Vec<_>>();
+    let selected = selected.as_ref().map(schedule_view);
+    render_page(
+        site,
+        "console/schedules.html",
+        "schedules",
+        "Schedules",
+        json!({
+            "page": {
+                "items": items,
+                "tasks": page.tasks,
+                "lanes": page.lanes,
+                "total": page.total,
+                "page": page.page,
+                "total_pages": page.total_pages,
+                "configured": page.configured,
+                "cron": page.cron,
+                "periodic": page.periodic,
+                "awaiting_first_run": page.awaiting_first_run,
+            },
+            "query": query,
+            "selected_schedule": selected,
+            "previous_page": previous_page,
+            "next_page": next_page,
+            "page_sizes": task_page_sizes(),
+        }),
+    )
+}
+
+/// Adds compact presentation times while preserving the API's RFC 3339 values.
+fn schedule_view(schedule: &ScheduleOut) -> serde_json::Value {
+    let mut value = match serde_json::to_value(schedule) {
+        Ok(value) => value,
+        Err(_) => json!({}),
+    };
+    value["last_submitted_display"] = json!(
+        schedule
+            .last_submitted_at
+            .as_ref()
+            .map(|time| compact_time(time))
+    );
+    value["next_expected_display"] = json!(
+        schedule
+            .next_expected_at
+            .as_ref()
+            .map(|time| compact_time(time))
+    );
+    value
+}
+
+/// Finds the selected schedule only among the inspected page's safe values.
+fn selected_schedule(query: &ScheduleQuery, schedules: &[ScheduleOut]) -> Option<ScheduleOut> {
+    let name = query.selected.as_deref()?;
+    schedules
+        .iter()
+        .find(|schedule| schedule.name == name)
+        .cloned()
 }
 
 fn task_page_sizes() -> Vec<usize> {

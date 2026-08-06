@@ -40,8 +40,9 @@ pub use vyuh_macros::{
 pub use vyuh_macros::{migrations, schema};
 
 pub use {
-    crate::apidocs::ApiMeta, crate::routes::RouteConf, emitters::CronConf, emitters::PeriodicConf,
-    emitters::PgNotifyConf, signals::SignalConf,
+    crate::apidocs::ApiMeta, crate::routes::RouteConf, emitters::CronConf,
+    emitters::EmitterExecutor, emitters::PeriodicConf, emitters::PgNotifyConf,
+    emitters::ScheduleStart, signals::SignalConf,
 };
 
 // ---------------------------------------------------------------------------

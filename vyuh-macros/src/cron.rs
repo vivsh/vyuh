@@ -17,6 +17,18 @@ struct CronConfMeta {
     /// Cron expression (e.g., "0 0 * * *")
     #[darling(default)]
     expr: Option<String>,
+
+    /// Target executor: `signal` or `task`.
+    #[darling(default)]
+    executor: Option<String>,
+
+    /// Stable durable task schedule name.
+    #[darling(default)]
+    schedule: Option<String>,
+
+    /// Durable task first-start policy: `next` or `immediately`.
+    #[darling(default)]
+    start: Option<String>,
 }
 
 /// Entry point for #[cron] macro.
@@ -42,11 +54,42 @@ fn build_cron_conf(
 
     validate_cron_expr(expr)?;
 
+    let executor = executor_tokens(conf.executor.as_deref())?;
+    let schedule = conf
+        .schedule
+        .as_ref()
+        .map(|value| quote! { .schedule(#value) });
+    let start = start_tokens(conf.start.as_deref())?;
     Ok(quote! {
-        ::vyuh::emitters::CronConf {
-            expr: #expr.to_string(),
-        }
+        ::vyuh::emitters::CronConf::new(#expr)
+            .executor(#executor)
+            #schedule
+            #start
     })
+}
+
+/// Produces the public executor value from the concise macro spelling.
+fn executor_tokens(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
+    match value.unwrap_or("signal") {
+        "signal" => Ok(quote! { ::vyuh::emitters::EmitterExecutor::Signal }),
+        "task" => Ok(quote! { ::vyuh::emitters::EmitterExecutor::Task }),
+        value => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported cron executor '{value}'; use 'signal' or 'task'"),
+        )),
+    }
+}
+
+/// Produces the durable-task start policy while retaining signal compatibility.
+fn start_tokens(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
+    match value.unwrap_or("next") {
+        "next" => Ok(quote! { .on_start(::vyuh::emitters::ScheduleStart::Next) }),
+        "immediately" => Ok(quote! { .on_start(::vyuh::emitters::ScheduleStart::Immediately) }),
+        value => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported cron start policy '{value}'; use 'next' or 'immediately'"),
+        )),
+    }
 }
 
 /// Validate cron expression by parsing it.

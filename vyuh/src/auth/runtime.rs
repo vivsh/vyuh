@@ -308,26 +308,6 @@ impl Authenticator {
 }
 
 impl<'a> ProviderAuth<'a> {
-    /// Authenticates one request through this selected provider only.
-    pub(crate) async fn authenticate(
-        &self,
-        parts: &Parts,
-        audience: Audience,
-    ) -> Result<AuthUser, AuthError> {
-        let result = async {
-            let audience = AudienceId::declared(audience)?;
-            let provider = self.provider()?;
-            let raw = provider
-                .access_location()
-                .extract(parts)?
-                .ok_or(AuthError::NoCredential)?;
-            provider.authenticate(&raw, parts, &audience).await
-        }
-        .await;
-        self.record(&result);
-        result
-    }
-
     /// Retains one identity-proof descriptor with this credential provider.
     pub fn via<Start, Complete>(
         &self,

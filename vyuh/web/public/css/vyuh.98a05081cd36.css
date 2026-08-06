@@ -16184,14 +16184,30 @@ body {
   color: #5d6875;
 }
 
-.console-login {
+.vyuh-console-development-notice {
+  align-items: baseline;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #101827;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+}
+
+.vyuh-console-development-notice strong {
+  color: #101827;
+}
+
+.console-error {
   display: grid;
   min-height: calc(100vh - 4.75rem);
   padding: 1.25rem;
   place-items: center;
 }
 
-.console-login-card {
+.console-error-card {
   display: grid;
   gap: 1.5rem;
   max-width: 32rem;
@@ -16199,34 +16215,7 @@ body {
   width: 100%;
 }
 
-.console-login-header {
-  display: grid;
-  gap: 0.75rem;
-}
-
-.console-login-header > * {
-  margin: 0;
-}
-
-.console-login-logo {
-  height: 4rem;
-  width: 4rem;
-}
-
-.console-login-form {
-  display: grid;
-  gap: 1rem;
-}
-
-.console-login-form .vyuh-button {
-  width: 100%;
-}
-
-.console-login-error {
-  margin: 0;
-}
-
-.console-login-card footer {
+.console-error-card footer {
   color: #5d6875;
 }
 

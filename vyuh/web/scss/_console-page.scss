@@ -495,14 +495,30 @@
   color: $vyuh-muted;
 }
 
-.console-login {
+.vyuh-console-development-notice {
+  align-items: baseline;
+  background: rgba($vyuh-saffron, 0.12);
+  border: 1px solid rgba($vyuh-saffron, 0.35);
+  color: $vyuh-ink;
+  display: flex;
+  flex-wrap: wrap;
+  gap: $vyuh-space-2;
+  margin-bottom: $vyuh-space-4;
+  padding: $vyuh-space-3 $vyuh-space-4;
+}
+
+.vyuh-console-development-notice strong {
+  color: $vyuh-ink;
+}
+
+.console-error {
   display: grid;
   min-height: calc(100vh - 4.75rem);
   padding: $vyuh-space-5;
   place-items: center;
 }
 
-.console-login-card {
+.console-error-card {
   display: grid;
   gap: $vyuh-space-6;
   max-width: 32rem;
@@ -510,34 +526,7 @@
   width: 100%;
 }
 
-.console-login-header {
-  display: grid;
-  gap: $vyuh-space-3;
-}
-
-.console-login-header > * {
-  margin: 0;
-}
-
-.console-login-logo {
-  height: $vyuh-space-10;
-  width: $vyuh-space-10;
-}
-
-.console-login-form {
-  display: grid;
-  gap: $vyuh-space-4;
-}
-
-.console-login-form .vyuh-button {
-  width: 100%;
-}
-
-.console-login-error {
-  margin: 0;
-}
-
-.console-login-card footer {
+.console-error-card footer {
   color: $vyuh-muted;
 }
 

@@ -219,11 +219,15 @@ pub fn derive_bitrole(input: TokenStream) -> TokenStream {
 ///
 /// This macro is sugar over `vyuh::bundles::cron(handler, CronConf)`.
 /// The handler returns `Data<T>` and the emitted data is submitted to signals by
-/// default.
+/// default. `executor = "task"` submits it to a registered durable task with
+/// input type `T`.
 ///
 /// # Attributes
 ///
 /// - `expr` - Cron expression (required): `"0 0 * * * *"` (every minute)
+/// - `executor` - `"signal"` (default) or `"task"`
+/// - `schedule` - stable task cursor name (task executor only)
+/// - `start` - `"next"` (default) or `"immediately"` (task executor only)
 ///
 /// # Examples
 ///
@@ -251,12 +255,16 @@ pub fn cron(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// This macro is sugar over `vyuh::bundles::periodic(handler, PeriodicConf)`.
 /// The handler returns `Data<T>` and the emitted data is submitted to signals by
-/// default.
+/// default. `executor = "task"` submits it to a registered durable task with
+/// input type `T`.
 ///
 /// # Attributes
 ///
 /// - `secs` - Interval in seconds (optional)
 /// - `millis` - Interval in milliseconds (optional)
+/// - `executor` - `"signal"` (default) or `"task"`
+/// - `schedule` - stable task cursor name (task executor only)
+/// - `start` - `"next"` (default) or `"immediately"` (task executor only)
 ///
 /// At least one of `secs` or `millis` must be specified. Both can be used together.
 ///

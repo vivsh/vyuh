@@ -2,13 +2,82 @@ use serde::{Deserialize, Serialize};
 use std::{
     any::TypeId,
     collections::{BinaryHeap, HashMap},
+    str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use crate::{
     Data, Error, Site,
     callables::{self, CallError, Callable, DataBox, DataValue, HasSite, IntoArgPart, IntoDataBox},
 };
+
+mod scheduled;
+
+/// Computes the next normal task-schedule occurrence after one timestamp.
+pub(crate) fn next_task_schedule(
+    schedule: &crate::tasks::TaskScheduleConf,
+    after: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, EmitterError> {
+    match schedule.source.as_str() {
+        "cron" => next_cron_schedule(&schedule.expression, after),
+        "periodic" => next_periodic_schedule(&schedule.expression, after),
+        _ => Err(EmitterError::InvalidSchedule(
+            "task schedule has an unsupported source".into(),
+        )),
+    }
+}
+
+/// Computes one cron occurrence from the normalized schedule expression.
+fn next_cron_schedule(
+    expression: &str,
+    after: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, EmitterError> {
+    let schedule = cron::Schedule::from_str(expression)?;
+    schedule.after(&after).next().ok_or_else(|| {
+        EmitterError::InvalidSchedule("cron expression has no next occurrence".into())
+    })
+}
+
+/// Computes one UTC-aligned periodic occurrence from normalized milliseconds.
+fn next_periodic_schedule(
+    expression: &str,
+    after: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, EmitterError> {
+    let milliseconds = expression
+        .parse::<u64>()
+        .map_err(|_| EmitterError::InvalidSchedule("periodic interval is invalid".into()))?;
+    scheduled::periodic_boundary(after, Duration::from_millis(milliseconds))
+}
+
+/// Selects where a timed emitter sends its produced data.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum EmitterExecutor {
+    /// Delivers data to signals and channels, preserving the existing emitter behavior.
+    #[default]
+    Signal,
+    /// Submits data to one registered durable task.
+    Task,
+}
+
+/// Controls the first durable submission of a task-targeted schedule.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ScheduleStart {
+    /// Wait for the first normal cron occurrence or UTC-aligned periodic boundary.
+    #[default]
+    Next,
+    /// Submit one task during initial activation before normal scheduling begins.
+    Immediately,
+}
+
+impl ScheduleStart {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Next => "next",
+            Self::Immediately => "immediately",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EmitterConf {
@@ -143,6 +212,12 @@ pub enum EmitterError {
     #[error("Invalid debounce configuration: {0}")]
     InvalidDebounce(String),
 
+    #[error("Invalid schedule configuration: {0}")]
+    InvalidSchedule(String),
+
+    #[error("Task schedule '{schedule}' has no registered task for {type_name}")]
+    MissingTaskTarget { schedule: String, type_name: String },
+
     #[error("Other error: {0}")]
     OtherError(#[from] Box<dyn std::error::Error + Send + Sync>),
 
@@ -153,25 +228,35 @@ pub enum EmitterError {
 #[derive(Debug)]
 pub struct Emitter {
     type_id: TypeId,
+    type_name: String,
+    executor: EmitterExecutor,
+    schedule: Option<TaskSchedule>,
     source: EmitterSource,
 }
 
 impl Emitter {
-    fn key(&self) -> (TypeId, u8) {
-        (self.type_id, self.source.discriminant())
+    fn key(&self) -> EmitterKey {
+        match &self.schedule {
+            Some(schedule) => EmitterKey::TaskSchedule(schedule.name.clone()),
+            None => EmitterKey::Signal(self.type_id, self.source.discriminant()),
+        }
     }
 
     pub fn operation(&self) -> callables::Operation {
         let specs = self.source.spec();
         let (kind, config) = match &self.source {
-            EmitterSource::Cron { schedule, .. } => (
-                callables::OperationKind::Cron,
-                Some(serde_json::json!({ "expr": schedule.to_string() })),
-            ),
-            EmitterSource::Periodic { interval, .. } => (
-                callables::OperationKind::Periodic,
-                Some(serde_json::json!({ "interval_secs": interval.as_secs() })),
-            ),
+            EmitterSource::Cron { schedule, .. } => {
+                let config = self.with_task_schedule_conf(serde_json::json!({
+                    "expr": schedule.to_string(),
+                }));
+                (callables::OperationKind::Cron, Some(config))
+            }
+            EmitterSource::Periodic { interval, .. } => {
+                let config = self.with_task_schedule_conf(serde_json::json!({
+                    "interval_secs": interval.as_secs(),
+                }));
+                (callables::OperationKind::Periodic, Some(config))
+            }
             EmitterSource::PgNotify {
                 channel, debounce, ..
             } => {
@@ -187,6 +272,30 @@ impl Emitter {
         };
         callables::Operation::from_specs(kind, specs).with_conf(&config)
     }
+}
+
+impl Emitter {
+    fn with_task_schedule_conf(&self, mut config: serde_json::Value) -> serde_json::Value {
+        let Some(schedule) = &self.schedule else {
+            return config;
+        };
+        config["executor"] = serde_json::json!("task");
+        config["schedule"] = serde_json::json!(schedule.name);
+        config["start"] = serde_json::json!(schedule.start.as_str());
+        config
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TaskSchedule {
+    name: String,
+    start: ScheduleStart,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum EmitterKey {
+    Signal(TypeId, u8),
+    TaskSchedule(String),
 }
 
 #[repr(u8)]
@@ -238,14 +347,80 @@ impl std::fmt::Debug for EmitterSource {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct CronConf {
-    pub expr: String,
+    expr: String,
+    executor: EmitterExecutor,
+    schedule: Option<String>,
+    start: ScheduleStart,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+impl CronConf {
+    /// Creates one cron configuration with the existing signal executor.
+    pub fn new(expr: impl Into<String>) -> Self {
+        Self {
+            expr: expr.into(),
+            executor: EmitterExecutor::Signal,
+            schedule: None,
+            start: ScheduleStart::Next,
+        }
+    }
+
+    /// Selects signal delivery or durable task submission.
+    pub const fn executor(mut self, executor: EmitterExecutor) -> Self {
+        self.executor = executor;
+        self
+    }
+
+    /// Gives a durable task schedule a stable name independent of its handler name.
+    pub fn schedule(mut self, name: impl Into<String>) -> Self {
+        self.schedule = Some(name.into());
+        self
+    }
+
+    /// Selects the initial activation policy for a durable task schedule.
+    pub const fn on_start(mut self, start: ScheduleStart) -> Self {
+        self.start = start;
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PeriodicConf {
-    pub interval: tokio::time::Duration,
+    interval: tokio::time::Duration,
+    executor: EmitterExecutor,
+    schedule: Option<String>,
+    start: ScheduleStart,
+}
+
+impl PeriodicConf {
+    /// Creates one periodic configuration with the existing signal executor.
+    pub const fn new(interval: tokio::time::Duration) -> Self {
+        Self {
+            interval,
+            executor: EmitterExecutor::Signal,
+            schedule: None,
+            start: ScheduleStart::Next,
+        }
+    }
+
+    /// Selects signal delivery or durable task submission.
+    pub const fn executor(mut self, executor: EmitterExecutor) -> Self {
+        self.executor = executor;
+        self
+    }
+
+    /// Gives a durable task schedule a stable name independent of its handler name.
+    pub fn schedule(mut self, name: impl Into<String>) -> Self {
+        self.schedule = Some(name.into());
+        self
+    }
+
+    /// Selects the initial activation policy for a durable task schedule.
+    pub const fn on_start(mut self, start: ScheduleStart) -> Self {
+        self.start = start;
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -322,8 +497,12 @@ where
     Args: callables::FromContext<EmitterContext> + callables::IntoArgSpecs,
 {
     let wrapper = Callable::new(handler);
+    let schedule = task_schedule(&options, wrapper.inspect().name.as_str())?;
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
+        type_name: std::any::type_name::<O>().into(),
+        executor: options.executor,
+        schedule,
         source: EmitterSource::Cron {
             schedule: options.expr.parse::<cron::Schedule>()?,
             handler: wrapper,
@@ -339,9 +518,18 @@ where
         callables::IntoOutput<Error> + callables::IntoReturnPart + EmitsData<O> + Send + 'static,
     Args: callables::FromContext<EmitterContext> + callables::IntoArgSpecs,
 {
+    if options.interval.is_zero() {
+        return Err(EmitterError::InvalidSchedule(
+            "periodic intervals must be greater than zero".into(),
+        ));
+    }
     let wrapper = Callable::new(handler);
+    let schedule = task_schedule_periodic(&options, wrapper.inspect().name.as_str())?;
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
+        type_name: std::any::type_name::<O>().into(),
+        executor: options.executor,
+        schedule,
         source: EmitterSource::Periodic {
             interval: options.interval,
             handler: wrapper,
@@ -363,6 +551,9 @@ where
     let wrapper = Callable::new(handler);
     Ok(Emitter {
         type_id: TypeId::of::<O>(),
+        type_name: std::any::type_name::<O>().into(),
+        executor: EmitterExecutor::Signal,
+        schedule: None,
         source: EmitterSource::PgNotify {
             channel: options.channel,
             handler: wrapper,
@@ -371,9 +562,56 @@ where
     })
 }
 
+fn task_schedule(
+    options: &CronConf,
+    handler_name: &str,
+) -> Result<Option<TaskSchedule>, EmitterError> {
+    if options.executor == EmitterExecutor::Signal {
+        if options.schedule.is_some() || options.start != ScheduleStart::Next {
+            return Err(EmitterError::InvalidSchedule(
+                "schedule and start apply only to task executors".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    schedule_from_parts(options.schedule.as_deref(), handler_name, options.start)
+}
+
+fn task_schedule_periodic(
+    options: &PeriodicConf,
+    handler_name: &str,
+) -> Result<Option<TaskSchedule>, EmitterError> {
+    if options.executor == EmitterExecutor::Signal {
+        if options.schedule.is_some() || options.start != ScheduleStart::Next {
+            return Err(EmitterError::InvalidSchedule(
+                "schedule and start apply only to task executors".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    schedule_from_parts(options.schedule.as_deref(), handler_name, options.start)
+}
+
+fn schedule_from_parts(
+    configured: Option<&str>,
+    handler_name: &str,
+    start: ScheduleStart,
+) -> Result<Option<TaskSchedule>, EmitterError> {
+    let name = configured.unwrap_or(handler_name);
+    if name.is_empty() || name.chars().count() > 191 {
+        return Err(EmitterError::InvalidSchedule(
+            "task schedule names must contain between 1 and 191 characters".into(),
+        ));
+    }
+    Ok(Some(TaskSchedule {
+        name: name.into(),
+        start,
+    }))
+}
+
 #[derive(Clone)]
 pub struct EmitterRegistry {
-    sources: HashMap<(TypeId, u8), Arc<Emitter>>,
+    sources: HashMap<EmitterKey, Arc<Emitter>>,
 }
 
 impl EmitterRegistry {
@@ -416,11 +654,66 @@ impl EmitterRegistry {
             conf,
         }
     }
+
+    /// Resolves every task-targeted emitter against the finalized task registry.
+    pub(crate) fn task_schedules(
+        &self,
+        tasks: &crate::tasks::TaskRegistry,
+    ) -> Result<Vec<crate::tasks::TaskScheduleConf>, EmitterError> {
+        self.sources
+            .values()
+            .filter(|emitter| emitter.executor == EmitterExecutor::Task)
+            .map(|emitter| emitter.task_schedule_conf(tasks))
+            .collect()
+    }
+}
+
+impl Emitter {
+    fn task_schedule_conf(
+        &self,
+        tasks: &crate::tasks::TaskRegistry,
+    ) -> Result<crate::tasks::TaskScheduleConf, EmitterError> {
+        let schedule = self.schedule.as_ref().ok_or_else(|| {
+            EmitterError::InvalidSchedule("task executor is missing schedule metadata".into())
+        })?;
+        let task =
+            tasks
+                .typed_map
+                .get(&self.type_id)
+                .ok_or_else(|| EmitterError::MissingTaskTarget {
+                    schedule: schedule.name.clone(),
+                    type_name: self.type_name.clone(),
+                })?;
+        let (source, expression) = match &self.source {
+            EmitterSource::Cron { schedule, .. } => ("cron", schedule.to_string()),
+            EmitterSource::Periodic { interval, .. } => {
+                let milliseconds = interval.as_millis();
+                if milliseconds == 0 {
+                    return Err(EmitterError::InvalidSchedule(
+                        "task periodic intervals must be at least one millisecond".into(),
+                    ));
+                }
+                ("periodic", milliseconds.to_string())
+            }
+            EmitterSource::PgNotify { .. } => {
+                return Err(EmitterError::InvalidSchedule(
+                    "pgnotify emitters cannot submit durable tasks".into(),
+                ));
+            }
+        };
+        Ok(crate::tasks::TaskScheduleConf {
+            name: schedule.name.clone(),
+            task: task.clone(),
+            source: source.into(),
+            expression,
+            start: schedule.start.as_str().into(),
+        })
+    }
 }
 
 #[derive(Clone)]
 pub struct EmitterEngine {
-    sources: HashMap<(TypeId, u8), Arc<Emitter>>,
+    sources: HashMap<EmitterKey, Arc<Emitter>>,
     conf: EmitterConf,
 }
 
@@ -443,14 +736,25 @@ impl EmitterEngine {
         let mut notify_tasks: HashMap<String, Vec<usize>> = HashMap::new();
         let mut notify_works: Vec<NotifyWork> = Vec::new();
 
-        for ((type_id, _), emitter) in &self.sources {
+        let scheduled = self
+            .sources
+            .values()
+            .filter(|emitter| emitter.executor == EmitterExecutor::Task)
+            .cloned()
+            .collect::<Vec<_>>();
+        scheduled::start(&site, scheduled, handler_limit.clone()).await?;
+
+        for emitter in self.sources.values() {
+            if emitter.executor == EmitterExecutor::Task {
+                continue;
+            }
             match &emitter.source {
                 EmitterSource::Periodic {
                     interval: dur,
                     handler,
                 } => {
                     let work = TimerWork::new(
-                        type_id.clone(),
+                        emitter.type_id,
                         TimerKind::Interval(dur.clone()),
                         handler.clone(),
                     );
@@ -458,7 +762,7 @@ impl EmitterEngine {
                 }
                 EmitterSource::Cron { schedule, handler } => {
                     let work = TimerWork::new(
-                        type_id.clone(),
+                        emitter.type_id,
                         TimerKind::Schedule(schedule.clone()),
                         handler.clone(),
                     );
@@ -472,7 +776,7 @@ impl EmitterEngine {
                     let work_id = notify_works.len();
                     notify_works.push(NotifyWork::new(
                         work_id,
-                        type_id.clone(),
+                        emitter.type_id,
                         channel.clone(),
                         handler.clone(),
                         debounce.clone(),
@@ -1118,13 +1422,13 @@ mod tests {
         Data::new(TestEvent { count })
     }
 
+    async fn consume_event(Data(_event): Data<TestEvent>) {}
+
     #[test]
     fn periodic_registration_records_operation() {
         let emitter = periodic::<_, _, TestEvent>(
             publish_event,
-            PeriodicConf {
-                interval: tokio::time::Duration::from_secs(30),
-            },
+            PeriodicConf::new(tokio::time::Duration::from_secs(30)),
         )
         .unwrap();
         let op = emitter.operation();
@@ -1143,16 +1447,12 @@ mod tests {
     fn duplicate_source_for_data_type_is_rejected() {
         let first = periodic::<_, _, TestEvent>(
             publish_event,
-            PeriodicConf {
-                interval: tokio::time::Duration::from_secs(30),
-            },
+            PeriodicConf::new(tokio::time::Duration::from_secs(30)),
         )
         .unwrap();
         let second = periodic::<_, _, TestEvent>(
             publish_event,
-            PeriodicConf {
-                interval: tokio::time::Duration::from_secs(60),
-            },
+            PeriodicConf::new(tokio::time::Duration::from_secs(60)),
         )
         .unwrap();
 
@@ -1162,6 +1462,84 @@ mod tests {
             registry.register(second),
             Err(EmitterError::AlreadyExists)
         ));
+    }
+
+    /// Verifies named task schedules may share one payload type without colliding.
+    #[test]
+    fn task_schedules_are_unique_by_stable_name() -> Result<(), EmitterError> {
+        let first = periodic::<_, _, TestEvent>(
+            publish_event,
+            PeriodicConf::new(tokio::time::Duration::from_secs(30))
+                .executor(EmitterExecutor::Task)
+                .schedule("first"),
+        )?;
+        let second = periodic::<_, _, TestEvent>(
+            publish_event,
+            PeriodicConf::new(tokio::time::Duration::from_secs(60))
+                .executor(EmitterExecutor::Task)
+                .schedule("second"),
+        )?;
+        let duplicate = periodic::<_, _, TestEvent>(
+            publish_event,
+            PeriodicConf::new(tokio::time::Duration::from_secs(90))
+                .executor(EmitterExecutor::Task)
+                .schedule("first"),
+        )?;
+        let mut registry = EmitterRegistry::new();
+        registry.register(first)?;
+        registry.register(second)?;
+        assert!(matches!(
+            registry.register(duplicate),
+            Err(EmitterError::AlreadyExists)
+        ));
+        Ok(())
+    }
+
+    /// Verifies task-targeted emitters reject an output type without a registered task.
+    #[test]
+    fn task_schedule_requires_registered_task_input() -> Result<(), EmitterError> {
+        let emitter = periodic::<_, _, TestEvent>(
+            publish_event,
+            PeriodicConf::new(tokio::time::Duration::from_secs(30)).executor(EmitterExecutor::Task),
+        )?;
+        let mut registry = EmitterRegistry::new();
+        registry.register(emitter)?;
+        let tasks = crate::tasks::TaskRegistry::new()
+            .finalize(crate::tasks::TaskConf::default())
+            .map_err(|error| EmitterError::InvalidSchedule(error.to_string()))?;
+        assert!(matches!(
+            registry.task_schedules(&tasks),
+            Err(EmitterError::MissingTaskTarget { .. })
+        ));
+        Ok(())
+    }
+
+    /// Verifies an omitted task schedule name uses the registered emitter handler name.
+    #[test]
+    fn task_schedule_defaults_to_emitter_handler_name() -> Result<(), EmitterError> {
+        let emitter = periodic::<_, _, TestEvent>(
+            publish_event,
+            PeriodicConf::new(tokio::time::Duration::from_secs(30)).executor(EmitterExecutor::Task),
+        )?;
+        let mut emitters = EmitterRegistry::new();
+        emitters.register(emitter)?;
+        let mut tasks = crate::tasks::TaskRegistry::new();
+        tasks
+            .register(crate::tasks::RegisteredTask::new(
+                crate::tasks::TaskDefinition::new("consume_event"),
+                consume_event,
+            ))
+            .map_err(|error| EmitterError::InvalidSchedule(error.to_string()))?;
+        let tasks = tasks
+            .finalize(crate::tasks::TaskConf::default())
+            .map_err(|error| EmitterError::InvalidSchedule(error.to_string()))?;
+        let schedules = emitters.task_schedules(&tasks)?;
+        assert!(
+            schedules
+                .first()
+                .is_some_and(|schedule| schedule.name.ends_with("::publish_event"))
+        );
+        Ok(())
     }
 
     fn debounce_work(mode: DebounceMode) -> (NotifyWork, DebounceQueue) {

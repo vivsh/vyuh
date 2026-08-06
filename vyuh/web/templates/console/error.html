@@ -9,13 +9,13 @@
   <link rel="stylesheet" href="{{ stylesheet_path }}">
 </head>
 <body class="vyuh-page console-body">
-  <section class="console-login">
-    <article class="vyuh-card console-login-card">
+  <section class="console-error">
+    <article class="vyuh-card console-error-card">
       <a class="vyuh-brand" href="{{ urls.home }}">
         <img src="{{ assets.logo }}" alt="Vyuh logo">
         <span>vyuh</span>
       </a>
-      <p class="vyuh-kicker console-login-kicker">Console {{ status }}</p>
+      <p class="vyuh-kicker">Console {{ status }}</p>
       <h1 class="vyuh-section-title">{{ title }}</h1>
       <p class="vyuh-copy">{{ message }}</p>
       <a class="vyuh-button vyuh-button-primary" href="{{ urls.home }}">Return to console</a>

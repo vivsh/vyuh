@@ -1,41 +1,30 @@
 use crate::{
     Error, ErrorKind, OperationId, Site,
-    auth::AuthUser,
     console::{
+        access::ConsoleGuard,
         logs::{LogError, limit as log_limit},
         query::{
             LogQuery, OperationQuery, TaskQuery, filter_operations, is_console_operation,
             task_limit_max,
         },
+        schedules::{SchedulePage, ScheduleQuery, page as schedule_page},
         types::{ConfigOut, OperationOut, Page, SessionOut, TaskDetailOut, TaskOut},
     },
-    routes::{Json, Path, Query, Request},
+    routes::{Json, Path, Query},
 };
 use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 
-pub async fn logout(site: Site, _user: AuthUser, request: Request) -> Result<Response, Error> {
-    let (parts, _) = request.into_parts();
-    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
-    let logout = site.console().logout(&parts).await.map_err(Error::other)?;
-    logout.write(&mut response);
-    Ok(response)
-}
-
-pub async fn session(user: AuthUser) -> Json<SessionOut> {
-    Json(SessionOut {
-        subject: user.key.to_string(),
-        roles: user.roles,
-        role_names: Vec::new(),
-    })
+pub async fn session(guard: ConsoleGuard) -> Json<SessionOut> {
+    Json(SessionOut::from(guard.user()))
 }
 
 pub async fn operations(
     site: Site,
     operation_id: OperationId,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Query(query): Query<OperationQuery>,
 ) -> Json<Page<OperationOut>> {
     let conf = &site.conf().console;
@@ -59,7 +48,7 @@ pub async fn operations(
 pub async fn operation_detail(
     site: Site,
     operation_id: OperationId,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Path(id): Path<String>,
 ) -> Result<Json<OperationOut>, Error> {
     let id = id
@@ -80,7 +69,7 @@ fn console_bundle_id(site: &Site, operation_id: OperationId) -> Option<uuid::Uui
 
 pub async fn tasks(
     site: Site,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<crate::routes::Page<TaskOut>>, Error> {
     let conf = &site.conf().console;
@@ -89,10 +78,23 @@ pub async fn tasks(
     Ok(Json(page.map(|record| TaskOut::from(&record))))
 }
 
+/// Returns immutable task schedule definitions with their durable cursors.
+pub async fn schedules(
+    site: Site,
+    _guard: ConsoleGuard,
+    Query(query): Query<ScheduleQuery>,
+) -> Result<Json<SchedulePage>, Error> {
+    let conf = &site.conf().console;
+    schedule_page(&site, &query, conf.page_size_default, conf.page_size_max)
+        .await
+        .map(Json)
+        .map_err(Error::other)
+}
+
 /// Returns one bounded page of configured JSON file logs.
 pub async fn logs(
     site: Site,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Query(query): Query<LogQuery>,
 ) -> Result<Response, Error> {
     let limit = log_limit(
@@ -123,7 +125,7 @@ fn log_error(error: LogError) -> Error {
 
 pub async fn task_detail(
     site: Site,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
     Path(id): Path<String>,
 ) -> Result<Json<TaskDetailOut>, Error> {
     let id = id
@@ -138,18 +140,18 @@ pub async fn task_detail(
     Ok(Json(TaskDetailOut::from(&record)))
 }
 
-pub async fn status(site: Site, _user: AuthUser) -> Json<crate::console::status::StatusOut> {
+pub async fn status(site: Site, _guard: ConsoleGuard) -> Json<crate::console::status::StatusOut> {
     Json(site.console_status())
 }
 
-pub async fn conf(site: Site, _user: AuthUser) -> Json<ConfigOut> {
+pub async fn conf(site: Site, _guard: ConsoleGuard) -> Json<ConfigOut> {
     Json(ConfigOut::from_site(&site))
 }
 
 pub async fn openapi(
     site: Site,
     operation_id: OperationId,
-    _user: AuthUser,
+    _guard: ConsoleGuard,
 ) -> Result<Response, Error> {
     let body = openapi_json(&site, operation_id).map_err(|_| Error::new(ErrorKind::Other))?;
     Ok((

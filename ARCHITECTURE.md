@@ -55,6 +55,9 @@ The `vyuh` crate is organized around these subsystems:
   extractor integration.
 - `signals`, `emitters`, and `channels` provide in-process fanout, scheduled
   or external event sources, and signal-backed client-facing live delivery.
+  Cron and periodic emitters may submit deterministic input through the shared
+  task runtime using a cursor-backed transaction; this is a narrow durable
+  enqueue path, not a second scheduler or workflow runtime.
 - `tasks` provides typed input, value-less durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
   and commits, lane-owned retry/backoff and idempotency-retention policy, local
@@ -199,15 +202,13 @@ the client-facing event type uses the payload schema name.
 6. When console is enabled, Vyuh injects its internal `vyuh/web` asset dir before
    private template and schema asset loading. Later asset directories override
    earlier matching paths; schema assets are parsed into the migration registry
-   without modifying the database. Its private short-lived login and IP-bound
-   cookie JWT providers are appended to a per-site effective `AuthConf` before
-   the one immutable authenticator registry is built; application configuration
-   remains unchanged and the console-only audience prevents cross-use with
-   application routes. `console-token` issues the short credential, and the
-   public console login page exchanges it for the browser cookie. Applications
-   may instead call `site.console().login(user, client_ip)`. Console URL values
-   are immutable and its bounded status cache is mutable state owned by that one
-   built site; no console process-global state or fallback route synthesis is used.
+   without modifying the database. Console uses the application's unchanged
+   immutable authenticator registry and its public console-only audience.
+   `ConsoleAccess` is a synchronous application policy over an optional normal
+   `AuthUser`; no console provider, credential exchange, login route, cookie, or
+   process-global state exists. Debug development access is visibly marked, while
+   enabled non-debug consoles require a policy. Console URL values are immutable
+   and its bounded status cache is mutable state owned by that one built site.
 7. `Site::run` executes one inert command unless it selects `serve`; `serve` and
    direct server startup bind the listener, then start task, emitter, and service
    workers before accepting HTTP work. One task dispatcher rotates configured

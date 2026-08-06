@@ -42,6 +42,7 @@
         <a href="{{ urls.overview }}" {% if active == "overview" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-dashboard"></use></svg><span>Overview</span></a>
         <a href="{{ urls.runtime }}" {% if active == "runtime" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-monitor"></use></svg><span>System Info</span></a>
         <a href="{{ urls.tasks }}" {% if active == "tasks" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-check"></use></svg><span>Tasks</span></a>
+        <a href="{{ urls.schedules }}" {% if active == "schedules" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-clock"></use></svg><span>Schedules</span></a>
         <a href="{{ urls.operations }}" {% if active == "operations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Operations</span></a>
         <a href="{{ urls.logs }}" {% if active == "logs" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-terminal"></use></svg><span>Logs</span></a>
         <a href="{{ urls.openapi }}" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
@@ -56,6 +57,12 @@
       </footer>
     </aside>
     <main class="vyuh-console-page">
+      {% if development_access %}
+      <aside class="vyuh-console-development-notice" role="status">
+        <strong>Development access is open.</strong>
+        <span>Configure ConsoleConf::access(...) before enabling Console outside debug builds.</span>
+      </aside>
+      {% endif %}
       {% block content %}{% endblock %}
       <footer class="vyuh-console-footer">
         <img src="{{ assets.logo }}" alt="">

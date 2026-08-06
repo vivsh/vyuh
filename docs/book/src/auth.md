@@ -11,12 +11,11 @@ password and HTTP Basic token exchange, password plus MFA, and OIDC
 Authorization Code with PKCE. Applications still own user rows, password and
 factor storage, account linking, and every authentication route.
 
-The optional built-in console uses the same JWT provider runtime with private
-console-only login and browser-cookie providers. `vyuh console-token` creates a
-90-second login credential that the console page exchanges for its IP-bound
-cookie. Applications can use `site.console().login_token(user)` for the same
-short-lived handoff, or call `site.console().login(user, client_ip)` directly.
-See [Console](console.md).
+The optional built-in console uses ordinary configured access credentials. Issue
+the public `console::CONSOLE_AUDIENCE` alongside the application audience, then
+use `ConsoleConf::access(...)` to decide which authenticated users may enter.
+Console never adds private providers, credentials, or login routes. See
+[Console](console.md).
 
 ## Audiences and identity
 

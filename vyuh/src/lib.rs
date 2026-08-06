@@ -43,6 +43,7 @@ mod schema_assets;
 pub use callables::{Data, DataValue, Operation, OperationId, OperationKind, Operations};
 pub use commands::CommandError;
 pub use conf::{DeploymentMode, SiteConf};
+pub use console::{CONSOLE_AUDIENCE, ConsoleAccess};
 pub use errors::{
     Error, ErrorCommandContext, ErrorContext, ErrorKind, ErrorRenderContext, ErrorRenderTarget,
     ErrorReport, ErrorRequestContext, ErrorSourceKind, ErrorView, HttpErrorRenderMode,

@@ -7,7 +7,7 @@ use crate::{
     tasks::{TaskError, TaskFilter, TaskRecord, TaskStatus},
 };
 
-use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow};
+use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow};
 
 /// Mool-backed persistent task store selected by Vyuh's database feature.
 #[derive(Clone)]
@@ -48,6 +48,11 @@ impl DbTaskStore {
     /// Returns the singleton task-runtime policy table.
     pub(super) fn runtime_table() -> db::queries::ModelTable<TaskRuntimeRow> {
         <TaskRuntimeRow as db::Model>::table()
+    }
+
+    /// Returns the typed durable emitter schedule cursor table.
+    pub(super) fn schedule_table() -> db::queries::ModelTable<TaskScheduleRow> {
+        <TaskScheduleRow as db::Model>::table()
     }
 
     /// Selects pending work that is ready or running work whose lease expired.

@@ -137,6 +137,24 @@ pub(super) struct TaskRuntimeRow {
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// One durable cursor for a task-targeted cron or periodic emitter.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_schedules")]
+pub(super) struct TaskScheduleRow {
+    #[column(primary_key, type = "varchar(191)")]
+    pub(super) name: String,
+    pub(super) last_submitted_at: chrono::DateTime<chrono::Utc>,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutable durable schedule cursor fields.
+#[derive(Debug, Clone, db::Record)]
+#[table(name = "vyuh_schedules")]
+pub(super) struct TaskSchedulePatch {
+    pub(super) last_submitted_at: chrono::DateTime<chrono::Utc>,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Mutable singleton task-runtime policy fields.
 #[derive(Debug, Clone, db::Record)]
 #[table(name = "vyuh_task_runtime")]

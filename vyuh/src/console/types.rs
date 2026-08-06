@@ -336,6 +336,23 @@ impl From<&TaskInfo> for TaskDetailOut {
     }
 }
 
+impl From<Option<&crate::auth::AuthUser>> for SessionOut {
+    fn from(user: Option<&crate::auth::AuthUser>) -> Self {
+        match user {
+            Some(user) => Self {
+                subject: user.key.to_string(),
+                roles: user.roles,
+                role_names: Vec::new(),
+            },
+            None => Self {
+                subject: "anonymous".to_string(),
+                roles: 0,
+                role_names: Vec::new(),
+            },
+        }
+    }
+}
+
 fn parse_json(value: &str) -> Option<serde_json::Value> {
     serde_json::from_str(value).ok()
 }
@@ -380,8 +397,7 @@ impl ConfigOut {
             console: ConsoleConfigOut {
                 enabled: conf.console.enabled,
                 path: conf.console.path.clone(),
-                cookie_name: conf.console.cookie_name.clone(),
-                secure_cookie: conf.console.secure_cookie,
+                access_mode: conf.console.access_mode().to_string(),
                 page_size_default: conf.console.page_size_default,
                 page_size_max: conf.console.page_size_max,
                 status_cache_ttl_seconds: conf.console.status_cache_ttl_seconds,
@@ -399,6 +415,12 @@ impl ConfigOut {
                     .iter()
                     .cloned()
                     .map(TaskLaneConfigOut::from)
+                    .collect(),
+                schedules: site
+                    .tasks()
+                    .schedule_configs()
+                    .iter()
+                    .map(TaskScheduleConfigOut::from)
                     .collect(),
             },
             emitters: EmitterConfigOut {
@@ -480,8 +502,7 @@ pub struct AuthConfigOut {
 pub struct ConsoleConfigOut {
     pub enabled: bool,
     pub path: String,
-    pub cookie_name: String,
-    pub secure_cookie: bool,
+    pub access_mode: String,
     pub page_size_default: usize,
     pub page_size_max: usize,
     pub status_cache_ttl_seconds: u64,
@@ -496,6 +517,7 @@ pub struct TaskConfigOut {
     pub lease_duration_ms: u64,
     pub readiness: String,
     pub lanes: Vec<TaskLaneConfigOut>,
+    pub schedules: Vec<TaskScheduleConfigOut>,
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {
@@ -520,6 +542,27 @@ impl From<crate::tasks::TaskLaneConf> for TaskLaneConfigOut {
             concurrency: conf.concurrency(),
             rate_limit: conf.rate().map(format_task_rate),
             global_rate_limit: conf.global_rate().map(format_task_rate),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TaskScheduleConfigOut {
+    pub name: String,
+    pub task: String,
+    pub source: String,
+    pub expression: String,
+    pub start: String,
+}
+
+impl From<&crate::tasks::TaskScheduleConf> for TaskScheduleConfigOut {
+    fn from(conf: &crate::tasks::TaskScheduleConf) -> Self {
+        Self {
+            name: conf.name.clone(),
+            task: conf.task.clone(),
+            source: conf.source.clone(),
+            expression: conf.expression.clone(),
+            start: conf.start.clone(),
         }
     }
 }

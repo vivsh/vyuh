@@ -36,10 +36,6 @@ pub struct ServeArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct HealthArgs {}
 
-/// Arguments accepted by the short-lived built-in console login credential command.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ConsoleTokenArgs {}
-
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ShowConfigArgs {
     #[serde(default)]
@@ -151,16 +147,6 @@ pub fn core_registry() -> Result<CommandRegistry, CommandError> {
     )?;
     registry.register(health)?;
 
-    let console_token = super::command::<
-        ConsoleTokenArgs,
-        _,
-        crate::callables::specs::Tuple2<SiteRef, Data<ConsoleTokenArgs>>,
-    >(
-        console_token_command,
-        CommandConf::new("console-token").description("Generate a 90-second console login token."),
-    )?;
-    registry.register(console_token)?;
-
     let show_config = super::command::<
         ShowConfigArgs,
         _,
@@ -259,23 +245,6 @@ fn register_migration_commands(registry: &mut CommandRegistry) -> Result<(), Com
     )?;
     registry.register(inspect)?;
 
-    Ok(())
-}
-
-/// Prints one short-lived credential accepted by the built-in console login page.
-async fn console_token_command(
-    SiteRef(site): SiteRef,
-    _args: Data<ConsoleTokenArgs>,
-) -> Result<(), Error> {
-    if !site.conf().console.enabled {
-        return Err(Error::invalid("console is not enabled"));
-    }
-    let login = site
-        .console()
-        .login_token(crate::auth::AuthUser::new("vyuh-console-command"))
-        .await
-        .map_err(Error::other)?;
-    println!("{}", login.credentials().access());
     Ok(())
 }
 

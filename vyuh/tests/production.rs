@@ -10,7 +10,6 @@ use vyuh::{
     Site, SiteConf,
     auth::{AuthConf, AuthProvider, CookieConf, Jwt, TokenConf, TokenProvider},
     bundles,
-    console::ConsoleConf,
     middlewares::{CorsConf, HttpConf, TimeoutConf},
     routes::{BodyBytes, Html, Json},
     testing::TestSite,
@@ -156,7 +155,6 @@ fn production_profile_rejects_permissive_cors_and_insecure_cookies() {
             },
             ..HttpConf::production()
         })
-        .console(ConsoleConf::production().enabled(true).secure_cookie(false))
         .auth(
             AuthConf::empty().provider(
                 AuthProvider::new("unsafe-access-cookie"),
@@ -171,7 +169,6 @@ fn production_profile_rejects_permissive_cors_and_insecure_cookies() {
         .expect_err("unsafe production settings must be rejected");
     let message = error.to_string();
     assert!(message.contains("http.cors.permissive"));
-    assert!(message.contains("console.secure_cookie"));
     assert!(message.contains("Secure"));
 }
 

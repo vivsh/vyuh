@@ -41,9 +41,7 @@ async fn test_periodic(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let site = create_site(pool).await;
     let emitter = emitters::periodic(
         move |emitters::IterCount(_it): emitters::IterCount| handler(counter_clone.clone()),
-        emitters::PeriodicConf {
-            interval: Duration::from_millis(100),
-        },
+        emitters::PeriodicConf::new(Duration::from_millis(100)),
     )?;
 
     let mut registry = EmitterRegistry::new();
@@ -283,9 +281,7 @@ async fn test_cron(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let site = create_site(pool).await;
     let emitter = emitters::cron(
         move || handler(counter_clone.clone()),
-        emitters::CronConf {
-            expr: "* * * * * *".into(), // Every second
-        },
+        emitters::CronConf::new("* * * * * *"), // Every second
     )?;
 
     let mut registry = EmitterRegistry::new();
@@ -342,9 +338,7 @@ async fn test_pgnotify_debounce_still_postpones_periodic_fallback(
                 Data::new(NotifyData)
             }
         },
-        emitters::PeriodicConf {
-            interval: Duration::from_millis(200),
-        },
+        emitters::PeriodicConf::new(Duration::from_millis(200)),
     )?;
     let pgnotify = emitters::pgnotify(
         move |_payload: Data<String>| {

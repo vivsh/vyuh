@@ -26,7 +26,9 @@ Use tasks when work needs one or more of these properties:
 - Controlled background concurrency.
 
 Use [signals](signals.md) for in-process notifications. Use
-[emitters](emitters.md) to produce scheduled or external events. Use
+[emitters](emitters.md) to produce scheduled or external events; cron and
+periodic emitters can atomically enqueue a registered task when scheduled
+creation must survive replica races and restarts. Use
 [services](services.md) for site-lifetime clients, caches, and workers.
 
 ## Mental Model
@@ -364,7 +366,10 @@ entries and returns `Ignored` for conflicts. Retention is lane policy: without
 remains unavailable from terminal completion until the configured duration.
 
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
-`TaskState::sleep`, and recurring creation belongs in emitters.
+`TaskState::sleep`, and recurring creation belongs in emitters. A
+task-targeted cron or periodic emitter stores one durable `vyuh_schedules`
+cursor and coalesces missed occurrences after restart; it does not turn tasks
+into a general workflow or recurring-service abstraction.
 
 ## Lanes, Throughput, And Rate Limits
 

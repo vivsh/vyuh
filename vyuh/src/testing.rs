@@ -488,6 +488,11 @@ pub struct TestResponse {
 }
 
 impl TestResponse {
+    /// Returns all response headers, including every repeated `Set-Cookie` value.
+    pub fn headers(&self) -> &axum::http::HeaderMap {
+        self.resp.headers()
+    }
+
     pub fn status(&self) -> axum::http::StatusCode {
         self.resp.status()
     }

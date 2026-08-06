@@ -21,6 +21,18 @@ struct PeriodicConfMeta {
     /// Duration in milliseconds
     #[darling(default)]
     millis: Option<u64>,
+
+    /// Target executor: `signal` or `task`.
+    #[darling(default)]
+    executor: Option<String>,
+
+    /// Stable durable task schedule name.
+    #[darling(default)]
+    schedule: Option<String>,
+
+    /// Durable task first-start policy: `next` or `immediately`.
+    #[darling(default)]
+    start: Option<String>,
 }
 
 /// Entry point for #[periodic] macro.
@@ -56,9 +68,40 @@ fn build_periodic_conf(
         }
     };
 
+    let executor = executor_tokens(conf.executor.as_deref())?;
+    let schedule = conf
+        .schedule
+        .as_ref()
+        .map(|value| quote! { .schedule(#value) });
+    let start = start_tokens(conf.start.as_deref())?;
     Ok(quote! {
-        ::vyuh::emitters::PeriodicConf {
-            interval: #interval,
-        }
+        ::vyuh::emitters::PeriodicConf::new(#interval)
+            .executor(#executor)
+            #schedule
+            #start
     })
+}
+
+/// Produces the public executor value from the concise macro spelling.
+fn executor_tokens(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
+    match value.unwrap_or("signal") {
+        "signal" => Ok(quote! { ::vyuh::emitters::EmitterExecutor::Signal }),
+        "task" => Ok(quote! { ::vyuh::emitters::EmitterExecutor::Task }),
+        value => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported periodic executor '{value}'; use 'signal' or 'task'"),
+        )),
+    }
+}
+
+/// Produces the durable-task start policy while retaining signal compatibility.
+fn start_tokens(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
+    match value.unwrap_or("next") {
+        "next" => Ok(quote! { .on_start(::vyuh::emitters::ScheduleStart::Next) }),
+        "immediately" => Ok(quote! { .on_start(::vyuh::emitters::ScheduleStart::Immediately) }),
+        value => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("unsupported periodic start policy '{value}'; use 'next' or 'immediately'"),
+        )),
+    }
 }

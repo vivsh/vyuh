@@ -1,4 +1,4 @@
-use crate::auth::{AuthConf, Authenticator};
+use crate::auth::Authenticator;
 use crate::bundles::{Bundle, IntoBundle};
 use crate::callables::{self, DataBox};
 use crate::channels::{Channels, LocalChannelBackend};
@@ -19,7 +19,7 @@ use axum::body::{self, Body};
 use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use chrono_tz::Tz;
 use std::net::{SocketAddr, ToSocketAddrs as _};
@@ -47,9 +47,6 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     else {
         return response;
     };
-    if let Some(location) = site.console_login_redirect(&method, &uri, &report) {
-        return Redirect::to(&location).into_response();
-    }
     let allow = method_error_allow(&response, &report);
     let ctx = crate::errors::ErrorContext {
         method,
@@ -73,29 +70,6 @@ fn method_error_allow(
     (report.code == "method_not_allowed")
         .then(|| response.headers().get(axum::http::header::ALLOW).cloned())
         .flatten()
-}
-
-fn console_cookie(conf: &crate::console::ConsoleConf) -> crate::auth::CookieConf {
-    crate::auth::CookieConf::new(&conf.cookie_name)
-        .path(&conf.path)
-        .secure(conf.secure_cookie)
-}
-
-fn effective_auth(conf: &SiteConf) -> AuthConf {
-    if conf.console.enabled {
-        conf.auth
-            .clone()
-            .provider(
-                crate::console::auth::CONSOLE_LOGIN,
-                crate::console::auth::login_provider(),
-            )
-            .provider(
-                crate::console::auth::CONSOLE_TOKEN,
-                crate::console::auth::token_provider(console_cookie(&conf.console)),
-            )
-    } else {
-        conf.auth.clone()
-    }
 }
 
 fn console_runtime(
@@ -412,9 +386,8 @@ impl SiteBuilder {
 
         template_engine.inject_templates(&bundle)?;
 
-        let auth_conf = effective_auth(&self.conf);
         let authenticator = Authenticator::new(
-            &auth_conf,
+            &self.conf.auth,
             &self.conf.secret_key,
             &self.conf.secret_key_fallbacks,
             &project_dir,
@@ -507,7 +480,9 @@ impl SiteBuilder {
 
         let task_registry = Arc::new(bundle.tasks.clone().finalize(task_config)?);
 
-        let task_dispatcher = task_registry.dispatcher(Arc::new(task_store));
+        let task_schedules = bundle.emitters.task_schedules(&task_registry)?;
+
+        let task_dispatcher = task_registry.dispatcher(Arc::new(task_store), task_schedules);
 
         let signal_engine = bundle.signals.engine();
 
@@ -878,6 +853,33 @@ impl Site {
         Ok(())
     }
 
+    /// Reads framework-owned task schedule state from the shared durable runtime.
+    pub(crate) async fn task_schedule_snapshot(
+        &self,
+        names: &[String],
+    ) -> Result<crate::tasks::TaskScheduleSnapshot, SiteError> {
+        self.inner
+            .task_engine
+            .schedule_snapshot(names)
+            .await
+            .map_err(SiteError::from)
+    }
+
+    /// Submits one framework-owned scheduled task through the shared task runtime.
+    pub(crate) async fn submit_scheduled_task(
+        &self,
+        schedule: &str,
+        occurrence: chrono::DateTime<chrono::Utc>,
+        payload: DataBox,
+    ) -> Result<(), SiteError> {
+        self.inner
+            .task_engine
+            .submit_scheduled(schedule, occurrence, payload)
+            .await
+            .map(|_| ())
+            .map_err(SiteError::from)
+    }
+
     pub(crate) async fn consume_notify(
         &self,
         topics: &[String],
@@ -948,11 +950,6 @@ impl Site {
         &self.inner.authenticator
     }
 
-    /// Returns the console authentication facade for manual console sign-in and sign-out.
-    pub fn console(&self) -> crate::console::Console<'_> {
-        crate::console::Console::new(self)
-    }
-
     /// Return the configured timezone, defaulting to UTC.
     /// Use this for application date/time rendering and operational timestamps.
     pub fn timezone(&self) -> Tz {
@@ -992,32 +989,6 @@ impl Site {
             .console_runtime
             .as_ref()
             .map(crate::console::ConsoleRuntime::logs)
-    }
-
-    /// Returns a login redirect when an unauthenticated request targets a console page.
-    pub(crate) fn console_login_redirect(
-        &self,
-        method: &Method,
-        uri: &axum::http::Uri,
-        report: &crate::errors::ErrorReport,
-    ) -> Option<String> {
-        self.inner.console_runtime.as_ref()?.login_redirect(
-            crate::routes::Routes::new(&self.inner.route_registry),
-            method,
-            uri,
-            report,
-        )
-    }
-
-    /// Returns a validated console page after a successful token login.
-    pub(crate) fn console_destination(&self, next: Option<&str>) -> String {
-        self.inner
-            .console_runtime
-            .as_ref()
-            .map(|runtime| {
-                runtime.destination(crate::routes::Routes::new(&self.inner.route_registry), next)
-            })
-            .unwrap_or_else(|| "/".to_string())
     }
 
     /// Returns the runtime observability registry for framework-owned routes.
@@ -1577,9 +1548,7 @@ mod tests {
             bundles::signal::<RuntimeSignal, _, _>(count_runtime_signal, SignalConf::default()),
             bundles::periodic::<RuntimeSignal, _, _>(
                 emit_runtime_signal,
-                PeriodicConf {
-                    interval: Duration::from_millis(1),
-                },
+                PeriodicConf::new(Duration::from_millis(1)),
             ),
             bundles::task::<RuntimeTask, _, _>(
                 count_runtime_task,

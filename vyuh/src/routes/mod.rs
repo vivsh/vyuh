@@ -38,7 +38,6 @@ pub use crate::Data;
 pub use crate::db::Page;
 pub use crate::validation::Valid;
 pub use client_ip::ClientIp;
-pub(crate) use client_ip::resolve as resolve_client_ip;
 pub use methods::{MethodIter, Methods};
 pub use middleware::{Middleware, RawLayer, layer_from};
 pub use multipart::{JsonPart, MultipartForm, MultipartMap, UploadedFile, UploadedText};

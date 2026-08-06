@@ -126,6 +126,7 @@ pub struct AbstractTaskRunner<S: AbstractTaskStore + Send + Sync + 'static> {
     store: Arc<S>,
     metrics: Arc<super::TaskMetrics>,
     health: super::TaskHealth,
+    schedules: Arc<[super::TaskScheduleConf]>,
 }
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> std::fmt::Debug for AbstractTaskRunner<S> {
@@ -177,6 +178,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
             store: dispatcher.store.clone(),
             metrics: dispatcher.metrics.clone(),
             health: dispatcher.health.clone(),
+            schedules: dispatcher.schedules.clone(),
         })
     }
 
@@ -608,6 +610,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
             handlers: self.registry.tasks.keys().cloned().collect(),
             lanes: self.lanes.iter().map(|lane| lane.conf.clone()).collect(),
             idempotency: self.registry.idempotency_conf()?,
+            schedules: self.schedules.to_vec(),
         })
     }
 }
@@ -767,7 +770,7 @@ mod tests {
                     .global_rate_limit(TaskRate::per_minute(1).burst(1)),
             );
         let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
-        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(2)));
+        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(2)), Vec::new());
         AbstractTaskRunner::new(dispatcher)
     }
 
@@ -777,7 +780,7 @@ mod tests {
             .batch_size(4)
             .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 4));
         let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
-        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(4)));
+        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(4)), Vec::new());
         AbstractTaskRunner::new(dispatcher)
     }
 
@@ -871,7 +874,7 @@ mod tests {
             TaskLaneConf::new(DEFAULT_TASK_LANE, 1).rate_limit(TaskRate::per_minute(1).burst(1)),
         );
         let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
-        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(1)));
+        let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(1)), Vec::new());
         let mut runner = AbstractTaskRunner::new(dispatcher)?;
         let now = tokio::time::Instant::now();
         let lane = runner

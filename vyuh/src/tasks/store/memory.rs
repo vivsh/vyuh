@@ -3,9 +3,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::tasks::{
-    AbstractTaskStore, IdempotencyRetention, LaneClaim, LanePoll, TaskCommit, TaskError,
-    TaskFilter, TaskId, TaskLane, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry,
-    TaskStatus, TaskStoreConf, TaskTick, TaskWrite,
+    AbstractTaskStore, IdempotencyRetention, LaneClaim, LanePoll, ScheduledTaskWrite, TaskCommit,
+    TaskError, TaskFilter, TaskId, TaskLane, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord,
+    TaskRetry, TaskScheduleSnapshot, TaskStatus, TaskStoreConf, TaskTick, TaskWrite,
 };
 
 #[derive(Clone)]
@@ -20,6 +20,7 @@ struct MemoryState {
     conf: Option<TaskStoreConf>,
     fingerprint: Option<String>,
     rates: HashMap<String, RateBucket>,
+    schedules: HashMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 struct ClaimReservation {
@@ -163,6 +164,46 @@ impl AbstractTaskStore for MemoryTaskStore {
         }
         state.tasks.extend(staged);
         Ok(receipts)
+    }
+
+    async fn schedule_snapshot(&self, names: &[String]) -> Result<TaskScheduleSnapshot, TaskError> {
+        let state = self.state.lock().await;
+        Ok(TaskScheduleSnapshot {
+            now: chrono::Utc::now(),
+            cursors: names
+                .iter()
+                .filter_map(|name| {
+                    state
+                        .schedules
+                        .get(name)
+                        .copied()
+                        .map(|time| (name.clone(), time))
+                })
+                .collect(),
+        })
+    }
+
+    async fn store_scheduled(
+        &self,
+        scheduled: ScheduledTaskWrite,
+    ) -> Result<Option<TaskReceipt>, TaskError> {
+        let mut state = self.state.lock().await;
+        if state
+            .schedules
+            .get(&scheduled.name)
+            .is_some_and(|last| *last >= scheduled.occurrence)
+        {
+            return Ok(None);
+        }
+        validate_write_lanes(&state, std::slice::from_ref(&scheduled.write))?;
+        let now = chrono::Utc::now();
+        let mut staged = Vec::with_capacity(1);
+        let receipt = stage_write(&state.tasks, &mut staged, scheduled.write, now)?;
+        state.tasks.extend(staged);
+        state
+            .schedules
+            .insert(scheduled.name, now.max(scheduled.occurrence));
+        Ok(Some(receipt))
     }
 
     async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {

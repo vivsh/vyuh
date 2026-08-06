@@ -2,15 +2,17 @@
 
 Emitters are typed in-process event sources. They run on the site runtime,
 produce `Data<T>` values, and dispatch that data to another subsystem.
-For v0, the public target is signals.
+The default target is signals. Cron and periodic emitters can instead submit
+their produced data through the existing durable task runtime.
 
 Emitters start only when Vyuh serves the site. Commands may inspect and use the
 same site, but they never start cron, periodic, or PgNotify sources implicitly.
 
-Emitters are not durable queues. Missed cron or periodic ticks are not replayed,
-Postgres notifications are not persisted by Vyuh, and handler failures are
-logged rather than retried. Use tasks when work must be durable or observable as
-a unit of background execution.
+Signal emitters are not durable queues. Missed cron or periodic ticks are not
+replayed, Postgres notifications are not persisted by Vyuh, and handler
+failures are logged rather than retried. Task-targeted cron and periodic
+emitters use one durable schedule cursor and submit a task atomically; they
+perform one coalesced recovery submission after a restart.
 
 Use emitters to turn schedules or external notifications into typed `Data<T>`.
 Do not use emitters as durable schedulers, queues, or client-facing pub/sub.
@@ -55,9 +57,7 @@ The equivalent direct registration is:
 ```rust
 let part = bundles::periodic::<Heartbeat, _, _>(
     publish_heartbeat,
-    emitters::PeriodicConf {
-        interval: std::time::Duration::from_secs(30),
-    },
+    emitters::PeriodicConf::new(std::time::Duration::from_secs(30)),
 );
 ```
 
@@ -99,9 +99,7 @@ Direct registration uses `CronConf`:
 ```rust
 let part = bundles::cron::<DailyTick, _, _>(
     publish_daily,
-    emitters::CronConf {
-        expr: "0 0 0 * * *".to_string(),
-    },
+    emitters::CronConf::new("0 0 0 * * *"),
 );
 ```
 
@@ -125,14 +123,54 @@ Direct registration uses `PeriodicConf`:
 ```rust
 let part = bundles::periodic::<QueueTick, _, _>(
     publish_queue_tick,
-    emitters::PeriodicConf {
-        interval: std::time::Duration::from_millis(1500),
-    },
+    emitters::PeriodicConf::new(std::time::Duration::from_millis(1500)),
 );
 ```
 
 Periodic emitters are timers, not queues. Slow handlers and process shutdown can
 delay or lose ticks.
+
+## Durable Task Execution
+
+Cron and periodic producers can submit their `Data<T>` to a registered task
+whose input type is `T`. The producer must only construct deterministic input:
+the durable task handler owns every side effect.
+
+```rust
+#[bundles::task]
+async fn rebuild(Data(input): Data<RebuildIndex>) -> Result<(), Error> {
+    rebuild_search_index(input).await
+}
+
+#[bundles::cron(
+    expr = "0 0 2 * * *",
+    executor = "task",
+    schedule = "nightly-index-v1"
+)]
+async fn nightly_index() -> Data<RebuildIndex> {
+    Data::new(RebuildIndex)
+}
+```
+
+The direct form is identical in capability:
+
+```rust
+let part = bundles::periodic::<RebuildIndex, _, _>(
+    refresh_index,
+    emitters::PeriodicConf::new(std::time::Duration::from_secs(300))
+        .executor(emitters::EmitterExecutor::Task)
+        .on_start(emitters::ScheduleStart::Immediately),
+);
+```
+
+Task schedules wait for the next normal occurrence by default. Use
+`ScheduleStart::Immediately` only when a bootstrap submission is required.
+Periodic task schedules align to UTC epoch boundaries. A task schedule stores a
+single cursor in `vyuh_schedules`; replicas may produce the same input, but only
+one transaction advances the cursor and accepts the task. On restart, Vyuh
+coalesces missed source occurrences into one catch-up task instead of replaying
+every missed slot. A produced payload survives transient store failures in the
+local runtime and is retried with bounded backoff.
 
 ## PgNotify
 
@@ -226,9 +264,11 @@ Emitters are registered as `BundlePart` values. Macro emitters and direct
 `bundles::cron`, `bundles::periodic`, or `bundles::pgnotify` registration
 produce the same kind of bundle part.
 
-Emitter registrations are unique by emitted data type and emitter source kind.
+Signal emitter registrations are unique by emitted data type and emitter source kind.
 Registering two periodic emitters for the same data type, for example,
-is rejected during bundle validation.
+is rejected during bundle validation. Task-targeted schedules are instead unique
+by their stable schedule name, so multiple schedules may submit the same task
+input type.
 
 See [Bundles](bundles.md) for `BundlePart`, `bundle!`, cross-module bundle
 organization, validation, composition behavior, and the general patch API.

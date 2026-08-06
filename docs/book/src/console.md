@@ -2,8 +2,8 @@
 
 Vyuh console is a built-in operational UI and JSON API for inspection. It is
 enabled by default in debug builds at `/console`, disabled by default in release
-builds, isolated from application credentials by a console-only audience and
-cookie, and read-only in this pass.
+builds, protected by an application-owned access policy, and read-only in this
+pass.
 
 Use it for inspecting registered operations, task records, runtime status,
 OpenAPI for application routes, and redacted runtime configuration. Do not use
@@ -15,11 +15,10 @@ it as an application admin framework or a command/task execution surface.
   `ConsoleConf.enabled` is true.
 - `ConsoleConf::default()` enables the console in debug builds and disables it
   in release builds.
-- Console auth is two private JWT providers built through the same Vyuh
-  authentication runtime and provider-registration path as application providers.
-- Console credentials use a console-only audience and cookie selector. Normal
-  app credentials do not grant console access, and console credentials cannot
-  satisfy application audiences.
+- Console uses normal application access credentials carrying the public
+  `CONSOLE_AUDIENCE`; it never installs private providers or browser cookies.
+- A synchronous application-owned `ConsoleAccess` policy decides whether the
+  authenticated user, or deliberately no user, may inspect Console.
 - The HTML UI is server-rendered with Minijinja and progressively enhanced with
   HTMX. JSON APIs remain available under `/api`.
 
@@ -29,11 +28,26 @@ Configuration lives on `SiteConf`:
 
 ```rust
 use vyuh::prelude::*;
-use vyuh::console::ConsoleConf;
+use vyuh::{
+    Site,
+    auth::AuthUser,
+    console::{CONSOLE_AUDIENCE, ConsoleAccess, ConsoleConf},
+};
+
+const ADMIN_MASK: u64 = 1;
+
+struct AdminConsole;
+
+impl ConsoleAccess for AdminConsole {
+    fn allows(&self, _site: &Site, user: Option<&AuthUser>) -> bool {
+        user.is_some_and(|user| user.roles & ADMIN_MASK != 0)
+    }
+}
 
 let conf = SiteConf::default().console(
     ConsoleConf::default()
         .enabled(true)
+        .access(AdminConsole)
         .path("/console"),
 );
 ```
@@ -44,56 +58,26 @@ Defaults:
 | --- | --- |
 | `enabled` | `cfg!(debug_assertions)` |
 | `path` | `/console` |
-| `cookie_name` | `vyuh_console` |
-| `secure_cookie` | `false` |
+| `access` | debug development mode; required in non-debug builds |
 | `page_size_default` | `50` |
 | `page_size_max` | `250` |
 | `status_cache_ttl_seconds` | `5` |
 
-Run `vyuh console-token` to print a short-lived login credential, then open the
-console login page. The credential is accepted only at `GET`/`POST /login` and
-is exchanged for the normal console cookie. Browser requests for console HTML
-pages redirect there on `401`; console JSON APIs keep their normal JSON `401`.
-The login credential is stateless and can be reused until it expires.
-
-Applications can create the same short-lived credential when they need to hand
-off a user to the console:
+Issue a regular application credential with the console audience whenever the
+authenticated user is allowed to inspect Console:
 
 ```rust
-let login = site.console().login_token(user).await?;
-let token = login.credentials().access();
+site.auth().login(user, &[API, CONSOLE_AUDIENCE]).await?;
 ```
 
-The login page accepts that value in its form or as `?token=...` for a
-short-lived handoff URL. Query credentials can appear in browser history, proxy
-logs, and referrers, so use the form when that exposure is unacceptable.
+The configured provider controls delivery, rotation, validation, CSRF, and
+logout exactly as it does for application routes. Console never mints, exchanges,
+or clears credentials. Applications own sign-in and sign-out routes.
 
-Applications may instead decide who may access the console through their own
-authentication flow, then write the standard login response directly:
-
-```rust
-async fn open_console(
-    site: Site,
-    user: AuthUser,
-    client_ip: ClientIp,
-) -> Result<Response, Error> {
-    let login = site.console().login(user, client_ip).await?;
-    let mut response = Redirect::to("/console").into_response();
-    login.write(&mut response);
-    Ok(response)
-}
-```
-
-The private login provider uses the site-secret JWT key ring, an
-`x-vyuh-console-login` header, and a 90-second access token. The private browser
-provider uses an HTTP-only cookie valid for 90 minutes and the resolved client
-IP as credential binding. It binds to a single valid `X-Forwarded-For` address
-when supplied, otherwise to the TCP peer address. Neither provider has a refresh
-credential.
-
-Login also creates a readable CSRF cookie. Unsafe console API requests must copy
-that value into `X-CSRF-Token`; the bundled console JavaScript does this
-automatically.
+In debug builds an enabled Console without `.access(...)` deliberately runs in
+development mode. It accepts no credential, displays a persistent warning, and
+must not be exposed publicly. In non-debug builds an enabled Console without a
+policy fails site construction.
 
 ## Endpoints
 
@@ -101,7 +85,6 @@ All endpoints are mounted under `ConsoleConf.path`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET`, `POST` | `/login` | render or submit the console token login exchange |
 | `GET` | `/` | canonical status overview page |
 | `GET` | `/overview` | status overview page |
 | `GET` | `/runtime` | formatted site, process, and system runtime page |
@@ -109,14 +92,15 @@ All endpoints are mounted under `ConsoleConf.path`.
 | `GET` | `/operations/{id}` | operation detail page |
 | `GET` | `/tasks` | task listing page with filters and in-page inspector |
 | `GET` | `/tasks/{id}` | task detail page |
+| `GET` | `/schedules` | durable task schedule listing with in-page inspector |
 | `GET` | `/openapi` | OpenAPI page for non-console routes |
 | `GET` | `/conf` | redacted runtime configuration page |
-| `POST` | `/api/logout` | clear console cookie |
 | `GET` | `/api/session` | inspect the current authenticated console identity |
 | `GET` | `/api/operations` | list/search operation metadata |
 | `GET` | `/api/operations/{id}` | inspect one operation |
 | `GET` | `/api/tasks` | list task records |
 | `GET` | `/api/tasks/{id}` | inspect one task record |
+| `GET` | `/api/schedules` | list task-targeted schedule definitions and cursors |
 | `GET` | `/api/logs` | query bounded configured file logs |
 | `GET` | `/api/status` | combined site, process, system, and safe task-runtime status |
 | `GET` | `/api/openapi` | OpenAPI JSON for non-console routes |
@@ -209,6 +193,28 @@ input/state/resume fields when they parse as JSON.
 The HTML task page exposes search, status, name, lane, idempotency-key, and date-range
 filters and shows selected task details without leaving the list.
 
+## Schedules
+
+The **Schedules** page shows task-targeted cron and periodic emitters. It is a
+read-only view of the immutable schedule definition and its durable
+`last_submitted_at` cursor:
+
+```text
+/console/api/schedules?source=cron&lane=exports&page=1&per_page=25
+```
+
+It supports `source` (`cron` or `periodic`), `task`, `lane`, text `q`,
+`awaiting_first_run=true`, and one-indexed `page`/`per_page` filters. Each entry shows its target task,
+effective lane, first-start policy, last durable submission, and a computed
+next occurrence. An `Immediately` schedule without a cursor shows its pending
+first submission instead of a later normal slot.
+
+The next occurrence is advisory; it is calculated from the immutable schedule
+definition and cursor, not a second mutable scheduler state. The page does not
+show signal-only emitters, task execution history, or mutation controls. A
+restart coalesces missed task intervals into one catch-up submission, as
+described in [Emitters](emitters.md).
+
 ## Logs
 
 The **Logs** page reads only configured `LogSink::File` JSON logs. It does not
@@ -278,7 +284,7 @@ database URLs.
 ## Current Limitations
 
 - Console is read-only.
-- Console authentication is stateless. Login tokens can be reused during their
-  90-second lifetime; single-use tokens require durable replay state.
+- Console access uses the application's credential lifetime and logout policy.
+  The framework does not provide a console-specific token or sign-out flow.
 - Pagination uses offset cursors in this pass.
 - Task listing is inspection-only and does not affect task leasing or retries.

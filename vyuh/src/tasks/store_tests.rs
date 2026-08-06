@@ -5,8 +5,8 @@ use vyuh::tasks::{
     DEFAULT_TASK_LANE, TaskId, TaskLane, TaskLaneConf, TaskRate, TaskReceipt, TaskRetry,
     TaskStatus,
     store::{
-        AbstractTaskStore, LaneClaim, MemoryTaskStore, TaskCommit, TaskIdempotencyConf,
-        TaskOutcome, TaskRecord, TaskStoreConf, TaskWrite,
+        AbstractTaskStore, LaneClaim, MemoryTaskStore, ScheduledTaskWrite, TaskCommit,
+        TaskIdempotencyConf, TaskOutcome, TaskRecord, TaskScheduleConf, TaskStoreConf, TaskWrite,
     },
 };
 
@@ -95,6 +95,62 @@ fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
                 retention,
             })
             .collect(),
+        schedules: Vec::new(),
+    }
+}
+
+/// Verifies one memory schedule cursor suppresses duplicate source occurrences.
+#[tokio::test]
+async fn scheduled_submission_advances_cursor_atomically() -> Result<(), vyuh::tasks::TaskError> {
+    let store = MemoryTaskStore::new(8);
+    store
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
+        .await?;
+    let occurrence = chrono::Utc::now();
+    let first = store
+        .store_scheduled(ScheduledTaskWrite {
+            name: "nightly".into(),
+            occurrence,
+            write: write(task_record("email", EMAIL)),
+        })
+        .await?;
+    assert!(matches!(first, Some(TaskReceipt::Queued(_))));
+    let duplicate = store
+        .store_scheduled(ScheduledTaskWrite {
+            name: "nightly".into(),
+            occurrence,
+            write: write(task_record("email", EMAIL)),
+        })
+        .await?;
+    assert!(duplicate.is_none());
+    assert_eq!(store.task_count().await, 1);
+    Ok(())
+}
+
+/// Verifies mixed workers reject a changed durable schedule definition.
+#[tokio::test]
+async fn schedule_policy_changes_are_not_store_compatible() -> Result<(), vyuh::tasks::TaskError> {
+    let store = MemoryTaskStore::new(8);
+    let conf = schedule_conf("300000");
+    store.initialize(conf).await?;
+    assert!(matches!(
+        store.initialize(schedule_conf("600000")).await,
+        Err(vyuh::tasks::TaskError::InvalidConfig(_))
+    ));
+    Ok(())
+}
+
+/// Adds one normalized task-targeted periodic schedule to the standard fixture.
+fn schedule_conf(expression: &str) -> TaskStoreConf {
+    TaskStoreConf {
+        schedules: vec![TaskScheduleConf {
+            name: "refresh-cache".into(),
+            task: "email".into(),
+            source: "periodic".into(),
+            expression: expression.into(),
+            start: "next".into(),
+        }],
+        ..store_conf(TestRetention::ACTIVE_ONLY)
     }
 }
 

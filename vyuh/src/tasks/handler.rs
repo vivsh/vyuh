@@ -422,6 +422,26 @@ impl RegisteredTask {
         self.policy.key_for(input)
     }
 
+    /// Resolves an idempotency key from a verified type-erased emitter payload.
+    pub(crate) fn idempotency_key_box(
+        &self,
+        input: &dyn std::any::Any,
+    ) -> Result<Option<String>, TaskError> {
+        self.policy.key_for_box(input)
+    }
+
+    /// Verifies that one type-erased payload is the input accepted by this task.
+    pub(crate) fn validate_box(&self, input: &callables::DataBox) -> Result<(), TaskError> {
+        if self.type_id == input.payload_type_id() {
+            Ok(())
+        } else {
+            Err(TaskError::TypeMismatch(
+                self.type_name.clone(),
+                "emitter payload".into(),
+            ))
+        }
+    }
+
     pub fn validate_object<T: 'static>(&self, _obj: &T) -> Result<(), TaskError> {
         if self.type_id != TypeId::of::<T>() {
             return Err(TaskError::TypeMismatch(
@@ -650,6 +670,7 @@ impl TaskRegistry {
     pub(crate) fn dispatcher<S: crate::tasks::store::AbstractTaskStore + Send + Sync + 'static>(
         self: Arc<Self>,
         store: Arc<S>,
+        schedules: Vec<super::store::TaskScheduleConf>,
     ) -> TaskDispatcher<S> {
         let metrics = Arc::new(super::TaskMetrics::new(
             self.tasks.keys().cloned(),
@@ -662,6 +683,7 @@ impl TaskRegistry {
             initialized: Arc::new(tokio::sync::OnceCell::new()),
             metrics,
             health: super::TaskHealth::new(self.config.readiness_policy(), !self.is_empty()),
+            schedules: schedules.into(),
         }
     }
 
@@ -828,7 +850,7 @@ mod tests {
         ))?;
 
         let store = Arc::new(MemoryTaskStore::new(10));
-        let dispatcher = Arc::new(registry).dispatcher(store.clone());
+        let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
         let task_id = dispatcher.submit(DirectJob { id: 42 }).await?.id();
         let claimed = store
             .claim_tasks(
@@ -870,7 +892,8 @@ mod tests {
             TaskDefinition::new("direct_job"),
             direct_job,
         ))?;
-        let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)));
+        let dispatcher =
+            Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
         let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
         assert!(matches!(
             dispatcher.submit_with(DirectJob { id: 1 }, oversized).await,
@@ -890,7 +913,8 @@ mod tests {
                 })),
             direct_job,
         ))?;
-        let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)));
+        let dispatcher =
+            Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
         let receipts = dispatcher
             .submit_many_with(
                 [DirectJob { id: 1 }, DirectJob { id: 1 }],
@@ -948,7 +972,7 @@ mod tests {
             direct_job,
         ))?;
         let store = Arc::new(MemoryTaskStore::new(10));
-        let dispatcher = Arc::new(registry).dispatcher(store.clone());
+        let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
 
         let receipts = dispatcher.submit_many(Vec::<DirectJob>::new()).await?;
 

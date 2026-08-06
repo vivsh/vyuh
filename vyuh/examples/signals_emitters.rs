@@ -123,9 +123,7 @@ async fn direct_heartbeat(
 fn emitter_bundle() -> vyuh::bundles::Bundle {
     let direct = bundles::periodic::<DirectHeartbeat, _, _>(
         direct_heartbeat,
-        bundles::PeriodicConf {
-            interval: tokio::time::Duration::from_millis(700),
-        },
+        bundles::PeriodicConf::new(tokio::time::Duration::from_millis(700)),
     );
 
     bundles::bundle([direct])

@@ -573,7 +573,6 @@ impl SiteConf {
             return;
         }
         self.validate_production_http(errors);
-        self.validate_production_console(errors);
         self.validate_production_cookies(errors);
     }
 
@@ -598,17 +597,6 @@ impl SiteConf {
                 field: "http.cors.permissive".into(),
                 reason: "must be false in production mode".into(),
                 expected: Some("application-specific CORS middleware".into()),
-            });
-        }
-    }
-
-    /// Validates the optional administrative console before exposing it in production.
-    fn validate_production_console(&self, errors: &mut Vec<ConfError>) {
-        if self.console.enabled && !self.console.secure_cookie {
-            errors.push(ConfError::InvalidValue {
-                field: "console.secure_cookie".into(),
-                reason: "must be true when console is enabled in production mode".into(),
-                expected: Some("true".into()),
             });
         }
     }

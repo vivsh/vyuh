@@ -1,15 +1,15 @@
 //! Built-in authenticated runtime console.
 
+mod access;
 mod api;
-pub(crate) mod auth;
 mod conf;
-mod login;
 pub(crate) mod logs;
 mod middleware;
 mod pages;
 mod query;
 mod routes;
 mod runtime;
+mod schedules;
 mod schema_view;
 pub(crate) mod status;
 #[cfg(test)]
@@ -18,7 +18,7 @@ mod types;
 
 use crate::embed;
 
-pub use auth::Console;
+pub use access::{CONSOLE_AUDIENCE, ConsoleAccess};
 pub use conf::ConsoleConf;
 pub(crate) use runtime::{ConsoleRuntime, ViewUrls};
 

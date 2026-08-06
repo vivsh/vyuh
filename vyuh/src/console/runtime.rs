@@ -1,18 +1,8 @@
 //! Per-site runtime data used by the built-in console.
 
-use std::{collections::BTreeSet, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
-use axum::http::{Method, StatusCode, Uri};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-
-use crate::{
-    OperationId, Site,
-    assets::AssetUrls,
-    auth::SecretRing,
-    errors::{ErrorReport, ErrorSourceKind},
-    logging::LoggingConf,
-    routes::Routes,
-};
+use crate::{Site, assets::AssetUrls, auth::SecretRing, logging::LoggingConf, routes::Routes};
 
 use super::{FALLBACK_STYLESHEET_NAME, WEB_ASSETS, logs::LogRuntime, status::ConsoleStatusCache};
 
@@ -20,7 +10,6 @@ use super::{FALLBACK_STYLESHEET_NAME, WEB_ASSETS, logs::LogRuntime, status::Cons
 pub(crate) struct ConsoleRuntime {
     urls: ViewUrls,
     status: ConsoleStatusCache,
-    page_operations: BTreeSet<OperationId>,
     logs: LogRuntime,
 }
 
@@ -35,7 +24,6 @@ impl ConsoleRuntime {
     ) -> Result<Self, String> {
         let urls = ViewUrls::new(&routes, assets)?;
         Ok(Self {
-            page_operations: page_operations(&routes)?,
             urls,
             status: ConsoleStatusCache::new(),
             logs: LogRuntime::new(logging, project_dir, secrets)?,
@@ -56,51 +44,15 @@ impl ConsoleRuntime {
     pub(crate) const fn logs(&self) -> &LogRuntime {
         &self.logs
     }
-
-    /// Builds a safe login redirect for an unauthenticated console HTML route.
-    pub(crate) fn login_redirect(
-        &self,
-        routes: Routes<'_>,
-        method: &Method,
-        uri: &Uri,
-        report: &ErrorReport,
-    ) -> Option<String> {
-        if report.status != StatusCode::UNAUTHORIZED
-            || report.source != ErrorSourceKind::Auth
-            || *method != Method::GET
-        {
-            return None;
-        }
-        let target = uri.path_and_query()?.as_str();
-        let operation = routes.resolve_url(method.clone(), target)?;
-        self.page_operations.contains(&operation).then(|| {
-            let next = utf8_percent_encode(target, NON_ALPHANUMERIC);
-            format!("{}?next={next}", self.urls.login)
-        })
-    }
-
-    /// Selects a validated console page as the post-login destination.
-    pub(crate) fn destination(&self, routes: Routes<'_>, next: Option<&str>) -> String {
-        let Some(next) = next else {
-            return self.urls.home.clone();
-        };
-        let Some(operation) = routes.resolve_url(Method::GET, next) else {
-            return self.urls.home.clone();
-        };
-        self.page_operations
-            .contains(&operation)
-            .then(|| next.to_owned())
-            .unwrap_or_else(|| self.urls.home.clone())
-    }
 }
 
 /// Browser-facing URLs required by the built-in console templates.
 pub(crate) struct ViewUrls {
     pub(crate) home: String,
-    pub(crate) login: String,
     pub(crate) overview: String,
     pub(crate) runtime: String,
     pub(crate) tasks: String,
+    pub(crate) schedules: String,
     pub(crate) operations: String,
     pub(crate) logs: String,
     pub(crate) conf: String,
@@ -120,10 +72,10 @@ impl ViewUrls {
             .url(&format!("css/{}", stylesheet_name()))
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            login: required_url(&routes, "console_login")?,
             overview: required_url(&routes, "console_overview")?,
             runtime: required_url(&routes, "console_runtime")?,
             tasks: required_url(&routes, "console_tasks")?,
+            schedules: required_url(&routes, "console_schedules")?,
             operations: required_url(&routes, "console_operations")?,
             logs: required_url(&routes, "console_logs")?,
             conf: required_url(&routes, "console_conf")?,
@@ -142,31 +94,6 @@ impl ViewUrls {
                 .map_err(|error| error.to_string())?,
         })
     }
-}
-
-fn page_operations(routes: &Routes<'_>) -> Result<BTreeSet<OperationId>, String> {
-    [
-        "console_home",
-        "console_overview",
-        "console_runtime",
-        "console_operations",
-        "console_logs",
-        "console_operation_detail",
-        "console_tasks",
-        "console_task_detail",
-        "console_conf",
-        "console_openapi",
-        "console_not_found",
-    ]
-    .into_iter()
-    .map(|name| route_operation(routes, name))
-    .collect()
-}
-
-fn route_operation(routes: &Routes<'_>, name: &'static str) -> Result<OperationId, String> {
-    routes
-        .operation_id(name)
-        .ok_or_else(|| format!("required console route '{name}' is not registered"))
 }
 
 fn required_url(routes: &Routes<'_>, name: &'static str) -> Result<String, String> {

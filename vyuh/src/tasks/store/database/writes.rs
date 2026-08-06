@@ -8,14 +8,17 @@ use chrono::{DateTime, Utc};
 use crate::{
     db,
     tasks::{
-        IdempotencyRetention, TaskCommit, TaskError, TaskFilter, TaskId, TaskOutcome, TaskReceipt,
-        TaskRecord, TaskRetry, TaskStatus, TaskWrite,
+        IdempotencyRetention, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter, TaskId,
+        TaskOutcome, TaskReceipt, TaskRecord, TaskRetry, TaskStatus, TaskWrite,
     },
 };
 
 use super::{
     common::{DbTaskStore, add_time, apply_filter},
-    model::{IdempotencyExpiryPatch, ResumePatch, TaskIdempotencyRow, TaskRow},
+    model::{
+        IdempotencyExpiryPatch, ResumePatch, TaskIdempotencyRow, TaskRow, TaskSchedulePatch,
+        TaskScheduleRow,
+    },
 };
 
 impl DbTaskStore {
@@ -31,20 +34,93 @@ impl DbTaskStore {
         let mut transaction = self.pool.begin().await?;
         verify_policy(self, &mut transaction).await?;
         let now = statement_now(&mut transaction).await?;
+        let receipts = self.store_writes_tx(&mut transaction, writes, now).await?;
+        transaction.commit().await?;
+        Ok(receipts)
+    }
+
+    /// Stores a schedule cursor and one task intent in one durable transaction.
+    pub(super) async fn store_scheduled_impl(
+        &self,
+        scheduled: ScheduledTaskWrite,
+    ) -> Result<Option<TaskReceipt>, TaskError> {
+        validate_write_lanes(self, std::slice::from_ref(&scheduled.write)).await?;
+        let mut transaction = self.pool.begin().await?;
+        verify_policy(self, &mut transaction).await?;
+        let now = statement_now(&mut transaction).await?;
+        let row = schedule_row(&scheduled.name, scheduled.occurrence, now)?;
+        insert_schedule_if_missing(&mut transaction, &row).await?;
+        let cursor = load_schedule_for_update(&mut transaction, &scheduled.name).await?;
+        let cursor = cursor.ok_or_else(|| {
+            TaskError::TaskExecutionError("scheduled task cursor was not stored".into())
+        })?;
+        if cursor.last_submitted_at >= scheduled.occurrence {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let mut receipts = self
+            .store_writes_tx(&mut transaction, vec![scheduled.write], now)
+            .await?;
+        let receipt = receipts.pop().ok_or_else(|| {
+            TaskError::TaskExecutionError("scheduled task submission omitted a receipt".into())
+        })?;
+        let cursor = now.max(scheduled.occurrence);
+        update_schedule_cursor(&mut transaction, &scheduled.name, cursor, now).await?;
+        transaction.commit().await?;
+        Ok(Some(receipt))
+    }
+
+    /// Reads known durable schedule cursors in one bounded query.
+    pub(super) async fn schedule_snapshot_impl(
+        &self,
+        names: &[String],
+    ) -> Result<crate::tasks::TaskScheduleSnapshot, TaskError> {
+        let mut transaction = self.pool.begin().await?;
+        verify_policy(self, &mut transaction).await?;
+        let now = statement_now(&mut transaction).await?;
+        if names.is_empty() {
+            transaction.commit().await?;
+            return Ok(crate::tasks::TaskScheduleSnapshot {
+                now,
+                cursors: HashMap::new(),
+            });
+        }
+        let table = Self::schedule_table();
+        let rows = db::from(&table)
+            .filter(table.name.in_values(names.to_vec()))
+            .all::<TaskScheduleRow>()
+            .exec(&mut transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(crate::tasks::TaskScheduleSnapshot {
+            now,
+            cursors: rows
+                .into_iter()
+                .map(|row| (row.name, row.last_submitted_at))
+                .collect(),
+        })
+    }
+
+    /// Resolves idempotency and inserts task rows inside an existing transaction.
+    async fn store_writes_tx(
+        &self,
+        transaction: &mut db::DbTransaction<'_>,
+        writes: Vec<TaskWrite>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TaskReceipt>, TaskError> {
         let (prepared, key_rows) = prepare_writes(writes, now)?;
-        upsert_key_owners(&mut transaction, &key_rows, self.batch_size).await?;
-        let owners = load_key_owners(&mut transaction, &key_rows).await?;
-        let owners = replace_expired_owners(&mut transaction, owners, &key_rows, now).await?;
+        upsert_key_owners(transaction, &key_rows, self.batch_size).await?;
+        let owners = load_key_owners(transaction, &key_rows).await?;
+        let owners = replace_expired_owners(transaction, owners, &key_rows, now).await?;
         let (rows, receipts) = resolve_writes(prepared, owners)?;
         if !rows.is_empty() {
             let table = Self::table();
             db::from(&table)
                 .batch_insert(&rows)
                 .batch_size(self.batch_size)
-                .exec(&mut transaction)
+                .exec(transaction)
                 .await?;
         }
-        transaction.commit().await?;
         Ok(receipts)
     }
 
@@ -893,6 +969,90 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration, TaskError> {
     chrono::Duration::from_std(duration).map_err(|_| {
         TaskError::TaskExecutionError("task duration is outside the supported range".into())
     })
+}
+
+/// Creates the initial schedule row without treating its first occurrence as complete.
+fn schedule_row(
+    name: &str,
+    occurrence: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<TaskScheduleRow, TaskError> {
+    let before = occurrence
+        .checked_sub_signed(chrono::Duration::nanoseconds(1))
+        .ok_or_else(|| {
+            TaskError::TaskExecutionError("scheduled occurrence is outside range".into())
+        })?;
+    Ok(TaskScheduleRow {
+        name: name.into(),
+        last_submitted_at: before,
+        updated_at: now,
+    })
+}
+
+/// Creates a cursor row without overwriting a concurrent worker's position.
+async fn insert_schedule_if_missing(
+    transaction: &mut db::DbTransaction<'_>,
+    row: &TaskScheduleRow,
+) -> Result<(), TaskError> {
+    let table = DbTaskStore::schedule_table();
+    db::from(&table)
+        .batch_upsert(std::slice::from_ref(row), &table.name)
+        .update_only(&table.name)
+        .exec(transaction)
+        .await?;
+    Ok(())
+}
+
+/// Advances one locked cursor after its task submission has been resolved.
+async fn update_schedule_cursor(
+    transaction: &mut db::DbTransaction<'_>,
+    name: &str,
+    occurrence: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), TaskError> {
+    let table = DbTaskStore::schedule_table();
+    let patch = TaskSchedulePatch {
+        last_submitted_at: occurrence,
+        updated_at: now,
+    };
+    db::from(&table)
+        .filter(table.name.eq(db::val(name.to_owned())))
+        .update(&patch)
+        .exec(transaction)
+        .await?;
+    Ok(())
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+/// Locks one schedule cursor before deciding whether an occurrence was covered.
+async fn load_schedule_for_update(
+    transaction: &mut db::DbTransaction<'_>,
+    name: &str,
+) -> Result<Option<TaskScheduleRow>, TaskError> {
+    use crate::db::backend::RowLockExt as _;
+    let table = DbTaskStore::schedule_table();
+    db::from(&table)
+        .filter(table.name.eq(db::val(name.to_owned())))
+        .for_update()
+        .first::<TaskScheduleRow>()
+        .exec(transaction)
+        .await
+        .map_err(TaskError::from)
+}
+
+#[cfg(feature = "sqlite")]
+/// Reads one schedule cursor inside SQLite's serial write transaction.
+async fn load_schedule_for_update(
+    transaction: &mut db::DbTransaction<'_>,
+    name: &str,
+) -> Result<Option<TaskScheduleRow>, TaskError> {
+    let table = DbTaskStore::schedule_table();
+    db::from(&table)
+        .filter(table.name.eq(db::val(name.to_owned())))
+        .first::<TaskScheduleRow>()
+        .exec(transaction)
+        .await
+        .map_err(TaskError::from)
 }
 
 async fn statement_now(

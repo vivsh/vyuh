@@ -184,6 +184,11 @@ impl TaskPolicy {
     pub(crate) fn key_for<T: 'static>(&self, input: &T) -> Result<Option<String>, TaskError> {
         self.key.as_ref().map(|key| key(input)).transpose()
     }
+
+    /// Resolves an idempotency key from a type-erased registered task payload.
+    pub(crate) fn key_for_box(&self, input: &dyn Any) -> Result<Option<String>, TaskError> {
+        self.key.as_ref().map(|key| key(input)).transpose()
+    }
 }
 
 /// Erases one statically typed idempotency function at task registration.

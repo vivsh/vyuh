@@ -5,7 +5,7 @@ use crate::{
     routes::{Methods, RouteConf},
 };
 
-use super::{ConsoleConf, WEB_ASSETS, api, auth, login, pages};
+use super::{CONSOLE_AUDIENCE, ConsoleConf, WEB_ASSETS, api, pages};
 
 /// Builds the console's one immutable bundle with all routes and assets.
 pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
@@ -13,19 +13,8 @@ pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
     parts.extend(dashboard_parts(&conf.path));
     parts.extend(inspection_parts(&conf.path));
     parts.extend(api_parts(&conf.path));
-    parts.extend(login_parts(&conf.path));
     parts.extend(fallback_parts(&conf.path));
-    bundles::bundle(parts).with_audience(auth::CONSOLE_AUDIENCE)
-}
-
-/// Returns the public route that exchanges a command credential for a cookie.
-fn login_parts(prefix: &str) -> Vec<bundles::BundlePart> {
-    vec![route(
-        "console_login",
-        path(prefix, "/login"),
-        Methods::GET | Methods::POST,
-        login::route,
-    )]
+    bundles::bundle(parts).with_audience(CONSOLE_AUDIENCE)
 }
 
 /// Returns the site-root console parts, including its public assets.
@@ -93,6 +82,12 @@ fn inspection_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             pages::tasks,
         ),
         route(
+            "console_schedules",
+            path(prefix, "/schedules"),
+            Methods::GET,
+            pages::schedules,
+        ),
+        route(
             "console_logs",
             path(prefix, "/logs"),
             Methods::GET,
@@ -110,12 +105,6 @@ fn inspection_parts(prefix: &str) -> Vec<bundles::BundlePart> {
 /// Returns console API routes under the configured path.
 fn api_parts(prefix: &str) -> Vec<bundles::BundlePart> {
     vec![
-        route(
-            "console_logout",
-            path(prefix, "/api/logout"),
-            Methods::POST,
-            api::logout,
-        ),
         route(
             "console_session",
             path(prefix, "/api/session"),
@@ -139,6 +128,12 @@ fn api_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             path(prefix, "/api/tasks"),
             Methods::GET,
             api::tasks,
+        ),
+        route(
+            "console_api_schedules",
+            path(prefix, "/api/schedules"),
+            Methods::GET,
+            api::schedules,
         ),
         route(
             "console_api_logs",

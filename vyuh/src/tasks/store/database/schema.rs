@@ -2,7 +2,7 @@
 
 use crate::db;
 
-use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow};
+use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow};
 
 /// Builds the desired task, idempotency, rate, and runtime coordination schema.
 pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
@@ -11,6 +11,7 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
         .model::<TaskIdempotencyRow>()
         .model::<TaskRateRow>()
         .model::<TaskRuntimeRow>()
+        .model::<TaskScheduleRow>()
         .build()?;
     if let Some(table) = schema.tables.get_mut("vyuh_tasks") {
         append_task_indexes(table);
@@ -137,6 +138,7 @@ mod tests {
             "vyuh_task_idempotency",
             "vyuh_task_lane_rates",
             "vyuh_task_runtime",
+            "vyuh_schedules",
         ] {
             if !schema.tables.contains_key(name) {
                 return Err(format!("task schema omitted {name}"));
