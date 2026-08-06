@@ -392,12 +392,12 @@ impl ConfigOut {
                 concurrency: conf.tasks.concurrency_value(),
                 batch_size: conf.tasks.batch_size_value(),
                 lease_duration_ms: duration_ms(conf.tasks.lease_duration_value()),
-                idempotency: format!("{:?}", conf.tasks.idempotency_value()),
                 readiness: conf.tasks.readiness_policy().as_str().to_string(),
-                lanes: conf
-                    .tasks
-                    .resolved_lanes()
-                    .into_iter()
+                lanes: site
+                    .tasks()
+                    .lane_configs()
+                    .iter()
+                    .cloned()
                     .map(TaskLaneConfigOut::from)
                     .collect(),
             },
@@ -494,7 +494,6 @@ pub struct TaskConfigOut {
     pub concurrency: usize,
     pub batch_size: usize,
     pub lease_duration_ms: u64,
-    pub idempotency: String,
     pub readiness: String,
     pub lanes: Vec<TaskLaneConfigOut>,
 }
@@ -609,6 +608,7 @@ impl From<&crate::logging::LogRule> for LogRuleOut {
             ),
             LogSink::Stdout { .. } => ("stdout".to_string(), None, None),
             LogSink::Stderr { .. } => ("stderr".to_string(), None, None),
+            LogSink::MailAdmins(_) => ("mail_admins".to_string(), None, None),
         };
         Self {
             name: rule.name.clone(),

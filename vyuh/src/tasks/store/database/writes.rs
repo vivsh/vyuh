@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     db,
     tasks::{
-        TaskCommit, TaskError, TaskFilter, TaskId, TaskIdempotency, TaskOutcome, TaskReceipt,
+        IdempotencyRetention, TaskCommit, TaskError, TaskFilter, TaskId, TaskOutcome, TaskReceipt,
         TaskRecord, TaskRetry, TaskStatus, TaskWrite,
     },
 };
@@ -88,7 +88,7 @@ impl DbTaskStore {
         let mut rows = load_owned_batch(&mut transaction, ids, runner_id).await?;
         apply_owned_outcomes(&mut rows, &mut outcomes, &conf.lanes, now)?;
         warn_unowned_outcomes(&outcomes, runner_id);
-        update_idempotency_batch(&mut transaction, &mut rows, conf.idempotency, now).await?;
+        update_idempotency_batch(&mut transaction, &mut rows, conf, now).await?;
         batch_update_rows(&mut transaction, &rows, self.batch_size).await?;
         Ok(())
     }
@@ -734,51 +734,87 @@ pub(super) fn finish(
 pub(super) async fn update_idempotency_batch(
     transaction: &mut db::DbTransaction<'_>,
     rows: &mut [TaskRow],
-    policy: TaskIdempotency,
+    conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
 ) -> Result<(), TaskError> {
-    let ids = terminal_idempotent_ids(rows)?;
-    if ids.is_empty() {
-        return Ok(());
-    }
     let table = DbTaskStore::idempotency_table();
-    match policy {
-        TaskIdempotency::ActiveOnly => {
-            db::from(&table)
-                .filter(table.task_id.in_values(ids))
-                .delete()
-                .exec(transaction)
-                .await?;
+    let (active, retained) = retention_groups(rows, conf)?;
+    if !active.is_empty() {
+        db::from(&table)
+            .filter(table.task_id.in_values(active))
+            .delete()
+            .exec(transaction)
+            .await?;
+    }
+    for (duration, ids) in retained {
+        let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
+        let patch = IdempotencyExpiryPatch {
+            expires_at: Some(expires),
+            updated_at: now,
+        };
+        db::from(&table)
+            .filter(table.task_id.in_values(ids))
+            .update(&patch)
+            .exec(transaction)
+            .await?;
+        apply_expiry(rows, conf, duration, expires)?;
+    }
+    Ok(())
+}
+
+/// Groups terminal idempotent rows by their finalized per-handler lane policy.
+fn retention_groups(
+    rows: &mut [TaskRow],
+    conf: &crate::tasks::TaskStoreConf,
+) -> Result<(Vec<uuid::Uuid>, Vec<(Duration, Vec<uuid::Uuid>)>), TaskError> {
+    let mut active = Vec::new();
+    let mut retained: Vec<(Duration, Vec<uuid::Uuid>)> = Vec::new();
+    for row in rows.iter_mut() {
+        if !is_terminal_idempotent(row)? {
+            continue;
         }
-        TaskIdempotency::RetainFor(duration) => {
-            let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
-            let patch = IdempotencyExpiryPatch {
-                expires_at: Some(expires),
-                updated_at: now,
-            };
-            db::from(&table)
-                .filter(table.task_id.in_values(ids))
-                .update(&patch)
-                .exec(transaction)
-                .await?;
-            for row in rows {
-                if is_terminal_idempotent(row)? {
-                    row.idempotency_expires_at = Some(expires);
+        match retention_for(row, conf)? {
+            IdempotencyRetention::ActiveOnly => {
+                row.idempotency_expires_at = None;
+                active.push(row.id);
+            }
+            IdempotencyRetention::RetainFor(duration) => {
+                if let Some((_, ids)) = retained.iter_mut().find(|(value, _)| *value == duration) {
+                    ids.push(row.id);
+                } else {
+                    retained.push((duration, vec![row.id]));
                 }
             }
+        }
+    }
+    Ok((active, retained))
+}
+
+/// Reflects one set-based retained-key write in the loaded task rows.
+fn apply_expiry(
+    rows: &mut [TaskRow],
+    conf: &crate::tasks::TaskStoreConf,
+    duration: Duration,
+    expires: DateTime<Utc>,
+) -> Result<(), TaskError> {
+    for row in rows {
+        if is_terminal_idempotent(row)?
+            && matches!(retention_for(row, conf)?, IdempotencyRetention::RetainFor(value) if value == duration)
+        {
+            row.idempotency_expires_at = Some(expires);
         }
     }
     Ok(())
 }
 
-fn terminal_idempotent_ids(rows: &[TaskRow]) -> Result<Vec<uuid::Uuid>, TaskError> {
-    rows.iter()
-        .filter_map(|row| match is_terminal_idempotent(row) {
-            Ok(true) => Some(Ok(row.id)),
-            Ok(false) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect()
+/// Returns the retention inherited by one idempotent task row.
+fn retention_for(
+    row: &TaskRow,
+    conf: &crate::tasks::TaskStoreConf,
+) -> Result<IdempotencyRetention, TaskError> {
+    conf.idempotency_for(&row.name).ok_or_else(|| {
+        TaskError::InvalidConfig(format!("task '{}' has no idempotency policy", row.name))
+    })
 }
 
 fn is_terminal_idempotent(row: &TaskRow) -> Result<bool, TaskError> {

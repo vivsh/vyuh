@@ -57,9 +57,11 @@ The `vyuh` crate is organized around these subsystems:
   or external event sources, and signal-backed client-facing live delivery.
 - `tasks` provides typed input, value-less durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
-  and commits, lane-owned retry/backoff policy, local runner and store-wide
-  database rate limits, idempotency retention, adaptive polling, lease renewal,
-  and explicit continuation lifecycle control.
+  and commits, lane-owned retry/backoff and idempotency-retention policy, local
+  runner and store-wide database rate limits, adaptive polling, lease renewal,
+  and explicit continuation lifecycle control. Tasks statically declare their
+  lane and optional key rule; reusable bundles may contribute complete lane
+  defaults, while site configuration resolves or strictly rejects missing lanes.
 - `observability` owns configured liveness/readiness probes and bounded-label
   Prometheus HTTP metrics. Task readiness is derived from per-site task runtime
   state updated by initialization and existing scheduler ticks, never by an
@@ -101,8 +103,10 @@ The `vyuh` crate is organized around these subsystems:
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.
 - `logging` configures structured tracing output. Console log inspection reads
-  only configured JSON file sinks through bounded per-site reverse readers; it
-  does not create a second log store or process-global log cache.
+  only configured JSON file sinks through bounded per-site reverse readers;
+  optional `mail_admins` sinks enqueue bounded error reports for the existing
+  site-owned SMTP delivery runtime and use lossy per-sink delivery throttles.
+  Neither facility creates a second log store or process-global log cache.
 
 ## Macro Crate
 

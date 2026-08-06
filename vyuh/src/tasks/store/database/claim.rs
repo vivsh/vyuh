@@ -7,8 +7,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     db,
     tasks::{
-        LaneClaim, LanePoll, TaskError, TaskIdempotency, TaskPoll, TaskRate, TaskRecord, TaskRetry,
-        TaskStatus,
+        LaneClaim, LanePoll, TaskError, TaskPoll, TaskRate, TaskRecord, TaskRetry, TaskStatus,
     },
 };
 
@@ -62,7 +61,7 @@ impl DbTaskStore {
                     claim,
                     lane_conf.global_rate(),
                     lane_conf.retry_policy(),
-                    conf.idempotency,
+                    conf,
                     now,
                 )
                 .await?;
@@ -86,7 +85,7 @@ impl DbTaskStore {
         claim: &LaneClaim,
         rate: Option<TaskRate>,
         retry: TaskRetry,
-        idempotency: TaskIdempotency,
+        conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
     ) -> Result<LanePoll, TaskError> {
         let limit = claim.limit.min(self.batch_size);
@@ -98,7 +97,7 @@ impl DbTaskStore {
             .await?;
         let selected = select_candidates(transaction, now, claim.lane.as_str(), limit).await?;
         let (mut exhausted, mut candidates) = split_exhausted(selected, retry)?;
-        self.fail_exhausted(transaction, &mut exhausted, idempotency, now)
+        self.fail_exhausted(transaction, &mut exhausted, conf, now)
             .await?;
         candidates.truncate(permits);
         let rate_blocked = permits < runnable_count;
@@ -124,7 +123,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         rows: &mut [TaskRow],
-        idempotency: TaskIdempotency,
+        conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
     ) -> Result<(), TaskError> {
         if rows.is_empty() {
@@ -141,7 +140,7 @@ impl DbTaskStore {
             row.leased_until = None;
             row.updated_at = now;
         }
-        super::writes::update_idempotency_batch(transaction, rows, idempotency, now).await?;
+        super::writes::update_idempotency_batch(transaction, rows, conf, now).await?;
         super::writes::batch_update_rows(transaction, rows, self.batch_size).await
     }
 

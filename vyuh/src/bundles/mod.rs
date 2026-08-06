@@ -192,6 +192,16 @@ impl Bundle {
         self
     }
 
+    /// Contributes one complete default configuration for a named task lane.
+    ///
+    /// Configuration errors accumulate on the bundle and surface from site construction.
+    pub fn with_task_lane(mut self, lane: crate::tasks::TaskLaneConf) -> Self {
+        if let Err(error) = self.tasks.register_lane(lane) {
+            self.errors.push(BundleError::Task(Arc::new(error)));
+        }
+        self
+    }
+
     /// Validates that no errors were accumulated during bundle construction.
     pub fn validate(&self) -> Result<(), BundleError> {
         if !self.errors.is_empty() {
@@ -463,6 +473,8 @@ mod tests {
     use super::*;
     use crate::routes::{Json, RouteConf};
 
+    const EMAIL_TASK_LANE: crate::tasks::TaskLane = crate::tasks::TaskLane::new("email");
+
     async fn ping() -> Json<&'static str> {
         Json("pong")
     }
@@ -659,5 +671,17 @@ mod tests {
             bundle.errors.as_slice(),
             [BundleError::InvalidRoutePrefix { .. }]
         ));
+    }
+
+    /// Verifies two reusable bundles cannot silently contribute the same lane default.
+    #[test]
+    fn duplicate_task_lane_defaults_accumulate_a_bundle_error() {
+        let left =
+            Bundle::new().with_task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1));
+        let right =
+            Bundle::new().with_task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1));
+        let bundle = left.merge(right);
+
+        assert!(matches!(bundle.validate(), Err(BundleError::ErrorList(_))));
     }
 }

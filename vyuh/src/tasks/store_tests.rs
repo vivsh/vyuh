@@ -1,16 +1,28 @@
 use std::time::Duration;
 
+use super::IdempotencyRetention;
 use vyuh::tasks::{
-    DEFAULT_TASK_LANE, TaskId, TaskIdempotency, TaskLane, TaskLaneConf, TaskRate, TaskReceipt,
-    TaskRetry, TaskStatus,
+    DEFAULT_TASK_LANE, TaskId, TaskLane, TaskLaneConf, TaskRate, TaskReceipt, TaskRetry,
+    TaskStatus,
     store::{
-        AbstractTaskStore, LaneClaim, MemoryTaskStore, TaskCommit, TaskOutcome, TaskRecord,
-        TaskStoreConf, TaskWrite,
+        AbstractTaskStore, LaneClaim, MemoryTaskStore, TaskCommit, TaskIdempotencyConf,
+        TaskOutcome, TaskRecord, TaskStoreConf, TaskWrite,
     },
 };
 
 const EMAIL: TaskLane = TaskLane::new("email");
 const MISSING: TaskLane = TaskLane::new("missing");
+
+/// Internal retention fixture for direct store-contract tests.
+struct TestRetention;
+
+impl TestRetention {
+    const ACTIVE_ONLY: IdempotencyRetention = IdempotencyRetention::ActiveOnly;
+
+    fn retain_for(duration: Duration) -> IdempotencyRetention {
+        IdempotencyRetention::RetainFor(duration)
+    }
+}
 
 /// Builds one pending record for direct store-contract tests.
 fn task_record(name: &str, lane: TaskLane) -> TaskRecord {
@@ -51,7 +63,7 @@ fn write(record: TaskRecord) -> TaskWrite {
 }
 
 /// Creates the two-lane runtime policy used throughout store tests.
-fn store_conf(idempotency: TaskIdempotency) -> TaskStoreConf {
+fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
     TaskStoreConf {
         handlers: [
             "email",
@@ -74,7 +86,15 @@ fn store_conf(idempotency: TaskIdempotency) -> TaskStoreConf {
             TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
             TaskLaneConf::new(EMAIL, 2),
         ],
-        idempotency,
+        idempotency: ["email", "archive"]
+            .into_iter()
+            .map(|handler| TaskIdempotencyConf {
+                handler: handler.to_string(),
+                lane: EMAIL.to_string(),
+                revision: "test-v1".to_string(),
+                retention,
+            })
+            .collect(),
     }
 }
 
@@ -95,7 +115,7 @@ async fn claim(
 async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let records = (0..3)
         .map(|index| write(task_record(&format!("job-{index}"), EMAIL)))
@@ -139,7 +159,7 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
 async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(1);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     store
         .store_tasks(vec![
@@ -163,7 +183,7 @@ async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::T
 async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     store
         .store_tasks(vec![
@@ -189,7 +209,7 @@ async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskErro
 async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     assert!(matches!(
         store
@@ -211,7 +231,7 @@ async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks
 async fn memory_store_resolves_idempotency_receipts() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let mut first = task_record("email", EMAIL);
     first.idempotency_key = Some("message-1".into());
@@ -259,7 +279,7 @@ async fn memory_store_resolves_in_batch_idempotency_in_input_order()
 -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let mut first = task_record("email", EMAIL);
     first.idempotency_key = Some("same-batch".into());
@@ -291,7 +311,7 @@ async fn memory_store_applies_idempotency_archive_policy() -> Result<(), vyuh::t
 async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
     let active = MemoryTaskStore::new(8);
     active
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let mut first = task_record("archive", EMAIL);
     first.idempotency_key = Some("key".into());
@@ -323,9 +343,9 @@ async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
 async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
     let retained = MemoryTaskStore::new(8);
     retained
-        .initialize(store_conf(TaskIdempotency::retain_for(
-            Duration::from_secs(60),
-        )))
+        .initialize(store_conf(TestRetention::retain_for(Duration::from_secs(
+            60,
+        ))))
         .await?;
     let mut archived = task_record("archive", EMAIL);
     archived.idempotency_key = Some("key".into());
@@ -358,7 +378,7 @@ async fn memory_store_global_rate_limits_lane_starts() -> Result<(), vyuh::tasks
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
         lanes: vec![TaskLaneConf::new(EMAIL, 2).global_rate_limit(rate)],
-        ..store_conf(TaskIdempotency::ActiveOnly)
+        ..store_conf(TestRetention::ACTIVE_ONLY)
     };
     store.initialize(conf).await?;
     store
@@ -400,7 +420,7 @@ async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::task
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
         lanes: vec![TaskLaneConf::new(EMAIL, 4).global_rate_limit(rate)],
-        ..store_conf(TaskIdempotency::ActiveOnly)
+        ..store_conf(TestRetention::ACTIVE_ONLY)
     };
     store.initialize(conf).await?;
     store
@@ -430,7 +450,7 @@ async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::task
 async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let record = task_record("later", EMAIL);
     let mut delayed = write(record);
@@ -453,7 +473,7 @@ async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::Task
 async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     store
         .store_tasks(vec![write(task_record("email", EMAIL))])
@@ -493,11 +513,11 @@ async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::
 async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let incompatible = TaskStoreConf {
         lanes: vec![TaskLaneConf::new(DEFAULT_TASK_LANE, 2)],
-        ..store_conf(TaskIdempotency::ActiveOnly)
+        ..store_conf(TestRetention::ACTIVE_ONLY)
     };
     assert!(matches!(
         store.initialize(incompatible).await,
@@ -511,17 +531,17 @@ async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskE
 async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
 
-    let mut local_only = store_conf(TaskIdempotency::ActiveOnly);
+    let mut local_only = store_conf(TestRetention::ACTIVE_ONLY);
     local_only.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).rate_limit(TaskRate::per_second(1)),
     ];
     store.initialize(local_only).await?;
 
-    let mut global = store_conf(TaskIdempotency::ActiveOnly);
+    let mut global = store_conf(TestRetention::ACTIVE_ONLY);
     global.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).global_rate_limit(TaskRate::per_second(1)),
@@ -538,9 +558,9 @@ async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh:
 async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
-    let mut incompatible = store_conf(TaskIdempotency::ActiveOnly);
+    let mut incompatible = store_conf(TestRetention::ACTIVE_ONLY);
     incompatible.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(3, Duration::from_secs(2))),
@@ -556,7 +576,7 @@ async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks:
 #[tokio::test]
 async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
-    let mut conf = store_conf(TaskIdempotency::ActiveOnly);
+    let mut conf = store_conf(TestRetention::ACTIVE_ONLY);
     conf.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(4, Duration::from_secs(2))),
@@ -602,7 +622,7 @@ async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::Task
 #[tokio::test]
 async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
-    let mut conf = store_conf(TaskIdempotency::ActiveOnly);
+    let mut conf = store_conf(TestRetention::ACTIVE_ONLY);
     conf.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).retry(TaskRetry::exponential(1, Duration::from_secs(1))),
@@ -629,7 +649,7 @@ async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::T
 async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let mut record = task_record("email", EMAIL);
     record.status = TaskStatus::Running;
@@ -652,7 +672,7 @@ async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::Task
 async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let receipt = store
         .store_tasks(vec![write(task_record("email", EMAIL))])
@@ -678,7 +698,7 @@ async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::Task
 #[tokio::test]
 async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
-    let conf = store_conf(TaskIdempotency::ActiveOnly);
+    let conf = store_conf(TestRetention::ACTIVE_ONLY);
     store.initialize(conf.clone()).await?;
     let mut record = task_record("email", EMAIL);
     record.status = TaskStatus::Running;
@@ -704,7 +724,7 @@ async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::T
 async fn memory_store_rolls_back_conflicting_batch() -> Result<(), vyuh::tasks::TaskError> {
     let store = MemoryTaskStore::new(8);
     store
-        .initialize(store_conf(TaskIdempotency::ActiveOnly))
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
     let mut owner = task_record("email", EMAIL);
     owner.idempotency_key = Some("key".into());

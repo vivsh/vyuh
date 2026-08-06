@@ -210,6 +210,13 @@ impl SiteBuilder {
 
     /// Starts all site-owned background engines exactly once per site runtime.
     async fn start_runtime(site: &Site) -> Result<(), SiteError> {
+        {
+            let mut joinset = site.inner.joinset.lock();
+            site.inner
+                ._logging_guard
+                .start_mail_admins(site.inner.shutdown_notifier.clone(), &mut joinset);
+        }
+
         if site.inner.task_engine.has_tasks() {
             let task_runner = TaskRunner::new(site.inner.task_engine.clone())?;
             task_runner.initialize().await?;
@@ -336,6 +343,8 @@ impl SiteBuilder {
         let mail_delivery = crate::email::delivery(&self.conf.mail).map_err(|error| {
             conf::ConfError::Other(format!("mail configuration error: {error}"))
         })?;
+        #[cfg(feature = "email")]
+        let mail_reporter = crate::email::reporter(&self.conf.mail, mail_delivery.clone());
 
         let mut bundle = bundle.into_bundle();
 
@@ -496,7 +505,7 @@ impl SiteBuilder {
             task_config.lease_duration_value(),
         );
 
-        let task_registry = Arc::new(bundle.tasks.clone().with_config(task_config));
+        let task_registry = Arc::new(bundle.tasks.clone().finalize(task_config)?);
 
         let task_dispatcher = task_registry.dispatcher(Arc::new(task_store));
 
@@ -518,7 +527,14 @@ impl SiteBuilder {
         command_registry.merge(builtins)?;
 
         let logging_guard = if self.conf.log_init {
-            logging::init_tracing(&project_dir, &self.conf.logging)?
+            #[cfg(feature = "email")]
+            {
+                logging::init_tracing(&project_dir, &self.conf.logging, Some(mail_reporter))?
+            }
+            #[cfg(not(feature = "email"))]
+            {
+                logging::init_tracing(&project_dir, &self.conf.logging)?
+            }
         } else {
             LoggingGuard::noop()
         };
@@ -657,16 +673,21 @@ impl std::fmt::Debug for Site {
 }
 
 impl Site {
+    /// Wraps finalized immutable site state.
+    fn from_inner(inner: SiteInner) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     /// Builds an inert `Site` from configuration and a bundle.
     ///
     /// The site exposes its router, database, services, and commands, but does
     /// not start task workers, emitters, PgNotify listeners, or service workers.
     pub async fn build(conf: SiteConf, bundle: impl IntoBundle) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
-        let site = builder.build(None, bundle).await?;
-        Ok(Self {
-            inner: Arc::new(site),
-        })
+        let inner = builder.build(None, bundle).await?;
+        Ok(Self::from_inner(inner))
     }
 
     /// Runs Vyuh's standard command-aware application entrypoint.
@@ -697,10 +718,8 @@ impl Site {
         pool: Pool,
     ) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
-        let site = builder.build(Some(pool), bundle).await?;
-        Ok(Self {
-            inner: Arc::new(site),
-        })
+        let inner = builder.build(Some(pool), bundle).await?;
+        Ok(Self::from_inner(inner))
     }
 
     /// Starts runtime engines and the HTTP server for an already-built site.
@@ -1233,7 +1252,7 @@ mod tests {
         observability::ObservabilityConf,
         routes::{Json, Methods, RouteConf},
         signals::SignalConf,
-        tasks::TaskHandlerConf,
+        tasks::{TaskDefinition, TaskLane, TaskLaneConf, TaskLanePolicy},
         testing::TestSite,
     };
     use axum::http::StatusCode;
@@ -1247,6 +1266,7 @@ mod tests {
 
     static RUNTIME_SIGNALS: AtomicUsize = AtomicUsize::new(0);
     static RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(0);
+    const EMAIL_TASK_LANE: TaskLane = TaskLane::new("email");
 
     #[derive(Clone, Deserialize, JsonSchema, Serialize)]
     struct RuntimeSignal;
@@ -1270,6 +1290,50 @@ mod tests {
 
     async fn count_runtime_task(_task: Data<RuntimeTask>) {
         RUNTIME_TASKS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Verifies a bundle can contribute the static lane used by its task definition.
+    #[tokio::test]
+    async fn bundle_task_lane_resolves_static_task_definition() -> Result<(), SiteError> {
+        let bundle = bundles::bundle([bundles::task(
+            count_runtime_task,
+            TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
+        )])
+        .with_task_lane(TaskLaneConf::new(EMAIL_TASK_LANE, 1));
+        let site = Site::build(crate::SiteConf::default().log_init(false), bundle).await?;
+        let receipt = site.tasks().submit(RuntimeTask).await?;
+        let task = site.tasks().get(receipt.id()).await?.ok_or_else(|| {
+            SiteError::TaskError(crate::tasks::TaskError::TaskNotFound(
+                receipt.id().to_string(),
+            ))
+        })?;
+
+        assert_eq!(task.lane(), EMAIL_TASK_LANE.as_str());
+        Ok(())
+    }
+
+    /// Verifies strict lane policy reports the task and unavailable static lane at site build.
+    #[tokio::test]
+    async fn strict_task_lane_policy_rejects_unconfigured_bundle_task() {
+        let bundle = bundles::bundle([bundles::task(
+            count_runtime_task,
+            TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
+        )]);
+        let result = Site::build(
+            crate::SiteConf::default().log_init(false).tasks(
+                crate::tasks::TaskConf::default().missing_lane(TaskLanePolicy::RequireConfigured),
+            ),
+            bundle,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let message = result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(message.contains("email-runtime-task"));
+        assert!(message.contains(EMAIL_TASK_LANE.as_str()));
     }
 
     async fn wait_command(site: Site, _args: Data<WaitArgs>) -> Result<(), Error> {
@@ -1350,7 +1414,7 @@ mod tests {
             method
                 .header(axum::http::header::ALLOW.as_str())
                 .and_then(|value| value.to_str().ok()),
-            Some("GET")
+            Some("GET, HEAD")
         );
         let method: serde_json::Value = method.json().await;
         assert_eq!(
@@ -1519,7 +1583,7 @@ mod tests {
             ),
             bundles::task::<RuntimeTask, _, _>(
                 count_runtime_task,
-                TaskHandlerConf::new("runtime-task-probe"),
+                TaskDefinition::new("runtime-task-probe"),
             ),
             bundles::command::<WaitArgs, _, _>(
                 wait_command,
@@ -1543,7 +1607,7 @@ mod tests {
     async fn task_readiness_waits_for_runtime_initialization() -> Result<(), SiteError> {
         let bundle = bundles::bundle([bundles::task::<RuntimeTask, _, _>(
             count_runtime_task,
-            TaskHandlerConf::new("readiness-task"),
+            TaskDefinition::new("readiness-task"),
         )]);
         let site = Site::build(
             crate::SiteConf::default()

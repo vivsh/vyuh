@@ -142,9 +142,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
     /// Creates a runner from one validated task dispatcher.
     pub fn new(dispatcher: TaskDispatcher<S>) -> Result<Self, TaskError> {
         let config = &dispatcher.registry.config;
-        let lanes = config
-            .validate()?
-            .into_iter()
+        let lanes = dispatcher
+            .registry
+            .lanes()
+            .iter()
+            .cloned()
             .map(|conf| {
                 let now = tokio::time::Instant::now();
                 LaneQueue {
@@ -605,7 +607,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         Ok(super::TaskStoreConf {
             handlers: self.registry.tasks.keys().cloned().collect(),
             lanes: self.lanes.iter().map(|lane| lane.conf.clone()).collect(),
-            idempotency: self.registry.config.idempotency_value(),
+            idempotency: self.registry.idempotency_conf()?,
         })
     }
 }
@@ -755,13 +757,16 @@ mod tests {
 
     /// Builds a two-lane runner with a claim batch smaller than global capacity.
     fn lane_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
-        let conf = TaskConf::default().concurrency(3).batch_size(2).lanes([
-            TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
-            TaskLaneConf::new(EMAIL, 1)
-                .rate_limit(TaskRate::per_minute(1).burst(1))
-                .global_rate_limit(TaskRate::per_minute(1).burst(1)),
-        ]);
-        let registry = Arc::new(TaskRegistry::new().with_config(conf));
+        let conf = TaskConf::default()
+            .concurrency(3)
+            .batch_size(2)
+            .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 2))
+            .lane(
+                TaskLaneConf::new(EMAIL, 1)
+                    .rate_limit(TaskRate::per_minute(1).burst(1))
+                    .global_rate_limit(TaskRate::per_minute(1).burst(1)),
+            );
+        let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
         let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(2)));
         AbstractTaskRunner::new(dispatcher)
     }
@@ -770,8 +775,8 @@ mod tests {
         let conf = TaskConf::default()
             .concurrency(4)
             .batch_size(4)
-            .lanes([TaskLaneConf::new(DEFAULT_TASK_LANE, 4)]);
-        let registry = Arc::new(TaskRegistry::new().with_config(conf));
+            .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 4));
+        let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
         let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(4)));
         AbstractTaskRunner::new(dispatcher)
     }
@@ -862,12 +867,10 @@ mod tests {
     /// Verifies an empty local permit budget preserves its next-token wake deadline.
     #[test]
     fn local_rate_wait_does_not_fall_back_to_idle_polling() -> Result<(), TaskError> {
-        let conf =
-            TaskConf::default()
-                .concurrency(1)
-                .lanes([TaskLaneConf::new(DEFAULT_TASK_LANE, 1)
-                    .rate_limit(TaskRate::per_minute(1).burst(1))]);
-        let registry = Arc::new(TaskRegistry::new().with_config(conf));
+        let conf = TaskConf::default().concurrency(1).lane(
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 1).rate_limit(TaskRate::per_minute(1).burst(1)),
+        );
+        let registry = Arc::new(TaskRegistry::new().with_config(conf)?);
         let dispatcher = registry.dispatcher(Arc::new(MemoryTaskStore::new(1)));
         let mut runner = AbstractTaskRunner::new(dispatcher)?;
         let now = tokio::time::Instant::now();
@@ -971,9 +974,14 @@ mod tests {
     /// Verifies a panicking handler becomes one generic terminal failure completion.
     #[tokio::test]
     async fn handler_panics_are_contained_as_terminal_failures() -> Result<(), String> {
-        let mut registry = TaskRegistry::new();
+        let mut registry = TaskRegistry::new()
+            .with_config(TaskConf::default())
+            .map_err(|error| error.to_string())?;
         registry
-            .register(RegisteredTask::new("panic-job", panic_job))
+            .register(RegisteredTask::new(
+                crate::tasks::TaskDefinition::new("panic-job"),
+                panic_job,
+            ))
             .map_err(|error| error.to_string())?;
         let site = crate::Site::build(
             crate::SiteConf::default().log_init(false),

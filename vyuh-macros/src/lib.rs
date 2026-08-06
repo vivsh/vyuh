@@ -364,13 +364,15 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Registers a function as a durable task handler.
 ///
-/// This macro is sugar over `vyuh::bundles::task(handler, TaskHandlerConf)`.
+/// This macro is sugar over `vyuh::bundles::task(handler, TaskDefinition)`.
 /// Task handlers accept `Data<T>` as their submitted data argument and return
 /// `()`, `Result<(), Error>`, `TaskState`, or `Result<TaskState, Error>`.
 ///
 /// # Attributes
 ///
 /// - `name` - Optional task name (defaults to function name)
+/// - `lane` - Optional static `TaskLane` descriptor (defaults to `default`)
+/// - `idempotency` - Optional static `TaskIdempotency<T>` key rule
 ///
 /// # Examples
 ///
@@ -384,7 +386,7 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// // Method with custom name
 /// impl TaskHandlers {
-///     #[task(name = "custom_task_name")]
+///     #[task(name = "custom_task_name", lane = EMAIL)]
 ///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<TaskState, Error> {
 ///         // process order
 ///         Ok(TaskState::complete())

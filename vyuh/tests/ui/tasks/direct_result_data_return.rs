@@ -1,5 +1,5 @@
 use schemars::JsonSchema;
-use vyuh::{bundles, prelude::*, tasks::TaskHandlerConf};
+use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
 
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 struct Job;
@@ -9,5 +9,5 @@ async fn invalid_task(_: Data<Job>) -> Result<Data<String>, Error> {
 }
 
 fn main() {
-    let _ = bundles::task(invalid_task, TaskHandlerConf::new("invalid_task"));
+    let _ = bundles::task(invalid_task, TaskDefinition::new("invalid_task"));
 }

@@ -2,7 +2,9 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use super::{TaskError, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt};
+use super::{
+    IdempotencyRetention, TaskError, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt,
+};
 
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) mod database;
@@ -97,8 +99,32 @@ pub struct TaskStoreConf {
     pub handlers: Vec<String>,
     /// Validated named lanes; stores coordinate only their global rate policies.
     pub lanes: Vec<TaskLaneConf>,
-    /// Key retention policy shared by all workers.
-    pub idempotency: super::TaskIdempotency,
+    /// Immutable per-handler idempotency policies shared by all workers.
+    pub idempotency: Vec<TaskIdempotencyConf>,
+}
+
+/// Store-visible identity rule for one idempotent task handler.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskIdempotencyConf {
+    /// Stable registered handler name.
+    pub handler: String,
+    /// Finalized lane that owns this handler's retention policy.
+    pub lane: String,
+    /// Explicit revision of the typed key derivation rule.
+    pub revision: String,
+    /// Retention inherited from the handler's effective lane.
+    pub retention: IdempotencyRetention,
+}
+
+impl TaskStoreConf {
+    /// Finds the effective key-retention policy for one registered handler.
+    pub(crate) fn idempotency_for(&self, handler: &str) -> Option<IdempotencyRetention> {
+        self.idempotency
+            .iter()
+            .find(|policy| policy.handler == handler)
+            .map(|policy| policy.retention)
+    }
 }
 
 /// Persistence and coordination boundary for durable task execution.
@@ -239,7 +265,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
 /// Produces the durable policy identity shared by every store implementation.
 pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
     let mut hasher = blake3::Hasher::new();
-    fingerprint_idempotency(&mut hasher, conf.idempotency);
+    fingerprint_idempotency(&mut hasher, &conf.idempotency);
     let mut handlers = conf.handlers.iter().map(String::as_str).collect::<Vec<_>>();
     handlers.sort_unstable();
     for handler in handlers {
@@ -266,16 +292,26 @@ pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn fingerprint_idempotency(hasher: &mut blake3::Hasher, policy: super::TaskIdempotency) {
-    match policy {
-        super::TaskIdempotency::ActiveOnly => {
-            hasher.update(b"idempotency-active");
+fn fingerprint_idempotency(hasher: &mut blake3::Hasher, policies: &[TaskIdempotencyConf]) {
+    let mut policies = policies.iter().collect::<Vec<_>>();
+    policies.sort_unstable_by(|left, right| left.handler.cmp(&right.handler));
+    for policy in policies {
+        hasher.update(policy.handler.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(policy.lane.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(policy.revision.as_bytes());
+        hasher.update(&[0]);
+        match policy.retention {
+            IdempotencyRetention::ActiveOnly => {
+                hasher.update(b"idempotency-active");
+            }
+            IdempotencyRetention::RetainFor(duration) => {
+                hasher.update(b"idempotency-retain");
+                hasher.update(&duration.as_nanos().to_le_bytes());
+            }
         }
-        super::TaskIdempotency::RetainFor(duration) => {
-            hasher.update(b"idempotency-retain");
-            hasher.update(&duration.as_nanos().to_le_bytes());
-        }
-    };
+    }
 }
 
 /// Bounds handler-controlled lifecycle data before it reaches any store.

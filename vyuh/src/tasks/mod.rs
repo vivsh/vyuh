@@ -22,7 +22,7 @@ pub(crate) use handler::{RegisteredTask, TaskOutcome, TaskRegistry};
 pub(crate) use health::{TaskHealth, TaskHealthSnapshot};
 pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
-pub use models::{TaskFilter, TaskHandlerConf, TaskId, TaskInfo};
+pub use models::{TaskDefinition, TaskFilter, TaskId, TaskIdempotency, TaskInfo};
 pub(crate) use runner::AbstractTaskRunner;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 pub(crate) use store::MemoryTaskStore;

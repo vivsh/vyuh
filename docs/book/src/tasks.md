@@ -98,13 +98,12 @@ use schemars::JsonSchema;
 use vyuh::prelude::*;
 use vyuh::bundles;
 use vyuh::bundles::IntoBundle;
-use vyuh::tasks::TaskHandlerConf;
+use vyuh::tasks::TaskDefinition;
 
-let bundle = bundles::task(
+let bundle = bundles::bundle([bundles::task(
     send_email,
-    TaskHandlerConf::new("send_email"),
-)
-.into_bundle();
+    TaskDefinition::new("send_email"),
+)]);
 ```
 
 Task names are used for registration, storage, diagnostics, logs, and console
@@ -319,22 +318,18 @@ The receipt is `Queued`, `Existing`, or `Ignored` and always exposes the new or
 existing task ID through `.id()`.
 
 Use `submit_many` to enqueue inputs in one store transaction. Use
-`submit_many_with` for a shared lane, delay, and idempotency rule:
+`submit_many_with` for a shared initial delay and conflict policy:
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::{TaskLane, TaskOptions};
-
-const EMAIL: TaskLane = TaskLane::new("email");
+use vyuh::tasks::TaskOptions;
 
 let receipts = site.tasks()
     .submit_many_with(
         jobs,
         TaskOptions::new()
-            .lane(EMAIL)
             .delay(Duration::from_secs(300))
-            .idempotency_key(|job: &SendEmailJob| format!("welcome:{}", job.to))
             .ignore_conflicts(),
     )
     .await?;
@@ -346,19 +341,27 @@ submission is atomic and its receipts preserve input order; a non-ignored
 conflict or store failure rolls back the whole batch. An empty batch succeeds
 with no receipts.
 
-All option builders are infallible. Invalid state serialization, lane names,
+All option builders are infallible. Invalid state serialization, generated
 keys, or durations are reported only by the terminal submission call.
 
-Idempotency keys are scoped by registered task handler. Vyuh fingerprints the
-canonical input together with execution-affecting options. Repeating the same
-intent returns `Existing`; reusing the key for a different intent rejects the
-whole batch. `.ignore_conflicts()` keeps non-conflicting entries and returns
-`Ignored` for conflicting entries instead.
+Idempotency belongs to the static task definition, not a particular submission:
 
-The site-wide retention policy defaults to `TaskIdempotency::active_only()`.
-Use `TaskIdempotency::retain_for(Duration::from_secs(30 * 24 * 60 * 60))` when a completed key must
-remain unavailable for an archive window. The window begins when the task
-reaches a terminal state.
+```rust
+fn email_key(job: &SendEmailJob) -> String {
+    format!("welcome:{}", job.to)
+}
+
+let definition = TaskDefinition::new("send_email")
+    .lane(EMAIL)
+    .idempotency(TaskIdempotency::new("email-v1", email_key));
+```
+
+Vyuh fingerprints the canonical input with the definition's stable key-rule
+revision. Repeating the same intent returns `Existing`; reusing a key for a
+different intent rejects the batch. `.ignore_conflicts()` keeps non-conflicting
+entries and returns `Ignored` for conflicts. Retention is lane policy: without
+`.idempotency_retention(...)`, a terminal task releases its key; a retained key
+remains unavailable from terminal completion until the configured duration.
 
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
 `TaskState::sleep`, and recurring creation belongs in emitters.
@@ -379,7 +382,7 @@ than queried again.
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::{TaskConf, TaskLane, TaskLaneConf, TaskIdempotency, TaskRate,
+use vyuh::tasks::{TaskConf, TaskLane, TaskLaneConf, TaskRate,
     TaskRetry, DEFAULT_TASK_LANE};
 
 const EMAIL: TaskLane = TaskLane::new("email");
@@ -391,18 +394,16 @@ let tasks = TaskConf::default()
     .poll_interval(Duration::from_secs(1))
     .fallback_poll_interval(Duration::from_secs(300))
     .lease_duration(Duration::from_secs(300))
-    .idempotency(TaskIdempotency::retain_for(Duration::from_secs(30 * 24 * 60 * 60)))
-    .lanes([
-        TaskLaneConf::new(DEFAULT_TASK_LANE, 6),
-        TaskLaneConf::new(EMAIL, 2)
+    .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 6))
+    .lane(TaskLaneConf::new(EMAIL, 2)
             .retry(
                 TaskRetry::exponential(5, Duration::from_secs(10))
                     .max_delay(Duration::from_secs(300)),
             )
             .rate_limit(TaskRate::per_second(10).burst(5))
-            .global_rate_limit(TaskRate::per_minute(60).burst(10)),
-        TaskLaneConf::new(EXPORTS, 2),
-    ]);
+            .global_rate_limit(TaskRate::per_minute(60).burst(10))
+            .idempotency_retention(Duration::from_secs(30 * 24 * 60 * 60)))
+    .lane(TaskLaneConf::new(EXPORTS, 2));
 let conf = SiteConf::default().tasks(tasks);
 ```
 
@@ -421,6 +422,30 @@ high-throughput lane does not require one rate-state write per task. The memory
 store coordinates a global limit only among runners sharing that in-process
 store. Restarting a runner restores its local burst, and adding processes
 multiplies a local-only limit.
+
+Reusable bundles can contribute a complete default for a named lane without
+changing `bundle!` syntax:
+
+```rust
+let bundle = bundles::bundle! { send_email }
+    .with_task_lane(TaskLaneConf::new(EMAIL, 2));
+```
+
+The application remains authoritative: `TaskConf::lane(...)` replaces that
+contributed definition by name. A task that declares an unavailable lane uses
+`default` with a startup warning by default. Use
+`TaskConf::missing_lane(TaskLanePolicy::RequireConfigured)` to make that a
+site-construction error instead:
+
+```rust
+use vyuh::tasks::TaskLanePolicy;
+
+let tasks = TaskConf::default()
+    .missing_lane(TaskLanePolicy::RequireConfigured);
+```
+
+Bundle defaults cannot configure `default`, and duplicate contributed lane
+names are rejected.
 
 Removing a configured lane never silently moves its work. Non-terminal orphaned
 tasks prevent worker startup. After running work drains, explicitly call

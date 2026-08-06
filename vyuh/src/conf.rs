@@ -427,6 +427,7 @@ impl SiteConf {
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
         self.mail.validate(&mut errors);
+        self.validate_logging(&mut errors);
         self.validate_production(&mut errors);
 
         if errors.is_empty() {
@@ -441,7 +442,27 @@ impl SiteConf {
             errors.push(ConfError::InvalidValue {
                 field: "tasks".into(),
                 reason: error.to_string(),
-                expected: Some("valid task groups, batching, and polling limits".into()),
+                expected: Some("valid task lanes, batching, and polling limits".into()),
+            });
+        }
+    }
+
+    fn validate_logging(&self, errors: &mut Vec<ConfError>) {
+        if let Err(error) = self.logging.validate() {
+            errors.push(ConfError::InvalidValue {
+                field: "logging".into(),
+                reason: error.to_string(),
+                expected: Some("valid logging rules and sinks".into()),
+            });
+        }
+        if let Err(error) = self
+            .logging
+            .validate_mail_admins(self.log_init, self.mail.enabled)
+        {
+            errors.push(ConfError::InvalidValue {
+                field: "logging.mail_admins".into(),
+                reason: error.to_string(),
+                expected: Some("enabled logging and outbound mail".into()),
             });
         }
     }
@@ -836,6 +857,7 @@ fn validate_file_writable(base: &PathBuf, file: &str, field: &str, errors: &mut 
 #[cfg(test)]
 mod auth_secret_tests {
     use super::{SiteConf, parse_secret_key_fallbacks};
+    use crate::logging::{LogRule, LogSink, LoggingConf, MailAdmins};
 
     /// Verifies env fallbacks accept both conventional comma and JSON list forms.
     #[test]
@@ -862,5 +884,19 @@ mod auth_secret_tests {
         assert!(!value.contains("retired-production-secret-value"));
         assert!(!value.contains("secret_key"));
         Ok(())
+    }
+
+    /// Verifies a configured administrator sink cannot be disabled by inert logging setup.
+    #[test]
+    fn mail_admins_requires_site_logging() {
+        let conf = SiteConf::default().log_init(false).logging(LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "ADMINS".into(),
+                sink: LogSink::mail_admins(MailAdmins::new(["ops@example.com"])),
+                default_filter: "error".into(),
+            }],
+        });
+        assert!(conf.validate().is_err());
     }
 }

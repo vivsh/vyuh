@@ -2,7 +2,8 @@
 
 Vyuh logging is built on Rust's `tracing` ecosystem. A site initializes tracing
 when it is built, keeps file writer guards alive for the site lifetime, and lets
-applications route logs to stdout, stderr, or rotating files.
+applications route logs to stdout, stderr, rotating files, or debounced
+administrator email reports.
 
 Logging is configuration-driven. Application code uses ordinary `tracing`
 macros such as `tracing::info!`, while `SiteConf.logging` decides which sinks
@@ -15,7 +16,7 @@ The main public pieces are:
 
 - `LoggingConf` for the full logging setup.
 - `LogRule` for one sink plus one default filter.
-- `LogSink` for stdout, stderr, or file output.
+- `LogSink` for stdout, stderr, file output, or administrator email reports.
 - `Rotation` for file sink rotation.
 - `LoggingError` for validation and initialization failures.
 
@@ -154,6 +155,56 @@ files directly with bounded reverse scans; it does not retain a second log
 store, index stdout/stderr, or stream logs to browsers. Search results can be
 partial when their fixed scan budget is reached.
 
+### Administrator email reports
+
+With Vyuh's optional `email` feature and enabled `MailConf`, a rule can send
+error reports to administrators through the site's existing SMTP transport:
+
+```rust
+use std::time::Duration;
+use vyuh::logging::{
+    LogRule, LogSink, LoggingConf, MailAdmins, MailDedupe, MailSummary, MailThrottle,
+};
+
+let logging = LoggingConf {
+    env_prefix: None,
+    rules: vec![LogRule {
+        name: "ADMINS".into(),
+        sink: LogSink::mail_admins(
+            MailAdmins::new(["ops@example.com"])
+                .debounce(Duration::from_secs(300))
+                .dedupe(MailDedupe::Callsite)
+                .summary(MailSummary::Samples)
+                .unthrottled()
+                .throttle(MailThrottle::per_minute(12))
+                .throttle(MailThrottle::per_hour(100)),
+        ),
+        default_filter: "error,my_app=error".into(),
+    }],
+};
+```
+
+`MailAdmins::new(...)` is sufficient for the ordinary case. Subject to its
+lossy delivery throttles, it sends the first matching `ERROR` immediately,
+groups later events from the same tracing callsite for five minutes, and sends
+one sampled summary. `MailDedupe::Exact` also includes the event message in
+the grouping key. `MailSummary::Count` omits samples and `MailSummary::None`
+suppresses the follow-up message.
+
+By default, a sink permits 12 emails per minute and 100 per hour. A throttle
+discards an email once its limit is exhausted; it never queues mail or adds a
+delivery delay. Every configured throttle must allow a message, so the default
+caps both alert bursts and sustained failure noise. Use `.unthrottled()` before
+adding custom policies, as shown above. Multiple `.throttle(...)` calls compose
+independently.
+
+The tracing callback never waits for SMTP. It places bounded error metadata on
+a site-owned queue; when the queue or active-report limit is full, newest
+reports are dropped rather than slowing application work. Mail is best-effort:
+Vyuh does not persist or retry reports, and a mail delivery failure logs at
+`WARN` without generating another administrator email. Logged fields may be
+included in email, so configure recipients accordingly.
+
 ## Rotation
 
 File sinks support:
@@ -177,8 +228,12 @@ Logging configuration is validated during site build:
   must start with an uppercase letter.
 - Filters must parse as valid tracing filter directives unless they disable the
   rule with `off`, `0`, `false`, or `no`.
+- `mail_admins` requires `log_init(true)`, the `email` feature, enabled valid
+  SMTP configuration, one or more valid recipients, a debounce from 1ms to
+  24 hours, and at most eight distinct delivery-throttle windows.
 
-Invalid logging configuration returns `SiteError::LoggingError`.
+Invalid logging configuration fails site construction with a configuration error
+that retains the logging validation reason.
 
 ## Tests
 
@@ -213,6 +268,8 @@ environment override names.
 - File sink directory creation errors return `LoggingError::DirCreation`.
 - A second global tracing initialization returns `LoggingError::SubscriberInit`.
 - A competing global `log` logger returns `LoggingError::SubscriberInit`.
+- A mail-admin sink without SMTP, email support, recipients, or logging
+  initialization fails site construction with a clear logging configuration error.
 
 ## Current Limitations
 
@@ -221,3 +278,4 @@ environment override names.
   logger installed by another runtime.
 - Vyuh does not currently expose runtime log-level reconfiguration.
 - File logging is JSON-only.
+- Administrator reports are best-effort and are not a durable alerting queue.

@@ -1,22 +1,19 @@
 //! Task submission options, persistence requests, and receipts.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, time::Duration};
 
 use serde::Serialize;
 
-use super::{DEFAULT_TASK_LANE, TaskError, TaskId, TaskLane, TaskRecord};
-
-type KeyFn<T> = Arc<dyn Fn(&T) -> String + Send + Sync + 'static>;
+use super::{TaskError, TaskId, TaskRecord};
 
 /// Submission policy evaluated before one or more task records are stored.
-pub struct TaskOptions<T> {
+#[derive(Default)]
+pub struct TaskOptions {
     pub(crate) initial_delay: Option<Duration>,
-    pub(crate) lane: TaskLane,
-    pub(crate) key: Option<KeyFn<T>>,
     pub(crate) ignore_conflicts: bool,
 }
 
-impl<T> TaskOptions<T> {
+impl TaskOptions {
     /// Creates the default submission policy.
     pub fn new() -> Self {
         Self::default()
@@ -28,31 +25,10 @@ impl<T> TaskOptions<T> {
         self
     }
 
-    /// Selects the named execution lane.
-    pub const fn lane(mut self, lane: TaskLane) -> Self {
-        self.lane = lane;
-        self
-    }
-
-    /// Derives one idempotency key from each typed input.
-    pub fn idempotency_key(mut self, key: impl Fn(&T) -> String + Send + Sync + 'static) -> Self {
-        self.key = Some(Arc::new(key));
-        self
-    }
-
     /// Keeps non-conflicting batch entries when an idempotency key is reused.
     pub const fn ignore_conflicts(mut self) -> Self {
         self.ignore_conflicts = true;
         self
-    }
-
-    pub(crate) fn key_for(&self, input: &T) -> Result<Option<String>, TaskError> {
-        let Some(key) = &self.key else {
-            return Ok(None);
-        };
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| key(input)))
-            .map(Some)
-            .map_err(|_| TaskError::InvalidOptions("task idempotency callback panicked".into()))
     }
 }
 
@@ -81,35 +57,20 @@ fn canonical_value(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-impl<T> Default for TaskOptions<T> {
-    fn default() -> Self {
-        Self {
-            initial_delay: None,
-            lane: DEFAULT_TASK_LANE,
-            key: None,
-            ignore_conflicts: false,
-        }
-    }
-}
-
-impl<T> Clone for TaskOptions<T> {
+impl Clone for TaskOptions {
     fn clone(&self) -> Self {
         Self {
             initial_delay: self.initial_delay,
-            lane: self.lane,
-            key: self.key.clone(),
             ignore_conflicts: self.ignore_conflicts,
         }
     }
 }
 
-impl<T> fmt::Debug for TaskOptions<T> {
+impl fmt::Debug for TaskOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TaskOptions")
             .field("initial_delay", &self.initial_delay)
-            .field("lane", &self.lane)
-            .field("has_idempotency_key", &self.key.is_some())
             .field("ignore_conflicts", &self.ignore_conflicts)
             .finish_non_exhaustive()
     }

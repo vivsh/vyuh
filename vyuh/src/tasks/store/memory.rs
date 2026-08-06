@@ -3,8 +3,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::tasks::{
-    AbstractTaskStore, LaneClaim, LanePoll, TaskCommit, TaskError, TaskFilter, TaskId,
-    TaskIdempotency, TaskLane, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry,
+    AbstractTaskStore, IdempotencyRetention, LaneClaim, LanePoll, TaskCommit, TaskError,
+    TaskFilter, TaskId, TaskLane, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry,
     TaskStatus, TaskStoreConf, TaskTick, TaskWrite,
 };
 
@@ -81,7 +81,7 @@ impl AbstractTaskStore for MemoryTaskStore {
                 "task workers use incompatible lane or global rate policies".into(),
             ));
         }
-        fail_unleased_running(&mut state.tasks, conf.idempotency, chrono::Utc::now())?;
+        fail_unleased_running(&mut state.tasks, &conf, chrono::Utc::now())?;
         reject_orphaned_tasks(&state.tasks, &conf)?;
         initialize_rates(&mut state, &conf);
         state.fingerprint = Some(fingerprint);
@@ -238,18 +238,15 @@ fn claim_tasks_state(
     lease_duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<TaskPoll, TaskError> {
+    let conf = state
+        .conf
+        .clone()
+        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
     let mut lanes = Vec::with_capacity(claims.len());
     for claim in claims {
         let bounded = bounded_claim(claim, batch_size);
-        let idempotency = configured_idempotency(state);
         let retry = configured_retry(state, bounded.lane)?;
-        fail_exhausted(
-            &mut state.tasks,
-            bounded.lane.as_str(),
-            now,
-            idempotency,
-            retry,
-        )?;
+        fail_exhausted(&mut state.tasks, bounded.lane.as_str(), now, &conf, retry)?;
         let candidates = due_count(state, bounded.lane, now);
         let rate = configured_rate(state, bounded.lane)?;
         let (permits, rate_wake) = reserve_permits(state, bounded.lane, candidates, rate, now)?;
@@ -277,7 +274,10 @@ fn commit_outcomes_state(
     commits: &[TaskCommit],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), TaskError> {
-    let idempotency = configured_idempotency(state);
+    let conf = state
+        .conf
+        .clone()
+        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
     for commit in commits {
         let retry = configured_retry(state, commit.lane)?;
         let Some(task) = owned_task_mut(&mut state.tasks, commit.task_id, runner_id) else {
@@ -287,7 +287,7 @@ fn commit_outcomes_state(
             return Err(TaskError::UnknownLane(task.lane.clone()));
         }
         apply_outcome(task, commit.outcome.clone(), retry, now)?;
-        finalize_idempotency(task, idempotency, now)?;
+        finalize_idempotency(task, &conf, now)?;
     }
     Ok(())
 }
@@ -350,7 +350,7 @@ fn claim_lane_state(
 /// Fails legacy running rows that cannot be safely reclaimed by lease expiry.
 fn fail_unleased_running(
     tasks: &mut [TaskRecord],
-    policy: TaskIdempotency,
+    conf: &TaskStoreConf,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), TaskError> {
     for task in tasks {
@@ -360,7 +360,7 @@ fn fail_unleased_running(
         fail(task, "Running task has no lease deadline".into(), now);
         task.locked_by = None;
         task.updated_at = now;
-        finalize_idempotency(task, policy, now)?;
+        finalize_idempotency(task, conf, now)?;
     }
     Ok(())
 }
@@ -370,7 +370,7 @@ fn fail_exhausted(
     tasks: &mut [TaskRecord],
     lane: &str,
     now: chrono::DateTime<chrono::Utc>,
-    policy: TaskIdempotency,
+    conf: &TaskStoreConf,
     retry: TaskRetry,
 ) -> Result<(), TaskError> {
     for task in tasks {
@@ -384,7 +384,7 @@ fn fail_exhausted(
         task.locked_by = None;
         task.leased_until = None;
         task.updated_at = now;
-        finalize_idempotency(task, policy, now)?;
+        finalize_idempotency(task, conf, now)?;
     }
     Ok(())
 }
@@ -713,15 +713,21 @@ fn checked_deadline(
 /// Releases or archives a key when its task reaches a terminal status.
 fn finalize_idempotency(
     task: &mut TaskRecord,
-    policy: TaskIdempotency,
+    conf: &TaskStoreConf,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), TaskError> {
     if !matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed) {
         return Ok(());
     }
+    if task.idempotency_key.is_none() {
+        return Ok(());
+    }
+    let policy = conf.idempotency_for(&task.name).ok_or_else(|| {
+        TaskError::InvalidConfig(format!("task '{}' has no idempotency policy", task.name))
+    })?;
     task.idempotency_expires_at = match policy {
-        TaskIdempotency::ActiveOnly => None,
-        TaskIdempotency::RetainFor(duration) => checked_deadline(now, duration)?,
+        IdempotencyRetention::ActiveOnly => None,
+        IdempotencyRetention::RetainFor(duration) => checked_deadline(now, duration)?,
     };
     Ok(())
 }
@@ -821,13 +827,6 @@ fn page(records: Vec<TaskRecord>, filter: &TaskFilter) -> crate::routes::Page<Ta
         .take(filter.per_page)
         .collect();
     crate::routes::Page::new(items, total, filter.page, filter.per_page)
-}
-
-fn configured_idempotency(state: &MemoryState) -> TaskIdempotency {
-    state
-        .conf
-        .as_ref()
-        .map_or(TaskIdempotency::ActiveOnly, |conf| conf.idempotency)
 }
 
 /// Creates buckets only for lanes with configured global rate limits.

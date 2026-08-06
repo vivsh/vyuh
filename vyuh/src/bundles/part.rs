@@ -7,7 +7,7 @@ use crate::{
     embed, emitters,
     services::{Service, ServiceBuildContext, ServiceHandler, ServiceInstance},
     signals::{self, SignalConf},
-    tasks::TaskHandlerConf,
+    tasks::TaskDefinition,
 };
 use axum::{
     http::{HeaderValue, header},
@@ -147,10 +147,18 @@ impl Bundle {
     }
 }
 
+/// Builds the HTTP `Allow` header, including Axum's implicit `HEAD` support for `GET`.
 fn allow_header(methods: &crate::routes::Methods) -> Option<HeaderValue> {
-    HeaderValue::from_str(&methods.to_vec().join(", ")).ok()
+    let mut names = methods.to_vec();
+    if methods.contains(crate::routes::Methods::GET)
+        && !methods.contains(crate::routes::Methods::HEAD)
+    {
+        names.push("HEAD");
+    }
+    HeaderValue::from_str(&names.join(", ")).ok()
 }
 
+/// Returns Vyuh's canonical framework error for a route with an unsupported method.
 async fn method_not_allowed(allow: Option<HeaderValue>) -> axum::response::Response {
     let mut response = crate::ErrorReport::method_not_allowed().into_response();
     if let Some(allow) = allow {
@@ -284,7 +292,7 @@ where
 }
 
 /// Creates a durable task part.
-pub fn task<T, H, Args>(handler: H, options: TaskHandlerConf) -> BundlePart
+pub fn task<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
 where
     T: callables::DataValue,
     H: callables::Specable<Args> + Send + Sync + 'static,
@@ -299,8 +307,8 @@ where
         + Send
         + 'static,
 {
-    let task = crate::tasks::RegisteredTask::new::<T, H, Args>(&options.name, handler);
-    let op = task.operation().with_conf(&options);
+    let task = crate::tasks::RegisteredTask::new::<T, H, Args>(definition, handler);
+    let op = task.operation();
     BundlePart {
         operation: Some(op),
         part: BundlePartInner::Task(task),

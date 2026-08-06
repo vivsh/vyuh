@@ -64,7 +64,7 @@ impl DbTaskStore {
                 row.leased_until = None;
                 row.updated_at = now;
             }
-            update_idempotency_batch(transaction, &mut rows, conf.idempotency, now).await?;
+            update_idempotency_batch(transaction, &mut rows, conf, now).await?;
             batch_update_rows(transaction, &rows, self.batch_size).await?;
         }
     }

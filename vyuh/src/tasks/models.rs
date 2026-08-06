@@ -1,8 +1,10 @@
 //! Task registration, submission, listing, and persisted-record value types.
 
+use std::{any::Any, sync::Arc};
+
 use serde::{Deserialize, Serialize};
 
-use super::{TaskError, TaskStatus};
+use super::{DEFAULT_TASK_LANE, TaskError, TaskLane, TaskStatus};
 
 /// Canonical identifier for one durable task execution.
 #[derive(
@@ -46,17 +48,152 @@ impl std::str::FromStr for TaskId {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
-/// Registration metadata for one task handler.
-pub struct TaskHandlerConf {
-    pub name: String,
+/// Immutable idempotency policy for one typed task definition.
+pub struct TaskIdempotency<T> {
+    revision: &'static str,
+    key: fn(&T) -> String,
 }
 
-impl TaskHandlerConf {
-    /// Creates handler registration metadata with one stable task name.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+impl<T> Copy for TaskIdempotency<T> {}
+
+impl<T> Clone for TaskIdempotency<T> {
+    fn clone(&self) -> Self {
+        *self
     }
+}
+
+impl<T> TaskIdempotency<T> {
+    /// Creates a stable typed idempotency key rule for one task definition.
+    pub const fn new(revision: &'static str, key: fn(&T) -> String) -> Self {
+        Self { revision, key }
+    }
+
+    pub(crate) const fn policy(self) -> IdempotencyPolicy {
+        IdempotencyPolicy {
+            revision: self.revision,
+        }
+    }
+
+    pub(crate) fn key_for(self, input: &T) -> Result<String, TaskError> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.key)(input)))
+            .map_err(|_| TaskError::InvalidOptions("task idempotency callback panicked".into()))
+    }
+}
+
+impl<T> std::fmt::Debug for TaskIdempotency<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskIdempotency")
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Immutable registration definition for one typed durable task.
+#[derive(Clone)]
+pub struct TaskDefinition<T> {
+    name: String,
+    lane: TaskLane,
+    idempotency: Option<TaskIdempotency<T>>,
+}
+
+impl<T> TaskDefinition<T> {
+    /// Creates a task definition with the framework default lane.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            lane: DEFAULT_TASK_LANE,
+            idempotency: None,
+        }
+    }
+
+    /// Declares the lane requested by every execution of this task.
+    pub const fn lane(mut self, lane: TaskLane) -> Self {
+        self.lane = lane;
+        self
+    }
+
+    /// Declares deterministic idempotency for every execution of this task.
+    pub const fn idempotency(mut self, idempotency: TaskIdempotency<T>) -> Self {
+        self.idempotency = Some(idempotency);
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (String, TaskDefinitionPolicy<T>) {
+        (
+            self.name,
+            TaskDefinitionPolicy {
+                declared_lane: self.lane,
+                effective_lane: self.lane,
+                idempotency: self.idempotency,
+            },
+        )
+    }
+}
+
+impl<T> std::fmt::Debug for TaskDefinition<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskDefinition")
+            .field("name", &self.name)
+            .field("lane", &self.lane)
+            .field("idempotency", &self.idempotency)
+            .finish()
+    }
+}
+
+/// Stable store-visible metadata for one idempotency rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdempotencyPolicy {
+    pub(crate) revision: &'static str,
+}
+
+/// Typed execution policy before task registration erases its input type.
+#[derive(Clone)]
+pub(crate) struct TaskDefinitionPolicy<T> {
+    pub(crate) declared_lane: TaskLane,
+    pub(crate) effective_lane: TaskLane,
+    pub(crate) idempotency: Option<TaskIdempotency<T>>,
+}
+
+type KeyFn = Arc<dyn Fn(&dyn Any) -> Result<String, TaskError> + Send + Sync + 'static>;
+
+/// Resolved immutable execution policy for a registered task.
+#[derive(Clone)]
+pub(crate) struct TaskPolicy {
+    pub(crate) declared_lane: TaskLane,
+    pub(crate) effective_lane: TaskLane,
+    pub(crate) idempotency: Option<IdempotencyPolicy>,
+    key: Option<KeyFn>,
+}
+
+impl<T: 'static> TaskDefinitionPolicy<T> {
+    pub(crate) fn erase(self) -> TaskPolicy {
+        let idempotency = self.idempotency;
+        let key = idempotency.map(erased_key::<T>);
+        TaskPolicy {
+            declared_lane: self.declared_lane,
+            effective_lane: self.effective_lane,
+            idempotency: idempotency.map(TaskIdempotency::policy),
+            key,
+        }
+    }
+}
+
+impl TaskPolicy {
+    pub(crate) fn key_for<T: 'static>(&self, input: &T) -> Result<Option<String>, TaskError> {
+        self.key.as_ref().map(|key| key(input)).transpose()
+    }
+}
+
+/// Erases one statically typed idempotency function at task registration.
+fn erased_key<T: 'static>(policy: TaskIdempotency<T>) -> KeyFn {
+    Arc::new(move |input| {
+        input
+            .downcast_ref::<T>()
+            .ok_or_else(|| TaskError::TaskExecutionError("task key input type changed".into()))
+            .and_then(|input| policy.key_for(input))
+    })
 }
 
 #[derive(Debug, Clone)]

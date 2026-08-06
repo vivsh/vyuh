@@ -1,12 +1,18 @@
 use serde::{Deserialize, Serialize};
-use std::{any::TypeId, collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::TypeId,
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{
     Error, Site,
     callables::{self, Callable},
 };
 
-use super::{TaskConf, TaskDispatcher, TaskRecord};
+use super::models::{IdempotencyPolicy, TaskPolicy};
+use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord};
 
 /// Invocation context used internally to extract task data and runtime identity.
 #[doc(hidden)]
@@ -381,6 +387,7 @@ pub(crate) struct RegisteredTask {
     outcome: fn(callables::DataBox) -> TaskOutcome,
     handler: TaskHandler,
     operation: callables::Operation,
+    policy: TaskPolicy,
 }
 
 impl RegisteredTask {
@@ -390,6 +397,29 @@ impl RegisteredTask {
 
     pub(crate) fn operation(&self) -> callables::Operation {
         self.operation.clone()
+    }
+
+    pub(crate) const fn declared_lane(&self) -> super::TaskLane {
+        self.policy.declared_lane
+    }
+
+    pub(crate) const fn effective_lane(&self) -> super::TaskLane {
+        self.policy.effective_lane
+    }
+
+    pub(crate) fn resolve_lane(&mut self, lane: super::TaskLane) {
+        self.policy.effective_lane = lane;
+    }
+
+    pub(crate) const fn idempotency_policy(&self) -> Option<IdempotencyPolicy> {
+        self.policy.idempotency
+    }
+
+    pub(crate) fn idempotency_key<T: 'static>(
+        &self,
+        input: &T,
+    ) -> Result<Option<String>, TaskError> {
+        self.policy.key_for(input)
     }
 
     pub fn validate_object<T: 'static>(&self, _obj: &T) -> Result<(), TaskError> {
@@ -429,7 +459,7 @@ impl RegisteredTask {
         (self.outcome)(data)
     }
 
-    pub fn new<T, H, Args>(name: &str, handler: H) -> Self
+    pub fn new<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
     where
         T: callables::DataValue,
         H: callables::Specable<Args> + Send + Sync + 'static,
@@ -444,17 +474,19 @@ impl RegisteredTask {
             + Send
             + 'static,
     {
+        let (name, policy) = definition.into_parts();
         let callable: callables::Callable<TaskContext, Error> = Callable::new(handler);
         let mut operation =
             callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
-        operation.name = name.to_string();
+        operation.name = name.clone();
         RegisteredTask {
-            name: name.to_string(),
+            name,
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>().to_string(),
             outcome: H::Output::into_task_outcome,
             handler: callable,
             operation,
+            policy: policy.erase(),
         }
     }
 }
@@ -495,6 +527,8 @@ pub(crate) struct TaskRegistry {
     pub(crate) config: TaskConf,
     pub(crate) tasks: HashMap<String, RegisteredTask>,
     pub(crate) typed_map: HashMap<TypeId, String>,
+    lane_defaults: BTreeMap<super::TaskLane, super::TaskLaneConf>,
+    lanes: Vec<super::TaskLaneConf>,
 }
 
 impl TaskRegistry {
@@ -503,15 +537,40 @@ impl TaskRegistry {
             config: TaskConf::default(),
             tasks: HashMap::new(),
             typed_map: HashMap::new(),
+            lane_defaults: BTreeMap::new(),
+            lanes: Vec::new(),
         }
     }
 
-    pub(crate) fn with_config(self, config: TaskConf) -> Self {
-        Self {
-            config,
-            tasks: self.tasks,
-            typed_map: self.typed_map,
+    #[cfg(test)]
+    pub(crate) fn with_config(mut self, config: TaskConf) -> Result<Self, TaskError> {
+        self.lanes = config.resolve_lanes(std::iter::empty())?;
+        self.config = config;
+        Ok(self)
+    }
+
+    /// Resolves every immutable task definition against validated site policy.
+    pub(crate) fn finalize(mut self, config: TaskConf) -> Result<Self, TaskError> {
+        let lanes = config.resolve_lanes(self.lane_defaults.values().cloned())?;
+        for task in self.tasks.values_mut() {
+            let declared = task.declared_lane();
+            validate_key_revision(task.idempotency_policy())?;
+            let (effective, fallback) = config
+                .resolve_lane(&lanes, declared)
+                .map_err(|error| missing_lane_error(error, task.name(), declared, &lanes))?;
+            if fallback {
+                tracing::warn!(
+                    task = task.name(),
+                    declared_lane = %declared,
+                    effective_lane = %effective,
+                    "task lane is not configured; using the default lane"
+                );
+            }
+            task.resolve_lane(effective);
         }
+        self.config = config;
+        self.lanes = lanes;
+        Ok(self)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -529,7 +588,25 @@ impl TaskRegistry {
         Ok(())
     }
 
+    /// Adds one bundle-owned default for a named non-default task lane.
+    pub(crate) fn register_lane(&mut self, lane: super::TaskLaneConf) -> Result<(), TaskError> {
+        let name = lane.lane();
+        if name == super::DEFAULT_TASK_LANE {
+            return Err(TaskError::InvalidConfig(
+                "bundles cannot configure the default task lane".into(),
+            ));
+        }
+        if self.lane_defaults.contains_key(&name) {
+            return Err(TaskError::AlreadyExists(format!("task lane '{name}'")));
+        }
+        self.lane_defaults.insert(name, lane);
+        Ok(())
+    }
+
     pub(crate) fn merge(&mut self, other: TaskRegistry) -> Result<(), TaskError> {
+        for lane in other.lane_defaults.into_values() {
+            self.register_lane(lane)?;
+        }
         for (name, task) in other.tasks {
             validate_task_name(&name)?;
             if self.tasks.contains_key(&name) {
@@ -544,16 +621,39 @@ impl TaskRegistry {
         Ok(())
     }
 
+    /// Returns the complete validated lane set used by the runtime and store.
+    pub(crate) fn lanes(&self) -> &[super::TaskLaneConf] {
+        &self.lanes
+    }
+
+    /// Produces the finalized per-handler idempotency policy shared with stores.
+    pub(crate) fn idempotency_conf(
+        &self,
+    ) -> Result<Vec<super::store::TaskIdempotencyConf>, TaskError> {
+        self.tasks
+            .values()
+            .filter_map(|task| {
+                task.idempotency_policy().map(|policy| {
+                    lane_retention(&self.lanes, task.effective_lane()).map(|retention| {
+                        super::store::TaskIdempotencyConf {
+                            handler: task.name.clone(),
+                            lane: task.effective_lane().to_string(),
+                            revision: policy.revision.into(),
+                            retention,
+                        }
+                    })
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn dispatcher<S: crate::tasks::store::AbstractTaskStore + Send + Sync + 'static>(
         self: Arc<Self>,
         store: Arc<S>,
     ) -> TaskDispatcher<S> {
         let metrics = Arc::new(super::TaskMetrics::new(
             self.tasks.keys().cloned(),
-            self.config
-                .resolved_lanes()
-                .into_iter()
-                .map(|lane| lane.lane().to_string()),
+            self.lanes.iter().map(|lane| lane.lane().to_string()),
         ));
         TaskDispatcher {
             store,
@@ -589,6 +689,59 @@ fn validate_task_name(name: &str) -> Result<(), TaskError> {
     Ok(())
 }
 
+/// Validates the stable identifier used to distinguish idempotency-key semantics.
+fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskError> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let revision = policy.revision;
+    if revision.is_empty() || revision.len() > 64 {
+        return Err(TaskError::InvalidConfig(
+            "task idempotency revisions must contain between 1 and 64 bytes".into(),
+        ));
+    }
+    if !revision.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+    }) {
+        return Err(TaskError::InvalidConfig(
+            "task idempotency revisions use lowercase letters, digits, '-' or '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reads the already validated retention policy for one effective registered lane.
+fn lane_retention(
+    lanes: &[super::TaskLaneConf],
+    lane: super::TaskLane,
+) -> Result<super::IdempotencyRetention, TaskError> {
+    lanes
+        .iter()
+        .find(|entry| entry.lane() == lane)
+        .map(super::TaskLaneConf::idempotency_policy)
+        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
+}
+
+/// Adds task-definition context when strict lane resolution rejects site construction.
+fn missing_lane_error(
+    error: TaskError,
+    task: &str,
+    declared: super::TaskLane,
+    lanes: &[super::TaskLaneConf],
+) -> TaskError {
+    if !matches!(error, TaskError::UnknownLane(_)) {
+        return error;
+    }
+    let configured = lanes
+        .iter()
+        .map(|lane| lane.lane().as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    TaskError::InvalidConfig(format!(
+        "task '{task}' declares lane '{declared}', but configured lanes are: {configured}"
+    ))
+}
+
 impl std::fmt::Debug for TaskRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskRegistry")
@@ -608,8 +761,8 @@ mod tests {
     use crate::{
         Data, SiteError,
         tasks::{
-            DEFAULT_TASK_LANE, LaneClaim, TaskCommit, TaskId, TaskLane, TaskOptions, TaskReceipt,
-            store::AbstractTaskStore, store::MemoryTaskStore,
+            DEFAULT_TASK_LANE, LaneClaim, TaskCommit, TaskId, TaskIdempotency, TaskOptions,
+            TaskReceipt, store::AbstractTaskStore, store::MemoryTaskStore,
         },
     };
 
@@ -668,8 +821,11 @@ mod tests {
     /// Verifies direct task registration retains typed task submission without result storage.
     #[tokio::test]
     async fn direct_registration_supports_typed_submit() -> Result<(), TaskError> {
-        let mut registry = TaskRegistry::new();
-        registry.register(RegisteredTask::new("direct_job", direct_job))?;
+        let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
+        registry.register(RegisteredTask::new(
+            TaskDefinition::new("direct_job"),
+            direct_job,
+        ))?;
 
         let store = Arc::new(MemoryTaskStore::new(10));
         let dispatcher = Arc::new(registry).dispatcher(store.clone());
@@ -706,25 +862,18 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies invalid lanes and oversized durations surface only from submission terminals.
+    /// Verifies invalid submission delay values surface only from submission terminals.
     #[tokio::test]
     async fn task_options_defer_errors_to_submission() -> Result<(), TaskError> {
-        let mut registry = TaskRegistry::new();
-        registry.register(RegisteredTask::new("direct_job", direct_job))?;
+        let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
+        registry.register(RegisteredTask::new(
+            TaskDefinition::new("direct_job"),
+            direct_job,
+        ))?;
         let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)));
-        let unknown = TaskOptions::new().lane(TaskLane::new("missing"));
-        assert!(matches!(
-            dispatcher.submit_with(DirectJob { id: 1 }, unknown).await,
-            Err(TaskError::UnknownLane(_))
-        ));
         let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
         assert!(matches!(
-            dispatcher.submit_with(DirectJob { id: 2 }, oversized).await,
-            Err(TaskError::InvalidOptions(_))
-        ));
-        let panicking = TaskOptions::new().idempotency_key(|_: &DirectJob| panic!("key failed"));
-        assert!(matches!(
-            dispatcher.submit_with(DirectJob { id: 3 }, panicking).await,
+            dispatcher.submit_with(DirectJob { id: 1 }, oversized).await,
             Err(TaskError::InvalidOptions(_))
         ));
         Ok(())
@@ -733,13 +882,19 @@ mod tests {
     /// Verifies typed bulk key derivation preserves ordered queued and existing receipts.
     #[tokio::test]
     async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskError> {
-        let mut registry = TaskRegistry::new();
-        registry.register(RegisteredTask::new("direct_job", direct_job))?;
+        let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
+        registry.register(RegisteredTask::new(
+            TaskDefinition::new("direct_job")
+                .idempotency(TaskIdempotency::new("direct-job-v1", |job: &DirectJob| {
+                    format!("job:{}", job.id)
+                })),
+            direct_job,
+        ))?;
         let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)));
         let receipts = dispatcher
             .submit_many_with(
                 [DirectJob { id: 1 }, DirectJob { id: 1 }],
-                TaskOptions::new().idempotency_key(|job: &DirectJob| format!("job:{}", job.id)),
+                TaskOptions::new(),
             )
             .await?;
         assert!(matches!(receipts.first(), Some(TaskReceipt::Queued(_))));
@@ -751,11 +906,47 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies a task's static key rule inherits retention from its finalized lane.
+    #[test]
+    fn static_idempotency_inherits_lane_retention() -> Result<(), TaskError> {
+        let mut registry = TaskRegistry::new();
+        registry.register(RegisteredTask::new(
+            TaskDefinition::new("direct_job")
+                .idempotency(TaskIdempotency::new("direct-job-v1", |job: &DirectJob| {
+                    format!("job:{}", job.id)
+                })),
+            direct_job,
+        ))?;
+        let registry = registry.finalize(
+            TaskConf::default().lane(
+                super::super::TaskLaneConf::new(DEFAULT_TASK_LANE, 10)
+                    .idempotency_retention(Duration::from_secs(60)),
+            ),
+        )?;
+        let policy = registry
+            .idempotency_conf()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TaskError::TaskNotFound("direct_job".into()))?;
+
+        assert_eq!(policy.handler, "direct_job");
+        assert_eq!(policy.lane, DEFAULT_TASK_LANE.as_str());
+        assert!(matches!(
+            policy.retention,
+            super::super::IdempotencyRetention::RetainFor(duration)
+                if duration == Duration::from_secs(60)
+        ));
+        Ok(())
+    }
+
     /// Verifies an empty typed batch succeeds without touching durable storage.
     #[tokio::test]
     async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TaskError> {
-        let mut registry = TaskRegistry::new();
-        registry.register(RegisteredTask::new("direct_job", direct_job))?;
+        let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
+        registry.register(RegisteredTask::new(
+            TaskDefinition::new("direct_job"),
+            direct_job,
+        ))?;
         let store = Arc::new(MemoryTaskStore::new(10));
         let dispatcher = Arc::new(registry).dispatcher(store.clone());
 
@@ -777,7 +968,7 @@ mod tests {
                 *captured.lock() = Some(id);
             }
         };
-        let service = RegisteredTask::new("operation_job", handler);
+        let service = RegisteredTask::new(TaskDefinition::new("operation_job"), handler);
         let expected = service.operation().id;
         let task =
             record("operation_job", &DirectJob { id: 1 }).map_err(|error| error.to_string())?;
@@ -791,7 +982,7 @@ mod tests {
     /// Verifies a unit task completes without serializing a synthetic null result.
     #[tokio::test]
     async fn task_unit_completes_without_result() -> Result<(), String> {
-        let service = RegisteredTask::new("unit_job", unit_job);
+        let service = RegisteredTask::new(TaskDefinition::new("unit_job"), unit_job);
         let outcome = service
             .execute(
                 test_site().await.map_err(|error| error.to_string())?,
@@ -806,7 +997,7 @@ mod tests {
     /// Verifies fallible unit tasks complete without a persisted result value.
     #[tokio::test]
     async fn task_result_unit_completes_without_result() -> Result<(), String> {
-        let service = RegisteredTask::new("result_unit_job", result_unit_job);
+        let service = RegisteredTask::new(TaskDefinition::new("result_unit_job"), result_unit_job);
         let outcome = service
             .execute(
                 test_site().await.map_err(|error| error.to_string())?,
@@ -822,7 +1013,7 @@ mod tests {
     /// Verifies handler errors retain no native detail in durable task outcomes.
     #[tokio::test]
     async fn task_handler_failure_uses_safe_summary() -> Result<(), String> {
-        let service = RegisteredTask::new("failed_job", failed_job);
+        let service = RegisteredTask::new(TaskDefinition::new("failed_job"), failed_job);
         let outcome = service
             .execute(
                 test_site().await.map_err(|error| error.to_string())?,
@@ -840,7 +1031,7 @@ mod tests {
     /// Verifies a task state controls completion without carrying a value.
     #[tokio::test]
     async fn task_state_controls_completion_without_result() -> Result<(), String> {
-        let service = RegisteredTask::new("direct_job", direct_job);
+        let service = RegisteredTask::new(TaskDefinition::new("direct_job"), direct_job);
         let outcome = service
             .execute(
                 test_site().await.map_err(|error| error.to_string())?,

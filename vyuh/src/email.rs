@@ -196,7 +196,10 @@ mod enabled {
 
     use super::{MailConf, MailTls};
     use crate::utils::html::html_to_text;
-    use crate::{SavedFile, Site, templates::TemplateError};
+    use crate::{
+        SavedFile, Site,
+        templates::{TemplateEngine, TemplateError},
+    };
 
     /// Errors raised while building, rendering, or delivering an email.
     #[derive(Debug, thiserror::Error)]
@@ -217,6 +220,8 @@ mod enabled {
         TextFallback,
         #[error("template error: {0}")]
         Template(#[from] TemplateError),
+        #[error("email templates require a site template engine")]
+        TemplateEngineUnavailable,
         #[error("attachment I/O error: {0}")]
         Io(#[from] std::io::Error),
         #[error("MIME message error: {0}")]
@@ -428,6 +433,36 @@ mod enabled {
 
     pub(crate) type SharedMailDelivery = Arc<dyn MailDelivery>;
 
+    /// Internal plain-text reporter used by framework subsystems that do not own a `Site` handle.
+    #[derive(Clone)]
+    pub(crate) struct MailReporter {
+        conf: MailConf,
+        delivery: SharedMailDelivery,
+    }
+
+    impl MailReporter {
+        pub(crate) async fn send(
+            &self,
+            recipients: &[String],
+            subject: &str,
+            text: String,
+        ) -> Result<Delivery, EmailError> {
+            let mail = recipients.iter().fold(
+                Mail::new().subject(subject).text(text),
+                |mail, recipient| mail.to(recipient),
+            );
+            let email = mail.build()?;
+            let message = email.into_message(None, &self.conf)?;
+            self.delivery.send(message).await
+        }
+
+        /// Returns the framework test outbox used by this reporter.
+        #[cfg(all(feature = "test-support", test))]
+        pub(crate) fn outbox(&self) -> MailOutbox {
+            self.delivery.outbox().unwrap_or_default()
+        }
+    }
+
     pub(crate) trait MailDelivery: Send + Sync {
         fn send<'a>(
             &'a self,
@@ -482,6 +517,22 @@ mod enabled {
         } else {
             Ok(Arc::new(SmtpDelivery(transport(conf)?)))
         }
+    }
+
+    /// Creates a plain-text framework reporter backed by the shared SMTP delivery runtime.
+    pub(crate) fn reporter(conf: &MailConf, delivery: SharedMailDelivery) -> MailReporter {
+        MailReporter {
+            conf: conf.clone(),
+            delivery,
+        }
+    }
+
+    /// Validates an administrator recipient during site construction.
+    pub(crate) fn validate_recipient(value: &str) -> Result<(), String> {
+        value
+            .parse::<Mailbox>()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     /// A captured mail message for endpoint integration tests.
@@ -571,13 +622,17 @@ mod enabled {
         /// Builds MIME content and sends one email through the configured SMTP relay.
         pub async fn send(&self, email: Email) -> Result<Delivery, EmailError> {
             let conf = &self.site.conf().mail;
-            let message = email.into_message(&self.site, conf)?;
+            let message = email.into_message(Some(self.site.template_engine()), conf)?;
             self.runtime.send(message).await
         }
     }
 
     impl Email {
-        fn into_message(self, site: &Site, conf: &MailConf) -> Result<Message, EmailError> {
+        fn into_message(
+            self,
+            templates: Option<&TemplateEngine>,
+            conf: &MailConf,
+        ) -> Result<Message, EmailError> {
             let Mail {
                 from,
                 to,
@@ -609,7 +664,11 @@ mod enabled {
             for (name, value) in &headers {
                 builder = builder.raw_header(HeaderValue::new(header_name(name)?, value.clone()));
             }
-            let body = body(render(site, text)?, render(site, html)?, html_only)?;
+            let body = body(
+                render(templates, text)?,
+                render(templates, html)?,
+                html_only,
+            )?;
             finish_message(builder, body, attachments)
         }
     }
@@ -624,11 +683,15 @@ mod enabled {
         })
     }
 
-    fn render(site: &Site, body: Option<Body>) -> Result<Option<String>, EmailError> {
+    fn render(
+        templates: Option<&TemplateEngine>,
+        body: Option<Body>,
+    ) -> Result<Option<String>, EmailError> {
         match body {
             Some(Body::Value(value)) => Ok(Some(value)),
             Some(Body::Template { name, context }) => {
-                Ok(Some(site.templates().render(&name, &context)?))
+                let templates = templates.ok_or(EmailError::TemplateEngineUnavailable)?;
+                Ok(Some(templates.render(&name, &context)?))
             }
             None => Ok(None),
         }
@@ -831,7 +894,9 @@ pub use enabled::{Attachment, Delivery, Email, EmailError, Mail, Mailer};
 #[cfg(all(feature = "email", feature = "test-support"))]
 pub use enabled::{MailOutbox, OutboxMessage};
 #[cfg(feature = "email")]
-pub(crate) use enabled::{SharedMailDelivery, delivery};
+pub(crate) use enabled::{
+    MailReporter, SharedMailDelivery, delivery, reporter, validate_recipient,
+};
 
 #[cfg(test)]
 mod conf_tests {

@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
 use thiserror::Error;
-use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
+
+mod mail_admins;
+mod runtime;
+
+pub use mail_admins::{MailAdmins, MailDedupe, MailSummary, MailThrottle};
+pub(crate) use runtime::{LoggingGuard, init_tracing, resolve_log_dir};
 
 #[derive(Debug, Error)]
 pub enum LoggingError {
@@ -39,6 +40,38 @@ pub enum LoggingError {
         value: String,
         source: tracing_subscriber::filter::ParseError,
     },
+
+    #[error("mail-admins logging requires the 'email' feature")]
+    MailAdminsFeature,
+
+    #[error("mail-admins logging requires enabled outbound mail")]
+    MailAdminsMailDisabled,
+
+    #[error("mail-admins logging requires SiteConf::log_init(true)")]
+    MailAdminsLoggingDisabled,
+
+    #[error("mail-admins logging requires at least one administrator recipient")]
+    MailAdminsRecipients,
+
+    #[error("mail-admins logging recipients cannot be empty")]
+    MailAdminsRecipientEmpty,
+
+    #[error("mail-admins debounce must be between 1ms and 24 hours, got {millis}ms")]
+    MailAdminsDebounce { millis: u64 },
+
+    #[error("mail-admins supports at most 8 delivery throttles, got {count}")]
+    MailAdminsThrottleCount { count: usize },
+
+    #[error(
+        "invalid mail-admins delivery throttle: limit must be 1 through 100000 and window must be 1ms through 24 hours, got {limit} messages in {millis}ms"
+    )]
+    MailAdminsThrottle { limit: u32, millis: u64 },
+
+    #[error("mail-admins delivery throttle window {millis}ms is configured more than once")]
+    MailAdminsDuplicateThrottle { millis: u64 },
+
+    #[error("invalid mail-admins recipient '{recipient}': {reason}")]
+    MailAdminsRecipient { recipient: String, reason: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -73,9 +106,25 @@ impl LogLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LogSink {
-    File { dir: String, rotation: Rotation },
-    Stdout { pretty: bool },
-    Stderr { pretty: bool },
+    File {
+        dir: String,
+        rotation: Rotation,
+    },
+    Stdout {
+        pretty: bool,
+    },
+    Stderr {
+        pretty: bool,
+    },
+    #[serde(rename = "mail_admins")]
+    MailAdmins(MailAdmins),
+}
+
+impl LogSink {
+    /// Creates a debounced administrator-email sink.
+    pub fn mail_admins(admins: MailAdmins) -> Self {
+        Self::MailAdmins(admins)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +197,10 @@ impl LogRule {
                 value: default_filter.to_string(),
                 source: e,
             })?;
+        }
+
+        if let LogSink::MailAdmins(admins) = &self.sink {
+            admins.validate()?;
         }
 
         Ok(())
@@ -322,6 +375,44 @@ impl LoggingConf {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_mail_admins(
+        &self,
+        log_init: bool,
+        mail_enabled: bool,
+    ) -> Result<(), LoggingError> {
+        #[cfg(not(feature = "email"))]
+        let _ = mail_enabled;
+        let admins = self.rules.iter().filter_map(|rule| match &rule.sink {
+            LogSink::MailAdmins(admins) => Some(admins),
+            _ => None,
+        });
+        for admins in admins {
+            if !log_init {
+                return Err(LoggingError::MailAdminsLoggingDisabled);
+            }
+            #[cfg(not(feature = "email"))]
+            {
+                let _ = admins;
+                return Err(LoggingError::MailAdminsFeature);
+            }
+            #[cfg(feature = "email")]
+            {
+                if !mail_enabled {
+                    return Err(LoggingError::MailAdminsMailDisabled);
+                }
+                for recipient in admins.recipients() {
+                    crate::email::validate_recipient(recipient).map_err(|reason| {
+                        LoggingError::MailAdminsRecipient {
+                            recipient: recipient.clone(),
+                            reason,
+                        }
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Joins two filter directive lists without introducing an empty directive.
@@ -333,135 +424,10 @@ fn extend_filter(base: &str, directives: &str) -> String {
     format!("{base},{directives}")
 }
 
-/// Returned guard must be kept alive until shutdown
-pub struct LoggingGuard {
-    _file_guards: Vec<WorkerGuard>,
-}
-
-impl LoggingGuard {
-    pub(crate) fn noop() -> Self {
-        Self {
-            _file_guards: Vec::new(),
-        }
-    }
-}
-
-pub(crate) fn resolve_log_dir(project_dir: &Path, dir: &str) -> PathBuf {
-    let path = Path::new(dir);
-    if path.is_relative() {
-        project_dir.join(path)
-    } else {
-        path.to_path_buf()
-    }
-}
-
-pub(crate) fn init_tracing(
-    project_dir: &Path,
-    conf: &LoggingConf,
-) -> Result<LoggingGuard, LoggingError> {
-    if conf.rules.is_empty() {
-        return Ok(LoggingGuard {
-            _file_guards: vec![],
-        });
-    }
-
-    conf.validate()?;
-
-    let env_prefix = conf.resolved_env_prefix();
-    let global_filter = std::env::var(env_prefix).ok();
-
-    let mut guards = Vec::new();
-    type BoxedLayer = Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync + 'static>;
-
-    let mut layers: Vec<BoxedLayer> = Vec::new();
-
-    for rule in &conf.rules {
-        let Some(filter) = rule.build_filter(env_prefix, global_filter.as_ref())? else {
-            continue;
-        };
-
-        match &rule.sink {
-            LogSink::File { dir, rotation } => {
-                let log_dir = resolve_log_dir(project_dir, dir);
-                fs::create_dir_all(&log_dir)?;
-
-                let appender = match rotation {
-                    Rotation::Daily => tracing_appender::rolling::daily(&log_dir, &rule.name),
-                    Rotation::Hourly => tracing_appender::rolling::hourly(&log_dir, &rule.name),
-                    Rotation::Minutely => tracing_appender::rolling::minutely(&log_dir, &rule.name),
-                };
-
-                let (writer, guard) = tracing_appender::non_blocking(appender);
-                guards.push(guard);
-
-                let layer = fmt::layer()
-                    .json()
-                    .with_writer(writer)
-                    .with_current_span(true)
-                    .with_span_list(true)
-                    .with_target(true)
-                    .with_file(true)
-                    .with_line_number(true)
-                    .with_thread_ids(true)
-                    .with_thread_names(true)
-                    .with_timer(fmt::time::UtcTime::rfc_3339());
-                layers.push(layer.with_filter(filter).boxed());
-            }
-            LogSink::Stdout { pretty } => {
-                if *pretty {
-                    let layer = fmt::layer()
-                        .pretty()
-                        .with_ansi(true)
-                        .with_writer(std::io::stdout);
-                    layers.push(layer.with_filter(filter).boxed());
-                } else {
-                    let layer = fmt::layer()
-                        .json()
-                        .with_writer(std::io::stdout)
-                        .with_current_span(true)
-                        .with_span_list(true)
-                        .with_target(true)
-                        .with_timer(fmt::time::UtcTime::rfc_3339());
-                    layers.push(layer.with_filter(filter).boxed());
-                }
-            }
-            LogSink::Stderr { pretty } => {
-                if *pretty {
-                    let layer = fmt::layer()
-                        .pretty()
-                        .with_ansi(true)
-                        .with_writer(std::io::stderr);
-                    layers.push(layer.with_filter(filter).boxed());
-                } else {
-                    let layer = fmt::layer()
-                        .json()
-                        .with_writer(std::io::stderr)
-                        .with_current_span(true)
-                        .with_span_list(true)
-                        .with_target(true)
-                        .with_timer(fmt::time::UtcTime::rfc_3339());
-                    layers.push(layer.with_filter(filter).boxed());
-                }
-            }
-        }
-    }
-
-    if layers.is_empty() {
-        return Ok(LoggingGuard {
-            _file_guards: vec![],
-        });
-    }
-
-    tracing_subscriber::registry().with(layers).try_init()?;
-
-    Ok(LoggingGuard {
-        _file_guards: guards,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_is_off_string() {
@@ -986,5 +952,42 @@ mod tests {
         };
         let _ = LogSink::Stdout { pretty: true };
         let _ = LogSink::Stderr { pretty: false };
+        let _ = LogSink::mail_admins(MailAdmins::new(["ops@example.com"]));
+    }
+
+    /// Verifies mail-admin sinks cannot be silently disabled with site logging.
+    #[test]
+    fn mail_admins_requires_logging_initialization() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "ADMINS".into(),
+                sink: LogSink::mail_admins(MailAdmins::new(["ops@example.com"])),
+                default_filter: "error".into(),
+            }],
+        };
+        let error = conf.validate_mail_admins(false, true).err();
+        assert!(matches!(
+            error,
+            Some(LoggingError::MailAdminsLoggingDisabled)
+        ));
+    }
+
+    /// Verifies a mail-admin sink requires the optional email feature or enabled SMTP delivery.
+    #[test]
+    fn mail_admins_requires_mail_delivery() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "ADMINS".into(),
+                sink: LogSink::mail_admins(MailAdmins::new(["ops@example.com"])),
+                default_filter: "error".into(),
+            }],
+        };
+        let error = conf.validate_mail_admins(true, false).err();
+        #[cfg(feature = "email")]
+        assert!(matches!(error, Some(LoggingError::MailAdminsMailDisabled)));
+        #[cfg(not(feature = "email"))]
+        assert!(matches!(error, Some(LoggingError::MailAdminsFeature)));
     }
 }

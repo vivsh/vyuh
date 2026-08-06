@@ -1,13 +1,19 @@
 use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ImplItemFn, ItemFn};
+use syn::{Expr, ImplItemFn, ItemFn};
 
 #[derive(Debug, Default, FromMeta)]
 struct TaskArgs {
     /// Optional task name
     #[darling(default)]
     name: Option<String>,
+    /// Optional static execution lane.
+    #[darling(default)]
+    lane: Option<Expr>,
+    /// Optional static idempotency policy.
+    #[darling(default)]
+    idempotency: Option<Expr>,
 }
 
 /// Unified implementation for both free functions and methods
@@ -51,12 +57,26 @@ pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { #fn_ident }
     };
 
+    let lane = args
+        .lane
+        .map(|lane| quote! { .lane(#lane) })
+        .unwrap_or_default();
+    let idempotency = args
+        .idempotency
+        .map(|policy| quote! { .idempotency(#policy) })
+        .unwrap_or_default();
+
     let expanded = quote! {
         #original
 
         #[allow(non_snake_case)]
         fn #bundle_part_fn_name() -> ::vyuh::bundles::BundlePart {
-            ::vyuh::bundles::task(#call_expr, ::vyuh::tasks::TaskHandlerConf::new(#task_name))
+            ::vyuh::bundles::task(
+                #call_expr,
+                ::vyuh::tasks::TaskDefinition::new(#task_name)
+                    #lane
+                    #idempotency,
+            )
         }
     };
 

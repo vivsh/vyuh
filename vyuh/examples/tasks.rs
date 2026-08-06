@@ -49,7 +49,11 @@ struct PendingApproval {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 // Pattern 1: Fire-and-forget — macro with explicit name.
-#[bundles::task(name = "send_email")]
+#[bundles::task(
+    name = "send_email",
+    lane = EMAIL,
+    idempotency = TaskIdempotency::new("send-email-v1", email_key)
+)]
 async fn send_email(input: Data<SendEmailJob>) {
     println!(
         "📧 Sending email to {} — subject: {}",
@@ -67,7 +71,14 @@ async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> {
 // Without the macro, register manually:
 //   async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> { ... }
 // Then pass to Site::build via a separate bundle:
-//   let extra = bundles::task(process_data, tasks::TaskHandlerConf::new("process_data")).into_bundle();
+//   let extra = bundles::bundle([bundles::task(
+//       process_data,
+//       tasks::TaskDefinition::new("process_data"),
+//   )]);
+
+fn email_key(job: &SendEmailJob) -> String {
+    format!("welcome:{}", job.to)
+}
 
 // Pattern 4: Suspend/resume with typed continuation state and input.
 #[bundles::task(name = "approve_document")]
@@ -114,24 +125,23 @@ async fn main() -> Result<(), Error> {
         send_email,
         process_data,
         approve_document,
-    };
+    }
+    .with_task_lane(TaskLaneConf::new(EMAIL, 2));
 
     let task_conf = TaskConf::default()
         .concurrency(4)
         .batch_size(50)
-        .lanes([
-            TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
+        .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 2))
+        .lane(
             TaskLaneConf::new(EMAIL, 2)
                 .retry(
                     TaskRetry::exponential(5, Duration::from_secs(2))
                         .max_delay(Duration::from_secs(60)),
                 )
                 .rate_limit(TaskRate::per_second(10).burst(5))
-                .global_rate_limit(TaskRate::per_minute(120).burst(10)),
-        ])
-        .idempotency(TaskIdempotency::retain_for(Duration::from_secs(
-            30 * 24 * 60 * 60,
-        )));
+                .global_rate_limit(TaskRate::per_minute(120).burst(10))
+                .idempotency_retention(Duration::from_secs(30 * 24 * 60 * 60)),
+        );
     let conf = SiteConf::default().tasks(task_conf);
     let site = Site::build(conf, bundle).await.map_err(Error::other)?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
@@ -151,9 +161,7 @@ async fn main() -> Result<(), Error> {
                     subject: "A second batched email".to_string(),
                 },
             ],
-            TaskOptions::new()
-                .lane(EMAIL)
-                .idempotency_key(|job: &SendEmailJob| format!("welcome:{}", job.to)),
+            TaskOptions::new(),
         )
         .await
         .map_err(Error::other)?;

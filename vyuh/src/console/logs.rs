@@ -282,7 +282,7 @@ fn file_sources(conf: &LoggingConf, project_dir: &Path) -> Vec<LogSource> {
                 dir: crate::logging::resolve_log_dir(project_dir, dir),
                 _rotation: *rotation,
             }),
-            LogSink::Stdout { .. } | LogSink::Stderr { .. } => None,
+            LogSink::Stdout { .. } | LogSink::Stderr { .. } | LogSink::MailAdmins(_) => None,
         })
         .collect()
 }

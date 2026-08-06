@@ -41,7 +41,7 @@ impl Tasks {
     pub async fn submit_with<T: Serialize + 'static>(
         &self,
         input: T,
-        options: TaskOptions<T>,
+        options: TaskOptions,
     ) -> Result<TaskReceipt, TaskError> {
         self.dispatcher.submit_with(input, options).await
     }
@@ -58,7 +58,7 @@ impl Tasks {
     pub async fn submit_many_with<T: Serialize + 'static>(
         &self,
         inputs: impl IntoIterator<Item = T>,
-        options: TaskOptions<T>,
+        options: TaskOptions,
     ) -> Result<Vec<TaskReceipt>, TaskError> {
         self.dispatcher.submit_many_with(inputs, options).await
     }
@@ -91,6 +91,11 @@ impl Tasks {
             .await
             .map(|record| record.map(TaskInfo::from))
     }
+
+    /// Returns the immutable effective lane configuration selected during site construction.
+    pub(crate) fn lane_configs(&self) -> &[super::TaskLaneConf] {
+        self.dispatcher.registry.lanes()
+    }
 }
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
@@ -108,7 +113,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub async fn submit_with<T: Serialize + 'static>(
         &self,
         input: T,
-        options: TaskOptions<T>,
+        options: TaskOptions,
     ) -> Result<TaskReceipt, TaskError> {
         let mut receipts = self.submit_many_with([input], options).await?;
         receipts.pop().ok_or_else(|| {
@@ -128,7 +133,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub async fn submit_many_with<T: Serialize + 'static>(
         &self,
         inputs: impl IntoIterator<Item = T>,
-        options: TaskOptions<T>,
+        options: TaskOptions,
     ) -> Result<Vec<TaskReceipt>, TaskError> {
         let mut inputs = inputs.into_iter().peekable();
         if inputs.peek().is_none() {
@@ -140,7 +145,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .tasks
             .get(name)
             .ok_or_else(|| TaskError::TaskNotFound(name.to_string()))?;
-        self.require_lane(options.lane)?;
         let writes = build_writes(service, name, inputs, &options, &self.registry.config)?;
         self.ensure_initialized().await?;
         let result = self.store.store_tasks(writes).await;
@@ -202,8 +206,9 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
 
     fn require_lane(&self, lane: TaskLane) -> Result<(), TaskError> {
         self.registry
-            .config
-            .has_lane(lane)
+            .lanes()
+            .iter()
+            .any(|entry| entry.lane() == lane)
             .then_some(())
             .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
     }
@@ -222,8 +227,8 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskError> {
         Ok(super::TaskStoreConf {
             handlers: self.registry.tasks.keys().cloned().collect(),
-            lanes: self.registry.config.validate()?,
-            idempotency: self.registry.config.idempotency_value(),
+            lanes: self.registry.lanes().to_vec(),
+            idempotency: self.registry.idempotency_conf()?,
         })
     }
 
@@ -258,7 +263,7 @@ fn build_writes<T: Serialize + 'static>(
     service: &RegisteredTask,
     name: &str,
     inputs: impl IntoIterator<Item = T>,
-    options: &TaskOptions<T>,
+    options: &TaskOptions,
     config: &super::TaskConf,
 ) -> Result<Vec<TaskWrite>, TaskError> {
     validate_options(options)?;
@@ -270,7 +275,12 @@ fn build_writes<T: Serialize + 'static>(
             ));
         }
         service.validate_object(&input)?;
-        let key = options.key_for(&input)?;
+        let key = service.idempotency_key(&input)?;
+        if key.is_none() && options.ignore_conflicts {
+            return Err(TaskError::InvalidOptions(
+                "ignore_conflicts requires an idempotent task definition".into(),
+            ));
+        }
         let serialized = if key.is_some() {
             canonical_json(&input)?
         } else {
@@ -280,10 +290,10 @@ fn build_writes<T: Serialize + 'static>(
         validate_key(key.as_deref())?;
         let fingerprint = key
             .as_ref()
-            .map(|_| fingerprint(name, &serialized, options))
+            .map(|_| fingerprint(name, &serialized, service))
             .transpose()?;
         writes.push(TaskWrite {
-            record: build_record(name, serialized, key, fingerprint, options)?,
+            record: build_record(name, serialized, key, fingerprint, service.effective_lane())?,
             ignore_conflicts: options.ignore_conflicts,
             initial_delay: options.initial_delay,
         });
@@ -292,7 +302,7 @@ fn build_writes<T: Serialize + 'static>(
 }
 
 /// Surfaces all accumulated builder failures at the submission terminal.
-fn validate_options<T>(options: &TaskOptions<T>) -> Result<(), TaskError> {
+fn validate_options(options: &TaskOptions) -> Result<(), TaskError> {
     if options
         .initial_delay
         .is_some_and(|value| value > super::config::MAX_TASK_DELAY)
@@ -306,12 +316,12 @@ fn validate_options<T>(options: &TaskOptions<T>) -> Result<(), TaskError> {
 }
 
 /// Creates one pending record without assigning store-relative readiness time.
-fn build_record<T>(
+fn build_record(
     name: &str,
     input: String,
     key: Option<String>,
     fingerprint: Option<String>,
-    options: &TaskOptions<T>,
+    lane: TaskLane,
 ) -> Result<TaskRecord, TaskError> {
     let now = chrono::Utc::now();
     Ok(TaskRecord {
@@ -322,7 +332,7 @@ fn build_record<T>(
         resume_input: None,
         status: TaskStatus::Pending,
         attempts: 0,
-        lane: options.lane.to_string(),
+        lane: lane.to_string(),
         lease_duration_ms: None,
         last_error: None,
         idempotency_key: key,
@@ -337,15 +347,17 @@ fn build_record<T>(
     })
 }
 
-/// Fingerprints canonical input and every execution-affecting option.
-fn fingerprint<T>(name: &str, input: &str, options: &TaskOptions<T>) -> Result<String, TaskError> {
+/// Fingerprints canonical input and immutable idempotency-key semantics.
+fn fingerprint(name: &str, input: &str, service: &RegisteredTask) -> Result<String, TaskError> {
+    let revision = service
+        .idempotency_policy()
+        .ok_or_else(|| TaskError::TaskExecutionError("idempotent task is missing policy".into()))?
+        .revision;
     let mut hasher = blake3::Hasher::new();
-    for part in [name, input, options.lane.as_str()] {
+    for part in [name, revision, input] {
         hasher.update(part.as_bytes());
         hasher.update(&[0]);
     }
-    let initial_delay_ms = duration_ms(options.initial_delay)?.unwrap_or(-1);
-    hasher.update(&initial_delay_ms.to_le_bytes());
     Ok(hasher.finalize().to_hex().to_string())
 }
 
