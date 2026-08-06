@@ -625,6 +625,7 @@ fn make_command(
         name: args.name.clone(),
         dry_run: args.dry_run,
         decisions,
+        filters: Vec::new(),
     }))
 }
 
