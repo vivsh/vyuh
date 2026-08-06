@@ -995,11 +995,24 @@ async fn insert_schedule_if_missing(
     row: &TaskScheduleRow,
 ) -> Result<(), TaskError> {
     let table = DbTaskStore::schedule_table();
-    db::from(&table)
-        .batch_upsert(std::slice::from_ref(row), &table.name)
-        .update_only(&table.name)
-        .exec(transaction)
-        .await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        use crate::db::backend::IgnoreConflictsExt as _;
+        db::from(&table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_conflicts_on(&table.name)
+            .exec(transaction)
+            .await?;
+    }
+    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
+    {
+        use crate::db::backend::IgnoreErrorsExt as _;
+        db::from(&table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_errors()
+            .exec(transaction)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1062,4 +1075,34 @@ async fn statement_now(
     Ok(transaction
         .fetch_scalar(db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
         .await?)
+}
+
+#[cfg(all(test, any(feature = "postgres", feature = "sqlite")))]
+mod tests {
+    use super::*;
+
+    /// Verifies concurrent schedule creation preserves the cursor through conflict-ignore insert.
+    #[test]
+    fn schedule_insert_ignores_existing_cursor() -> Result<(), String> {
+        use crate::db::backend::IgnoreConflictsExt as _;
+
+        let table = DbTaskStore::schedule_table();
+        let row = TaskScheduleRow {
+            name: "nightly".into(),
+            last_submitted_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let plan = db::from(&table)
+            .batch_insert(&[row])
+            .ignore_conflicts_on(&table.name)
+            .plan()
+            .map_err(|error| error.to_string())?;
+        if !plan.sql.contains("ON CONFLICT (name) DO NOTHING") {
+            return Err(format!(
+                "expected conflict-ignore schedule insert, got {}",
+                plan.sql
+            ));
+        }
+        Ok(())
+    }
 }

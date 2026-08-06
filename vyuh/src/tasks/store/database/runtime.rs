@@ -294,11 +294,24 @@ async fn insert_runtime_if_missing(
     table: &db::queries::ModelTable<TaskRuntimeRow>,
     row: &TaskRuntimeRow,
 ) -> Result<(), TaskError> {
-    db::from(table)
-        .batch_upsert(std::slice::from_ref(row), &table.id)
-        .update_only(&table.id)
-        .exec(transaction)
-        .await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        use crate::db::backend::IgnoreConflictsExt as _;
+        db::from(table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_conflicts_on(&table.id)
+            .exec(transaction)
+            .await?;
+    }
+    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
+    {
+        use crate::db::backend::IgnoreErrorsExt as _;
+        db::from(table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_errors()
+            .exec(transaction)
+            .await?;
+    }
     Ok(())
 }
 
@@ -308,10 +321,73 @@ async fn insert_rate_if_missing(
     table: &db::queries::ModelTable<TaskRateRow>,
     row: &TaskRateRow,
 ) -> Result<(), TaskError> {
-    db::from(table)
-        .batch_upsert(std::slice::from_ref(row), &table.lane_name)
-        .update_only(&table.lane_name)
-        .exec(transaction)
-        .await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        use crate::db::backend::IgnoreConflictsExt as _;
+        db::from(table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_conflicts_on(&table.lane_name)
+            .exec(transaction)
+            .await?;
+    }
+    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
+    {
+        use crate::db::backend::IgnoreErrorsExt as _;
+        db::from(table)
+            .batch_insert(std::slice::from_ref(row))
+            .ignore_errors()
+            .exec(transaction)
+            .await?;
+    }
     Ok(())
+}
+
+#[cfg(all(test, any(feature = "postgres", feature = "sqlite")))]
+mod tests {
+    use super::*;
+
+    /// Verifies singleton and lane initialization use conflict-ignore inserts, never no-op upserts.
+    #[test]
+    fn initialization_inserts_ignore_conflicts() -> Result<(), String> {
+        use crate::db::backend::IgnoreConflictsExt as _;
+
+        let now = Utc::now();
+        let runtime = DbTaskStore::runtime_table();
+        let runtime_row = TaskRuntimeRow {
+            id: RUNTIME_ID,
+            policy_fingerprint: "policy".into(),
+            updated_at: now,
+        };
+        let runtime_plan = db::from(&runtime)
+            .batch_insert(&[runtime_row])
+            .ignore_conflicts_on(&runtime.id)
+            .plan()
+            .map_err(|error| error.to_string())?;
+        assert_ignore_plan(&runtime_plan.sql, "id")?;
+
+        let rates = DbTaskStore::rate_table();
+        let rate_row = TaskRateRow {
+            id: uuid::Uuid::now_v7(),
+            lane_name: "default".into(),
+            policy_fingerprint: "policy".into(),
+            tokens_micros: TOKEN_SCALE,
+            updated_at: now,
+        };
+        let rate_plan = db::from(&rates)
+            .batch_insert(&[rate_row])
+            .ignore_conflicts_on(&rates.lane_name)
+            .plan()
+            .map_err(|error| error.to_string())?;
+        assert_ignore_plan(&rate_plan.sql, "lane_name")
+    }
+
+    /// Confirms an insert-if-missing plan leaves the existing row unchanged.
+    fn assert_ignore_plan(sql: &str, target: &str) -> Result<(), String> {
+        if !sql.contains(&format!("ON CONFLICT ({target}) DO NOTHING")) {
+            return Err(format!(
+                "expected conflict-ignore plan for '{target}', got {sql}"
+            ));
+        }
+        Ok(())
+    }
 }
