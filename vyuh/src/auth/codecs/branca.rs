@@ -3,8 +3,8 @@
 use std::future::{Future, ready};
 
 use crate::auth::{
-    AuthError, AuthToken, CodecDefinition, CodecRuntime, EncodedCredential, KeySource,
-    PresentedCredential, SecretRing, TokenDecoder, TokenEncoder,
+    AuthError, AuthToken, CodecDefinition, CodecRuntime, CustomClaims, EncodedCredential,
+    KeySource, PresentedCredential, ProviderId, SecretRing, TokenDecoder, TokenEncoder,
 };
 
 const KEY_LENGTH: usize = 32;
@@ -42,6 +42,12 @@ struct BrancaCodec {
     verification: Vec<Vec<u8>>,
 }
 
+struct ClaimsBrancaCodec {
+    codec: BrancaCodec,
+    claims: CustomClaims,
+    provider: ProviderId,
+}
+
 impl TokenEncoder for BrancaCodec {
     fn encode<'a>(
         &'a self,
@@ -52,6 +58,15 @@ impl TokenEncoder for BrancaCodec {
 }
 
 impl TokenDecoder for BrancaCodec {
+    fn decode<'a>(
+        &'a self,
+        presented: &'a PresentedCredential<'a>,
+    ) -> impl Future<Output = Result<AuthToken, AuthError>> + Send + 'a {
+        ready(self.decode_inner(presented.expose()))
+    }
+}
+
+impl TokenDecoder for ClaimsBrancaCodec {
     fn decode<'a>(
         &'a self,
         presented: &'a PresentedCredential<'a>,
@@ -71,32 +86,68 @@ impl BrancaCodec {
     }
 
     fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        let (timestamp, payload) = self.payload(value)?;
+        let token = serde_json::from_slice::<AuthToken>(&payload)
+            .map_err(|_| AuthError::InvalidCredential)?;
+        validate_timestamp(&token, timestamp)?;
+        Ok(token)
+    }
+
+    /// Authenticates a BRANCA value and returns its transport timestamp and JSON payload.
+    fn payload(&self, value: &str) -> Result<(u32, Vec<u8>), AuthError> {
         for key in &self.verification {
             if let Ok((timestamp, payload)) = ::branca::decode_with_timestamp(value, key) {
                 if payload.len() > MAX_DECODED_PAYLOAD_BYTES {
                     return Err(AuthError::InvalidCredential);
                 }
-                let token = serde_json::from_slice::<AuthToken>(&payload)
-                    .map_err(|_| AuthError::InvalidCredential)?;
-                let issued = u32::try_from(token.issued_at()?.timestamp())
-                    .map_err(|_| AuthError::InvalidCredential)?;
-                if issued != timestamp {
-                    return Err(AuthError::InvalidCredential);
-                }
-                return Ok(token);
+                return Ok((timestamp, payload));
             }
         }
         Err(AuthError::InvalidCredential)
     }
 }
 
-pub(crate) fn build(value: &Branca, secrets: &SecretRing) -> Result<CodecRuntime, AuthError> {
+impl ClaimsBrancaCodec {
+    fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        let (timestamp, payload) = self.codec.payload(value)?;
+        let claims = serde_json::from_slice(&payload).map_err(|_| AuthError::InvalidCredential)?;
+        let token = self.claims.auth_token(claims, self.provider.clone())?;
+        validate_timestamp(&token, timestamp)?;
+        Ok(token)
+    }
+}
+
+pub(crate) fn build(
+    value: &Branca,
+    secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
+) -> Result<CodecRuntime, AuthError> {
     let active = key(secrets, &value.key)?;
     let verification = keys(secrets, &value.key)?;
-    Ok(CodecRuntime::new(BrancaCodec {
+    let codec = BrancaCodec {
         active,
         verification,
-    }))
+    };
+    match claims {
+        Some(claims) => Ok(CodecRuntime::decoder(ClaimsBrancaCodec {
+            codec,
+            claims: claims.clone(),
+            provider,
+        })),
+        None => Ok(CodecRuntime::new(codec)),
+    }
+}
+
+/// Ensures the normalized issuance time agrees with the authenticated transport timestamp.
+fn validate_timestamp(token: &AuthToken, timestamp: u32) -> Result<(), AuthError> {
+    let issued =
+        u32::try_from(token.issued_at()?.timestamp()).map_err(|_| AuthError::InvalidCredential)?;
+    if issued == timestamp {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidCredential)
+    }
 }
 
 fn key(secrets: &SecretRing, source: &KeySource) -> Result<Vec<u8>, AuthError> {

@@ -10,8 +10,8 @@ use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use ring::{constant_time, digest, hmac};
 
 use crate::auth::{
-    AuthError, AuthToken, CodecDefinition, CodecRuntime, EncodedCredential, KeySource,
-    PresentedCredential, SecretRing, TokenDecoder, TokenEncoder,
+    AuthError, AuthToken, CodecDefinition, CodecRuntime, CustomClaims, EncodedCredential,
+    KeySource, PresentedCredential, ProviderId, SecretRing, TokenDecoder, TokenEncoder,
 };
 
 const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -70,6 +70,12 @@ struct DjangoCodec {
     compress: bool,
 }
 
+struct ClaimsDjangoCodec {
+    codec: DjangoCodec,
+    claims: CustomClaims,
+    provider: ProviderId,
+}
+
 impl TokenEncoder for DjangoCodec {
     fn encode<'a>(
         &'a self,
@@ -80,6 +86,15 @@ impl TokenEncoder for DjangoCodec {
 }
 
 impl TokenDecoder for DjangoCodec {
+    fn decode<'a>(
+        &'a self,
+        presented: &'a PresentedCredential<'a>,
+    ) -> impl Future<Output = Result<AuthToken, AuthError>> + Send + 'a {
+        ready(self.decode_inner(presented.expose()))
+    }
+}
+
+impl TokenDecoder for ClaimsDjangoCodec {
     fn decode<'a>(
         &'a self,
         presented: &'a PresentedCredential<'a>,
@@ -120,6 +135,37 @@ impl DjangoCodec {
         }
         Ok(token)
     }
+
+    /// Authenticates a Django value and returns its transport timestamp and JSON payload.
+    fn claims_payload(&self, value: &str) -> Result<(i64, serde_json::Value), AuthError> {
+        let (signed, supplied) = value
+            .rsplit_once(self.separator)
+            .ok_or(AuthError::InvalidCredential)?;
+        if !self.verification.iter().any(|key| {
+            let expected = signature(key, &self.salt, signed);
+            constant_time::verify_slices_are_equal(expected.as_bytes(), supplied.as_bytes()).is_ok()
+        }) {
+            return Err(AuthError::InvalidCredential);
+        }
+        let (payload, timestamp) = signed
+            .rsplit_once(self.separator)
+            .ok_or(AuthError::InvalidCredential)?;
+        let timestamp = base62_decode(timestamp)?;
+        let bytes = decode_payload(payload)?;
+        let claims = serde_json::from_slice(&bytes).map_err(|_| AuthError::InvalidCredential)?;
+        Ok((timestamp, claims))
+    }
+}
+
+impl ClaimsDjangoCodec {
+    fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        let (timestamp, claims) = self.codec.claims_payload(value)?;
+        let token = self.claims.auth_token(claims, self.provider.clone())?;
+        if token.issued_at()?.timestamp() != timestamp {
+            return Err(AuthError::InvalidCredential);
+        }
+        Ok(token)
+    }
 }
 
 fn django_json(token: &AuthToken) -> Result<String, AuthError> {
@@ -141,6 +187,8 @@ fn django_json(token: &AuthToken) -> Result<String, AuthError> {
 pub(crate) fn build(
     value: &DjangoSigning,
     secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
 ) -> Result<CodecRuntime, AuthError> {
     validate_separator(value.separator)?;
     if value.salt.is_empty() {
@@ -150,13 +198,21 @@ pub(crate) fn build(
     }
     let active = secrets.active(&value.key)?;
     let verification = secrets.verification(&value.key)?;
-    Ok(CodecRuntime::new(DjangoCodec {
+    let codec = DjangoCodec {
         active,
         verification,
         salt: value.salt.clone(),
         separator: value.separator,
         compress: value.compress,
-    }))
+    };
+    match claims {
+        Some(claims) => Ok(CodecRuntime::decoder(ClaimsDjangoCodec {
+            codec,
+            claims: claims.clone(),
+            provider,
+        })),
+        None => Ok(CodecRuntime::new(codec)),
+    }
 }
 
 fn signature(secret: &[u8], salt: &str, value: &str) -> String {

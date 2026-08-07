@@ -16,19 +16,28 @@ pub use branca::Branca;
 #[cfg(feature = "paseto")]
 pub use paseto::Paseto;
 
-use super::{AuthError, CodecDefinition, CodecRuntime, SecretRing};
+use super::{AuthError, CodecDefinition, CodecRuntime, CustomClaims, ProviderId, SecretRing};
 
 pub(crate) fn build(
     definition: &CodecDefinition,
     secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
 ) -> Result<CodecRuntime, AuthError> {
     match definition {
-        CodecDefinition::Jwt(value) => jwt::build(value, secrets),
-        CodecDefinition::Django(value) => django::build(value, secrets),
+        CodecDefinition::Jwt(value) => jwt::build(value, secrets, claims, provider),
+        CodecDefinition::Django(value) => django::build(value, secrets, claims, provider),
         #[cfg(feature = "paseto")]
-        CodecDefinition::Paseto(value) => paseto::build(value, secrets),
+        CodecDefinition::Paseto(value) => paseto::build(value, secrets, claims, provider),
         #[cfg(feature = "branca")]
-        CodecDefinition::Branca(value) => branca::build(value, secrets),
-        CodecDefinition::Custom(value) => Ok(CodecRuntime::custom(value.clone())),
+        CodecDefinition::Branca(value) => branca::build(value, secrets, claims, provider),
+        CodecDefinition::Custom(value) => {
+            if claims.is_some() {
+                return Err(AuthError::InvalidProviderConfig(
+                    "custom claims require a built-in JSON token codec".into(),
+                ));
+            }
+            Ok(CodecRuntime::custom(value.clone()))
+        }
     }
 }

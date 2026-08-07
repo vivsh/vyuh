@@ -11,8 +11,8 @@ use serde::Deserializer as _;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 
 use crate::auth::{
-    AuthError, AuthToken, CodecDefinition, CodecRuntime, EncodedCredential, KeySource,
-    PresentedCredential, SecretRing, TokenDecoder, TokenEncoder,
+    AuthError, AuthToken, CodecDefinition, CodecRuntime, CustomClaims, EncodedCredential,
+    KeySource, PresentedCredential, ProviderId, SecretRing, TokenDecoder, TokenEncoder,
 };
 
 /// JWT signing algorithms supported by the built-in codec.
@@ -149,6 +149,12 @@ struct JwtCodec {
     validation: Validation,
 }
 
+struct ClaimsJwtCodec {
+    codec: JwtCodec,
+    claims: CustomClaims,
+    provider: ProviderId,
+}
+
 impl TokenEncoder for JwtCodec {
     fn encode<'a>(
         &'a self,
@@ -164,6 +170,15 @@ impl TokenEncoder for JwtCodec {
 }
 
 impl TokenDecoder for JwtCodec {
+    fn decode<'a>(
+        &'a self,
+        presented: &'a PresentedCredential<'a>,
+    ) -> impl Future<Output = Result<AuthToken, AuthError>> + Send + 'a {
+        ready(self.decode_inner(presented.expose()))
+    }
+}
+
+impl TokenDecoder for ClaimsJwtCodec {
     fn decode<'a>(
         &'a self,
         presented: &'a PresentedCredential<'a>,
@@ -198,6 +213,23 @@ impl JwtCodec {
                 .ok_or(AuthError::InvalidCredential);
         }
         self.decoding.without_id()
+    }
+}
+
+impl ClaimsJwtCodec {
+    fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        reject_duplicate_claims(value)?;
+        let header = decode_header(value).map_err(|_| AuthError::InvalidCredential)?;
+        if header.alg != self.codec.algorithm {
+            return Err(AuthError::InvalidCredential);
+        }
+        let keys = self.codec.select(header.kid.as_deref())?;
+        for key in keys {
+            if let Ok(data) = decode::<serde_json::Value>(value, key, &self.codec.validation) {
+                return self.claims.auth_token(data.claims, self.provider.clone());
+            }
+        }
+        Err(AuthError::InvalidCredential)
     }
 }
 
@@ -264,7 +296,12 @@ impl<'de> Visitor<'de> for UniqueClaims {
     }
 }
 
-pub(crate) fn build(value: &Jwt, secrets: &SecretRing) -> Result<CodecRuntime, AuthError> {
+pub(crate) fn build(
+    value: &Jwt,
+    secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
+) -> Result<CodecRuntime, AuthError> {
     validate_key_ids(value)?;
     let encoding = encoding(value, secrets)?;
     let decoding = decoding(value, secrets)?;
@@ -274,13 +311,21 @@ pub(crate) fn build(value: &Jwt, secrets: &SecretRing) -> Result<CodecRuntime, A
     validation.validate_exp = false;
     validation.validate_nbf = false;
     validation.required_spec_claims.clear();
-    Ok(CodecRuntime::new(JwtCodec {
+    let codec = JwtCodec {
         algorithm,
         active_key_id: value.conf.key_id.clone(),
         encoding,
         decoding,
         validation,
-    }))
+    };
+    match claims {
+        Some(claims) => Ok(CodecRuntime::decoder(ClaimsJwtCodec {
+            codec,
+            claims: claims.clone(),
+            provider,
+        })),
+        None => Ok(CodecRuntime::new(codec)),
+    }
 }
 
 fn validate_key_ids(value: &Jwt) -> Result<(), AuthError> {

@@ -2,6 +2,7 @@
 
 use std::{
     future::Future,
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,8 +11,15 @@ use futures::future::BoxFuture;
 use ring::hkdf;
 
 use super::{
-    AuthError, AuthToken, EncodedCredential, KeySource, KeySourceKind, PresentedCredential,
+    AuthError, AuthToken, AuthTokenBuilder, EncodedCredential, KeySource, KeySourceKind,
+    PresentedCredential, ProviderId,
 };
+
+/// Converts one external token-claims schema into Vyuh's normalized token envelope.
+pub trait TokenClaims: serde::de::DeserializeOwned + Send + 'static {
+    /// Builds a complete token through the accepting provider's fixed builder.
+    fn auth_token(self, builder: AuthTokenBuilder) -> Result<AuthToken, AuthError>;
+}
 
 /// Encodes a normalized authenticated token into one transport format.
 pub trait TokenEncoder: Send + Sync + 'static {
@@ -64,6 +72,45 @@ impl<T: TokenDecoder> ErasedDecoder for T {
 }
 
 #[derive(Clone)]
+pub(crate) struct CustomClaims(Arc<dyn ErasedTokenClaims>);
+
+impl CustomClaims {
+    pub(crate) fn new<C: TokenClaims>() -> Self {
+        Self(Arc::new(ClaimsAdapter::<C>(PhantomData)))
+    }
+
+    pub(crate) fn auth_token(
+        &self,
+        value: serde_json::Value,
+        provider: ProviderId,
+    ) -> Result<AuthToken, AuthError> {
+        self.0.auth_token(value, provider)
+    }
+}
+
+trait ErasedTokenClaims: Send + Sync {
+    fn auth_token(
+        &self,
+        value: serde_json::Value,
+        provider: ProviderId,
+    ) -> Result<AuthToken, AuthError>;
+}
+
+struct ClaimsAdapter<C>(PhantomData<fn() -> C>);
+
+impl<C: TokenClaims> ErasedTokenClaims for ClaimsAdapter<C> {
+    fn auth_token(
+        &self,
+        value: serde_json::Value,
+        provider: ProviderId,
+    ) -> Result<AuthToken, AuthError> {
+        let claims =
+            serde_json::from_value::<C>(value).map_err(|_| AuthError::InvalidCredential)?;
+        claims.auth_token(AuthTokenBuilder::bound(provider))
+    }
+}
+
+#[derive(Clone)]
 #[doc(hidden)]
 pub struct CustomCodec {
     pub(crate) encoder: Option<Arc<dyn ErasedEncoder>>,
@@ -107,6 +154,13 @@ impl CodecRuntime {
         Self {
             encoder: value.encoder,
             decoder: value.decoder,
+        }
+    }
+
+    pub(crate) fn decoder(value: impl TokenDecoder) -> Self {
+        Self {
+            encoder: None,
+            decoder: Arc::new(value),
         }
     }
 

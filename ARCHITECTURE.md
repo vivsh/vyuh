@@ -45,7 +45,9 @@ The `vyuh` crate is organized around these subsystems:
 - `auth` provides complete token and opaque-key providers. One token provider
   owns access and optional refresh behavior through `TokenKind`, normalizes JWT,
   Django signing, PASETO, BRANCA, and custom codecs into `AuthToken`, and exposes
-  only `AuthUser` to protected handlers. `roles` provides bit-mask authorization
+  only `AuthUser` to protected handlers. Typed `TokenClaims` adapters map
+  externally shaped authenticated JSON into that envelope without bypassing the
+  provider's common validation. `roles` provides bit-mask authorization
   after audience validation. Bundles own an explicit `Audience` descriptor or
   receive the site's bounded default audience during site construction;
   omission never grants unrestricted access.

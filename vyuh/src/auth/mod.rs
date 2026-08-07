@@ -14,7 +14,7 @@ mod response;
 mod runtime;
 mod token;
 
-pub use codec::{CodecDefinition, TokenDecoder, TokenEncoder};
+pub use codec::{CodecDefinition, TokenClaims, TokenDecoder, TokenEncoder};
 #[cfg(feature = "branca")]
 pub use codecs::Branca;
 #[cfg(feature = "paseto")]
@@ -50,7 +50,9 @@ pub use token::{AuthToken, AuthTokenBuilder, EncodedCredential, PresentedCredent
 pub use crate::permit;
 pub use crate::roles::{BitRole, Permit, PermitAll, PermitAny, RoleType, format_roles};
 
-pub(crate) use codec::{CodecRuntime, CustomCodec, ErasedDecoder, ErasedEncoder, SecretRing};
+pub(crate) use codec::{
+    CodecRuntime, CustomClaims, CustomCodec, ErasedDecoder, ErasedEncoder, SecretRing,
+};
 pub(crate) use config::{
     BindingResolver, ErasedTokenVerifier, KeySourceKind, ProviderDefinitionInner, ProviderKind,
     build_codec, validate_token_conf,

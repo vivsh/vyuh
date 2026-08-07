@@ -15,12 +15,12 @@ use vyuh::auth::{OidcIdentity, OidcLogin, OidcStart, OidcUserMapper};
 use vyuh::{
     Site, SiteConf,
     auth::{
-        Audience, AuthConf, AuthError, AuthKey, AuthProvider, AuthToken, AuthUser,
-        BasicCredentials, BasicLogin, DEFAULT_AUTH_PROVIDER, DjangoSigning, Jwt, KeyLifecycle,
-        KeyRequest, KeyVerifier, LoginMethod, LoginResponse, LoginStateStore, MfaLogin, MfaMethod,
-        MfaResponse, MfaVerifier, PasswordCredentials, PasswordLogin, PasswordVerifier,
-        PresentedCredential, PresentedSecret, RefreshMetadata, TokenConf, TokenDecoder, TokenKind,
-        TokenLifecycle, TokenProvider, UnsafeQueryCredentials,
+        Audience, AuthConf, AuthError, AuthKey, AuthProvider, AuthToken, AuthTokenBuilder,
+        AuthUser, BasicCredentials, BasicLogin, DEFAULT_AUTH_PROVIDER, DjangoSigning, Jwt,
+        KeyLifecycle, KeyRequest, KeyVerifier, LoginMethod, LoginResponse, LoginStateStore,
+        MfaLogin, MfaMethod, MfaResponse, MfaVerifier, PasswordCredentials, PasswordLogin,
+        PasswordVerifier, PresentedCredential, PresentedSecret, RefreshMetadata, TokenClaims,
+        TokenConf, TokenDecoder, TokenKind, TokenLifecycle, TokenProvider, UnsafeQueryCredentials,
     },
     bundles,
     routes::{Json, Methods, RouteConf},
@@ -67,6 +67,39 @@ struct DjangoFixture {
     secret: String,
     django_token: String,
     legacy_token: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExternalJwtClaims {
+    kind: String,
+    subject: String,
+    roles: u64,
+    iat: i64,
+    exp: i64,
+    jti: String,
+}
+
+impl TokenClaims for ExternalJwtClaims {
+    fn auth_token(self, builder: AuthTokenBuilder) -> Result<AuthToken, AuthError> {
+        let issued_at =
+            chrono::DateTime::from_timestamp(self.iat, 0).ok_or(AuthError::InvalidCredential)?;
+        let expires_at =
+            chrono::DateTime::from_timestamp(self.exp, 0).ok_or(AuthError::InvalidCredential)?;
+        let kind = match self.kind.as_str() {
+            "access" => TokenKind::Access,
+            "refresh" => TokenKind::Refresh,
+            _ => return Err(AuthError::InvalidCredential),
+        };
+        builder
+            .kind(kind)
+            .subject(self.subject)
+            .issued_at(issued_at)
+            .expires_at(expires_at)
+            .roles(self.roles)
+            .audiences([REPORTS.as_str()])
+            .token_id(Some(self.jti))
+            .build()
+    }
 }
 
 async fn me(user: AuthUser) -> Json<WhoAmI> {
@@ -184,15 +217,13 @@ impl TokenDecoder for ExternalDecoder {
             return Err(AuthError::InvalidCredential);
         }
         let issued_at = chrono::Utc::now();
-        AuthToken::builder(
-            EXTERNAL,
-            TokenKind::Access,
-            "external-user",
-            issued_at,
-            issued_at + chrono::Duration::hours(1),
-        )
-        .audiences([REPORTS.as_str()])
-        .build()
+        AuthToken::builder(EXTERNAL)
+            .kind(TokenKind::Access)
+            .subject("external-user")
+            .issued_at(issued_at)
+            .expires_at(issued_at + chrono::Duration::hours(1))
+            .audiences([REPORTS.as_str()])
+            .build()
     }
 }
 
@@ -204,14 +235,12 @@ impl TokenDecoder for AudienceLessDecoder {
             return Err(AuthError::InvalidCredential);
         }
         let issued_at = chrono::Utc::now();
-        AuthToken::builder(
-            EXTERNAL,
-            TokenKind::Access,
-            "legacy-user",
-            issued_at,
-            issued_at + chrono::Duration::hours(1),
-        )
-        .build()
+        AuthToken::builder(EXTERNAL)
+            .kind(TokenKind::Access)
+            .subject("legacy-user")
+            .issued_at(issued_at)
+            .expires_at(issued_at + chrono::Duration::hours(1))
+            .build()
     }
 }
 
@@ -309,6 +338,123 @@ impl OidcUserMapper for TestOidcMapper {
     async fn map(&self, identity: &OidcIdentity) -> Result<AuthUser, AuthError> {
         Ok(AuthUser::new(identity.subject()))
     }
+}
+
+/// Verifies authenticated external JWT claims normalize through a provider-bound builder.
+#[tokio::test]
+async fn custom_jwt_claims_authenticate_as_normal_users() -> Result<(), AuthError> {
+    let auth = AuthConf::empty().provider(
+        EXTERNAL,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .custom_claims::<ExternalJwtClaims>()
+            .access(TokenConf::header_with_scheme("authorization", "JWT")),
+    );
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let now = chrono::Utc::now().timestamp();
+    let claims = ExternalJwtClaims {
+        kind: "access".into(),
+        subject: "partner-user".into(),
+        roles: 7,
+        iat: now,
+        exp: now + 300,
+        jti: "partner-token-1".into(),
+    };
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(b"auth-test-secret-minimum-32-chars"),
+    )
+    .map_err(auth_error)?;
+    let response = TestSite::new(site)
+        .get("/me")
+        .header("authorization", &format!("JWT {token}"))
+        .send()
+        .await;
+    response
+        .assert_json(
+            vyuh::routes::StatusCode::OK,
+            &serde_json::json!({ "key": "partner-user", "provider": "external" }),
+        )
+        .await;
+    Ok(())
+}
+
+/// Verifies typed claims cannot use a refresh credential to access a protected operation.
+#[tokio::test]
+async fn custom_jwt_claims_reject_refresh_tokens_for_access() -> Result<(), AuthError> {
+    let auth = AuthConf::empty().provider(
+        EXTERNAL,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .custom_claims::<ExternalJwtClaims>()
+            .access(TokenConf::header_with_scheme("authorization", "JWT")),
+    );
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let now = chrono::Utc::now().timestamp();
+    let claims = ExternalJwtClaims {
+        kind: "refresh".into(),
+        subject: "partner-user".into(),
+        roles: 7,
+        iat: now,
+        exp: now + 300,
+        jti: "partner-refresh-1".into(),
+    };
+    let token = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(b"auth-test-secret-minimum-32-chars"),
+    )
+    .map_err(auth_error)?;
+    TestSite::new(site)
+        .get("/me")
+        .header("authorization", &format!("JWT {token}"))
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// Verifies external-claims providers remain verify-only even with an access configuration.
+#[tokio::test]
+async fn custom_jwt_claims_provider_cannot_issue_credentials() -> Result<(), AuthError> {
+    let auth = AuthConf::empty().provider(
+        EXTERNAL,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .custom_claims::<ExternalJwtClaims>()
+            .access(TokenConf::bearer()),
+    );
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let error = site
+        .auth()
+        .using(EXTERNAL)
+        .login(AuthUser::new("partner-user"), &[REPORTS])
+        .await
+        .err()
+        .ok_or(AuthError::InvalidCredential)?;
+    assert!(matches!(error, AuthError::UnsupportedProviderCapability));
+    Ok(())
+}
+
+/// Verifies a custom-claims provider rejects an attempted refresh configuration at build time.
+#[tokio::test]
+async fn custom_jwt_claims_provider_rejects_refresh_configuration() -> Result<(), AuthError> {
+    let auth = AuthConf::empty().provider(
+        EXTERNAL,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .custom_claims::<ExternalJwtClaims>()
+            .refresh(TokenConf::header("x-partner-refresh")),
+    );
+    let error = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .err()
+        .ok_or(AuthError::InvalidCredential)?;
+    assert!(error.to_string().contains("verify-only providers"));
+    Ok(())
 }
 
 /// Verifies typed password login delegates successful proof to the default token provider.

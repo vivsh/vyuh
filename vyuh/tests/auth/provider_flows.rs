@@ -791,15 +791,13 @@ async fn refresh_empty_audiences_uses_site_default() -> Result<(), AuthError> {
 #[test]
 fn explicit_empty_token_audience_is_invalid() -> Result<(), AuthError> {
     let issued_at = chrono::Utc::now();
-    let token = AuthToken::builder(
-        EXTERNAL,
-        TokenKind::Access,
-        "legacy-user",
-        issued_at,
-        issued_at + chrono::Duration::hours(1),
-    )
-    .audiences(Vec::<String>::new())
-    .build();
+    let token = AuthToken::builder(EXTERNAL)
+        .kind(TokenKind::Access)
+        .subject("legacy-user")
+        .issued_at(issued_at)
+        .expires_at(issued_at + chrono::Duration::hours(1))
+        .audiences(Vec::<String>::new())
+        .build();
     assert!(matches!(token, Err(AuthError::InvalidCredential)));
     Ok(())
 }

@@ -9,10 +9,10 @@ use serde::Serialize;
 
 use super::{
     Audience, AudienceId, AuthError, AuthProvider, AuthToken, AuthUser, CodecDefinition,
-    CredentialLocation, CsrfConf, ErasedDecoder, ErasedEncoder, ErasedKeyLifecycle,
+    CredentialLocation, CsrfConf, CustomClaims, ErasedDecoder, ErasedEncoder, ErasedKeyLifecycle,
     ErasedLifecycle, Jwt, LoginDefinitionInner, LoginMethod, LoginProviderDefinition,
-    LoginStateStore, LoginStateStoreRuntime, ProviderDocLocation, SecretRing, TokenDecoder,
-    TokenEncoder, TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
+    LoginStateStore, LoginStateStoreRuntime, ProviderDocLocation, ProviderId, SecretRing,
+    TokenClaims, TokenDecoder, TokenEncoder, TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
 };
 
 /// Source for token signing, verification, or encryption key material.
@@ -258,6 +258,7 @@ pub struct TokenProvider {
     pub(crate) binding: Option<BindingResolver>,
     pub(crate) leeway_seconds: i64,
     pub(crate) issuer: Option<String>,
+    pub(crate) custom_claims: Option<CustomClaims>,
 }
 
 impl TokenProvider {
@@ -272,6 +273,7 @@ impl TokenProvider {
             binding: None,
             leeway_seconds: 0,
             issuer: None,
+            custom_claims: None,
         }
     }
 
@@ -283,6 +285,16 @@ impl TokenProvider {
             format: format.into(),
         };
         Self::new(CodecDefinition::Custom(custom)).without_refresh()
+    }
+
+    /// Decodes authenticated built-in JSON payloads through one typed external-claims adapter.
+    ///
+    /// This makes the provider verify-only and removes refresh. A later refresh configuration is
+    /// rejected during site construction.
+    pub fn custom_claims<C: TokenClaims>(mut self) -> Self {
+        self.custom_claims = Some(CustomClaims::new::<C>());
+        self.refresh = None;
+        self
     }
 
     /// Creates a provider from an application-owned issuing and verifying codec.
@@ -788,6 +800,8 @@ pub(crate) fn validate_token_conf(value: &TokenConf) -> Result<(), AuthError> {
 pub(crate) fn build_codec(
     value: &CodecDefinition,
     secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
 ) -> Result<super::CodecRuntime, AuthError> {
-    super::codecs::build(value, secrets)
+    super::codecs::build(value, secrets, claims, provider)
 }

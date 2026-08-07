@@ -437,23 +437,80 @@ format)` integrates externally issued self-contained tokens; login and refresh
 then fail with `UnsupportedProviderCapability`. Framework validation always
 runs after decoding and cannot be bypassed by a `TokenVerifier`.
 
+### External JSON claims
+
+When an external issuer uses JWT, Django signing, PASETO, or BRANCA but its
+JSON claims are not Vyuh's envelope, use one typed adapter on the provider.
+The built-in codec still authenticates the transport and its key material; the
+adapter only maps authenticated claims into the canonical token. Such a
+provider is verify-only, so it cannot issue or refresh credentials.
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use vyuh::auth::{
+    AuthError, AuthToken, AuthTokenBuilder, Jwt, TokenClaims, TokenConf,
+    TokenKind, TokenProvider,
+};
+
+#[derive(Deserialize)]
+struct DjangoClaims {
+    token_type: String,
+    user_id: i64,
+    kind: u64,
+    iat: i64,
+    exp: i64,
+    jti: Option<String>,
+}
+
+impl TokenClaims for DjangoClaims {
+    fn auth_token(self, builder: AuthTokenBuilder) -> Result<AuthToken, AuthError> {
+        let issued_at = DateTime::from_timestamp(self.iat, 0)
+            .ok_or(AuthError::InvalidCredential)?;
+        let expires_at = DateTime::from_timestamp(self.exp, 0)
+            .ok_or(AuthError::InvalidCredential)?;
+        let kind = match self.token_type.as_str() {
+            "access" => TokenKind::Access,
+            "refresh" => TokenKind::Refresh,
+            _ => return Err(AuthError::InvalidCredential),
+        };
+        builder
+            .kind(kind)
+            .subject(self.user_id.to_string())
+            .issued_at(issued_at)
+            .expires_at(expires_at)
+            .roles(self.kind)
+            .token_id(self.jti)
+            .build()
+    }
+}
+
+let provider = TokenProvider::new(Jwt::hs256_site_secret())
+    .custom_claims::<DjangoClaims>()
+    .access(TokenConf::header_with_scheme("authorization", "JWT"));
+```
+
+The framework fixes the builder's provider identity; a claims adapter cannot
+forge it. The adapter must supply token kind, subject, issuance time, and
+expiry. It may supply audiences, but omitted audiences use the site's configured
+default-audience compatibility policy. `AuthKey` remains the correct choice for
+opaque credentials that require a lookup rather than JSON claims.
+
 An external decoder constructs the normalized value without invented claims:
 
 ```rust
-let token = AuthToken::builder(
-    PARTNER_AUTH,
-    TokenKind::Access,
-    claims.subject,
-    claims.issued_at,
-    claims.expires_at,
-)
-.roles(claims.roles)
-.audiences(claims.audiences)
-.issuer(claims.issuer)
-.token_id(claims.token_id)
-.authentication(claims.auth_time, claims.amr, claims.acr)
-.payload(claims.application_data)
-.build()?;
+let token = AuthToken::builder(PARTNER_AUTH)
+    .kind(TokenKind::Access)
+    .subject(claims.subject)
+    .issued_at(claims.issued_at)
+    .expires_at(claims.expires_at)
+    .roles(claims.roles)
+    .audiences(claims.audiences)
+    .issuer(claims.issuer)
+    .token_id(claims.token_id)
+    .authentication(claims.auth_time, claims.amr, claims.acr)
+    .payload(claims.application_data)
+    .build()?;
 ```
 
 Provider, kind, subject, issuance, and expiry are mandatory. Audience omission
@@ -634,7 +691,8 @@ as follows:
 - construct sources with `TokenConf::{bearer,header,cookie,query}` or the
   parallel `AuthKey` constructors instead of `CredentialLocation`;
 - compose password or Basic proof with MFA through `.then(...)`;
-- construct externally decoded values through `AuthToken::builder(...)`;
+- construct externally decoded values through the fluent
+  `AuthToken::builder(PROVIDER).kind(...).subject(...).issued_at(...).expires_at(...)`;
 - call infallible `LoginResponse::write`; obtain assurance through
   `AuthUser::authentication()` and handle its `auth_time()` as optional;
 - remove `?` after `using(...)` and `via(...)`; selection errors are returned

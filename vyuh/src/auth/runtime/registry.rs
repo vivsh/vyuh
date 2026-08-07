@@ -1,6 +1,7 @@
 //! Provider construction and startup registry validation.
 
 use super::*;
+use crate::auth::CustomClaims;
 
 pub(super) fn build_provider(
     definition: ProviderDefinitionInner,
@@ -48,11 +49,13 @@ fn build_token(
         &value.codec,
         value.issuer.as_deref(),
         secrets,
+        value.custom_claims.as_ref(),
+        id.clone(),
     )?;
     let refresh = value
         .refresh
         .as_ref()
-        .map(|conf| build_refresh(conf, &value, secrets))
+        .map(|conf| build_refresh(conf, &value, secrets, id.clone()))
         .transpose()?;
     if !access.codec.can_encode() && refresh.is_some() {
         return Err(AuthError::InvalidProviderConfig(
@@ -76,9 +79,17 @@ fn build_refresh(
     conf: &TokenConf,
     provider: &TokenProvider,
     secrets: &SecretRing,
+    id: ProviderId,
 ) -> Result<KindRuntime, AuthError> {
     validate_token_conf(conf)?;
-    build_kind(conf, &provider.codec, provider.issuer.as_deref(), secrets)
+    build_kind(
+        conf,
+        &provider.codec,
+        provider.issuer.as_deref(),
+        secrets,
+        provider.custom_claims.as_ref(),
+        id,
+    )
 }
 
 fn build_kind(
@@ -86,13 +97,15 @@ fn build_kind(
     default: &CodecDefinition,
     provider_issuer: Option<&str>,
     secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
 ) -> Result<KindRuntime, AuthError> {
     let definition = conf.codec.as_ref().unwrap_or(default);
     Ok(KindRuntime {
         location: conf.location.clone(),
         response_header: conf.response_header.clone(),
         ttl_seconds: conf.ttl_seconds,
-        codec: build_codec(definition, secrets)?,
+        codec: build_codec(definition, secrets, claims, provider)?,
         issuer: provider_issuer.map(str::to_owned),
         csrf: conf.csrf.clone(),
         max_credential_bytes: conf.max_credential_bytes,

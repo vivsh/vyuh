@@ -68,15 +68,9 @@ pub struct AuthToken {
 }
 
 impl AuthToken {
-    /// Starts a complete normalized-token builder for an external decoder.
-    pub fn builder(
-        provider: AuthProvider,
-        kind: TokenKind,
-        subject: impl Into<String>,
-        issued_at: DateTime<Utc>,
-        expires_at: DateTime<Utc>,
-    ) -> AuthTokenBuilder {
-        AuthTokenBuilder::new(provider, kind, subject, issued_at, expires_at)
+    /// Starts a normalized-token builder bound to one accepting provider.
+    pub fn builder(provider: AuthProvider) -> AuthTokenBuilder {
+        AuthTokenBuilder::new(provider)
     }
 
     /// Returns the token envelope version.
@@ -219,37 +213,52 @@ fn authentication_time(user: &AuthUser, fallback: i64) -> Option<i64> {
 
 /// Builder used by externally authenticated token decoders.
 pub struct AuthTokenBuilder {
-    token: Result<AuthToken, AuthError>,
+    token: Result<AuthTokenDraft, AuthError>,
 }
 
 impl AuthTokenBuilder {
-    fn new(
-        provider: AuthProvider,
-        kind: TokenKind,
-        subject: impl Into<String>,
-        issued_at: DateTime<Utc>,
-        expires_at: DateTime<Utc>,
-    ) -> Self {
-        let token = ProviderId::new(provider.as_str()).map(|provider| AuthToken {
-            version: 1,
-            provider,
-            kind,
-            subject: subject.into(),
-            roles: 0,
-            audiences: None,
-            issued_at: issued_at.timestamp(),
-            auth_time: None,
-            authentication_methods: Vec::new(),
-            authentication_class: None,
-            not_before: None,
-            expires_at: expires_at.timestamp(),
-            token_id: None,
-            family_id: None,
-            issuer: None,
-            binding: None,
-            payload: serde_json::Value::Null,
-        });
+    fn new(provider: AuthProvider) -> Self {
+        let token = ProviderId::new(provider.as_str()).map(AuthTokenDraft::new);
         Self { token }
+    }
+
+    /// Starts a builder bound to the provider authenticated by an internal codec.
+    pub(crate) fn bound(provider: ProviderId) -> Self {
+        Self {
+            token: Ok(AuthTokenDraft::new(provider)),
+        }
+    }
+
+    /// Sets whether this credential is an access or refresh token.
+    pub fn kind(mut self, value: TokenKind) -> Self {
+        if let Ok(token) = &mut self.token {
+            token.kind = Some(value);
+        }
+        self
+    }
+
+    /// Sets the stable authenticated subject key.
+    pub fn subject(mut self, value: impl Into<String>) -> Self {
+        if let Ok(token) = &mut self.token {
+            token.subject = Some(value.into());
+        }
+        self
+    }
+
+    /// Sets the authenticated credential issuance time.
+    pub fn issued_at(mut self, value: DateTime<Utc>) -> Self {
+        if let Ok(token) = &mut self.token {
+            token.issued_at = Some(value.timestamp());
+        }
+        self
+    }
+
+    /// Sets the mandatory credential expiry time.
+    pub fn expires_at(mut self, value: DateTime<Utc>) -> Self {
+        if let Ok(token) = &mut self.token {
+            token.expires_at = Some(value.timestamp());
+        }
+        self
     }
 
     /// Sets the embedded role mask.
@@ -343,9 +352,74 @@ impl AuthTokenBuilder {
 
     /// Validates and returns the normalized token.
     pub fn build(self) -> Result<AuthToken, AuthError> {
-        let token = self.token?;
+        let token = self.token?.build()?;
         validate_structure(&token)?;
         Ok(token)
+    }
+}
+
+struct AuthTokenDraft {
+    provider: ProviderId,
+    kind: Option<TokenKind>,
+    subject: Option<String>,
+    roles: RoleType,
+    audiences: Option<Vec<AudienceId>>,
+    issued_at: Option<i64>,
+    auth_time: Option<i64>,
+    authentication_methods: Vec<String>,
+    authentication_class: Option<String>,
+    not_before: Option<i64>,
+    expires_at: Option<i64>,
+    token_id: Option<String>,
+    family_id: Option<String>,
+    issuer: Option<String>,
+    binding: Option<String>,
+    payload: serde_json::Value,
+}
+
+impl AuthTokenDraft {
+    fn new(provider: ProviderId) -> Self {
+        Self {
+            provider,
+            kind: None,
+            subject: None,
+            roles: 0,
+            audiences: None,
+            issued_at: None,
+            auth_time: None,
+            authentication_methods: Vec::new(),
+            authentication_class: None,
+            not_before: None,
+            expires_at: None,
+            token_id: None,
+            family_id: None,
+            issuer: None,
+            binding: None,
+            payload: serde_json::Value::Null,
+        }
+    }
+
+    /// Produces an envelope only after every externally required claim was supplied.
+    fn build(self) -> Result<AuthToken, AuthError> {
+        Ok(AuthToken {
+            version: 1,
+            provider: self.provider,
+            kind: self.kind.ok_or(AuthError::InvalidCredential)?,
+            subject: self.subject.ok_or(AuthError::InvalidCredential)?,
+            roles: self.roles,
+            audiences: self.audiences,
+            issued_at: self.issued_at.ok_or(AuthError::InvalidCredential)?,
+            auth_time: self.auth_time,
+            authentication_methods: self.authentication_methods,
+            authentication_class: self.authentication_class,
+            not_before: self.not_before,
+            expires_at: self.expires_at.ok_or(AuthError::InvalidCredential)?,
+            token_id: self.token_id,
+            family_id: self.family_id,
+            issuer: self.issuer,
+            binding: self.binding,
+            payload: self.payload,
+        })
     }
 }
 
@@ -571,6 +645,31 @@ mod tests {
             token.audiences().collect::<Vec<_>>(),
             vec!["api", "reports"]
         );
+        Ok(())
+    }
+
+    /// Verifies external-claims builders reject incomplete normalized envelopes.
+    #[test]
+    fn builder_requires_all_required_claims() {
+        let error = AuthToken::builder(AuthProvider::new("external"))
+            .kind(TokenKind::Access)
+            .subject("user-1")
+            .build()
+            .err();
+        assert!(matches!(error, Some(AuthError::InvalidCredential)));
+    }
+
+    /// Verifies a builder preserves its fixed accepting provider in the result.
+    #[test]
+    fn builder_binds_the_accepting_provider() -> Result<(), AuthError> {
+        let now = Utc::now();
+        let token = AuthToken::builder(AuthProvider::new("external"))
+            .kind(TokenKind::Access)
+            .subject("user-1")
+            .issued_at(now)
+            .expires_at(now + chrono::Duration::minutes(5))
+            .build()?;
+        assert_eq!(token.provider(), "external");
         Ok(())
     }
 }

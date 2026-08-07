@@ -13,8 +13,8 @@ use pasetors::{
 };
 
 use crate::auth::{
-    AuthError, AuthToken, CodecDefinition, CodecRuntime, EncodedCredential, KeySource,
-    PresentedCredential, SecretRing, TokenDecoder, TokenEncoder,
+    AuthError, AuthToken, CodecDefinition, CodecRuntime, CustomClaims, EncodedCredential,
+    KeySource, PresentedCredential, ProviderId, SecretRing, TokenDecoder, TokenEncoder,
 };
 
 const LOCAL_CONTEXT: &[u8] = b"paseto-v4-local";
@@ -120,6 +120,12 @@ enum PasetoCodec {
     },
 }
 
+struct ClaimsPasetoCodec {
+    codec: PasetoCodec,
+    claims: CustomClaims,
+    provider: ProviderId,
+}
+
 impl TokenEncoder for PasetoCodec {
     fn encode<'a>(
         &'a self,
@@ -130,6 +136,15 @@ impl TokenEncoder for PasetoCodec {
 }
 
 impl TokenDecoder for PasetoCodec {
+    fn decode<'a>(
+        &'a self,
+        presented: &'a PresentedCredential<'a>,
+    ) -> impl Future<Output = Result<AuthToken, AuthError>> + Send + 'a {
+        ready(self.decode_inner(presented.expose()))
+    }
+}
+
+impl TokenDecoder for ClaimsPasetoCodec {
     fn decode<'a>(
         &'a self,
         presented: &'a PresentedCredential<'a>,
@@ -157,6 +172,12 @@ impl PasetoCodec {
     }
 
     fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        let payload = self.payload(value)?;
+        serde_json::from_str(&payload).map_err(|_| AuthError::InvalidCredential)
+    }
+
+    /// Authenticates a PASETO value and returns its bounded JSON payload.
+    fn payload(&self, value: &str) -> Result<String, AuthError> {
         let payload = match self {
             Self::Public { verification, .. } => decode_public(value, verification)?,
             Self::Local { verification, .. } => decode_local(value, verification)?,
@@ -164,11 +185,24 @@ impl PasetoCodec {
         if payload.len() > MAX_DECODED_PAYLOAD_BYTES {
             return Err(AuthError::InvalidCredential);
         }
-        serde_json::from_str(&payload).map_err(|_| AuthError::InvalidCredential)
+        Ok(payload)
     }
 }
 
-pub(crate) fn build(value: &Paseto, secrets: &SecretRing) -> Result<CodecRuntime, AuthError> {
+impl ClaimsPasetoCodec {
+    fn decode_inner(&self, value: &str) -> Result<AuthToken, AuthError> {
+        let payload = self.codec.payload(value)?;
+        let claims = serde_json::from_str(&payload).map_err(|_| AuthError::InvalidCredential)?;
+        self.claims.auth_token(claims, self.provider.clone())
+    }
+}
+
+pub(crate) fn build(
+    value: &Paseto,
+    secrets: &SecretRing,
+    claims: Option<&CustomClaims>,
+    provider: ProviderId,
+) -> Result<CodecRuntime, AuthError> {
     if let Some(error) = value.configuration_error {
         return Err(AuthError::InvalidProviderConfig(error.into()));
     }
@@ -181,7 +215,14 @@ pub(crate) fn build(value: &Paseto, secrets: &SecretRing) -> Result<CodecRuntime
         } => build_public(signing, verifying, key_id, verification_keys, secrets)?,
         PasetoMode::Local { key } => build_local(key, secrets)?,
     };
-    Ok(CodecRuntime::new(codec))
+    match claims {
+        Some(claims) => Ok(CodecRuntime::decoder(ClaimsPasetoCodec {
+            codec,
+            claims: claims.clone(),
+            provider,
+        })),
+        None => Ok(CodecRuntime::new(codec)),
+    }
 }
 
 fn build_public(
