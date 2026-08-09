@@ -51,3 +51,11 @@ pub use crate::services::ServiceRef;
 // ── Channels ─────────────────────────────────────────────────────────────────
 
 pub use crate::channels::{ChannelResponse, Channels, UserKey};
+
+// ── Cache ───────────────────────────────────────────────────────────────────
+
+pub use crate::cache::{CacheName, CacheTtl, DEFAULT_CACHE};
+
+// ── Authentication ──────────────────────────────────────────────────────────
+
+pub use crate::auth::{AuthUser, Permit, Scope, ScopeExpr, ScopeRule};

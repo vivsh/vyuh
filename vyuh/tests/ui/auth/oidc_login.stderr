@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `vyuh::auth::OidcLogin`
+ --> tests/ui/auth/oidc_login.rs:1:5
+  |
+1 | use vyuh::auth::OidcLogin;
+  |     ^^^^^^^^^^^^^^^^^^^^^ no `OidcLogin` in `auth`

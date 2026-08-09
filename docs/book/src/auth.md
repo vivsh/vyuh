@@ -7,8 +7,8 @@ cryptographic verification. Handlers see the same `AuthUser` regardless of the
 provider or token format.
 
 Identity proof is a separate, composable layer. Named login methods support
-password and HTTP Basic token exchange, password plus MFA, and OIDC
-Authorization Code with PKCE. Applications still own user rows, password and
+password and HTTP Basic token exchange, password plus MFA, and federated
+Authorization Code login. Applications still own user rows, password and
 factor storage, account linking, and every authentication route.
 
 The optional built-in console uses ordinary configured access credentials. Issue
@@ -39,7 +39,7 @@ let api = bundles::bundle! { me }
 
 Audience names are validated during site construction and login. Duplicate
 audiences are removed while preserving order. An audience controls where a
-credential is accepted; roles control what the identity may do within that
+credential is accepted; scopes control what the identity may do within that
 surface.
 
 Vyuh safely maps omitted audiences to `DEFAULT_AUDIENCE` (`"default"`). This
@@ -62,23 +62,68 @@ an audience use `AuthConf::require_explicit_audiences()`; site construction then
 rejects authenticated routes without `.with_audience(...)`, and empty login or
 refresh slices fail.
 
-Construct identities with role builders:
+Construct identities with exact application scopes:
 
 ```rust
+use vyuh::auth::Scope;
+
+const USERS_READ: Scope = Scope::of("users:read");
+const USERS_WRITE: Scope = Scope::of("users:write");
+
 let user = AuthUser::new("user-123")
-    .with_role(UserRole::User);
+    .with_scope(USERS_READ);
 
 let editor = AuthUser::new("user-456")
-    .with_roles([UserRole::User, UserRole::Editor]);
+    .with_scopes([USERS_READ, USERS_WRITE]);
 
 let restored = AuthUser::new("user-789")
-    .with_role_mask(database_role_mask);
+    .with_scopes(database_scopes);
 ```
 
-`AuthUser` exposes its stable `key`, role mask, and accepting provider. A token
+`AuthUser` exposes its stable `key`, normalized scopes, and accepting provider. A token
 or key verifier can attach request-only data with `with_extra`; handlers recover
 it with `extra::<T>()`. Extras are not serialized into tokens and are redacted
-from diagnostics. Use `permit!` for static role gates.
+from diagnostics. `without_extra()` removes only this runtime data; provider and
+assurance metadata remain intact.
+
+Use `Scope::of(...)` for allocation-free static declarations and `Scope::new(...)`
+for dynamically owned `Arc<str>` values. Identity scopes are sorted and
+deduplicated, so exact membership uses allocation-free binary search. Scope
+construction and identity builders are infallible; login, decoding, and verifier
+terminals reject malformed trusted collections. Vyuh fixes the defensive limit at
+128 distinct scopes and 8 KiB of canonical scope data.
+
+### Scope authorization
+
+Declare static rules and extract `Permit<R>` directly in handlers:
+
+```rust
+use vyuh::auth::{Permit, Scope, ScopeExpr, ScopeRule};
+
+const USERS_READ: Scope = Scope::of("users:read");
+const USERS_WRITE: Scope = Scope::of("users:write");
+const MANAGE_USERS: &[Scope] = &[USERS_READ, USERS_WRITE];
+
+struct ManageUsers;
+
+impl ScopeRule for ManageUsers {
+    const EXPR: ScopeExpr = ScopeExpr::all(MANAGE_USERS);
+}
+
+async fn update_user(permit: Permit<ManageUsers>) -> Json<String> {
+    Json(permit.user().key.to_string())
+}
+```
+
+`ScopeExpr::all` requires every scope; `ScopeExpr::any` requires one. Scope
+checks are exact and case-sensitive. Rules are flat, static, validated at site
+construction, and recorded in operation metadata. An operation declares at most
+one flat permit rule. There is no global scope
+registry, wildcard matching, or route-configuration authorization language.
+
+`Option<Permit<R>>` returns `None` only when no credential is present. A valid
+identity missing the required scopes remains a `403`; malformed or expired
+credentials remain authentication failures.
 
 ### Authentication assurance
 
@@ -105,7 +150,7 @@ The context exposes:
 `auth_time` is optional because opaque keys and externally decoded credentials
 may not provide a trustworthy proof time. Credentials created through Vyuh
 login methods carry their authenticated assurance through access-token issuance
-and refresh. Assurance describes identity proof; audiences and roles remain the
+and refresh. Assurance describes identity proof; audiences and scopes remain the
 authorization controls.
 
 ## Login methods
@@ -145,7 +190,7 @@ Configuration itself is validated by `Site::build`.
 
 One-step methods expose `login`. Inherently multi-step methods expose only
 `begin` and `complete`; the type system prevents completing password or Basic
-login and prevents using one-step `login` on OIDC or MFA. Login methods are
+login and prevents using one-step `login` on federated login or MFA. Login methods are
 registered centrally through `AuthConf::method`; route bundles do not repeat
 that registration as runtime or documentation metadata.
 
@@ -184,25 +229,29 @@ The first route calls `begin(credentials, &[API])` and returns
 the factor succeeds. An optional `AuthConf::login_state_store` atomically
 consumes continuation IDs for strict replay protection.
 
-### OIDC
+### Federated login
 
-Enable the `oidc` feature and register one discovery-backed method:
+Enable the `federated` feature and register one generic OIDC or provider-preset
+method:
 
 ```rust
-let google = OidcLogin::discovery("https://accounts.google.com")
+let google = FederatedLogin::google()
     .client_id("client-id")
     .client_secret(KeySource::env("GOOGLE_CLIENT_SECRET"))
     .redirect_uri("https://example.com/auth/google/callback")
-    .scopes(["email", "profile"])
     .mapper(GoogleAccountMapper);
 ```
 
-The start route calls `via(GOOGLE)?.begin(OidcStart::new(), &[API])`; the
-callback calls `via(GOOGLE)?.complete(callback)`. Vyuh validates discovery,
+`FederatedLogin::oidc(issuer)`, `google()`, `github()`, and `facebook()` share
+the same `begin` and `complete` handler API. The start route calls
+`via(GOOGLE).begin(FederatedStart::new(), &[API])`; the callback calls
+`via(GOOGLE).complete(callback)`. OIDC and Google validate discovery,
 Authorization Code, PKCE-S256, state, nonce, ID-token signature, issuer,
-audience, expiry, and access-token hash before invoking `OidcUserMapper`.
+audience, expiry, and access-token hash. GitHub and Facebook use their
+provider-specific code exchange and bounded authenticated profile APIs. A
+mapper is always required and provider access tokens are never exposed.
 
-MFA and OIDC continuation state is AES-256-GCM sealed with a domain-separated
+MFA and federated continuation state is AES-256-GCM sealed with a domain-separated
 site-secret key. New state uses the active secret and in-flight state accepts
 configured fallback secrets during rotation. The state binds login method,
 credential provider, audiences, and expiry.
@@ -347,6 +396,42 @@ The unselected `login`, `refresh`, and `logout` conveniences all mean the
 default provider. Refresh and logout never probe or mutate another provider;
 multi-provider routes must select their provider with `using`.
 
+### Audience-scoped providers
+
+Access credential selectors are unique per local Vyuh audience, not globally.
+OAuth resource servers and identity-token providers already declare their local
+audiences through `resource(...)`. Token and opaque-key providers may restrict
+their route coverage explicitly:
+
+```rust
+let auth = AuthConf::empty()
+    .provider(
+        REPORTS_AUTH,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .audiences([REPORTS]),
+    )
+    .provider(
+        ADMIN_AUTH,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .audiences([ADMIN]),
+    );
+```
+
+Both providers may use `Authorization: Bearer` because their audience sets do
+not overlap. Vyuh resolves the route audience first and dispatches directly to
+the one matching provider; it never decodes a token merely to discover its
+issuer. The same selector on overlapping audiences fails `Site::build`.
+
+Omitting `.audiences(...)` keeps a token or key provider unrestricted. An
+unrestricted provider therefore conflicts with every same-selector provider,
+which preserves conservative behavior for existing configurations. Explicit
+login and refresh operations also reject audiences outside the selected
+provider's declared coverage.
+
+Refresh selectors may be reused across providers because refresh and logout are
+always default-provider or `.using(PROVIDER)` operations. They are never used
+for automatic provider discovery.
+
 Call `.without_refresh()` for access-only providers. Access and refresh may use
 different formats while remaining one provider:
 
@@ -387,9 +472,13 @@ are rejected instead of choosing one.
 ## Token formats
 
 Every parseable format authenticates the same private `AuthToken` envelope:
-provider, `TokenKind`, subject, roles, audiences, timestamps, token and family
+provider, `TokenKind`, subject, scopes, audiences, timestamps, token and family
 IDs, optional issuer and binding, and optional authenticated payload data.
 Normal handlers never extract `AuthToken`; they extract `AuthUser`.
+
+The version-two envelope serializes application grants as the standard
+space-delimited `scope` string. Missing or empty `scope` means no grants.
+Version-one numeric-role tokens are intentionally rejected and must be reissued.
 
 Built-in codecs are:
 
@@ -437,6 +526,75 @@ format)` integrates externally issued self-contained tokens; login and refresh
 then fail with `UnsupportedProviderCapability`. Framework validation always
 runs after decoding and cannot be bypassed by a `TokenVerifier`.
 
+### OAuth JWT access tokens
+
+The optional `oauth` feature makes Vyuh an OAuth resource server for external
+JWT access tokens. It is not an OAuth authorization server and does not add
+login, consent, client registration, issuance, refresh, or token introspection.
+Use `OAuthResourceServer::discovery(...)` with one or more resource policies:
+
+```rust,ignore
+OAuthResourceServer::discovery("https://auth.example.com")
+    .resource(
+        API,
+        OAuthResource::new("https://api.example.com")
+            .require_scopes(["api.read"]),
+    )
+    .mapper(AppIdentityMapper)
+```
+
+The outer `Audience` selects a Vyuh route surface. `OAuthResource::new(...)`
+names the external JWT `aud`; neither value is inferred from the other. Each
+policy may also advertise and require upstream OAuth scopes. Vyuh builds the provider during `Site::build`: RFC 8414 discovery and
+the initial JWKS load must succeed before the site starts. A missing RFC 8414
+endpoint (`404` or `410`) falls back to OIDC discovery; transport failures,
+server failures, malformed metadata, and issuer mismatches do not.
+
+JWT parsing, asymmetric signature verification, claim validation, key
+selection, bounded JWKS retention, rotation, single-flight refresh, and
+unknown-key refresh throttling are handled by a private Huskarl runtime. Its
+state belongs to the built site and is not coupled to `site.cache()`.
+
+The default identity mapping is `sub` to `AuthUser.key` with no application
+scopes. Upstream OAuth scopes are credential policy; an explicit identity
+mapper decides which Vyuh application scopes to grant:
+
+```rust,ignore
+struct AppIdentityMapper;
+
+impl OAuthIdentityMapper for AppIdentityMapper {
+    async fn map(&self, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
+        Ok(AuthUser::new(&claims.subject).with_scope(API_READ))
+    }
+}
+```
+
+OAuth providers remain verify-only and accept Bearer JWT access tokens. They do
+not add opaque-token introspection, DPoP, mTLS, multi-issuer routing, login,
+refresh, issuance, or authorization-server behavior. The old OAuth cache and
+cache-TTL builders have been removed; no compatibility aliases are retained.
+
+### External identity tokens
+
+Enable `id-token` for independently presented identity JWTs such as Google
+Workspace `systemIdToken`:
+
+```rust,ignore
+IdToken::google()
+    .resource(
+        GMAIL,
+        "https://example.com/integrations/gmail/member-context",
+    )
+    .mapper(GmailSystemIdentity)
+```
+
+`resource(local_audience, token_audience)` keeps Vyuh route capability separate
+from the external token audience. `IdToken` is verify-only and supports the
+same bearer, header, cookie, and explicit unsafe-query extraction vocabulary as
+other providers. The mapper receives bounded verified claims and performs
+application checks such as service-account email or hosted domain. It never
+receives the raw credential.
+
 ### External JSON claims
 
 When an external issuer uses JWT, Django signing, PASETO, or BRANCA but its
@@ -449,15 +607,15 @@ provider is verify-only, so it cannot issue or refresh credentials.
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use vyuh::auth::{
-    AuthError, AuthToken, AuthTokenBuilder, Jwt, TokenClaims, TokenConf,
-    TokenKind, TokenProvider,
+    AuthError, AuthToken, AuthTokenBuilder, Jwt, Scope, TokenClaims,
+    TokenConf, TokenKind, TokenProvider,
 };
 
 #[derive(Deserialize)]
 struct DjangoClaims {
     token_type: String,
     user_id: i64,
-    kind: u64,
+    legacy_kind: u64,
     iat: i64,
     exp: i64,
     jti: Option<String>,
@@ -474,12 +632,14 @@ impl TokenClaims for DjangoClaims {
             "refresh" => TokenKind::Refresh,
             _ => return Err(AuthError::InvalidCredential),
         };
+        // This legacy numeric interpretation belongs to the application.
+        let scopes = legacy_scopes(self.legacy_kind);
         builder
             .kind(kind)
             .subject(self.user_id.to_string())
             .issued_at(issued_at)
             .expires_at(expires_at)
-            .roles(self.kind)
+            .scopes(scopes)
             .token_id(self.jti)
             .build()
     }
@@ -504,7 +664,7 @@ let token = AuthToken::builder(PARTNER_AUTH)
     .subject(claims.subject)
     .issued_at(claims.issued_at)
     .expires_at(claims.expires_at)
-    .roles(claims.roles)
+    .scopes(claims.application_scopes)
     .audiences(claims.audiences)
     .issuer(claims.issuer)
     .token_id(claims.token_id)
@@ -550,11 +710,11 @@ second algorithm.
 
 A `TokenVerifier` runs only after extraction, size limits, cryptographic
 authentication, provider and kind checks, temporal validation, requested
-audiences, CSRF, and binding. It may reject a user, replace stale roles, or add
+audiences, CSRF, and binding. It may reject a user, replace stale scopes, or add
 runtime extras:
 
 ```rust
-use vyuh::auth::{AuthError, AuthToken, AuthUser, TokenVerifier};
+use vyuh::auth::{AuthError, AuthToken, AuthUser, Scope, TokenVerifier};
 
 struct ActiveAccount;
 
@@ -565,7 +725,7 @@ impl TokenVerifier for ActiveAccount {
             return Err(AuthError::InvalidCredential);
         }
         Ok(AuthUser::new(account.id.to_string())
-            .with_role_mask(account.roles)
+            .with_scopes(account.scopes)
             .with_extra(account))
     }
 }
@@ -578,7 +738,7 @@ before a refreshed `LoginResponse` is returned.
 ## Opaque API keys
 
 `AuthKey` is separate from parseable `AuthToken` formats. Its verifier owns the
-lookup, expiry, revocation, tenant checks, and role resolution:
+lookup, expiry, revocation, tenant checks, and application-scope resolution:
 
 ```rust
 use vyuh::auth::{
@@ -597,7 +757,7 @@ impl KeyVerifier for ApiKeyVerifier {
     ) -> Result<AuthUser, AuthError> {
         let record = load_api_key(credential.expose(), request.audience()).await?;
         Ok(AuthUser::new(record.subject)
-            .with_role_mask(record.roles)
+            .with_scopes(record.scopes)
             .with_extra(record))
     }
 }
@@ -660,9 +820,9 @@ bindings, and key material are redacted from formatting and serialization.
 Prometheus output includes `vyuh_auth_attempts_total` with configured provider
 names, one fixed `<unknown>` selector bucket, and safe outcome classes, plus
 `vyuh_login_attempts_total` with the same bounded method-label policy. OpenAPI
-emits one security alternative per provider, `x-vyuh-audience`, token
-`bearerFormat`, API-key locations, and CSRF-header metadata for unsafe
-cookie-authenticated operations.
+emits only the providers eligible for each operation's effective audience,
+along with `x-vyuh-audience`, token `bearerFormat`, API-key locations, and
+CSRF-header metadata for unsafe cookie-authenticated operations.
 
 Rate limiting remains middleware policy. Treat password login, refresh, and
 expensive API-key verification endpoints as explicit rate-limit boundaries.

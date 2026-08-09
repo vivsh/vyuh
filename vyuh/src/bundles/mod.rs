@@ -203,6 +203,15 @@ impl Bundle {
         }
     }
 
+    pub(crate) fn normalize_authorization(&mut self) -> Result<(), BundleError> {
+        for operation in self.ops.values_mut() {
+            operation.normalize_authorization().map_err(|reason| {
+                BundleError::Auth(format!("operation '{}': {reason}", operation.name))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Assigns a human-readable label to this bundle, for example in logging or diagnostics.
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());

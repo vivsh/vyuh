@@ -6,7 +6,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AudienceId, AuthError, AuthProvider, AuthUser, AuthenticationContext, ProviderId, RoleType,
+    AudienceId, AuthError, AuthProvider, AuthUser, AuthenticationContext, ProviderId, Scope,
 };
 
 const MAX_SUBJECT_BYTES: usize = 512;
@@ -15,7 +15,7 @@ const MAX_NAME_BYTES: usize = 128;
 const MAX_AUTH_METHODS: usize = 16;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 
-/// The protocol role carried by an authenticated token.
+/// The protocol function carried by an authenticated token.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,7 +35,14 @@ pub struct AuthToken {
     kind: TokenKind,
     #[serde(rename = "sub")]
     subject: String,
-    roles: RoleType,
+    #[serde(
+        default,
+        rename = "scope",
+        skip_serializing_if = "scopes_empty",
+        serialize_with = "serialize_scopes",
+        deserialize_with = "deserialize_scopes"
+    )]
+    scopes: std::sync::Arc<[Scope]>,
     #[serde(
         default,
         rename = "aud",
@@ -93,9 +100,9 @@ impl AuthToken {
         &self.subject
     }
 
-    /// Returns the embedded role mask.
-    pub const fn roles(&self) -> RoleType {
-        self.roles
+    /// Returns normalized application scopes.
+    pub fn scopes(&self) -> &[Scope] {
+        &self.scopes
     }
 
     /// Returns the authenticated audience names.
@@ -165,18 +172,18 @@ impl AuthToken {
 
     pub(crate) fn embedded_user(&self) -> AuthUser {
         AuthUser::new(&self.subject)
-            .with_role_mask(self.roles)
+            .with_scopes(self.scopes.iter().cloned())
             .with_authentication(self.authentication())
     }
 
     pub(crate) fn issued(input: LocalToken<'_>) -> Self {
         let issued_at = Utc::now().timestamp();
         Self {
-            version: 1,
+            version: 2,
             provider: input.provider,
             kind: input.kind,
             subject: input.user.key.to_string(),
-            roles: input.user.roles,
+            scopes: input.user.scopes().iter().cloned().collect(),
             audiences: Some(input.audiences),
             issued_at,
             auth_time: authentication_time(input.user, issued_at),
@@ -261,10 +268,13 @@ impl AuthTokenBuilder {
         self
     }
 
-    /// Sets the embedded role mask.
-    pub fn roles(mut self, roles: RoleType) -> Self {
+    /// Sets normalized application scopes.
+    pub fn scopes<I>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = Scope>,
+    {
         if let Ok(token) = &mut self.token {
-            token.roles = roles;
+            token.scopes = crate::scopes::normalize(scopes);
         }
         self
     }
@@ -335,9 +345,9 @@ impl AuthTokenBuilder {
     }
 
     /// Sets authenticated credential binding.
-    pub fn binding(mut self, value: Option<impl Into<String>>) -> Self {
+    pub fn binding(mut self, value: Option<super::AuthBinding>) -> Self {
         if let Ok(token) = &mut self.token {
-            token.binding = value.map(Into::into);
+            token.binding = value.map(super::AuthBinding::into_inner);
         }
         self
     }
@@ -362,7 +372,7 @@ struct AuthTokenDraft {
     provider: ProviderId,
     kind: Option<TokenKind>,
     subject: Option<String>,
-    roles: RoleType,
+    scopes: std::sync::Arc<[Scope]>,
     audiences: Option<Vec<AudienceId>>,
     issued_at: Option<i64>,
     auth_time: Option<i64>,
@@ -383,7 +393,7 @@ impl AuthTokenDraft {
             provider,
             kind: None,
             subject: None,
-            roles: 0,
+            scopes: std::sync::Arc::from([]),
             audiences: None,
             issued_at: None,
             auth_time: None,
@@ -402,11 +412,11 @@ impl AuthTokenDraft {
     /// Produces an envelope only after every externally required claim was supplied.
     fn build(self) -> Result<AuthToken, AuthError> {
         Ok(AuthToken {
-            version: 1,
+            version: 2,
             provider: self.provider,
             kind: self.kind.ok_or(AuthError::InvalidCredential)?,
             subject: self.subject.ok_or(AuthError::InvalidCredential)?,
-            roles: self.roles,
+            scopes: self.scopes,
             audiences: self.audiences,
             issued_at: self.issued_at.ok_or(AuthError::InvalidCredential)?,
             auth_time: self.auth_time,
@@ -465,6 +475,39 @@ where
         .map(Some)
 }
 
+fn scopes_empty(scopes: &std::sync::Arc<[Scope]>) -> bool {
+    scopes.is_empty()
+}
+
+/// Serializes normalized application grants in OAuth's canonical scope form.
+fn serialize_scopes<S>(scopes: &std::sync::Arc<[Scope]>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut value = String::new();
+    for scope in scopes.iter() {
+        if !value.is_empty() {
+            value.push(' ');
+        }
+        value.push_str(scope.as_str());
+    }
+    serializer.serialize_str(&value)
+}
+
+/// Deserializes an authenticated OAuth-style scope string into normalized grants.
+fn deserialize_scopes<'de, D>(deserializer: D) -> Result<std::sync::Arc<[Scope]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
+    if value.is_empty() {
+        return Ok(std::sync::Arc::from([]));
+    }
+    Ok(crate::scopes::normalize(
+        value.split(' ').map(|scope| Scope::from(scope.to_owned())),
+    ))
+}
+
 pub(crate) fn validate_structure(token: &AuthToken) -> Result<(), AuthError> {
     validate_names(token)?;
     validate_times(token)?;
@@ -472,7 +515,7 @@ pub(crate) fn validate_structure(token: &AuthToken) -> Result<(), AuthError> {
 }
 
 fn validate_names(token: &AuthToken) -> Result<(), AuthError> {
-    if token.version != 1
+    if token.version != 2
         || ProviderId::new(token.provider.as_str()).is_err()
         || token.subject.trim().is_empty()
         || token.subject.len() > MAX_SUBJECT_BYTES
@@ -483,6 +526,7 @@ fn validate_names(token: &AuthToken) -> Result<(), AuthError> {
     {
         return Err(AuthError::InvalidCredential);
     }
+    crate::scopes::validate_scopes(&token.scopes).map_err(|_| AuthError::InvalidCredential)?;
     if token.audiences.as_ref().is_some_and(Vec::is_empty)
         || token
             .audiences
@@ -554,6 +598,7 @@ impl fmt::Debug for AuthToken {
             .field("provider", &self.provider)
             .field("kind", &self.kind)
             .field("subject", &self.subject)
+            .field("scope_count", &self.scopes.len())
             .field("audiences", &self.audiences)
             .field("expires_at", &self.expires_at)
             .field("token_id", &self.token_id)
@@ -613,11 +658,11 @@ mod tests {
     fn token_json(audience: serde_json::Value) -> serde_json::Value {
         let now = Utc::now().timestamp();
         serde_json::json!({
-            "version": 1,
+            "version": 2,
             "prv": "default",
             "kind": "access",
             "sub": "user-1",
-            "roles": 0,
+            "scope": "users:read users:write",
             "aud": audience,
             "iat": now,
             "exp": now + 60
@@ -670,6 +715,62 @@ mod tests {
             .expires_at(now + chrono::Duration::minutes(5))
             .build()?;
         assert_eq!(token.provider(), "external");
+        Ok(())
+    }
+
+    /// Verifies the removed role-mask envelope version cannot pass framework validation.
+    #[test]
+    fn version_one_tokens_are_rejected() -> Result<(), AuthError> {
+        let now = Utc::now().timestamp();
+        let value = serde_json::json!({
+            "version": 1,
+            "prv": "default",
+            "kind": "access",
+            "sub": "legacy-user",
+            "roles": 1,
+            "aud": ["api"],
+            "iat": now,
+            "exp": now + 60
+        });
+        let token =
+            serde_json::from_value::<AuthToken>(value).map_err(|_| AuthError::InvalidCredential)?;
+        assert!(matches!(
+            validate_structure(&token),
+            Err(AuthError::InvalidCredential)
+        ));
+        Ok(())
+    }
+
+    /// Verifies canonical envelopes serialize sorted scopes as one OAuth-compatible string.
+    #[test]
+    fn canonical_scopes_serialize_as_a_sorted_string() -> Result<(), AuthError> {
+        let now = Utc::now();
+        let token = AuthToken::builder(AuthProvider::new("external"))
+            .kind(TokenKind::Access)
+            .subject("user-1")
+            .issued_at(now)
+            .expires_at(now + chrono::Duration::minutes(5))
+            .scopes([Scope::of("users:write"), Scope::of("users:read")])
+            .build()?;
+        let value = serde_json::to_value(token).map_err(|_| AuthError::InvalidCredential)?;
+        assert_eq!(
+            value.get("scope"),
+            Some(&serde_json::json!("users:read users:write"))
+        );
+        Ok(())
+    }
+
+    /// Verifies a missing canonical scope claim grants no application scopes.
+    #[test]
+    fn missing_scope_deserializes_without_grants() -> Result<(), AuthError> {
+        let mut value = token_json(serde_json::json!(["api"]));
+        if let Some(object) = value.as_object_mut() {
+            object.remove("scope");
+        }
+        let token =
+            serde_json::from_value::<AuthToken>(value).map_err(|_| AuthError::InvalidCredential)?;
+        validate_structure(&token)?;
+        assert!(token.scopes().is_empty());
         Ok(())
     }
 }

@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `vyuh::auth::OAuthAccess`
+ --> tests/ui/auth/oauth_access.rs:1:5
+  |
+1 | use vyuh::auth::OAuthAccess;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^ no `OAuthAccess` in `auth`

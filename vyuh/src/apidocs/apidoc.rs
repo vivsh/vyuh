@@ -714,6 +714,7 @@ fn register_security(
     scopes: &[String],
     join_all: bool,
     auth: Option<&AuthConf>,
+    audience: Option<&str>,
     optional: bool,
 ) {
     if scheme == "vyuhAuth" {
@@ -721,7 +722,11 @@ fn register_security(
             registry.register_security(scheme.to_string(), scopes, false, optional);
             return;
         };
-        for provider in auth.provider_docs() {
+        for provider in auth
+            .provider_docs()
+            .into_iter()
+            .filter(|provider| audience.is_none_or(|value| provider.supports_audience(value)))
+        {
             registry.register_security(provider_scheme_name(&provider), scopes, false, optional);
         }
         return;
@@ -769,13 +774,14 @@ fn build_operation(
     auth: Option<&AuthConf>,
 ) -> Result<Operation, SchemaConversionError> {
     // Build parameters from both args and layer specs
-    let mut parameters = build_params(&view.args, registry, auth)?;
+    let audience = view.audience();
+    let mut parameters = build_params(&view.args, registry, auth, audience)?;
 
     // Process layer specs - they may contribute parameters (e.g., auth headers)
     for layer in &view.layers {
         for part in &layer.parts {
             for flat in flatten_arg_part(part) {
-                if let Some(param) = build_layer_param(layer, flat, registry, auth)? {
+                if let Some(param) = build_layer_param(layer, flat, registry, auth, audience)? {
                     parameters.push(ReferenceOr::Item(param));
                 }
             }
@@ -798,6 +804,7 @@ fn build_operation(
             let headers = auth
                 .provider_docs()
                 .into_iter()
+                .filter(|provider| provider.supports_audience(audience))
                 .filter_map(|provider| provider.csrf_header)
                 .collect::<std::collections::BTreeSet<_>>();
             if !headers.is_empty() {
@@ -807,6 +814,15 @@ fn build_operation(
                 );
             }
         }
+    }
+    if let Some(requirement) = view.scope_requirement() {
+        extensions.insert(
+            "x-vyuh-scopes".to_owned(),
+            serde_json::json!({
+                "mode": if requirement.all { "all" } else { "any" },
+                "scopes": requirement.scopes,
+            }),
+        );
     }
     Ok(Operation {
         tags,
@@ -838,12 +854,13 @@ fn build_params(
     args: &[ArgSpec],
     registry: &mut ComponentRegistry,
     auth: Option<&AuthConf>,
+    audience: Option<&str>,
 ) -> Result<Vec<ReferenceOr<Parameter>>, SchemaConversionError> {
     let mut result = Vec::new();
 
     for arg in args {
         for part in flatten_arg_part(&arg.part) {
-            if let Some(param) = build_param(arg, part, registry, auth)? {
+            if let Some(param) = build_param(arg, part, registry, auth, audience)? {
                 result.push(ReferenceOr::Item(param));
             }
         }
@@ -858,6 +875,7 @@ fn build_layer_param(
     flat: FlatArgPart<'_>,
     registry: &mut ComponentRegistry,
     auth: Option<&AuthConf>,
+    audience: Option<&str>,
 ) -> Result<Option<Parameter>, SchemaConversionError> {
     let (schema, location, required) = match flat.part {
         ArgPart::Cookie(st) => (st, "cookie", false),
@@ -881,13 +899,15 @@ fn build_layer_param(
                 &scopes_str,
                 *join_all,
                 auth,
+                audience,
                 flat.optional,
             );
             return Ok(None);
         }
         ArgPart::Zone | ArgPart::Ignore => return Ok(None),
+        ArgPart::Authorization { .. } => return Ok(None),
         #[cfg(feature = "mcp")]
-        ArgPart::RawRequest | ArgPart::Authorization { .. } => return Ok(None),
+        ArgPart::RawRequest => return Ok(None),
     };
 
     let openapi_schema = type_schema_to_openapi(schema, registry)?;
@@ -935,6 +955,7 @@ fn build_param(
     flat: FlatArgPart<'_>,
     registry: &mut ComponentRegistry,
     auth: Option<&AuthConf>,
+    audience: Option<&str>,
 ) -> Result<Option<Parameter>, SchemaConversionError> {
     let (schema, location, required) = match flat.part {
         ArgPart::Cookie(st) => (st, "cookie", false),
@@ -960,13 +981,15 @@ fn build_param(
                 &scopes_str,
                 *join_all,
                 auth,
+                audience,
                 flat.optional,
             );
             return Ok(None);
         }
         ArgPart::Zone | ArgPart::Ignore => return Ok(None),
+        ArgPart::Authorization { .. } => return Ok(None),
         #[cfg(feature = "mcp")]
-        ArgPart::RawRequest | ArgPart::Authorization { .. } => return Ok(None),
+        ArgPart::RawRequest => return Ok(None),
     };
 
     let openapi_schema = type_schema_to_openapi(schema, registry)?;
@@ -1924,6 +1947,93 @@ mod tests {
                 .unwrap()
                 .security_schemes
                 .contains_key("bearerAuth")
+        );
+    }
+
+    /// Verifies authenticated operations advertise only providers eligible for their audience.
+    #[test]
+    fn filters_provider_security_by_route_audience() {
+        const REPORTS: crate::auth::Audience = crate::auth::Audience::new("reports");
+        const ADMIN: crate::auth::Audience = crate::auth::Audience::new("admin");
+        const REPORTS_AUTH: crate::auth::AuthProvider =
+            crate::auth::AuthProvider::new("reports-auth");
+        const ADMIN_AUTH: crate::auth::AuthProvider = crate::auth::AuthProvider::new("admin-auth");
+
+        let auth = AuthConf::empty()
+            .provider(
+                REPORTS_AUTH,
+                crate::auth::TokenProvider::new(crate::auth::Jwt::hs256_site_secret())
+                    .audiences([REPORTS]),
+            )
+            .provider(
+                ADMIN_AUTH,
+                crate::auth::TokenProvider::new(crate::auth::Jwt::hs256_site_secret())
+                    .audiences([ADMIN]),
+            );
+        let mut op = route_op("reports", "/reports", Methods::GET);
+        op.audience = crate::auth::AudienceId::declared(REPORTS).ok();
+        assert!(op.audience.is_some());
+        op.args.push(ArgSpec {
+            name: "auth".to_owned(),
+            description: None,
+            position: 0,
+            part: ArgPart::Security {
+                scheme: Cow::Borrowed("vyuhAuth"),
+                scopes: Vec::new(),
+                join_all: false,
+            },
+        });
+
+        let api = ApiDocGenerator::default()
+            .with_auth(auth)
+            .generate(&[&op])
+            .unwrap();
+        let json = serde_json::to_value(api).unwrap();
+        let security = &json["paths"]["/reports"]["get"]["security"];
+        assert_eq!(security, &serde_json::json!([{ "vyuh_reports-auth": [] }]));
+        assert!(
+            json["components"]["securitySchemes"]
+                .get("vyuh_admin-auth")
+                .is_none()
+        );
+    }
+
+    /// Verifies application scope rules use deterministic Vyuh metadata, not OAuth scopes.
+    #[test]
+    fn emits_application_scope_metadata() {
+        let mut op = route_op("notes", "/notes", Methods::GET);
+        op.args.push(ArgSpec {
+            name: "permit".to_string(),
+            description: None,
+            position: 0,
+            part: ArgPart::Composite(vec![
+                ArgPart::Security {
+                    scheme: Cow::Borrowed("oauthAccess"),
+                    scopes: vec![Cow::Borrowed("upstream:notes")],
+                    join_all: true,
+                },
+                ArgPart::Authorization {
+                    scopes: vec![
+                        crate::auth::Scope::of("notes:read"),
+                        crate::auth::Scope::of("notes:write"),
+                    ],
+                    all: true,
+                },
+            ]),
+        });
+        let api = ApiDocGenerator::default().generate(&[&op]).unwrap();
+        let json = serde_json::to_value(api).unwrap();
+        let operation = &json["paths"]["/notes"]["get"];
+        assert_eq!(
+            operation["x-vyuh-scopes"],
+            serde_json::json!({
+                "mode": "all",
+                "scopes": ["notes:read", "notes:write"]
+            })
+        );
+        assert_eq!(
+            operation["security"],
+            serde_json::json!([{ "oauthAccess": ["upstream:notes"] }])
         );
     }
 

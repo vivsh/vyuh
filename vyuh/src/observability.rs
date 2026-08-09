@@ -161,6 +161,7 @@ pub(crate) async fn readiness(State(site): State<Site>) -> StatusCode {
 pub(crate) async fn metrics(State(site): State<Site>) -> Response {
     let mut output = site.observability().render();
     output.push_str(&site.auth().render_metrics());
+    output.push_str(&site.cache_metrics());
     output.push_str(&site.task_metrics());
     (
         [(

@@ -47,10 +47,13 @@ The `vyuh` crate is organized around these subsystems:
   Django signing, PASETO, BRANCA, and custom codecs into `AuthToken`, and exposes
   only `AuthUser` to protected handlers. Typed `TokenClaims` adapters map
   externally shaped authenticated JSON into that envelope without bypassing the
-  provider's common validation. `roles` provides bit-mask authorization
+  provider's common validation. Exact string scopes and `Permit<ScopeRule>`
+  provide extractor-driven application authorization
   after audience validation. Bundles own an explicit `Audience` descriptor or
   receive the site's bounded default audience during site construction;
-  omission never grants unrestricted access.
+  omission never grants unrestricted access. Provider selector ownership is
+  indexed by local audience, allowing the same Bearer source for disjoint OAuth
+  resources without token sniffing or verifier fallthrough.
 - `routes::ClientIp` resolves a single forwarded client address when supplied,
   with TCP peer-address fallback for applications and framework routes.
 - `validation` and `validators` provide typed validation primitives and
@@ -67,6 +70,12 @@ The `vyuh` crate is organized around these subsystems:
   and explicit continuation lifecycle control. Tasks statically declare their
   lane and optional key rule; reusable bundles may contribute complete lane
   defaults, while site configuration resolves or strictly rejects missing lanes.
+- `cache` provides an immutable per-site registry of asynchronous named cache
+  providers. Its typed handles own JSON serialization, canonical provider and
+  namespace key scoping, and bounded metrics; providers own byte storage, TTL,
+  atomic integer, and scoped-clear semantics. The default memory provider is
+  bounded and local to one built site. OAuth verifier state remains a separate,
+  per-site protocol concern and never consumes an application cache provider.
 - `observability` owns configured liveness/readiness probes and bounded-label
   Prometheus HTTP metrics. Task readiness is derived from per-site task runtime
   state updated by initialization and existing scheduler ticks, never by an
@@ -83,10 +92,12 @@ The `vyuh` crate is organized around these subsystems:
   more independently configured service endpoints. Direct tools execute through
   `McpToolContext`, while route-backed tools reconstruct only a static-method
   JSON request and dispatch through the built site router. The engine owns
-  protocol framing, role-filtered discovery, protected-resource metadata,
-  external JWT/JWKS verification, and a swappable public-document cache. It
-  converts validated subjects into normal `AuthUser` values but never forwards
-  bearer credentials or owns OAuth login and consent. Modern MCP requests are
+  protocol framing, scope-filtered discovery, protected-resource metadata,
+  authentication through one selected Vyuh provider. Generic optional `auth::oauth`
+  delegates external JWT/JWKS validation and bounded key rotation to a private
+  Huskarl runtime built eagerly for the site; MCP only publishes protected-resource
+  metadata when that provider exposes it. It never
+  forwards credentials or owns OAuth login and consent. Modern MCP requests are
   stateless and validate mirrored routing headers against body metadata, while
   prior initialization-based revisions are accepted without framework session
   state.
@@ -136,7 +147,7 @@ compact while feeding metadata into the runtime:
   generate bundle parts.
 - `embed_asset!` delegates directory discovery and force-mode expansion to Rust
   Silos' shared macro implementation while emitting Vyuh's asset facade types.
-- `Record`, `Filterable`, `Validate`, and role/schema macros
+- `Record`, `Filterable`, `Validate`, and schema macros
   generate database, validation, schema, and auth integration code.
 - Macro implementation should keep parsing, validation, diagnostics, and code
   generation separated.
@@ -189,20 +200,27 @@ the client-facing event type uses the payload schema name.
    templates, assets, signals, and optional crate-owned migration sources.
 2. `Site::build` validates `SiteConf` and bundle metadata.
 3. `SiteBuilder` creates the database pool, router, template engine,
-   authenticator, command registry, channel backend, signal engine, emitter
+   authenticator, cache registry, command registry, channel backend, signal engine, emitter
    engine, services, and task engine. Database-backed builds use the selected
    backend task store; development builds may use `MemoryTaskStore`. When enabled,
    observability endpoints are mounted before the site router is finalized and
    request metrics are applied as a site-wide middleware.
 4. The authenticator resolves key sources off request threads and builds
    immutable credential-provider, selector, metric, and typed login-method
-   registries plus the site-secret key ring. Application-owned routes select
-   identity proof with `.via(...)`, while password, Basic, MFA, and optional
-   OIDC methods delegate successful proof to the selected credential provider.
+   registries plus the site-secret key ring. OAuth resource, external ID-token,
+   and federated discovery/JWKS state is initialized before the site starts.
+   Application-owned routes select identity proof with `.via(...)`, while
+   password, Basic, MFA, and optional federated methods delegate successful
+   proof to the selected credential provider.
    Runtime `.using(...)` and `.via(...)` calls retain descriptors without
    failure; terminal operations resolve them against the immutable registries.
    Unselected login, refresh, and logout target the default provider, while
-   request extraction alone falls through absent access credentials. Refresh
+   request extraction alone falls through absent access credentials. Access
+   dispatch first resolves the route audience, then considers only providers
+   whose static audience coverage includes it. A selector may repeat across
+   disjoint audience sets, while overlapping or unrestricted same-selector
+   providers fail site construction. Multiple eligible credentials still fail
+   before cryptographic work. Refresh
    validates and rotates a credential only inside its selected provider. Cookie
    credentials use provider-managed delivery, CSRF validation, and logout
    response attachments. Optional lifecycle storage supplies replay protection
@@ -211,6 +229,9 @@ the client-facing event type uses the payload schema name.
    login, refresh, logout, capabilities, and OpenAPI metadata. Server-side
    session storage is not implemented, but a stateful provider can fit that
    contract without changing handler or registration APIs.
+   The cache registry validates configured provider names and default selection
+   once, then exposes lock-free provider selection through `site.cache()`;
+   individual providers remain responsible for their own asynchronous I/O.
 5. Vyuh validates one site-wide static URL and mounts all bundle `public/**`
    assets at its local path. Relative URLs use the browser host; absolute URLs
    support a fixed CDN origin. Templates and the console resolve every asset
@@ -247,11 +268,12 @@ the client-facing event type uses the payload schema name.
     rejects unclaimed entries and endpoint/resource collisions, and builds a
     deterministic catalog per service. Protected endpoints validate their own
     canonical resource audience and map the subject to `AuthUser`. Discovery
-    filters tools using the same required `permit!` masks used again at call
+    filters tools using the same normalized scope rules used again at call
     time. Direct targets receive `McpToolContext`; route targets receive the
     semantic object unchanged as an internal JSON body through the existing
     router. Neither path receives the external bearer credential. Only public
-    OAuth metadata and JWKS may cross the service-owned cache boundary.
+    OAuth metadata and JWKS remain inside the selected provider's per-site
+    Huskarl verifier and never cross the application cache boundary.
 11. OpenAPI and schema metadata are produced from registered operations and
     type metadata.
 

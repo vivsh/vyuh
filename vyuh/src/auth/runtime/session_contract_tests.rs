@@ -1,13 +1,17 @@
 //! Test-only proof that stateful providers fit the private provider contract.
 
 use axum::http::{Request, request::Parts};
+use futures::future::BoxFuture;
 
+use super::contract::{ProviderAudienceSet, ProviderRuntimeContract};
 use super::*;
+use crate::auth::Credentials;
 
 #[derive(Clone)]
 pub(super) struct MockSessionRuntime {
     pub(super) id: ProviderId,
     pub(super) location: super::super::CredentialLocation,
+    audiences: ProviderAudienceSet,
 }
 
 impl MockSessionRuntime {
@@ -15,6 +19,7 @@ impl MockSessionRuntime {
         Ok(Self {
             id: ProviderId::new("mock-session")?,
             location: super::super::CredentialLocation::bearer(),
+            audiences: ProviderAudienceSet::Any,
         })
     }
 
@@ -66,6 +71,9 @@ impl ProviderRuntimeContract for MockSessionRuntime {
     fn id(&self) -> &ProviderId {
         &self.id
     }
+    fn audiences(&self) -> &ProviderAudienceSet {
+        &self.audiences
+    }
     fn access_location(&self) -> &super::super::CredentialLocation {
         &self.location
     }
@@ -78,6 +86,7 @@ impl ProviderRuntimeContract for MockSessionRuntime {
     fn openapi(&self) -> super::super::ProviderDoc {
         super::super::ProviderDoc {
             id: self.id.to_string(),
+            audiences: None,
             credential_type: super::super::CredentialType::Key,
             location: self.location.doc(),
             csrf_header: None,

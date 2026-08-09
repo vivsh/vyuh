@@ -20,6 +20,7 @@ pub(crate) struct OperationView {
     pub tags: Vec<String>,
     pub owner: Option<String>,
     pub hidden: bool,
+    pub authorization: Option<AuthorizationView>,
     pub args: Vec<SchemaView>,
     pub middleware: Vec<MiddlewareView>,
     pub returns: Vec<SchemaView>,
@@ -38,12 +39,30 @@ impl OperationView {
             tags: op.tags.iter().map(|tag| tag.to_string()).collect(),
             owner: op.owner.clone(),
             hidden: op.hidden,
+            authorization: op
+                .scope_requirement()
+                .map(AuthorizationView::from_requirement),
             args: op.args.iter().flat_map(SchemaView::from_arg).collect(),
             middleware: operation_middleware(site, op)
                 .iter()
                 .map(MiddlewareView::from_info)
                 .collect(),
             returns: operation_returns(op),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AuthorizationView {
+    pub mode: &'static str,
+    pub scopes: Vec<String>,
+}
+
+impl AuthorizationView {
+    fn from_requirement(requirement: crate::callables::specs::ScopeRequirement<'_>) -> Self {
+        Self {
+            mode: if requirement.all { "all" } else { "any" },
+            scopes: requirement.scopes.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -226,7 +245,6 @@ fn arg_part(part: &ArgPart) -> (String, Option<&TypeSchema>, Option<String>) {
             ..
         } => ("body".into(), Some(schema), Some(content_type.to_string())),
         ArgPart::Security { scheme, .. } => (format!("security: {scheme}"), None, None),
-        #[cfg(feature = "mcp")]
         ArgPart::Authorization { .. } => ("authorization".to_string(), None, None),
         ArgPart::Response(_) => ("response".into(), None, None),
         ArgPart::Composite(_) => ("composite".into(), None, None),

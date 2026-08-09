@@ -111,7 +111,7 @@ Common inputs:
 - `MultipartForm<T>` parses file uploads and contributes `multipart/form-data`
   metadata. See [Uploads](uploads.md).
 - `Valid<E>` wraps a request extractor and runs `Validate` after parsing.
-- `AuthUser` and `permit!(Role, Variant)` contribute security metadata. They
+- `AuthUser` and `Permit<ScopeRule>` contribute security metadata. They
   must be registered in a bundle with `with_audience(YOUR_AUDIENCE)`.
 
 Common outputs:

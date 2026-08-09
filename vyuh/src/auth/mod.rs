@@ -1,19 +1,26 @@
-//! Composable authentication providers, verified identities, and role guards.
+//! Composable authentication providers, verified identities, and scope guards.
+
+#![deny(dead_code, unused_imports)]
 
 mod codec;
 mod codecs;
 mod config;
+#[cfg(feature = "id-token")]
+mod id_token;
 mod identity;
 mod lifecycle;
 mod location;
 mod login;
 mod metrics;
+#[cfg(any(feature = "oauth", feature = "id-token"))]
+mod oauth;
 mod password;
 mod request;
 mod response;
 mod runtime;
 mod token;
 
+pub use crate::scopes::{Permit, Scope, ScopeExpr, ScopeRule};
 pub use codec::{CodecDefinition, TokenClaims, TokenDecoder, TokenEncoder};
 #[cfg(feature = "branca")]
 pub use codecs::Branca;
@@ -21,9 +28,11 @@ pub use codecs::Branca;
 pub use codecs::Paseto;
 pub use codecs::{DjangoSigning, Jwt, JwtAlgorithm, JwtConf, JwtVerificationKey};
 pub use config::{
-    AuthConf, AuthKey, AuthProviderSummary, AuthSummary, KeyRequest, KeySource, KeyVerifier,
-    ProviderDefinition, TokenConf, TokenProvider, TokenVerifier,
+    AuthBinding, AuthConf, AuthKey, AuthProviderSummary, AuthSummary, BindingResolver, KeyRequest,
+    KeySource, KeyVerifier, ProviderDefinition, TokenConf, TokenProvider, TokenVerifier,
 };
+#[cfg(feature = "id-token")]
+pub use id_token::{IdToken, IdTokenClaims, IdTokenMapper};
 pub use identity::{
     Audience, AuthProvider, AuthUser, AuthenticationContext, DEFAULT_AUDIENCE,
     DEFAULT_AUTH_PROVIDER,
@@ -37,8 +46,15 @@ pub use login::{
     LoginStateStore, MfaLogin, MfaMethod, MfaResponse, MfaVerifier, PasswordCredentials,
     PasswordLogin, PasswordVerifier, PresentedSecret,
 };
-#[cfg(feature = "oidc")]
-pub use login::{OidcCallback, OidcIdentity, OidcLogin, OidcStart, OidcUserMapper};
+#[cfg(feature = "federated")]
+pub use login::{
+    FederatedCallback, FederatedIdentity, FederatedLogin, FederatedProvider, FederatedStart,
+    FederatedUserMapper,
+};
+#[cfg(feature = "oauth")]
+pub use oauth::{
+    OAuthClaims, OAuthIdentityMapper, OAuthJwtAlgorithm, OAuthResource, OAuthResourceServer,
+};
 pub use password::{
     PasswordVerification, check_password, check_password_with_upgrade, make_password,
     make_password_with_iterations, unusable_password,
@@ -47,27 +63,40 @@ pub use response::{Credentials, DefaultLoginData, LoginResponse, LogoutResponse}
 pub use runtime::{Authenticator, ProviderAuth};
 pub use token::{AuthToken, AuthTokenBuilder, EncodedCredential, PresentedCredential, TokenKind};
 
-pub use crate::permit;
-pub use crate::roles::{BitRole, Permit, PermitAll, PermitAny, RoleType, format_roles};
-
 pub(crate) use codec::{
     CodecRuntime, CustomClaims, CustomCodec, ErasedDecoder, ErasedEncoder, SecretRing,
 };
-#[cfg(feature = "mcp")]
+#[cfg(any(feature = "oauth", feature = "id-token"))]
 pub(crate) use codecs::reject_duplicate_claims;
-pub(crate) use config::{
-    BindingResolver, ErasedTokenVerifier, KeySourceKind, ProviderDefinitionInner, ProviderKind,
-    build_codec, validate_token_conf,
-};
 pub(crate) use config::{CredentialType, ProviderDoc};
+pub(crate) use config::{
+    ErasedTokenVerifier, KeySourceKind, ProviderDefinitionInner, ProviderKind, build_codec,
+    validate_token_conf,
+};
 pub(crate) use identity::{AudienceId, ProviderId};
 pub(crate) use lifecycle::{ErasedKeyLifecycle, ErasedLifecycle};
-pub(crate) use location::{CredentialLocation, ProviderDocLocation};
+pub(crate) use location::{CredentialLocation, ProviderDocLocation, RequestCredentialScan};
 pub(crate) use login::{
     ChallengeCodec, LoginDefinitionInner, LoginMethodId, LoginProviderDefinition,
     LoginStateStoreRuntime, NoChallenge,
 };
 pub(crate) use metrics::AuthMetrics;
+
+#[cfg(feature = "mcp")]
+/// Provider-owned OAuth protected-resource details consumed by protocol adapters.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthProtectedResource {
+    pub(crate) issuer: String,
+    pub(crate) advertised_scopes: Vec<String>,
+    pub(crate) required_scopes: Vec<String>,
+}
+
+#[cfg(feature = "mcp")]
+/// Provider-owned challenge metadata for protocol adapters.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthChallenge {
+    pub(crate) scheme: &'static str,
+}
 
 use axum::{
     http::StatusCode,
@@ -94,6 +123,8 @@ pub enum AuthError {
     AudienceMismatch,
     #[error("authenticated identity is forbidden from this operation")]
     Forbidden,
+    #[error("credential lacks a required provider scope")]
+    InsufficientScope,
     #[error("credential binding does not match this request")]
     BindingMismatch,
     #[error("credential CSRF validation failed")]
@@ -143,9 +174,10 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::AudienceMismatch | Self::Forbidden | Self::InvalidCsrfToken => {
-                StatusCode::FORBIDDEN
-            }
+            Self::AudienceMismatch
+            | Self::Forbidden
+            | Self::InsufficientScope
+            | Self::InvalidCsrfToken => StatusCode::FORBIDDEN,
             Self::NoCredential
             | Self::MalformedLocation
             | Self::InvalidCredential

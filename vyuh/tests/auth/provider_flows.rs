@@ -432,8 +432,8 @@ async fn lifecycle_rejects_replay() -> Result<(), AuthError> {
 /// Verifies an opaque key provider resolves the normal AuthUser extractor.
 #[tokio::test]
 async fn opaque_key_authenticates_user() -> Result<(), AuthError> {
-    let auth =
-        AuthConf::default().provider(API_KEY, AuthKey::header("x-api-key", StaticKeyVerifier));
+    let key = AuthKey::header("x-api-key", StaticKeyVerifier).audiences([REPORTS]);
+    let auth = AuthConf::default().provider(API_KEY, key);
     let site = Site::build(config().auth(auth), bundle())
         .await
         .map_err(auth_error)?;
@@ -836,18 +836,159 @@ async fn duplicate_access_selector_is_rejected() -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Verifies access and refresh selectors cannot collide across providers.
+/// Sends one Bearer credential and verifies the resulting route status.
+async fn assert_bearer_status(
+    client: &TestSite,
+    path: &str,
+    token: &str,
+    status: vyuh::routes::StatusCode,
+) {
+    client
+        .get(path)
+        .header("authorization", &format!("Bearer {token}"))
+        .send()
+        .await
+        .assert_status(status);
+}
+
+/// Verifies one access selector can serve statically disjoint local audiences.
 #[tokio::test]
-async fn cross_kind_selector_collision_is_rejected() -> Result<(), AuthError> {
+async fn shared_access_selector_dispatches_by_audience() -> Result<(), AuthError> {
+    let auth = AuthConf::empty()
+        .provider(
+            SHARED_A,
+            TokenProvider::new(Jwt::hs256_site_secret())
+                .without_refresh()
+                .audiences([REPORTS]),
+        )
+        .provider(
+            SHARED_B,
+            TokenProvider::new(Jwt::hs256_site_secret())
+                .without_refresh()
+                .audiences([ADMIN]),
+        );
+    let site = Site::build(config().auth(auth), dual_audience_bundle())
+        .await
+        .map_err(auth_error)?;
+    let reports = site
+        .auth()
+        .using(SHARED_A)
+        .login(AuthUser::new("reports-user"), &[REPORTS])
+        .await?;
+    let admin = site
+        .auth()
+        .using(SHARED_B)
+        .login(AuthUser::new("admin-user"), &[ADMIN])
+        .await?;
+    let client = TestSite::new(site);
+    assert_bearer_status(
+        &client,
+        "/me",
+        reports.credentials().access(),
+        vyuh::routes::StatusCode::OK,
+    )
+    .await;
+    assert_bearer_status(
+        &client,
+        "/admin-me",
+        admin.credentials().access(),
+        vyuh::routes::StatusCode::OK,
+    )
+    .await;
+    assert_bearer_status(
+        &client,
+        "/admin-me",
+        reports.credentials().access(),
+        vyuh::routes::StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    Ok(())
+}
+
+/// Verifies overlapping local audiences still reject a shared access selector.
+#[tokio::test]
+async fn shared_selector_with_overlapping_audience_is_rejected() -> Result<(), AuthError> {
+    let auth = AuthConf::empty()
+        .provider(
+            SHARED_A,
+            TokenProvider::new(Jwt::hs256_site_secret())
+                .without_refresh()
+                .audiences([REPORTS]),
+        )
+        .provider(
+            SHARED_B,
+            TokenProvider::new(Jwt::hs256_site_secret())
+                .without_refresh()
+                .audiences([REPORTS]),
+        );
+    let result = Site::build(config().auth(auth), bundles::Bundle::default()).await;
+    assert!(result.is_err());
+    Ok(())
+}
+
+/// Verifies an explicit provider audience set cannot be empty.
+#[tokio::test]
+async fn empty_provider_audience_set_is_rejected() -> Result<(), AuthError> {
+    let provider = TokenProvider::new(Jwt::hs256_site_secret())
+        .without_refresh()
+        .audiences([]);
+    let auth = AuthConf::empty().provider(SHARED_A, provider);
+    let result = Site::build(config().auth(auth), bundles::Bundle::default()).await;
+    assert!(result.is_err());
+    Ok(())
+}
+
+/// Verifies an explicit provider audience set cannot contain duplicates.
+#[tokio::test]
+async fn duplicate_provider_audience_is_rejected() -> Result<(), AuthError> {
+    let provider = TokenProvider::new(Jwt::hs256_site_secret())
+        .without_refresh()
+        .audiences([REPORTS, REPORTS]);
+    let auth = AuthConf::empty().provider(SHARED_A, provider);
+    let result = Site::build(config().auth(auth), bundles::Bundle::default()).await;
+    assert!(result.is_err());
+    Ok(())
+}
+
+/// Verifies explicit provider operations cannot exceed static audience coverage.
+#[tokio::test]
+async fn selected_provider_rejects_unconfigured_audience() -> Result<(), AuthError> {
+    let auth = AuthConf::empty().provider(
+        SHARED_A,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .without_refresh()
+            .audiences([REPORTS]),
+    );
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let result = site
+        .auth()
+        .using(SHARED_A)
+        .login(AuthUser::new("user"), &[ADMIN])
+        .await;
+    assert!(matches!(result, Err(AuthError::AudienceMismatch)));
+    Ok(())
+}
+
+/// Verifies refresh selectors may be reused because refresh is provider-selected.
+#[tokio::test]
+async fn refresh_selector_can_match_another_provider_access_selector() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .access(TokenConf::header("x-alternate"))
         .refresh(TokenConf::bearer());
-    let result = Site::build(
+    let site = Site::build(
         config().auth(AuthConf::default().provider(ALTERNATE, provider)),
         bundles::Bundle::default(),
     )
-    .await;
-    assert!(result.is_err());
+    .await
+    .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .using(ALTERNATE)
+        .login(AuthUser::new("user"), &[REPORTS])
+        .await?;
+    assert!(login.credentials().refresh().is_some());
     Ok(())
 }
 

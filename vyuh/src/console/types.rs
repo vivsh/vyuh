@@ -18,8 +18,13 @@ pub struct Page<T> {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionOut {
     pub subject: String,
-    pub roles: u64,
-    pub role_names: Vec<&'static str>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AuthorizationOut {
+    pub mode: &'static str,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -34,6 +39,7 @@ pub struct OperationOut {
     pub tags: Vec<String>,
     pub owner: Option<String>,
     pub hidden: bool,
+    pub authorization: Option<AuthorizationOut>,
     pub conf: Option<serde_json::Value>,
     pub args: Vec<SchemaItem>,
     pub middleware: Vec<MiddlewareOut>,
@@ -53,6 +59,9 @@ impl OperationOut {
             tags: op.tags.iter().map(|tag| tag.to_string()).collect(),
             owner: op.owner.clone(),
             hidden: op.hidden,
+            authorization: op
+                .scope_requirement()
+                .map(AuthorizationOut::from_requirement),
             conf: op.conf.clone(),
             args: op.args.iter().map(SchemaItem::from_arg).collect(),
             middleware: operation_middleware(site, op)
@@ -100,6 +109,15 @@ impl SettingOut {
         Self {
             key: setting.key.clone(),
             value: setting.value.clone(),
+        }
+    }
+}
+
+impl AuthorizationOut {
+    fn from_requirement(requirement: crate::callables::specs::ScopeRequirement<'_>) -> Self {
+        Self {
+            mode: if requirement.all { "all" } else { "any" },
+            scopes: requirement.scopes.iter().map(ToString::to_string).collect(),
         }
     }
 }
@@ -179,7 +197,6 @@ fn arg_part(part: &ArgPart) -> (String, Option<String>, Option<String>) {
             Some(content_type.to_string()),
         ),
         ArgPart::Security { scheme, .. } => (format!("security: {scheme}"), None, None),
-        #[cfg(feature = "mcp")]
         ArgPart::Authorization { .. } => ("authorization".to_string(), None, None),
         ArgPart::Response(_) => ("response".into(), None, None),
         ArgPart::Composite(_) => ("composite".into(), None, None),
@@ -345,13 +362,11 @@ impl From<Option<&crate::auth::AuthUser>> for SessionOut {
         match user {
             Some(user) => Self {
                 subject: user.key.to_string(),
-                roles: user.roles,
-                role_names: Vec::new(),
+                scopes: user.scopes().iter().map(ToString::to_string).collect(),
             },
             None => Self {
                 subject: "anonymous".to_string(),
-                roles: 0,
-                role_names: Vec::new(),
+                scopes: Vec::new(),
             },
         }
     }

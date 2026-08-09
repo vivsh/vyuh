@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 
 use super::{
     BasicCredentials, BoxLoginInput, ErasedLoginRuntime, LoginProviderDefinition,
-    LoginProviderKind, NoChallenge, PasswordCredentials, PresentedSecret, VerifiedLogin,
+    LoginRuntimeDefinition, NoChallenge, PasswordCredentials, PresentedSecret, VerifiedLogin,
     runtime::LoginFuture,
 };
 use crate::{
@@ -134,8 +134,8 @@ fn downcast_credentials(
 }
 
 impl LoginProviderDefinition<PasswordCredentials, NoChallenge> for PasswordLogin {
-    fn define(self) -> LoginProviderKind {
-        LoginProviderKind {
+    fn define(self) -> LoginRuntimeDefinition {
+        LoginRuntimeDefinition {
             runtime: Arc::new(PasswordRuntime {
                 verifier: self.verifier,
                 input: PasswordInputKind::Password,
@@ -144,9 +144,11 @@ impl LoginProviderDefinition<PasswordCredentials, NoChallenge> for PasswordLogin
     }
 }
 
+impl super::model::definition_sealed::Sealed for PasswordLogin {}
+
 impl LoginProviderDefinition<BasicCredentials, NoChallenge> for BasicLogin {
-    fn define(self) -> LoginProviderKind {
-        LoginProviderKind {
+    fn define(self) -> LoginRuntimeDefinition {
+        LoginRuntimeDefinition {
             runtime: Arc::new(PasswordRuntime {
                 verifier: self.verifier,
                 input: PasswordInputKind::Basic,
@@ -154,6 +156,8 @@ impl LoginProviderDefinition<BasicCredentials, NoChallenge> for BasicLogin {
         }
     }
 }
+
+impl super::model::definition_sealed::Sealed for BasicLogin {}
 
 impl FromRequestParts<Site> for BasicCredentials {
     type Rejection = AuthError;

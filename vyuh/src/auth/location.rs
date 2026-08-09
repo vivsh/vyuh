@@ -1,11 +1,17 @@
+use std::borrow::Cow;
+
 use axum::http::{HeaderName, HeaderValue, Method, header, request::Parts};
 use axum_extra::extract::cookie::{self, Cookie};
 use ring::constant_time;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use super::AuthError;
 
 const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
+const MAX_CREDENTIAL_SOURCE_BYTES: usize = 64 * 1024;
+type CookieValues<'a> = SmallVec<[(&'a str, Option<&'a str>); 8]>;
+type QueryValues<'a> = SmallVec<[(Cow<'a, str>, Option<Cow<'a, str>>); 8]>;
 
 /// Explicit acknowledgement that query credentials leak through URLs and logs.
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +168,7 @@ impl CsrfConf {
 enum LocationKind {
     Header {
         name: String,
+        parsed: Option<HeaderName>,
         scheme: Option<String>,
     },
     Cookie(CookieConf),
@@ -172,6 +179,65 @@ enum LocationKind {
 #[derive(Clone, Debug)]
 pub(crate) struct CredentialLocation(LocationKind);
 
+pub(crate) struct RequestCredentialScan<'a> {
+    parts: &'a Parts,
+    cookies: Option<ParsedCookies<'a>>,
+    query: Option<ParsedQuery<'a>>,
+}
+
+struct ParsedCookies<'a> {
+    values: CookieValues<'a>,
+    malformed: bool,
+}
+
+struct ParsedQuery<'a> {
+    values: QueryValues<'a>,
+    malformed: bool,
+}
+
+impl<'a> RequestCredentialScan<'a> {
+    pub(crate) const fn new(parts: &'a Parts) -> Self {
+        Self {
+            parts,
+            cookies: None,
+            query: None,
+        }
+    }
+
+    fn cookie(&mut self, name: &str) -> Result<Option<Cow<'a, str>>, AuthError> {
+        let parsed = self
+            .cookies
+            .get_or_insert_with(|| parse_cookies(self.parts));
+        if parsed.malformed {
+            return Err(AuthError::MalformedLocation);
+        }
+        selected_borrowed(
+            parsed
+                .values
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, value)| value),
+        )
+    }
+
+    fn query(&mut self, name: &str) -> Result<Option<Cow<'a, str>>, AuthError> {
+        let parsed = self.query.get_or_insert_with(|| parse_query(self.parts));
+        if parsed.malformed {
+            return Err(AuthError::MalformedLocation);
+        }
+        match parsed
+            .values
+            .iter()
+            .find(|(candidate, _)| candidate.as_ref() == name)
+            .map(|(_, value)| value)
+        {
+            Some(Some(value)) => Ok(Some(value.clone())),
+            Some(None) => Err(AuthError::MalformedLocation),
+            None => Ok(None),
+        }
+    }
+}
+
 impl CredentialLocation {
     /// Uses the conventional `Authorization: Bearer` header.
     pub(crate) fn bearer() -> Self {
@@ -180,16 +246,22 @@ impl CredentialLocation {
 
     /// Uses a header without an authorization scheme prefix.
     pub(crate) fn header(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let parsed = HeaderName::try_from(&name).ok();
         Self(LocationKind::Header {
-            name: name.into(),
+            name,
+            parsed,
             scheme: None,
         })
     }
 
     /// Uses a header with a case-insensitive scheme prefix.
     pub(crate) fn header_with_scheme(name: impl Into<String>, scheme: impl Into<String>) -> Self {
+        let name = name.into();
+        let parsed = HeaderName::try_from(&name).ok();
         Self(LocationKind::Header {
-            name: name.into(),
+            name,
+            parsed,
             scheme: Some(scheme.into()),
         })
     }
@@ -216,21 +288,29 @@ impl CredentialLocation {
         }
     }
 
-    pub(crate) fn extract(&self, parts: &Parts) -> Result<Option<String>, AuthError> {
+    pub(crate) fn extract<'a>(&self, parts: &'a Parts) -> Result<Option<Cow<'a, str>>, AuthError> {
         let value = match &self.0 {
-            LocationKind::Header { name, scheme, .. } => {
-                extract_header(parts, name, scheme.as_deref())?
+            LocationKind::Header { parsed, scheme, .. } => {
+                extract_header(parts, parsed.as_ref(), scheme.as_deref())?
             }
             LocationKind::Cookie(cookie) => extract_cookie(parts, &cookie.name)?,
             LocationKind::Query(name) => extract_query(parts, name)?,
         };
-        if value
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_CREDENTIAL_BYTES)
-        {
-            return Err(AuthError::MalformedLocation);
-        }
-        Ok(value)
+        validate_extracted_size(value)
+    }
+
+    pub(crate) fn extract_from<'a>(
+        &self,
+        scan: &mut RequestCredentialScan<'a>,
+    ) -> Result<Option<Cow<'a, str>>, AuthError> {
+        let value = match &self.0 {
+            LocationKind::Header { parsed, scheme, .. } => {
+                extract_header(scan.parts, parsed.as_ref(), scheme.as_deref())?
+            }
+            LocationKind::Cookie(cookie) => scan.cookie(&cookie.name)?,
+            LocationKind::Query(name) => scan.query(name)?,
+        };
+        validate_extracted_size(value)
     }
 
     pub(crate) fn attachment(
@@ -256,6 +336,11 @@ impl CredentialLocation {
         matches!(self.0, LocationKind::Cookie(_))
     }
 
+    #[cfg(feature = "mcp")]
+    pub(crate) fn is_header(&self) -> bool {
+        matches!(self.0, LocationKind::Header { .. })
+    }
+
     pub(crate) fn default_csrf(&self) -> Option<CsrfConf> {
         let LocationKind::Cookie(cookie) = &self.0 else {
             return None;
@@ -272,7 +357,18 @@ impl CredentialLocation {
 
     pub(crate) fn validate(&self) -> Result<(), AuthError> {
         match &self.0 {
-            LocationKind::Header { name, scheme } => validate_header(name, scheme.as_deref(), None),
+            LocationKind::Header {
+                name,
+                parsed,
+                scheme,
+            } => {
+                if parsed.is_none() {
+                    return Err(AuthError::InvalidProviderConfig(
+                        "invalid credential header name".into(),
+                    ));
+                }
+                validate_header(name, scheme.as_deref(), None)
+            }
             LocationKind::Cookie(cookie) => validate_cookie(cookie),
             LocationKind::Query(name) if name.trim().is_empty() => Err(
                 AuthError::InvalidProviderConfig("credential query name cannot be empty".into()),
@@ -355,12 +451,12 @@ fn validate_cookie(cookie: &CookieConf) -> Result<(), AuthError> {
     Ok(())
 }
 
-fn extract_header(
-    parts: &Parts,
-    name: &str,
+fn extract_header<'a>(
+    parts: &'a Parts,
+    name: Option<&HeaderName>,
     scheme: Option<&str>,
-) -> Result<Option<String>, AuthError> {
-    let name = HeaderName::try_from(name).map_err(|_| AuthError::MalformedLocation)?;
+) -> Result<Option<Cow<'a, str>>, AuthError> {
+    let name = name.ok_or(AuthError::MalformedLocation)?;
     let mut values = parts.headers.get_all(name).iter();
     let Some(value) = values.next() else {
         return Ok(None);
@@ -380,10 +476,115 @@ fn extract_header(
     if raw.is_empty() {
         return Err(AuthError::MalformedLocation);
     }
-    Ok(Some(raw.to_owned()))
+    Ok(Some(Cow::Borrowed(raw)))
 }
 
-fn extract_query(parts: &Parts, key: &str) -> Result<Option<String>, AuthError> {
+fn validate_extracted_size<'a>(
+    value: Option<Cow<'a, str>>,
+) -> Result<Option<Cow<'a, str>>, AuthError> {
+    if value
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_CREDENTIAL_BYTES)
+    {
+        Err(AuthError::MalformedLocation)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Parses request cookies once while retaining borrowed credential values.
+fn parse_cookies(parts: &Parts) -> ParsedCookies<'_> {
+    let mut output = ParsedCookies {
+        values: SmallVec::new(),
+        malformed: false,
+    };
+    let mut scanned = 0_usize;
+    for header in parts.headers.get_all(header::COOKIE) {
+        scanned = scanned.saturating_add(header.as_bytes().len());
+        if scanned > MAX_CREDENTIAL_SOURCE_BYTES {
+            output.malformed = true;
+            break;
+        }
+        let Ok(header) = header.to_str() else {
+            output.malformed = true;
+            continue;
+        };
+        parse_cookie_header(header, &mut output);
+    }
+    output
+}
+
+/// Adds one cookie header while preserving duplicate-name failures.
+fn parse_cookie_header<'a>(header: &'a str, output: &mut ParsedCookies<'a>) {
+    for item in header.split(';') {
+        let item = item.trim();
+        let Some((name, value)) = item.split_once('=') else {
+            if !item.is_empty() {
+                insert_cookie(&mut output.values, item, None);
+            }
+            continue;
+        };
+        if value.is_empty() {
+            insert_cookie(&mut output.values, name, None);
+        } else {
+            insert_cookie(&mut output.values, name, Some(value));
+        }
+    }
+}
+
+/// Inserts one borrowed cookie while retaining duplicate-name failure state.
+fn insert_cookie<'a>(values: &mut CookieValues<'a>, name: &'a str, value: Option<&'a str>) {
+    if let Some((_, existing)) = values.iter_mut().find(|(candidate, _)| *candidate == name) {
+        *existing = None;
+    } else {
+        values.push((name, value));
+    }
+}
+
+fn selected_borrowed<'a>(
+    value: Option<&Option<&'a str>>,
+) -> Result<Option<Cow<'a, str>>, AuthError> {
+    match value {
+        Some(Some(value)) => Ok(Some(Cow::Borrowed(value))),
+        Some(None) => Err(AuthError::MalformedLocation),
+        None => Ok(None),
+    }
+}
+
+/// Parses query credentials once and owns only percent-decoded values when necessary.
+fn parse_query(parts: &Parts) -> ParsedQuery<'_> {
+    let mut values = SmallVec::new();
+    if let Some(query) = parts.uri.query() {
+        if query.len() > MAX_CREDENTIAL_SOURCE_BYTES {
+            return ParsedQuery {
+                values,
+                malformed: true,
+            };
+        }
+        for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            let value = (!value.is_empty()).then_some(value);
+            insert_query(&mut values, name, value);
+        }
+    }
+    ParsedQuery {
+        values,
+        malformed: false,
+    }
+}
+
+/// Inserts one decoded query pair while retaining duplicate-name failure state.
+fn insert_query<'a>(values: &mut QueryValues<'a>, name: Cow<'a, str>, value: Option<Cow<'a, str>>) {
+    if let Some((_, existing)) = values
+        .iter_mut()
+        .find(|(candidate, _)| candidate.as_ref() == name.as_ref())
+    {
+        *existing = None;
+    } else {
+        values.push((name, value));
+    }
+}
+
+fn extract_query<'a>(parts: &'a Parts, key: &str) -> Result<Option<Cow<'a, str>>, AuthError> {
     let Some(query) = parts.uri.query() else {
         return Ok(None);
     };
@@ -395,12 +596,12 @@ fn extract_query(parts: &Parts, key: &str) -> Result<Option<String>, AuthError> 
         if value.is_empty() || found.is_some() {
             return Err(AuthError::MalformedLocation);
         }
-        found = Some(value.into_owned());
+        found = Some(value);
     }
     Ok(found)
 }
 
-fn extract_cookie(parts: &Parts, name: &str) -> Result<Option<String>, AuthError> {
+fn extract_cookie<'a>(parts: &'a Parts, name: &str) -> Result<Option<Cow<'a, str>>, AuthError> {
     let mut found = None;
     for header in parts.headers.get_all(header::COOKIE) {
         let header = header.to_str().map_err(|_| AuthError::MalformedLocation)?;
@@ -414,7 +615,7 @@ fn extract_cookie(parts: &Parts, name: &str) -> Result<Option<String>, AuthError
             if value.is_empty() || found.is_some() {
                 return Err(AuthError::MalformedLocation);
             }
-            found = Some(value.to_owned());
+            found = Some(Cow::Borrowed(value));
         }
     }
     Ok(found)
@@ -466,4 +667,44 @@ fn safe_method(method: &Method) -> bool {
         *method,
         Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    /// Malformed unrelated cookies do not invalidate a distinct configured selector.
+    #[test]
+    fn shared_scan_ignores_unrelated_malformed_cookie() -> Result<(), AuthError> {
+        let request = Request::builder()
+            .header(header::COOKIE, "unrelated; auth=credential")
+            .body(())
+            .map_err(|_| AuthError::MalformedLocation)?;
+        let (parts, _) = request.into_parts();
+        let mut scan = RequestCredentialScan::new(&parts);
+        let location = CredentialLocation::cookie(CookieConf::new("auth"));
+        assert_eq!(
+            location.extract_from(&mut scan)?.as_deref(),
+            Some("credential")
+        );
+        Ok(())
+    }
+
+    /// A malformed configured cookie remains a deterministic credential failure.
+    #[test]
+    fn shared_scan_rejects_malformed_selected_cookie() -> Result<(), AuthError> {
+        let request = Request::builder()
+            .header(header::COOKIE, "auth")
+            .body(())
+            .map_err(|_| AuthError::MalformedLocation)?;
+        let (parts, _) = request.into_parts();
+        let mut scan = RequestCredentialScan::new(&parts);
+        let location = CredentialLocation::cookie(CookieConf::new("auth"));
+        assert!(matches!(
+            location.extract_from(&mut scan),
+            Err(AuthError::MalformedLocation)
+        ));
+        Ok(())
+    }
 }

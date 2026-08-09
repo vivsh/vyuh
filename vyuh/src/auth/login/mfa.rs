@@ -8,13 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     BasicCredentials, BasicLogin, BoxLoginInput, ChallengeCodec, ErasedLoginRuntime,
-    LoginChallenge, LoginCompletion, LoginMethodId, LoginProviderDefinition, LoginProviderKind,
-    LoginTarget,
+    LoginChallenge, LoginCompletion, LoginMethodId, LoginProviderDefinition,
+    LoginRuntimeDefinition, LoginTarget,
     MfaMethod::*,
     PasswordCredentials, PasswordLogin, PresentedSecret, SealedLoginState, VerifiedLogin,
     runtime::{CompletedLogin, LoginFuture, completion_sealed},
 };
-use crate::auth::{AuthError, AuthUser, LoginStateStoreRuntime, RoleType, SecretRing};
+use crate::auth::{AuthError, AuthUser, LoginStateStoreRuntime, Scope, SecretRing};
 
 /// A supported second-factor method.
 #[non_exhaustive]
@@ -219,7 +219,7 @@ enum PrimaryInput {
 #[derive(Serialize, Deserialize)]
 struct PendingMfa {
     subject: String,
-    roles: RoleType,
+    scopes: Vec<Scope>,
     methods: Vec<MfaMethod>,
     auth_time: i64,
 }
@@ -269,16 +269,17 @@ impl PasswordMfaRuntime {
         input.validate()?;
         let (username, password) = input.parts();
         let user = self.primary.verify(username, password).await?;
+        user.validate()?;
         let methods = self.available_methods(&user).await?;
         let pending = PendingMfa {
             subject: user.key.to_string(),
-            roles: user.roles,
+            scopes: user.scopes().to_vec(),
             methods: methods.clone(),
             auth_time: Utc::now().timestamp(),
         };
         let expires_at = Utc::now().timestamp() + self.factors.ttl_seconds;
         let state = SealedLoginState {
-            version: 1,
+            version: 2,
             state_id: uuid::Uuid::new_v4().to_string(),
             method: method.as_str().into(),
             target,
@@ -312,7 +313,7 @@ impl PasswordMfaRuntime {
         if !pending.methods.contains(&response.method) {
             return Err(AuthError::InvalidCredential);
         }
-        let user = AuthUser::new(&pending.subject).with_role_mask(pending.roles);
+        let user = AuthUser::new(&pending.subject).with_scopes(pending.scopes);
         let user = self.factors.verifier.verify(&user, &response).await?;
         if let Some(store) = state_store {
             store.consume(&state).await?;
@@ -320,7 +321,7 @@ impl PasswordMfaRuntime {
         let login = VerifiedLogin {
             user,
             methods: vec![self.input.method().into(), response.method.as_str().into()],
-            auth_time: pending.auth_time,
+            auth_time: Some(pending.auth_time),
             acr: Some("urn:vyuh:acr:mfa".into()),
         };
         Ok(CompletedLogin {
@@ -345,8 +346,8 @@ impl PasswordMfaRuntime {
 impl LoginProviderDefinition<PasswordCredentials, MfaResponse>
     for ComposedMfaLogin<PasswordCredentials>
 {
-    fn define(self) -> LoginProviderKind {
-        LoginProviderKind {
+    fn define(self) -> LoginRuntimeDefinition {
+        LoginRuntimeDefinition {
             runtime: Arc::new(PasswordMfaRuntime {
                 primary: self.primary,
                 input: self.input,
@@ -356,9 +357,11 @@ impl LoginProviderDefinition<PasswordCredentials, MfaResponse>
     }
 }
 
+impl<T: Send + Sync + 'static> super::model::definition_sealed::Sealed for ComposedMfaLogin<T> {}
+
 impl LoginProviderDefinition<BasicCredentials, MfaResponse> for ComposedMfaLogin<BasicCredentials> {
-    fn define(self) -> LoginProviderKind {
-        LoginProviderKind {
+    fn define(self) -> LoginRuntimeDefinition {
+        LoginRuntimeDefinition {
             runtime: Arc::new(PasswordMfaRuntime {
                 primary: self.primary,
                 input: self.input,
@@ -394,7 +397,7 @@ fn downcast_primary(
 }
 
 fn validate_state(state: &SealedLoginState, method: &LoginMethodId) -> Result<(), AuthError> {
-    if state.version != 1 || state.method != method.as_str() {
+    if state.version != 2 || state.method != method.as_str() {
         return Err(AuthError::InvalidLoginState);
     }
     if state.expires_at <= Utc::now().timestamp() {

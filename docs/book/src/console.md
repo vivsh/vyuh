@@ -30,17 +30,17 @@ Configuration lives on `SiteConf`:
 use vyuh::prelude::*;
 use vyuh::{
     Site,
-    auth::AuthUser,
+    auth::{AuthUser, Scope},
     console::{CONSOLE_AUDIENCE, ConsoleAccess, ConsoleConf},
 };
 
-const ADMIN_MASK: u64 = 1;
+const CONSOLE_ADMIN: Scope = Scope::of("console:admin");
 
 struct AdminConsole;
 
 impl ConsoleAccess for AdminConsole {
     fn allows(&self, _site: &Site, user: Option<&AuthUser>) -> bool {
-        user.is_some_and(|user| user.roles & ADMIN_MASK != 0)
+        user.is_some_and(|user| user.has_scope(&CONSOLE_ADMIN))
     }
 }
 

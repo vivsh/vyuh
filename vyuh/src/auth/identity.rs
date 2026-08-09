@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{AuthError, BitRole, RoleType};
+use super::{AuthError, Scope};
 
 /// A reusable name for an authenticated API surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -151,7 +151,7 @@ impl AudienceId {
 #[derive(Clone, Serialize)]
 pub struct AuthUser {
     pub key: Arc<str>,
-    pub roles: RoleType,
+    scopes: Arc<[Scope]>,
     #[serde(skip)]
     provider: ProviderId,
     #[serde(skip)]
@@ -161,39 +161,55 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
-    /// Creates an identity without static roles.
+    /// Creates an identity without application scopes.
     pub fn new(key: impl AsRef<str>) -> Self {
         Self {
             key: Arc::from(key.as_ref()),
-            roles: 0,
+            scopes: Arc::from([]),
             provider: ProviderId("default".into()),
             extra: None,
             authentication: AuthenticationContext::default(),
         }
     }
 
-    /// Adds one role to the identity's role mask.
-    pub fn with_role<R: BitRole>(mut self, role: R) -> Self {
-        self.roles |= role.to_role_type();
-        self
-    }
-
-    /// Adds roles from one role enum to the identity's role mask.
-    pub fn with_roles<R, I>(mut self, roles: I) -> Self
-    where
-        R: BitRole,
-        I: IntoIterator<Item = R>,
-    {
-        for role in roles {
-            self.roles |= role.to_role_type();
+    /// Adds one exact application scope.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        let mut values = self.scopes.to_vec();
+        if let Err(position) = values.binary_search(&scope) {
+            values.insert(position, scope);
+            self.scopes = values.into();
         }
         self
     }
 
-    /// Replaces the identity's role mask with an application-provided value.
-    pub fn with_role_mask(mut self, roles: RoleType) -> Self {
-        self.roles = roles;
+    /// Adds exact application scopes, preserving sorted unique storage.
+    pub fn with_scopes<I>(mut self, scopes: I) -> Self
+    where
+        I: IntoIterator<Item = Scope>,
+    {
+        let values = self.scopes.iter().cloned().chain(scopes);
+        self.scopes = crate::scopes::normalize(values);
         self
+    }
+
+    /// Returns normalized application scopes in lexical order.
+    pub fn scopes(&self) -> &[Scope] {
+        &self.scopes
+    }
+
+    /// Returns whether the identity has one exact scope.
+    pub fn has_scope(&self, scope: &Scope) -> bool {
+        self.scopes.binary_search(scope).is_ok()
+    }
+
+    /// Returns whether the identity has every supplied scope.
+    pub fn has_all(&self, scopes: &[Scope]) -> bool {
+        scopes.iter().all(|scope| self.has_scope(scope))
+    }
+
+    /// Returns whether the identity has at least one supplied scope.
+    pub fn has_any(&self, scopes: &[Scope]) -> bool {
+        scopes.iter().any(|scope| self.has_scope(scope))
     }
 
     /// Attaches cloneable request-only application data.
@@ -245,6 +261,13 @@ impl AuthUser {
         self.authentication = value;
         self
     }
+
+    pub(crate) fn validate(&self) -> Result<(), AuthError> {
+        if self.key.trim().is_empty() {
+            return Err(AuthError::InvalidCredential);
+        }
+        crate::scopes::validate_scopes(&self.scopes).map_err(|_| AuthError::InvalidCredential)
+    }
 }
 
 impl fmt::Debug for AuthUser {
@@ -252,7 +275,7 @@ impl fmt::Debug for AuthUser {
         formatter
             .debug_struct("AuthUser")
             .field("key", &self.key)
-            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
             .field("provider", &self.provider)
             .field("extra", &self.extra.as_ref().map(|_| "<redacted>"))
             .field("authentication", &self.authentication)
@@ -305,4 +328,31 @@ pub(crate) fn resolve_audiences(
             ));
     }
     collect_audiences(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies removing runtime extras preserves grants, provider, and assurance metadata.
+    #[test]
+    fn without_extra_preserves_authenticated_identity() -> Result<(), AuthError> {
+        let authentication = AuthenticationContext::new(
+            Some(1_700_000_000),
+            vec!["password".to_string(), "totp".to_string()],
+            Some("urn:example:mfa".to_string()),
+        );
+        let user = AuthUser::new("user-42")
+            .with_scope(Scope::of("users:read"))
+            .with_extra("request-only")
+            .set_provider(ProviderId::new("accounts")?)
+            .with_authentication(authentication.clone())
+            .without_extra();
+
+        assert!(user.extra::<&str>().is_none());
+        assert!(user.has_scope(&Scope::of("users:read")));
+        assert_eq!(user.provider(), "accounts");
+        assert_eq!(user.authentication(), &authentication);
+        Ok(())
+    }
 }

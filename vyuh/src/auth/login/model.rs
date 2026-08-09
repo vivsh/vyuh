@@ -147,14 +147,20 @@ impl LoginMethodId {
 
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct LoginProviderKind {
+pub struct LoginRuntimeDefinition {
     pub(crate) runtime: Arc<dyn ErasedLoginRuntime>,
 }
 
+pub(crate) mod definition_sealed {
+    pub trait Sealed {}
+}
+
 /// Framework-owned login provider definition accepted by `AuthConf::method`.
-pub trait LoginProviderDefinition<Start, Complete>: Send + Sync + 'static {
+pub trait LoginProviderDefinition<Start, Complete>:
+    definition_sealed::Sealed + Send + Sync + 'static
+{
     #[doc(hidden)]
-    fn define(self) -> LoginProviderKind;
+    fn define(self) -> LoginRuntimeDefinition;
 }
 
 #[derive(Clone)]

@@ -22,6 +22,20 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout Mool prerequisite
+        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - name: Check Vyuh at the declared MSRV
+        run: cargo check -p vyuh --no-default-features --features oauth,id-token,federated,mcp,paseto,branca
+      - name: Check Vyuh macros at the declared MSRV
+        run: cargo check -p vyuh-macros
+
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -58,7 +72,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [oidc, paseto, branca, "oidc,paseto,branca"]
+        features:
+          - oauth
+          - federated
+          - id-token
+          - "oauth,federated"
+          - paseto
+          - branca
+          - "oauth,federated,id-token,mcp"
+          - "oauth,federated,id-token,paseto,branca,mcp"
     steps:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
@@ -66,6 +88,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test authentication codec feature set
         run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --test auth
+      - name: Test OAuth resource-server internals
+        if: contains(matrix.features, 'oauth')
+        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::oauth
+      - name: Test external identity-token internals
+        if: contains(matrix.features, 'id-token')
+        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::id_token
+      - name: Test federated provider internals
+        if: contains(matrix.features, 'federated')
+        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::login::federated
 
   feature-matrix:
     runs-on: ubuntu-latest
@@ -78,6 +109,9 @@ jobs:
           - mysql
           - sqlite,migrations
           - postgres,migrations
+          - oauth,sqlite
+          - oauth,postgres
+          - oauth,mysql
     steps:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite

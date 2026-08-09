@@ -24,7 +24,7 @@ pub(crate) struct LoginTarget {
 pub(crate) struct VerifiedLogin {
     pub(crate) user: AuthUser,
     pub(crate) methods: Vec<String>,
-    pub(crate) auth_time: i64,
+    pub(crate) auth_time: Option<i64>,
     pub(crate) acr: Option<String>,
 }
 
@@ -33,7 +33,7 @@ impl VerifiedLogin {
         Self {
             user,
             methods: vec![method.into()],
-            auth_time: chrono::Utc::now().timestamp(),
+            auth_time: Some(chrono::Utc::now().timestamp()),
             acr: None,
         }
     }
@@ -53,6 +53,10 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
 
     fn validate(&self) -> Result<(), AuthError> {
         Ok(())
+    }
+
+    fn initialize(&self) -> LoginFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
     }
 
     fn login<'a>(&'a self, _input: BoxLoginInput) -> LoginFuture<'a, VerifiedLogin> {
@@ -177,6 +181,7 @@ where
     }
 }
 
+#[allow(private_bounds)]
 impl<Start, Complete> LoginAuth<'_, Start, Complete>
 where
     Start: Send + 'static,
@@ -246,8 +251,7 @@ pub(crate) mod completion_sealed {
 }
 
 /// Marker implemented by framework-owned inputs that complete a login flow.
-#[doc(hidden)]
-pub trait LoginCompletion: completion_sealed::Sealed + Send + 'static {}
+pub(crate) trait LoginCompletion: completion_sealed::Sealed + Send + 'static {}
 
 pub(crate) fn select<Start, Complete>(
     authenticator: &Authenticator,

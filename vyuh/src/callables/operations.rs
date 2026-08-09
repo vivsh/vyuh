@@ -107,6 +107,36 @@ pub struct Operation {
 }
 
 impl Operation {
+    /// Validates and freezes deterministic scope metadata before runtime routing starts.
+    pub(crate) fn normalize_authorization(&mut self) -> Result<(), String> {
+        let mut count = 0usize;
+        for argument in &mut self.args {
+            count += normalize_part(&mut argument.part)?;
+        }
+        for layer in &mut self.layers {
+            for part in &mut layer.parts {
+                count += normalize_part(part)?;
+            }
+        }
+        if count > 1 {
+            return Err("an operation may declare only one Permit scope rule".to_string());
+        }
+        Ok(())
+    }
+
+    /// Returns normalized application authorization metadata for this operation.
+    pub(crate) fn scope_requirement(&self) -> Option<super::specs::ScopeRequirement<'_>> {
+        self.args
+            .iter()
+            .find_map(|argument| argument.part.authorization())
+            .or_else(|| {
+                self.layers
+                    .iter()
+                    .flat_map(|layer| layer.parts.iter())
+                    .find_map(ArgPart::authorization)
+            })
+    }
+
     pub(crate) fn requires_auth(&self) -> bool {
         self.args
             .iter()
@@ -239,6 +269,11 @@ impl Operation {
         };
         (summary, description)
     }
+}
+
+fn normalize_part(part: &mut ArgPart) -> Result<usize, String> {
+    part.normalize_authorization()
+        .map_err(|error| error.to_string())
 }
 
 /// Read-only access to the operations registered on one built site.

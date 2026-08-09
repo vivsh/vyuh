@@ -8,6 +8,7 @@ pub mod assets;
 #[path = "auth/mod.rs"]
 pub mod auth;
 pub mod bundles;
+pub mod cache;
 pub mod callables;
 pub mod channels;
 pub mod collectors;
@@ -27,8 +28,8 @@ pub mod middlewares;
 pub(crate) mod notifiers;
 pub mod observability;
 pub mod prelude;
-pub(crate) mod roles;
 pub(crate) mod schedulers;
+pub(crate) mod scopes;
 pub mod services;
 pub mod signals;
 

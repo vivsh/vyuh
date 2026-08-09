@@ -87,6 +87,8 @@ forcing each subsystem into a different programming style.
 
 ## Getting Started
 
+Vyuh requires Rust 1.97 or newer.
+
 Add the crate with one backend feature for production work:
 
 ```toml

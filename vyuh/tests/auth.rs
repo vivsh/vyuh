@@ -10,8 +10,8 @@ use axum::response::IntoResponse;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use vyuh::auth::KeySource;
-#[cfg(feature = "oidc")]
-use vyuh::auth::{OidcIdentity, OidcLogin, OidcStart, OidcUserMapper};
+#[cfg(feature = "federated")]
+use vyuh::auth::{FederatedIdentity, FederatedLogin, FederatedStart, FederatedUserMapper};
 use vyuh::{
     Site, SiteConf,
     auth::{
@@ -19,8 +19,9 @@ use vyuh::{
         AuthUser, BasicCredentials, BasicLogin, DEFAULT_AUTH_PROVIDER, DjangoSigning, Jwt,
         KeyLifecycle, KeyRequest, KeyVerifier, LoginMethod, LoginResponse, LoginStateStore,
         MfaLogin, MfaMethod, MfaResponse, MfaVerifier, PasswordCredentials, PasswordLogin,
-        PasswordVerifier, PresentedCredential, PresentedSecret, RefreshMetadata, TokenClaims,
-        TokenConf, TokenDecoder, TokenKind, TokenLifecycle, TokenProvider, UnsafeQueryCredentials,
+        PasswordVerifier, Permit, PresentedCredential, PresentedSecret, RefreshMetadata, Scope,
+        ScopeExpr, ScopeRule, TokenClaims, TokenConf, TokenDecoder, TokenKind, TokenLifecycle,
+        TokenProvider, TokenVerifier, UnsafeQueryCredentials,
     },
     bundles,
     routes::{Json, Methods, RouteConf},
@@ -44,13 +45,30 @@ const MIXED: AuthProvider = AuthProvider::new("mixed");
 const EXTERNAL: AuthProvider = AuthProvider::new("external");
 const SHARED_A: AuthProvider = AuthProvider::new("shared-a");
 const SHARED_B: AuthProvider = AuthProvider::new("shared-b");
+const PARTNER_READ: Scope = Scope::of("partner:read");
+const REPORTS_READ: Scope = Scope::of("reports:read");
+const REPORTS_WRITE: Scope = Scope::of("reports:write");
+const REPORT_SCOPES: &[Scope] = &[REPORTS_WRITE, REPORTS_READ];
+const INVALID_SCOPES: &[Scope] = &[Scope::of("invalid scope")];
+
+struct ReadReports;
+
+impl ScopeRule for ReadReports {
+    const EXPR: ScopeExpr = ScopeExpr::any(REPORT_SCOPES);
+}
+
+struct InvalidRule;
+
+impl ScopeRule for InvalidRule {
+    const EXPR: ScopeExpr = ScopeExpr::all(INVALID_SCOPES);
+}
 const PASSWORD: LoginMethod<PasswordCredentials> = LoginMethod::new("password");
 const BASIC: LoginMethod<BasicCredentials> = LoginMethod::new("basic");
 const PASSWORD_MFA: LoginMethod<PasswordCredentials, MfaResponse> =
     LoginMethod::new("password-mfa");
 const BASIC_MFA: LoginMethod<BasicCredentials, MfaResponse> = LoginMethod::new("basic-mfa");
-#[cfg(feature = "oidc")]
-const OIDC: LoginMethod<OidcStart, vyuh::auth::OidcCallback> = LoginMethod::new("oidc");
+#[cfg(feature = "federated")]
+const OIDC: LoginMethod<FederatedStart, vyuh::auth::FederatedCallback> = LoginMethod::new("oidc");
 #[cfg(feature = "branca")]
 const BRANCA_PROVIDER: AuthProvider = AuthProvider::new("branca");
 #[cfg(feature = "paseto")]
@@ -90,12 +108,13 @@ impl TokenClaims for ExternalJwtClaims {
             "refresh" => TokenKind::Refresh,
             _ => return Err(AuthError::InvalidCredential),
         };
+        let scopes = (self.roles & 1 != 0).then_some(PARTNER_READ).into_iter();
         builder
             .kind(kind)
             .subject(self.subject)
             .issued_at(issued_at)
             .expires_at(expires_at)
-            .roles(self.roles)
+            .scopes(scopes)
             .audiences([REPORTS.as_str()])
             .token_id(Some(self.jti))
             .build()
@@ -111,6 +130,42 @@ async fn me(user: AuthUser) -> Json<WhoAmI> {
 
 async fn assurance(user: AuthUser) -> Json<Vec<String>> {
     Json(user.authentication().methods().to_vec())
+}
+
+async fn scoped_reports(permit: Permit<ReadReports>) -> Json<String> {
+    Json(permit.user().key.to_string())
+}
+
+async fn optional_reports(permit: Option<Permit<ReadReports>>) -> Json<bool> {
+    Json(permit.is_some())
+}
+
+async fn invalid_scope_rule(_permit: Permit<InvalidRule>) -> Json<bool> {
+    Json(true)
+}
+
+fn scope_bundle() -> bundles::Bundle {
+    bundles::bundle([
+        bundles::route(
+            scoped_reports,
+            RouteConf {
+                name: "scoped_reports".into(),
+                methods: Methods::GET,
+                path: "/scoped-reports".into(),
+                slash: None,
+            },
+        ),
+        bundles::route(
+            optional_reports,
+            RouteConf {
+                name: "optional_reports".into(),
+                methods: Methods::GET,
+                path: "/optional-reports".into(),
+                slash: None,
+            },
+        ),
+    ])
+    .with_audience(REPORTS)
 }
 
 async fn basic_exchange(
@@ -164,6 +219,20 @@ fn bundle_without_audience() -> bundles::Bundle {
     )])
 }
 
+fn dual_audience_bundle() -> bundles::Bundle {
+    let admin = bundles::bundle([bundles::route(
+        me,
+        RouteConf {
+            name: "admin_me".into(),
+            methods: Methods::GET,
+            path: "/admin-me".into(),
+            slash: None,
+        },
+    )])
+    .with_audience(ADMIN);
+    bundle().merge(admin)
+}
+
 fn auth_error(error: impl std::fmt::Display) -> AuthError {
     AuthError::Internal(error.to_string())
 }
@@ -177,6 +246,14 @@ fn bearer_parts(value: &str) -> Result<axum::http::request::Parts, AuthError> {
 }
 
 struct StaticKeyVerifier;
+
+struct CurrentScopeVerifier;
+
+impl TokenVerifier for CurrentScopeVerifier {
+    async fn verify(&self, token: &AuthToken) -> Result<AuthUser, AuthError> {
+        Ok(AuthUser::new(token.subject()).with_scope(REPORTS_WRITE))
+    }
+}
 
 #[derive(Clone)]
 struct KeyRevoker(Arc<AtomicBool>);
@@ -329,15 +406,176 @@ impl MfaVerifier for TestFactors {
     }
 }
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[derive(Clone, Copy)]
 struct TestOidcMapper;
 
-#[cfg(feature = "oidc")]
-impl OidcUserMapper for TestOidcMapper {
-    async fn map(&self, identity: &OidcIdentity) -> Result<AuthUser, AuthError> {
+#[cfg(feature = "federated")]
+impl FederatedUserMapper for TestOidcMapper {
+    async fn map(&self, identity: &FederatedIdentity) -> Result<AuthUser, AuthError> {
         Ok(AuthUser::new(identity.subject()))
     }
+}
+
+/// Verifies scope permits authorize exact grants and retain deterministic metadata.
+#[tokio::test]
+async fn scope_permits_enforce_exact_grants() -> Result<(), AuthError> {
+    let site = Site::build(config(), scope_bundle())
+        .await
+        .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .login(
+            AuthUser::new("scoped-user").with_scope(REPORTS_READ),
+            &[REPORTS],
+        )
+        .await?;
+    let authorization = format!("Bearer {}", login.credentials().access());
+    let operation = site
+        .operations()
+        .list()
+        .find(|operation| operation.name == "scoped_reports")
+        .ok_or(AuthError::InvalidCredential)?;
+    let metadata = serde_json::to_string(operation).map_err(auth_error)?;
+    let read = metadata.find("reports:read");
+    let write = metadata.find("reports:write");
+    assert!(matches!((read, write), (Some(left), Some(right)) if left < right));
+    TestSite::new(site)
+        .get("/scoped-reports")
+        .header("authorization", &authorization)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::OK);
+    Ok(())
+}
+
+/// Verifies optional permits distinguish absent credentials from forbidden identities.
+#[tokio::test]
+async fn optional_permits_only_hide_absence() -> Result<(), AuthError> {
+    let site = Site::build(config(), scope_bundle())
+        .await
+        .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .login(AuthUser::new("unscoped-user"), &[REPORTS])
+        .await?;
+    let authorization = format!("Bearer {}", login.credentials().access());
+    let client = TestSite::new(site);
+    client
+        .get("/optional-reports")
+        .send()
+        .await
+        .assert_json(vyuh::routes::StatusCode::OK, &serde_json::json!(false))
+        .await;
+    client
+        .get("/optional-reports")
+        .header("authorization", &authorization)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+/// Multiple configured access credentials are rejected before either provider runs.
+#[tokio::test]
+async fn conflicting_access_credentials_are_rejected() -> Result<(), AuthError> {
+    let auth =
+        AuthConf::default().provider(API_KEY, AuthKey::header("x-api-key", StaticKeyVerifier));
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .login(AuthUser::new("token-user"), &[REPORTS])
+        .await?;
+    TestSite::new(site)
+        .get("/me")
+        .header(
+            "authorization",
+            &format!("Bearer {}", login.credentials().access()),
+        )
+        .header("x-api-key", "service-secret")
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// Verifies malformed static scope rules fail before a site can serve requests.
+#[tokio::test]
+async fn invalid_scope_rules_fail_site_build() -> Result<(), AuthError> {
+    let bundle = bundles::bundle([bundles::route(
+        invalid_scope_rule,
+        RouteConf {
+            name: "invalid_scope_rule".into(),
+            methods: Methods::GET,
+            path: "/invalid-scope-rule".into(),
+            slash: None,
+        },
+    )])
+    .with_audience(REPORTS);
+    let error = Site::build(config(), bundle)
+        .await
+        .err()
+        .ok_or(AuthError::InvalidCredential)?;
+    assert!(error.to_string().contains("scope rule"));
+    Ok(())
+}
+
+/// Verifies infallible identity builders defer malformed scope rejection to login.
+#[tokio::test]
+async fn manual_login_rejects_invalid_identity_scopes() -> Result<(), AuthError> {
+    let site = Site::build(config(), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let error = site
+        .auth()
+        .login(
+            AuthUser::new("invalid-user").with_scope(Scope::of("invalid scope")),
+            &[REPORTS],
+        )
+        .await
+        .err()
+        .ok_or(AuthError::InvalidCredential)?;
+    assert!(matches!(error, AuthError::InvalidCredential));
+    Ok(())
+}
+
+/// Verifies refresh replacements carry the current scopes returned by the verifier.
+#[tokio::test]
+async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), AuthError> {
+    let provider = TokenProvider::new(Jwt::hs256_site_secret())
+        .access(TokenConf::bearer())
+        .refresh(TokenConf::bearer())
+        .verifier(CurrentScopeVerifier);
+    let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .login(
+            AuthUser::new("refresh-user").with_scope(REPORTS_READ),
+            &[REPORTS],
+        )
+        .await?;
+    let refresh = login
+        .credentials()
+        .refresh()
+        .ok_or(AuthError::UnsupportedProviderCapability)?;
+    let parts = bearer_parts(refresh)?;
+    let replacement = site.auth().refresh(&parts, &[REPORTS]).await?;
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_aud = false;
+    let decoded = jsonwebtoken::decode::<AuthToken>(
+        replacement.credentials().access(),
+        &jsonwebtoken::DecodingKey::from_secret(b"auth-test-secret-minimum-32-chars"),
+        &validation,
+    )
+    .map_err(auth_error)?;
+
+    assert_eq!(decoded.claims.scopes(), &[REPORTS_WRITE]);
+    Ok(())
 }
 
 /// Verifies authenticated external JWT claims normalize through a provider-bound builder.
@@ -755,7 +993,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
 }
 
 /// Verifies OIDC begin performs discovery and emits state, nonce, and PKCE parameters.
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[tokio::test]
 async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -768,7 +1006,7 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    let login = OidcLogin::discovery(&issuer)
+    let login = FederatedLogin::oidc(&issuer)
         .client_id("test-client")
         .client_secret(vyuh::auth::KeySource::inline("test-secret"))
         .redirect_uri(format!("{issuer}/callback"))
@@ -781,7 +1019,7 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
     let challenge = site
         .auth()
         .via(OIDC)
-        .begin(OidcStart::new().return_to("/dashboard"), &[REPORTS])
+        .begin(FederatedStart::new().return_to("/dashboard"), &[REPORTS])
         .await?;
     let url = challenge
         .redirect_url()
@@ -796,7 +1034,7 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
 }
 
 /// Verifies OIDC callback verification maps identity before issuing credentials.
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[tokio::test]
 async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -809,7 +1047,7 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    let login = OidcLogin::discovery(&issuer)
+    let login = FederatedLogin::oidc(&issuer)
         .client_id("test-client")
         .client_secret(vyuh::auth::KeySource::inline("test-secret"))
         .redirect_uri(format!("{issuer}/callback"))
@@ -819,7 +1057,7 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         .await
         .map_err(auth_error)?;
     let selected = site.auth().via(OIDC);
-    let challenge = selected.begin(OidcStart::new(), &[REPORTS]).await?;
+    let challenge = selected.begin(FederatedStart::new(), &[REPORTS]).await?;
     let redirect = url::Url::parse(
         challenge
             .redirect_url()
@@ -838,7 +1076,7 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         .ok_or(AuthError::InvalidLoginState)?
         .to_string();
     oidc_state.set_nonce(nonce)?;
-    let callback = serde_json::from_value::<vyuh::auth::OidcCallback>(serde_json::json!({
+    let callback = serde_json::from_value::<vyuh::auth::FederatedCallback>(serde_json::json!({
         "code": "valid-code",
         "state": state,
     }))
@@ -850,10 +1088,10 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
 }
 
 /// Verifies non-loopback OIDC endpoints require HTTPS at startup.
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[tokio::test]
 async fn oidc_rejects_insecure_remote_endpoints() -> Result<(), AuthError> {
-    let login = OidcLogin::discovery("http://accounts.example.com")
+    let login = FederatedLogin::oidc("http://accounts.example.com")
         .client_id("test-client")
         .redirect_uri("http://app.example.com/callback")
         .mapper(TestOidcMapper);
@@ -867,7 +1105,7 @@ async fn oidc_rejects_insecure_remote_endpoints() -> Result<(), AuthError> {
 }
 
 /// Verifies OIDC discovery transport failures are reported as provider outages.
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[tokio::test]
 async fn oidc_discovery_outage_is_provider_unavailable() -> Result<(), AuthError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -875,33 +1113,31 @@ async fn oidc_discovery_outage_is_provider_unavailable() -> Result<(), AuthError
         .map_err(auth_error)?;
     let issuer = format!("http://{}", listener.local_addr().map_err(auth_error)?);
     drop(listener);
-    let login = OidcLogin::discovery(&issuer)
+    let login = FederatedLogin::oidc(&issuer)
         .client_id("test-client")
         .redirect_uri(format!("{issuer}/callback"))
         .mapper(TestOidcMapper);
     let auth = AuthConf::default().method(OIDC, login);
-    let site = Site::build(config().auth(auth), bundles::Bundle::default())
-        .await
-        .map_err(auth_error)?;
-    let error = site
-        .auth()
-        .via(OIDC)
-        .begin(OidcStart::new(), &[REPORTS])
+    let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("OIDC discovery unexpectedly succeeded".into()))?;
-    assert!(matches!(error, AuthError::ProviderUnavailable));
+    assert!(
+        error
+            .to_string()
+            .contains("authentication provider is unavailable")
+    );
     Ok(())
 }
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 #[derive(Clone)]
 struct MockOidcState {
     issuer: String,
     nonce: Arc<Mutex<Option<String>>>,
 }
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 impl MockOidcState {
     fn new(issuer: String) -> Self {
         Self {
@@ -919,7 +1155,7 @@ impl MockOidcState {
     }
 }
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 fn oidc_discovery_router(state: MockOidcState) -> axum::Router {
     use axum::{Json as AxumJson, extract::State, routing::get};
 

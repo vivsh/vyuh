@@ -2,6 +2,7 @@
 name = "vyuh-macros"
 version = "0.2.17"
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 description = "Procedural macros for the Vyuh web framework"
 readme = "../README.md"

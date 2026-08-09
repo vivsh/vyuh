@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `vyuh::permit`
+ --> tests/ui/auth/permit_macro.rs:1:5
+  |
+1 | use vyuh::permit;
+  |     ^^^^^^^^^^^^ no `permit` in the root

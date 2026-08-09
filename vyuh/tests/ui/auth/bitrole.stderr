@@ -1,0 +1,7 @@
+error[E0432]: unresolved imports `vyuh::auth::BitRole`, `vyuh::auth::RoleType`
+ --> tests/ui/auth/bitrole.rs:1:18
+  |
+1 | use vyuh::auth::{BitRole, RoleType};
+  |                  ^^^^^^^  ^^^^^^^^ no `RoleType` in `auth`
+  |                  |
+  |                  no `BitRole` in `auth`

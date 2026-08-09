@@ -6,8 +6,8 @@
 use std::{ffi::OsString, fmt, path::PathBuf};
 
 use crate::{
-    auth::AuthConf, channels::ChannelConf, console::ConsoleConf, db::DbConf, email::MailConf,
-    emitters::EmitterConf, errors::ErrorConf, file_storage::UploadConf, logging,
+    auth::AuthConf, cache::CacheConf, channels::ChannelConf, console::ConsoleConf, db::DbConf,
+    email::MailConf, emitters::EmitterConf, errors::ErrorConf, file_storage::UploadConf, logging,
     middlewares::HttpConf, observability::ObservabilityConf, tasks::TaskConf,
     templates::TemplateConf,
 };
@@ -159,6 +159,10 @@ pub struct SiteConf {
     #[serde(skip, default)]
     pub auth: AuthConf,
 
+    /// Source-owned cache providers and their default selection.
+    #[serde(skip, default)]
+    pub cache: CacheConf,
+
     #[serde(skip, default)]
     pub tasks: TaskConf,
 
@@ -195,6 +199,7 @@ impl fmt::Debug for SiteConf {
             .field("secret_key", &"<redacted>")
             .field("secret_key_fallbacks", &self.secret_key_fallbacks.len())
             .field("auth", &self.auth)
+            .field("cache", &self.cache)
             .field("console", &self.console)
             .field("observability", &self.observability)
             .finish_non_exhaustive()
@@ -220,6 +225,7 @@ impl Default for SiteConf {
             log_init: true,
             tz: None,
             auth: AuthConf::default(),
+            cache: CacheConf::default(),
             tasks: TaskConf::default(),
             uploads: UploadConf::default(),
             channels: ChannelConf::default(),
@@ -399,6 +405,12 @@ impl SiteConf {
         self
     }
 
+    /// Sets source-owned cache provider configuration.
+    pub fn cache(mut self, cache: CacheConf) -> Self {
+        self.cache = cache;
+        self
+    }
+
     pub fn tasks(mut self, tasks: TaskConf) -> Self {
         self.tasks = tasks;
         self
@@ -423,6 +435,7 @@ impl SiteConf {
         self.validate_database(&mut errors);
         self.validate_paths(&mut errors);
         self.validate_auth(&mut errors);
+        self.validate_cache(&mut errors);
         self.validate_tasks(&mut errors);
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
@@ -443,6 +456,17 @@ impl SiteConf {
                 field: "tasks".into(),
                 reason: error.to_string(),
                 expected: Some("valid task lanes, batching, and polling limits".into()),
+            });
+        }
+    }
+
+    /// Adds accumulated cache configuration failures to the site validation report.
+    fn validate_cache(&self, errors: &mut Vec<ConfError>) {
+        if let Err(error) = self.cache.validate() {
+            errors.push(ConfError::InvalidValue {
+                field: "cache".into(),
+                reason: error.to_string(),
+                expected: Some("unique configured providers and one valid default provider".into()),
             });
         }
     }

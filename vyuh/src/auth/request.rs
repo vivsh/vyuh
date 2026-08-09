@@ -11,12 +11,15 @@ use crate::{
     callables::{IntoArgPart, specs::ArgPart},
 };
 
+#[derive(Clone)]
+struct AcceptedIdentity(AuthUser);
+
 impl FromRequestParts<Site> for AuthUser {
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
-        if let Some(user) = parts.extensions.get::<Self>() {
-            return Ok(user.clone());
+        if let Some(user) = parts.extensions.get::<AcceptedIdentity>() {
+            return Ok(user.0.clone());
         }
         let context = parts
             .extensions
@@ -26,7 +29,8 @@ impl FromRequestParts<Site> for AuthUser {
             .or_else(|| site.auth().default_audience())
             .ok_or(AuthError::MissingAudienceContext)?;
         let user = site.auth().authenticate(parts, audience).await?;
-        parts.extensions.insert(user.clone());
+        user.validate()?;
+        parts.extensions.insert(AcceptedIdentity(user.clone()));
         Ok(user)
     }
 }
@@ -62,5 +66,32 @@ impl IntoArgPart for AuthUser {
                 crate::callables::ReturnSpec::error(503, "Authentication provider unavailable."),
             ]),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::extract::FromRequestParts;
+
+    use super::*;
+
+    /// Verifies a public `AuthUser` extension cannot bypass provider authentication.
+    #[tokio::test]
+    async fn public_identity_extension_is_not_an_authentication_cache()
+    -> Result<(), Box<crate::SiteError>> {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            crate::bundles::Bundle::default(),
+        )
+        .await
+        .map_err(Box::new)?;
+        let request = axum::http::Request::new(axum::body::Body::empty());
+        let (mut parts, _) = request.into_parts();
+        parts.extensions.insert(AuthUser::new("injected-user"));
+
+        let result =
+            <AuthUser as FromRequestParts<Site>>::from_request_parts(&mut parts, &site).await;
+        assert!(matches!(result, Err(AuthError::NoCredential)));
+        Ok(())
     }
 }

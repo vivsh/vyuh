@@ -1,11 +1,13 @@
 # Services
 
 Vyuh services are site-lifetime application components. Use them for shared
-clients, caches, coordinators, in-process state, and background loops that
+clients, coordinators, in-process state, and background loops that
 should be created once when the serving runtime starts.
 
 Services are not durable work queues. Use [Tasks](tasks.md) for work that must
 survive process restarts, retries, sleeps, or external resume.
+Use [Cache](cache.md) for ordinary named cache providers instead of creating a
+service solely for caching.
 
 Use services for site-lifetime dependencies and workers that should be built
 once with the site. Do not use `Data<T>` for services; handlers should extract

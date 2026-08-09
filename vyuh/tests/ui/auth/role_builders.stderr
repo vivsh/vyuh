@@ -1,0 +1,5 @@
+error[E0599]: no method named `with_role_mask` found for struct `AuthUser` in the current scope
+ --> tests/ui/auth/role_builders.rs:4:41
+  |
+4 |     let _user = AuthUser::new("user-1").with_role_mask(1);
+  |                                         ^^^^^^^^^^^^^^ method not found in `AuthUser`

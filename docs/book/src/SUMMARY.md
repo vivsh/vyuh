@@ -30,6 +30,7 @@
 - [Emitters](emitters.md)
 - [Channels](channels.md)
 - [Services](services.md)
+- [Cache](cache.md)
 
 # Web Platform
 

@@ -1,5 +1,6 @@
 use crate::auth::Authenticator;
 use crate::bundles::{Bundle, IntoBundle};
+use crate::cache::CacheRegistry;
 use crate::callables::{self, DataBox};
 use crate::channels::{Channels, LocalChannelBackend};
 use crate::commands::CommandRegistry;
@@ -349,6 +350,8 @@ impl SiteBuilder {
 
         bundle.apply_default_audience(default_audience);
 
+        bundle.normalize_authorization()?;
+
         bundle.validate()?;
 
         let observability = Observability::new(self.conf.observability.clone());
@@ -386,6 +389,10 @@ impl SiteBuilder {
 
         template_engine.inject_templates(&bundle)?;
 
+        let cache = Arc::new(
+            CacheRegistry::build(&self.conf.cache)
+                .map_err(|err| conf::ConfError::Other(format!("Cache config error: {err}")))?,
+        );
         let authenticator = Authenticator::new(
             &self.conf.auth,
             &self.conf.secret_key,
@@ -400,9 +407,12 @@ impl SiteBuilder {
             .setup(&mut router, &bundle.ops, &self.conf.auth)?;
 
         #[cfg(feature = "mcp")]
-        bundle
-            .mcp_engine
-            .setup(&mut router, &bundle.ops, &bundle.mcp_registry)?;
+        bundle.mcp_engine.setup(
+            &mut router,
+            &bundle.ops,
+            &bundle.mcp_registry,
+            &authenticator,
+        )?;
 
         router = router.fallback(route_not_found);
 
@@ -531,6 +541,7 @@ impl SiteBuilder {
             runtime: OnceCell::new(),
             timezone,
             authenticator,
+            cache,
             template_engine,
             slash_router,
             route_registry,
@@ -561,6 +572,7 @@ struct SiteInner {
     conf: SiteConf,
     observability: Observability,
     authenticator: Authenticator,
+    cache: Arc<CacheRegistry>,
     pool: DbPool,
     channels: LocalChannelBackend,
     console_runtime: Option<crate::console::ConsoleRuntime>,
@@ -949,10 +961,21 @@ impl Site {
         &self.inner.template_engine
     }
 
-    /// Return the configured authenticator.
-    /// Routes and commands can use it for JWT and role-aware authentication behavior.
+    /// Returns the configured provider-oriented authenticator.
+    ///
+    /// Routes and commands use it to authenticate scoped identities and to issue,
+    /// refresh, or revoke credentials through configured providers.
     pub fn auth(&self) -> &Authenticator {
         &self.inner.authenticator
+    }
+
+    /// Returns the default typed cache provider configured for this site.
+    pub fn cache(&self) -> crate::cache::Cache {
+        self.inner.cache.default_handle()
+    }
+
+    pub(crate) fn cache_metrics(&self) -> String {
+        self.inner.cache.render_metrics()
     }
 
     /// Return the configured timezone, defaulting to UTC.

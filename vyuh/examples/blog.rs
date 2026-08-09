@@ -48,8 +48,8 @@ use tokio_util::io::ReaderStream;
 use vyuh::{
     ErrorKind,
     auth::{
-        AuthConf, AuthUser, BitRole, CookieConf, Jwt, TokenConf, TokenProvider, check_password,
-        make_password,
+        AuthConf, AuthUser, CookieConf, Jwt, Permit, Scope, ScopeExpr, ScopeRule, TokenConf,
+        TokenProvider, check_password, make_password,
     },
     commands::CommandConf,
     console::ConsoleConf,
@@ -79,14 +79,25 @@ const DEFAULT_PAGE_SIZE: usize = 9;
 const MAX_PAGE_SIZE: usize = 50;
 const ADMIN_POST_PAGE_SIZE: usize = 8;
 
-#[derive(BitRole)]
-enum UserRole {
-    User,
-    Admin,
+const BLOG_USE: Scope = Scope::of("blog:use");
+const BLOG_ADMIN: Scope = Scope::of("blog:admin");
+const BLOG_USE_RULE: &[Scope] = &[BLOG_USE];
+const BLOG_ADMIN_RULE: &[Scope] = &[BLOG_ADMIN];
+
+struct BlogAccess;
+
+impl ScopeRule for BlogAccess {
+    const EXPR: ScopeExpr = ScopeExpr::all(BLOG_USE_RULE);
 }
 
-type BlogUser = vyuh::permit!(UserRole, User);
-type AdminUser = vyuh::permit!(UserRole, Admin);
+struct AdminAccess;
+
+impl ScopeRule for AdminAccess {
+    const EXPR: ScopeExpr = ScopeExpr::all(BLOG_ADMIN_RULE);
+}
+
+type BlogUser = Permit<BlogAccess>;
+type AdminUser = Permit<AdminAccess>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, db::Model)]
 #[table(name = "blog_users")]
@@ -357,15 +368,10 @@ async fn login(
         user: Some(UserOut::from(user.clone())),
     });
     let subject = user.id.to_string();
-    let roles = UserRole::User.to_role_type()
-        | if user.is_admin {
-            UserRole::Admin.to_role_type()
-        } else {
-            0
-        };
+    let scopes = std::iter::once(BLOG_USE).chain(user.is_admin.then_some(BLOG_ADMIN));
     let login = site
         .auth()
-        .login(AuthUser::new(&subject).with_role_mask(roles), &[BLOG])
+        .login(AuthUser::new(&subject).with_scopes(scopes), &[BLOG])
         .await?;
     login.write(response.response_mut());
     Ok(response)
@@ -413,7 +419,7 @@ async fn show_post(
     let comment_table = Comment::table();
     let comments = db::from(&comment_table)
         .filter(comment_table.post_id.eq(db::val(post.post.id)))
-        .order_by(comment_table.created_at.asc())
+        .sort(comment_table.created_at.asc())
         .all::<CommentWithAuthor>()
         .exec(&mut db)
         .await?;
@@ -653,7 +659,13 @@ async fn list_users(
     let table = User::table();
     let users = db::from(&table)
         .sort(table.created_at.desc())
-        .page::<User, _>(page.page, page.per_page, &mut db)
+        .page::<User, _>(
+            db::Pagination {
+                page_num: page.page,
+                page_size: page.per_page,
+            },
+            &mut db,
+        )
         .await?;
     Ok(Json(users.map(UserOut::from)))
 }
@@ -884,7 +896,13 @@ async fn query_posts(
         scope.filter(table.published.eq(db::val(true)))
     };
     Ok(scope
-        .page::<PostWithAuthor, _>(page.page, page.per_page, db)
+        .page::<PostWithAuthor, _>(
+            db::Pagination {
+                page_num: page.page,
+                page_size: page.per_page,
+            },
+            db,
+        )
         .await?)
 }
 

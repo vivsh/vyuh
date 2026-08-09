@@ -82,7 +82,7 @@ pub(super) fn validate_common(
     provider: &ProviderId,
     leeway_seconds: i64,
 ) -> Result<(), AuthError> {
-    if token.version() != 1
+    if token.version() != 2
         || token.provider() != provider.as_str()
         || crate::auth::token::validate_structure(token).is_err()
     {
@@ -118,8 +118,12 @@ pub(super) fn validate_binding(
     }
 }
 
-fn validate_resolved_binding(expected: &str, current: Option<String>) -> Result<(), AuthError> {
-    let matches = current.as_deref().is_some_and(|current| {
+fn validate_resolved_binding(
+    expected: &str,
+    current: Option<crate::auth::AuthBinding>,
+) -> Result<(), AuthError> {
+    let matches = current.as_ref().is_some_and(|current| {
+        let current = current.as_str();
         constant_time::verify_slices_are_equal(expected.as_bytes(), current.as_bytes()).is_ok()
     });
     if matches {
@@ -156,11 +160,7 @@ pub(super) fn validate_issued_binding(
 }
 
 pub(super) fn validate_subject(user: &AuthUser) -> Result<(), AuthError> {
-    if user.key.trim().is_empty() {
-        Err(AuthError::InvalidCredential)
-    } else {
-        Ok(())
-    }
+    user.validate()
 }
 
 pub(super) fn clear_locations(

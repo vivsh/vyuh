@@ -328,11 +328,10 @@ pub enum ArgPart {
         join_all: bool,
     },
 
-    /// Application role requirement retained for MCP discovery authorization.
-    #[cfg(feature = "mcp")]
+    /// Exact application-scope requirement contributed by a permit extractor.
     Authorization {
-        mask: crate::auth::RoleType,
-        join_all: bool,
+        scopes: Vec<crate::auth::Scope>,
+        all: bool,
     },
 
     /// Internal marker used to validate that authenticated Vyuh routes belong
@@ -375,6 +374,39 @@ impl ArgPart {
             _ => None,
         }
     }
+
+    /// Validates and normalizes every scope declaration nested in this argument part.
+    pub(crate) fn normalize_authorization(
+        &mut self,
+    ) -> Result<usize, crate::scopes::ScopeRuleError> {
+        match self {
+            Self::Authorization { scopes, .. } => {
+                crate::scopes::normalize_rule(scopes)?;
+                Ok(1)
+            }
+            Self::Composite(parts) => parts.iter_mut().try_fold(0usize, |count, part| {
+                part.normalize_authorization().map(|value| count + value)
+            }),
+            Self::Optional(part) | Self::Fallible(part) => part.normalize_authorization(),
+            _ => Ok(0),
+        }
+    }
+
+    /// Returns the first normalized application-scope requirement in this argument part.
+    pub(crate) fn authorization(&self) -> Option<ScopeRequirement<'_>> {
+        match self {
+            Self::Authorization { scopes, all } => Some(ScopeRequirement { scopes, all: *all }),
+            Self::Composite(parts) => parts.iter().find_map(Self::authorization),
+            Self::Optional(part) | Self::Fallible(part) => part.authorization(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ScopeRequirement<'a> {
+    pub(crate) scopes: &'a [crate::auth::Scope],
+    pub(crate) all: bool,
 }
 
 /// OpenAPI-safe metadata derived from a typed multipart upload contract.

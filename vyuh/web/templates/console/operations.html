@@ -76,6 +76,10 @@
         <div><dt>Methods</dt><dd>{{ selected_operation.methods | join(", ") }}</dd></div>
         <div><dt>Owner</dt><dd>{% if selected_operation.owner %}{{ selected_operation.owner }}{% else %}-{% endif %}</dd></div>
         <div><dt>Hidden</dt><dd>{{ selected_operation.hidden }}</dd></div>
+        {% if selected_operation.authorization %}
+        <div><dt>Scope rule</dt><dd>{{ selected_operation.authorization.mode }}</dd></div>
+        <div><dt>Scopes</dt><dd>{{ selected_operation.authorization.scopes | join(", ") }}</dd></div>
+        {% endif %}
       </dl>
       <nav class="vyuh-console-tabs is-compact" role="tablist" data-console-tabs aria-label="Operation detail sections">
         <button type="button" role="tab" id="operation-request-tab" aria-controls="operation-request-panel" aria-selected="true">Request</button>

@@ -1,0 +1,11 @@
+error[E0603]: enum `ProviderKind` is private
+ --> tests/ui/auth/provider_kind.rs:1:17
+  |
+1 | use vyuh::auth::ProviderKind;
+  |                 ^^^^^^^^^^^^ private enum
+  |
+note: the enum `ProviderKind` is defined here
+ --> src/auth/mod.rs
+  |
+  |     ErasedTokenVerifier, KeySourceKind, ProviderDefinitionInner, ProviderKind, build_codec,
+  |                                                                  ^^^^^^^^^^^^

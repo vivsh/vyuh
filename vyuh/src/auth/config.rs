@@ -7,6 +7,10 @@ use chrono::Duration;
 use futures::future::BoxFuture;
 use serde::Serialize;
 
+#[cfg(feature = "id-token")]
+use super::IdToken;
+#[cfg(feature = "oauth")]
+use super::OAuthResourceServer;
 use super::{
     Audience, AudienceId, AuthError, AuthProvider, AuthToken, AuthUser, CodecDefinition,
     CredentialLocation, CsrfConf, CustomClaims, ErasedDecoder, ErasedEncoder, ErasedKeyLifecycle,
@@ -14,6 +18,33 @@ use super::{
     LoginStateStore, LoginStateStoreRuntime, ProviderDocLocation, ProviderId, SecretRing,
     TokenClaims, TokenDecoder, TokenEncoder, TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
 };
+
+/// Opaque request-binding material attached to issued credentials.
+///
+/// The value is intentionally redacted and cannot be serialized or formatted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AuthBinding(String);
+
+impl AuthBinding {
+    /// Creates binding material resolved by application request policy.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for AuthBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthBinding(<redacted>)")
+    }
+}
 
 /// Source for token signing, verification, or encryption key material.
 #[derive(Clone, PartialEq, Eq)]
@@ -152,7 +183,8 @@ impl<T: KeyVerifier> ErasedKeyVerifier for T {
     }
 }
 
-pub(crate) type BindingResolver = fn(&Parts) -> Result<Option<String>, AuthError>;
+/// Resolves optional request-binding material for one configured provider.
+pub type BindingResolver = fn(&Parts) -> Result<Option<AuthBinding>, AuthError>;
 
 /// Extraction, delivery, and lifetime policy for one token kind.
 #[derive(Clone)]
@@ -259,6 +291,7 @@ pub struct TokenProvider {
     pub(crate) leeway_seconds: i64,
     pub(crate) issuer: Option<String>,
     pub(crate) custom_claims: Option<CustomClaims>,
+    pub(crate) audiences: Option<Vec<Audience>>,
 }
 
 impl TokenProvider {
@@ -274,6 +307,7 @@ impl TokenProvider {
             leeway_seconds: 0,
             issuer: None,
             custom_claims: None,
+            audiences: None,
         }
     }
 
@@ -358,6 +392,12 @@ impl TokenProvider {
         self.issuer = Some(value.into());
         self
     }
+
+    /// Restricts credential issuance and request authentication to local route audiences.
+    pub fn audiences(mut self, values: impl IntoIterator<Item = Audience>) -> Self {
+        self.audiences = Some(values.into_iter().collect());
+        self
+    }
 }
 
 impl fmt::Debug for TokenProvider {
@@ -382,6 +422,7 @@ pub struct AuthKey {
     pub(crate) csrf: Option<CsrfConf>,
     pub(crate) max_credential_bytes: usize,
     pub(crate) lifecycle: Option<Arc<dyn ErasedKeyLifecycle>>,
+    pub(crate) audiences: Option<Vec<Audience>>,
 }
 
 impl AuthKey {
@@ -425,6 +466,7 @@ impl AuthKey {
             csrf,
             max_credential_bytes: 16 * 1024,
             lifecycle: None,
+            audiences: None,
         }
     }
 
@@ -457,6 +499,12 @@ impl AuthKey {
         self.lifecycle = Some(Arc::new(value));
         self
     }
+
+    /// Restricts this opaque key provider to local route audiences.
+    pub fn audiences(mut self, values: impl IntoIterator<Item = Audience>) -> Self {
+        self.audiences = Some(values.into_iter().collect());
+        self
+    }
 }
 
 impl fmt::Debug for AuthKey {
@@ -468,36 +516,57 @@ impl fmt::Debug for AuthKey {
     }
 }
 
-pub(crate) mod sealed {
+mod sealed {
     pub trait ProviderDefinition {}
 }
 
 /// A framework-owned provider family accepted by [`AuthConf::provider`].
 pub trait ProviderDefinition: sealed::ProviderDefinition + Sized {
     #[doc(hidden)]
-    fn define(self) -> ProviderKind;
+    fn define(self) -> ProviderDefinitionInner;
 }
 
 impl sealed::ProviderDefinition for TokenProvider {}
 impl ProviderDefinition for TokenProvider {
-    fn define(self) -> ProviderKind {
-        ProviderKind::Token(Box::new(self))
+    fn define(self) -> ProviderDefinitionInner {
+        ProviderDefinitionInner::new(ProviderKind::Token(Box::new(self)))
     }
 }
 
 impl sealed::ProviderDefinition for AuthKey {}
 impl ProviderDefinition for AuthKey {
-    fn define(self) -> ProviderKind {
-        ProviderKind::Key(self)
+    fn define(self) -> ProviderDefinitionInner {
+        ProviderDefinitionInner::new(ProviderKind::Key(Box::new(self)))
+    }
+}
+
+#[cfg(feature = "oauth")]
+impl sealed::ProviderDefinition for OAuthResourceServer {}
+#[cfg(feature = "oauth")]
+impl ProviderDefinition for OAuthResourceServer {
+    fn define(self) -> ProviderDefinitionInner {
+        ProviderDefinitionInner::new(ProviderKind::OAuth(Box::new(self)))
+    }
+}
+
+#[cfg(feature = "id-token")]
+impl sealed::ProviderDefinition for IdToken {}
+#[cfg(feature = "id-token")]
+impl ProviderDefinition for IdToken {
+    fn define(self) -> ProviderDefinitionInner {
+        ProviderDefinitionInner::new(ProviderKind::IdToken(Box::new(self)))
     }
 }
 
 /// Internal provider representation used while building a site.
-#[doc(hidden)]
 #[derive(Clone, Debug)]
-pub enum ProviderKind {
+pub(crate) enum ProviderKind {
     Token(Box<TokenProvider>),
-    Key(AuthKey),
+    Key(Box<AuthKey>),
+    #[cfg(feature = "oauth")]
+    OAuth(Box<OAuthResourceServer>),
+    #[cfg(feature = "id-token")]
+    IdToken(Box<IdToken>),
 }
 
 impl ProviderKind {
@@ -505,6 +574,10 @@ impl ProviderKind {
         match self {
             Self::Token(value) => &value.access.location,
             Self::Key(value) => &value.location,
+            #[cfg(feature = "oauth")]
+            Self::OAuth(value) => value.location(),
+            #[cfg(feature = "id-token")]
+            Self::IdToken(value) => &value.location,
         }
     }
 
@@ -512,14 +585,28 @@ impl ProviderKind {
         match self {
             Self::Token(value) => value.refresh.as_ref().map(|item| &item.location),
             Self::Key(_) => None,
+            #[cfg(feature = "oauth")]
+            Self::OAuth(_) => None,
+            #[cfg(feature = "id-token")]
+            Self::IdToken(_) => None,
         }
     }
 }
 
+#[doc(hidden)]
 #[derive(Clone, Debug)]
-pub(crate) struct ProviderDefinitionInner {
+pub struct ProviderDefinitionInner {
     pub(crate) name: AuthProvider,
     pub(crate) kind: ProviderKind,
+}
+
+impl ProviderDefinitionInner {
+    fn new(kind: ProviderKind) -> Self {
+        Self {
+            name: DEFAULT_AUTH_PROVIDER,
+            kind,
+        }
+    }
 }
 
 /// Authentication configuration and runtime provider registrations.
@@ -567,10 +654,9 @@ impl AuthConf {
 
     /// Registers one complete named authentication provider.
     pub fn provider<D: ProviderDefinition>(mut self, name: AuthProvider, provider: D) -> Self {
-        self.providers.push(ProviderDefinitionInner {
-            name,
-            kind: provider.define(),
-        });
+        let mut definition = provider.define();
+        definition.name = name;
+        self.providers.push(definition);
         self
     }
 
@@ -650,11 +736,16 @@ impl AuthConf {
             .into_iter()
             .map(|definition| ProviderDoc {
                 id: definition.name.as_str().to_owned(),
+                audiences: provider_doc_audiences(&definition.kind),
                 credential_type: match &definition.kind {
                     ProviderKind::Token(value) => {
                         CredentialType::Token(Some(value.codec.format().to_owned()))
                     }
                     ProviderKind::Key(_) => CredentialType::Key,
+                    #[cfg(feature = "oauth")]
+                    ProviderKind::OAuth(_) => CredentialType::Token(Some("OAuth JWT".into())),
+                    #[cfg(feature = "id-token")]
+                    ProviderKind::IdToken(_) => CredentialType::Token(Some("JWT".into())),
                 },
                 location: definition.kind.access_location().doc(),
                 csrf_header: match &definition.kind {
@@ -664,6 +755,12 @@ impl AuthConf {
                         .as_ref()
                         .map(|csrf| csrf.header_name.clone()),
                     ProviderKind::Key(value) => {
+                        value.csrf.as_ref().map(|csrf| csrf.header_name.clone())
+                    }
+                    #[cfg(feature = "oauth")]
+                    ProviderKind::OAuth(_) => None,
+                    #[cfg(feature = "id-token")]
+                    ProviderKind::IdToken(value) => {
                         value.csrf.as_ref().map(|csrf| csrf.header_name.clone())
                     }
                 },
@@ -683,6 +780,10 @@ impl AuthConf {
                         ));
                     }
                 }
+                #[cfg(feature = "oauth")]
+                ProviderKind::OAuth(value) => value.validate()?,
+                #[cfg(feature = "id-token")]
+                ProviderKind::IdToken(value) => value.validate_production()?,
             }
         }
         Ok(())
@@ -712,9 +813,53 @@ pub(crate) enum CredentialType {
 #[derive(Clone)]
 pub(crate) struct ProviderDoc {
     pub(crate) id: String,
+    pub(crate) audiences: Option<Vec<String>>,
     pub(crate) credential_type: CredentialType,
     pub(crate) location: ProviderDocLocation,
     pub(crate) csrf_header: Option<String>,
+}
+
+impl ProviderDoc {
+    pub(crate) fn supports_audience(&self, audience: &str) -> bool {
+        self.audiences
+            .as_ref()
+            .is_none_or(|values| values.iter().any(|value| value == audience))
+    }
+}
+
+fn provider_doc_audiences(kind: &ProviderKind) -> Option<Vec<String>> {
+    match kind {
+        ProviderKind::Token(value) => value
+            .audiences
+            .as_ref()
+            .map(|values| audience_names(values)),
+        ProviderKind::Key(value) => value
+            .audiences
+            .as_ref()
+            .map(|values| audience_names(values)),
+        #[cfg(feature = "oauth")]
+        ProviderKind::OAuth(value) => Some(
+            value
+                .route_audiences()
+                .map(|audience| audience.as_str().to_owned())
+                .collect(),
+        ),
+        #[cfg(feature = "id-token")]
+        ProviderKind::IdToken(value) => Some(
+            value
+                .resources
+                .iter()
+                .map(|item| item.0.as_str().to_owned())
+                .collect(),
+        ),
+    }
+}
+
+fn audience_names(values: &[Audience]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect()
 }
 
 /// Redacted authentication configuration safe for consoles and diagnostics.
@@ -737,6 +882,8 @@ pub struct AuthProviderSummary {
     pub format: String,
     /// Validated request selector description.
     pub source: String,
+    /// Restricted local route audiences, or `None` when the provider is unrestricted.
+    pub audiences: Option<Vec<String>>,
 }
 
 impl AuthConf {
@@ -771,6 +918,7 @@ fn provider_summary(value: ProviderDoc) -> AuthProviderSummary {
         id: value.id,
         format,
         source,
+        audiences: value.audiences,
     }
 }
 

@@ -1,5 +1,4 @@
 mod assets;
-mod bitrole;
 mod bundle;
 mod bundlepart;
 mod cron;
@@ -121,7 +120,7 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// #[mcp_tool(read_only = true, idempotent = true)]
 /// async fn search_notes(
-///     _permit: permit!(Role, Reader | Editor),
+///     _permit: Permit<ReadNotes>,
 ///     input: Data<SearchNotesInput>,
 /// ) -> Result<Data<SearchNotesOutput>, Error> {
 ///     // ...
@@ -223,29 +222,6 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Filterable, attributes(filter, db))]
 pub fn derive_filterable(input: TokenStream) -> TokenStream {
     mool_macros_impl::filterable::derive_filterable(input.into(), quote::quote!(::vyuh::db)).into()
-}
-
-/// Derives the BitRole trait for role-based access control.
-///
-/// Automatically implements BitRole for enums with unit variants only.
-/// Each variant is assigned a bit position (0, 1, 2, ...) for role masking.
-///
-/// # Requirements
-/// - Only unit variants allowed (no tuple or struct variants)
-/// - Explicit discriminants identify bit positions and must be < 64
-///
-/// # Example
-/// ```ignore
-/// #[derive(BitRole)]
-/// enum UserRole {
-///     Viewer = 0,
-///     Editor = 1,
-///     Manager = 2,
-/// }
-/// ```
-#[proc_macro_derive(BitRole, attributes(bitrole))]
-pub fn derive_bitrole(input: TokenStream) -> TokenStream {
-    bitrole::derive_bitrole(input)
 }
 
 /// Registers a cron emitter.

@@ -22,6 +22,10 @@
         <tr><th>Methods</th><td>{{ operation.methods | join(", ") }}</td></tr>
         <tr><th>Owner</th><td>{% if operation.owner %}{{ operation.owner }}{% endif %}</td></tr>
         <tr><th>Hidden</th><td>{{ operation.hidden }}</td></tr>
+        {% if operation.authorization %}
+        <tr><th>Scope rule</th><td>{{ operation.authorization.mode }}</td></tr>
+        <tr><th>Scopes</th><td>{{ operation.authorization.scopes | join(", ") }}</td></tr>
+        {% endif %}
       </tbody>
     </table>
   </section>

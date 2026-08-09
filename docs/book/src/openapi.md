@@ -18,7 +18,7 @@ OpenAPI generation uses these inputs:
 - Doc comments supply operation summary and description.
 - `PatchOp` overrides names, descriptions, argument metadata, response metadata,
   status codes, and extra responses.
-- `AuthUser`, `permit!(...)`, and validation wrappers contribute security and
+- `AuthUser`, `Permit<ScopeRule>`, and validation wrappers contribute security and
   error response metadata.
 - `OpenApiConf` controls the generated spec endpoint and API metadata.
 
@@ -30,6 +30,10 @@ Vyuh's UUID-backed `OperationId` is the canonical runtime identity used by
 `site.operations()` and handler extraction. It is separate from OpenAPI's
 configurable string `operationId`; multi-method OpenAPI suffixes never create
 additional runtime operations.
+
+`Permit<R>` contributes deterministic `x-vyuh-scopes` metadata with an `all`
+or `any` mode. Application scopes stay separate from OAuth authorization-server
+scope requirements in the standard security scheme.
 
 ## Registration
 
@@ -278,7 +282,7 @@ Vyuh documents common framework errors from handler metadata:
 
 - request inputs imply `400 Bad Request`;
 - `Valid<T>` inputs imply `422 Unprocessable Entity`;
-- auth inputs such as `AuthUser` and `permit!(...)` imply safe `401`, `403`,
+- auth inputs such as `AuthUser` and `Permit<ScopeRule>` imply safe `401`, `403`,
   `500`, and provider-unavailable `503` responses.
 
 These responses are explicit operation metadata contributed by the argument

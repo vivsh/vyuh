@@ -21,7 +21,7 @@ The main public pieces are:
 - `Site::serve(conf, bundle)` for advanced direct HTTP serving.
 - `Site::test(conf, bundle, pool)` for inert tests with an explicit SQLx pool.
 - `site.start()` for serving an already-built site.
-- `Site` accessors such as `db()`, `tasks()`, `templates()`, `service()`,
+- `Site` accessors such as `db()`, `cache()`, `tasks()`, `templates()`, `service()`,
   `auth()`, `signals()`, `routes()`, and `operations()`.
 - `vyuh::testing::router(&site)` for tests or Axum interop.
 - `SiteConf::http(...)` for global HTTP middleware and slash behavior.

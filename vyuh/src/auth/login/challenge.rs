@@ -2,7 +2,7 @@
 
 use std::{fmt, future::Future, sync::Arc};
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 use axum::http::{StatusCode, header};
 use axum::{
     Json,
@@ -40,7 +40,7 @@ pub struct LoginChallenge {
 }
 
 enum Challenge {
-    #[cfg(feature = "oidc")]
+    #[cfg(feature = "federated")]
     Redirect { url: String, expires_in: i64 },
     Factor {
         token: String,
@@ -53,7 +53,7 @@ impl LoginChallenge {
     /// Returns whether this challenge redirects or requests another factor.
     pub const fn kind(&self) -> LoginChallengeKind {
         match &self.challenge {
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => LoginChallengeKind::Redirect,
             Challenge::Factor { .. } => LoginChallengeKind::Factor,
         }
@@ -62,7 +62,7 @@ impl LoginChallenge {
     /// Returns an external redirect URL when this is an OIDC challenge.
     pub fn redirect_url(&self) -> Option<&str> {
         match &self.challenge {
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { url, .. } => Some(url),
             Challenge::Factor { .. } => None,
         }
@@ -72,7 +72,7 @@ impl LoginChallenge {
     pub fn token(&self) -> Option<&str> {
         match &self.challenge {
             Challenge::Factor { token, .. } => Some(token),
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => None,
         }
     }
@@ -81,7 +81,7 @@ impl LoginChallenge {
     pub fn methods(&self) -> &[String] {
         match &self.challenge {
             Challenge::Factor { methods, .. } => methods,
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => &[],
         }
     }
@@ -89,7 +89,7 @@ impl LoginChallenge {
     /// Returns the number of seconds before this challenge expires.
     pub const fn expires_in(&self) -> i64 {
         match &self.challenge {
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { expires_in, .. } => *expires_in,
             Challenge::Factor { expires_in, .. } => *expires_in,
         }
@@ -113,7 +113,7 @@ impl LoginChallenge {
         }
     }
 
-    #[cfg(feature = "oidc")]
+    #[cfg(feature = "federated")]
     pub(crate) fn redirect(url: String, expires_in: i64) -> Self {
         Self {
             challenge: Challenge::Redirect { url, expires_in },
@@ -132,7 +132,7 @@ pub(crate) struct FactorChallengeSchema {
 impl IntoResponse for LoginChallenge {
     fn into_response(self) -> Response {
         let mut response = match self.challenge {
-            #[cfg(feature = "oidc")]
+            #[cfg(feature = "federated")]
             Challenge::Redirect { url, .. } => redirect_response(url),
             Challenge::Factor {
                 token,
@@ -158,7 +158,7 @@ impl IntoReturnPart for LoginChallenge {
     }
 }
 
-#[cfg(feature = "oidc")]
+#[cfg(feature = "federated")]
 fn redirect_response(url: String) -> Response {
     match HeaderValue::from_str(&url) {
         Ok(value) => {
