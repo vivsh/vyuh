@@ -178,6 +178,8 @@ fn parse_kind(value: &str) -> Option<OperationKind> {
         "route" => Some(OperationKind::Route),
         "api_doc" | "apidoc" => Some(OperationKind::ApiDoc),
         "service" => Some(OperationKind::Service),
+        #[cfg(feature = "mcp")]
+        "mcp_tool" | "mcptool" => Some(OperationKind::McpTool),
         _ => None,
     }
 }
@@ -193,5 +195,7 @@ fn kind_key(kind: &OperationKind) -> &'static str {
         OperationKind::Route => "route",
         OperationKind::ApiDoc => "api_doc",
         OperationKind::Service => "service",
+        #[cfg(feature = "mcp")]
+        OperationKind::McpTool => "mcp_tool",
     }
 }

@@ -255,7 +255,7 @@ impl VerificationKeys {
     }
 }
 
-fn reject_duplicate_claims(value: &str) -> Result<(), AuthError> {
+pub(crate) fn reject_duplicate_claims(value: &str) -> Result<(), AuthError> {
     let mut segments = value.split('.');
     let _header = segments.next().ok_or(AuthError::InvalidCredential)?;
     let claims = segments.next().ok_or(AuthError::InvalidCredential)?;

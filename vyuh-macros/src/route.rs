@@ -26,13 +26,67 @@ struct RouteConfMeta {
 
     /// Optional slash policy: exact, trim, redirect_append, redirect_remove, auto.
     slash: Option<String>,
+
+    /// Expose the route as an MCP tool.
+    #[darling(default)]
+    mcp: Option<McpRouteMeta>,
+}
+
+#[derive(Debug, Default, FromMeta)]
+struct McpOptions {
+    read_only: Option<bool>,
+    destructive: Option<bool>,
+    idempotent: Option<bool>,
+    open_world: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+struct McpRouteMeta(McpOptions);
+
+impl FromMeta for McpRouteMeta {
+    fn from_word() -> darling::Result<Self> {
+        Ok(Self::default())
+    }
+
+    fn from_list(items: &[darling::ast::NestedMeta]) -> darling::Result<Self> {
+        McpOptions::from_list(items).map(Self)
+    }
 }
 
 /// Entry point for #[route] macro.
 ///
 /// Handles both free functions and methods in impl blocks.
 pub(crate) fn parse_route(attr: TokenStream, item: TokenStream) -> TokenStream {
-    bundlepart::generate_bundle_part::<RouteConfMeta>(attr, item, "route", build_route_conf)
+    bundlepart::generate_bundle_part_with::<RouteConfMeta>(
+        attr,
+        item,
+        "route",
+        build_route_conf,
+        decorate_mcp,
+    )
+}
+
+fn decorate_mcp(conf: &RouteConfMeta) -> proc_macro2::TokenStream {
+    let Some(meta) = &conf.mcp else {
+        return quote! {};
+    };
+    let read_only = meta.0.read_only.map(|value| quote! { .read_only(#value) });
+    let destructive = meta
+        .0
+        .destructive
+        .map(|value| quote! { .destructive(#value) });
+    let idempotent = meta
+        .0
+        .idempotent
+        .map(|value| quote! { .idempotent(#value) });
+    let open_world = meta
+        .0
+        .open_world
+        .map(|value| quote! { .open_world(#value) });
+    quote! {
+        .mcp(::vyuh::mcp::McpToolConf::default()
+            #read_only #destructive #idempotent #open_world)
+    }
 }
 
 /// Build RouteConf from parsed metadata and function spec.
@@ -155,6 +209,38 @@ fn build_method_filter(methods: &[String]) -> proc_macro2::TokenStream {
     }
 }
 
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+    use quote::quote;
+
+    /// Verifies bare route opt-in creates default MCP annotations.
+    #[test]
+    fn accepts_bare_mcp_annotation() {
+        assert!(McpRouteMeta::from_word().is_ok());
+    }
+
+    /// Verifies nested route MCP annotations use the same limited metadata set.
+    #[test]
+    fn accepts_nested_mcp_annotations() {
+        let items = darling::ast::NestedMeta::parse_meta_list(quote! {
+            read_only = true,
+            idempotent = true
+        })
+        .unwrap_or_default();
+        let result = McpRouteMeta::from_list(&items);
+        assert!(result.is_ok());
+    }
+
+    /// Verifies route MCP annotations do not accept permission configuration.
+    #[test]
+    fn rejects_route_role_annotation() {
+        let items = darling::ast::NestedMeta::parse_meta_list(quote! { role = "admin" })
+            .unwrap_or_default();
+        assert!(McpRouteMeta::from_list(&items).is_err());
+    }
+}
+
 /// Convert method string to Methods constant.
 fn method_to_const(method: &str) -> proc_macro2::TokenStream {
     match method {
@@ -211,5 +297,17 @@ mod tests {
     fn validate_path_rejects_double_slashes() {
         let err = validate_path("/api//notes").unwrap_err();
         assert!(err.to_string().contains("double slashes"));
+    }
+
+    /// Verifies the route macro emits the MCP opt-in call only when requested.
+    #[test]
+    fn decorates_mcp_route() {
+        let enabled = RouteConfMeta {
+            mcp: Some(McpRouteMeta::default()),
+            ..RouteConfMeta::default()
+        };
+        let disabled = RouteConfMeta::default();
+        assert!(decorate_mcp(&enabled).to_string().contains("McpToolConf"));
+        assert!(decorate_mcp(&disabled).is_empty());
     }
 }

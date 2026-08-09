@@ -886,6 +886,8 @@ fn build_layer_param(
             return Ok(None);
         }
         ArgPart::Zone | ArgPart::Ignore => return Ok(None),
+        #[cfg(feature = "mcp")]
+        ArgPart::RawRequest | ArgPart::Authorization { .. } => return Ok(None),
     };
 
     let openapi_schema = type_schema_to_openapi(schema, registry)?;
@@ -963,6 +965,8 @@ fn build_param(
             return Ok(None);
         }
         ArgPart::Zone | ArgPart::Ignore => return Ok(None),
+        #[cfg(feature = "mcp")]
+        ArgPart::RawRequest | ArgPart::Authorization { .. } => return Ok(None),
     };
 
     let openapi_schema = type_schema_to_openapi(schema, registry)?;
@@ -1661,6 +1665,8 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
+            #[cfg(feature = "mcp")]
+            mcp: None,
             audience: None,
             bundle_id: None,
             slash_policy: None,

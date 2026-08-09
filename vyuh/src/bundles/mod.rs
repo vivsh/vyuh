@@ -21,11 +21,17 @@ use crate::{
 // Public re-exports
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "mcp")]
+use crate::mcp::{McpEngine, McpToolRegistry};
 use openapi::DocEngine;
 
 pub use crate::apidocs::{DocViewer, OpenApiVersion};
+#[cfg(feature = "mcp")]
+pub use crate::mcp::{McpConf, McpToolConf};
 pub use error::BundleError;
 pub use openapi::{OpenApiConf, OpenApiViewerConf};
+#[cfg(feature = "mcp")]
+pub use part::mcp_tool;
 pub use part::{
     BundlePart, asset_dir, bundle, command, cron, periodic, pgnotify, route, service, signal, task,
     url_info,
@@ -33,6 +39,8 @@ pub use part::{
 #[cfg(feature = "migrations")]
 pub use part::{migrations, schema};
 
+#[cfg(feature = "mcp")]
+pub use vyuh_macros::mcp_tool;
 pub use vyuh_macros::{
     asset_dir, bundle, cron, periodic, pgnotify, route, service, signal, task, url_info,
 };
@@ -110,6 +118,10 @@ pub struct Bundle {
     pub(crate) services: ServiceRegistry,
     pub(crate) commands: CommandRegistry,
     pub(crate) doc_engine: DocEngine,
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_engine: McpEngine,
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_registry: McpToolRegistry,
     #[cfg(feature = "migrations")]
     pub(crate) migrations: crate::db::MigrationRegistry,
 }
@@ -136,6 +148,10 @@ impl Bundle {
             services: ServiceRegistry::new(),
             commands: CommandRegistry::new(),
             doc_engine: DocEngine::new(),
+            #[cfg(feature = "mcp")]
+            mcp_engine: McpEngine::new(),
+            #[cfg(feature = "mcp")]
+            mcp_registry: McpToolRegistry::new(),
             #[cfg(feature = "migrations")]
             migrations: crate::db::MigrationRegistry::new(),
         }
@@ -181,7 +197,7 @@ impl Bundle {
             return;
         };
         for operation in self.ops.values_mut() {
-            if operation.requires_auth() && operation.audience.is_none() {
+            if operation.requires_bundle_audience() && operation.audience.is_none() {
                 operation.audience = Some(audience.clone());
             }
         }
@@ -208,8 +224,22 @@ impl Bundle {
         if !self.errors.is_empty() {
             return Err(BundleError::ErrorList(self.errors.clone()));
         }
+        #[cfg(feature = "mcp")]
+        {
+            let unclaimed = self
+                .mcp_registry
+                .unclaimed()
+                .filter_map(|id| self.ops.get(&id).map(|operation| operation.name.as_str()))
+                .collect::<Vec<_>>();
+            if !unclaimed.is_empty() {
+                return Err(BundleError::Mcp(format!(
+                    "MCP registrations are not claimed by a service: {}",
+                    unclaimed.join(", ")
+                )));
+            }
+        }
         for operation in self.ops.values() {
-            if operation.requires_auth() && operation.audience.is_none() {
+            if operation.requires_bundle_audience() && operation.audience.is_none() {
                 return Err(BundleError::MissingAuthAudience {
                     name: operation.name.clone(),
                     path: operation.path.clone(),
@@ -386,6 +416,10 @@ impl Bundle {
             return Err(BundleError::Migration(Arc::new(e)));
         }
         self.doc_engine.merge(other.doc_engine);
+        #[cfg(feature = "mcp")]
+        self.mcp_engine.merge(other.mcp_engine);
+        #[cfg(feature = "mcp")]
+        self.mcp_registry.merge(other.mcp_registry);
         Ok(other.inner_router)
     }
 
@@ -498,6 +532,8 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
+            #[cfg(feature = "mcp")]
+            mcp: None,
             audience: None,
             bundle_id: None,
             slash_policy: None,

@@ -9,6 +9,8 @@ mod branca;
 mod paseto;
 
 pub use django::DjangoSigning;
+#[cfg(feature = "mcp")]
+pub(crate) use jwt::reject_duplicate_claims;
 pub use jwt::{Jwt, JwtAlgorithm, JwtConf, JwtVerificationKey};
 
 #[cfg(feature = "branca")]

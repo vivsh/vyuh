@@ -3,6 +3,7 @@ mod bitrole;
 mod bundle;
 mod bundlepart;
 mod cron;
+mod mcp_tool;
 mod migrations;
 mod multipart;
 mod openapi;
@@ -68,6 +69,8 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 /// - `description` - Detailed description for OpenAPI. Defaults to doc comments.
 /// - `arg(...)` - Override OpenAPI argument metadata by position/name.
 /// - `returns(...)` - Override or append OpenAPI response metadata.
+/// - `mcp` or `mcp(...)` - Opt an eligible JSON-body route into an owning
+///   bundle's feature-gated MCP service and optionally set tool annotations.
 ///
 /// # Examples
 ///
@@ -93,10 +96,40 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 /// async fn create_user(Json(input): Json<CreateUser>) -> Json<User> {
 ///     // ...
 /// }
+///
+/// // Semantic MCP route tool
+/// #[route(
+///     path = "/users/update",
+///     method = "POST",
+///     mcp(idempotent = true)
+/// )]
+/// async fn update_user(Json(input): Json<UpdateUser>) -> Json<User> {
+///     // ...
+/// }
 /// ```
 #[proc_macro_attribute]
 pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
     route::parse_route(attr, item)
+}
+
+/// Defines a semantic MCP-only tool backed by a typed Vyuh callable.
+///
+/// This macro is sugar over `vyuh::bundles::mcp_tool`. The handler must end in
+/// one `Data<T>` or `Valid<Data<T>>` object payload. Supported annotations are
+/// `read_only`, `destructive`, `idempotent`, and `open_world`.
+///
+/// ```ignore
+/// #[mcp_tool(read_only = true, idempotent = true)]
+/// async fn search_notes(
+///     _permit: permit!(Role, Reader | Editor),
+///     input: Data<SearchNotesInput>,
+/// ) -> Result<Data<SearchNotesOutput>, Error> {
+///     // ...
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
+    mcp_tool::parse_mcp_tool(attr, item)
 }
 
 /// Collects bundle parts (routes, tasks, signals) into a Bundle for composition and registration.

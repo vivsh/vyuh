@@ -34,6 +34,8 @@ pub(super) enum BundlePartInner {
     Migrations(crate::db::MigrationSource),
     #[cfg(feature = "migrations")]
     Schema(crate::db::SchemaSource),
+    #[cfg(feature = "mcp")]
+    McpTool(crate::mcp::McpDirectRegistration),
 }
 
 /// A single registerable piece of a bundle: a route, emitter, signal, service, etc.
@@ -50,8 +52,27 @@ impl BundlePart {
     pub fn patch(mut self, f: callables::PatchOp) -> Self {
         if let Some(op) = &mut self.operation {
             f.apply(op);
-        } else if let BundlePartInner::Route(_, ref mut op) = self.part {
-            f.apply(op);
+        } else {
+            match &mut self.part {
+                BundlePartInner::Route(_, operation) => f.apply(operation),
+                #[cfg(feature = "mcp")]
+                BundlePartInner::McpTool(registration) => f.apply(&mut registration.operation),
+                _ => {}
+            }
+        }
+        self
+    }
+
+    /// Exposes this HTTP route as an MCP tool when the owning bundle enables MCP.
+    #[cfg(feature = "mcp")]
+    pub fn mcp(mut self, conf: crate::mcp::McpToolConf) -> Self {
+        match &mut self.part {
+            BundlePartInner::Route(_, operation) => operation.mcp = Some(conf),
+            _ => {
+                self.part = BundlePartInner::Error(BundleError::Mcp(
+                    "only HTTP routes can be exposed as MCP tools".to_string(),
+                ));
+            }
         }
         self
     }
@@ -120,6 +141,13 @@ impl Bundle {
                     self.errors.push(BundleError::Migration(Arc::new(e)));
                 }
             }
+            #[cfg(feature = "mcp")]
+            BundlePartInner::McpTool(mut registration) => {
+                registration.operation.assign_bundle_id(self.id);
+                let id = registration.operation.id;
+                self.ops.insert(id, registration.operation);
+                self.mcp_registry.register_direct(id, registration.callable);
+            }
         }
         self
     }
@@ -135,6 +163,10 @@ impl Bundle {
             return self;
         }
         let id = op.id;
+        #[cfg(feature = "mcp")]
+        if op.mcp.is_some() {
+            self.mcp_registry.register_route(id);
+        }
         let allow = allow_header(&op.methods);
         let router = router
             .fallback(move || method_not_allowed(allow.clone()))
@@ -193,6 +225,39 @@ where
     BundlePart {
         operation: None,
         part: BundlePartInner::Route(router, op),
+    }
+}
+
+/// Creates a semantic MCP-only tool from a typed Vyuh callable.
+#[cfg(feature = "mcp")]
+pub fn mcp_tool<T, H, O, Args>(
+    name: impl Into<String>,
+    handler: H,
+    conf: crate::mcp::McpToolConf,
+) -> BundlePart
+where
+    T: callables::DataValue,
+    H: callables::Specable<Args, Output = O> + Send + Sync + 'static,
+    O: callables::IntoOutput<Error> + callables::IntoReturnPart + Send + 'static,
+    Args: callables::FromContext<crate::mcp::McpToolContext>
+        + callables::IntoArgSpecs
+        + callables::HasData<T>
+        + Send
+        + 'static,
+{
+    let callable = callables::Callable::new(handler);
+    let mut operation = crate::callables::Operation::from_specs(
+        crate::callables::OperationKind::McpTool,
+        callable.inspect(),
+    );
+    operation.name = name.into();
+    operation.mcp = Some(conf);
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::McpTool(crate::mcp::McpDirectRegistration {
+            operation,
+            callable,
+        }),
     }
 }
 

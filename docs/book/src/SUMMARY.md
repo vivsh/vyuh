@@ -20,6 +20,7 @@
 - [Auth](auth.md)
 - [Middlewares](middlewares.md)
 - [OpenAPI](openapi.md)
+- [Model Context Protocol](mcp.md)
 
 # Runtime Paths
 

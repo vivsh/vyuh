@@ -53,6 +53,8 @@ pub use crate::roles::{BitRole, Permit, PermitAll, PermitAny, RoleType, format_r
 pub(crate) use codec::{
     CodecRuntime, CustomClaims, CustomCodec, ErasedDecoder, ErasedEncoder, SecretRing,
 };
+#[cfg(feature = "mcp")]
+pub(crate) use codecs::reject_duplicate_claims;
 pub(crate) use config::{
     BindingResolver, ErasedTokenVerifier, KeySourceKind, ProviderDefinitionInner, ProviderKind,
     build_codec, validate_token_conf,

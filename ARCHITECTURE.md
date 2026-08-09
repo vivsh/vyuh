@@ -76,6 +76,20 @@ The `vyuh` crate is organized around these subsystems:
   built `Site`.
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
   operations and types.
+- `mcp` is an optional, tool-only Streamable HTTP subsystem over explicitly
+  registered semantic callables and eligible typed JSON routes. Bundle-owned
+  `McpToolRegistry` entries retain stable schemas, authorization metadata, and
+  either a direct callable or route target; `McpEngine` separately owns one or
+  more independently configured service endpoints. Direct tools execute through
+  `McpToolContext`, while route-backed tools reconstruct only a static-method
+  JSON request and dispatch through the built site router. The engine owns
+  protocol framing, role-filtered discovery, protected-resource metadata,
+  external JWT/JWKS verification, and a swappable public-document cache. It
+  converts validated subjects into normal `AuthUser` values but never forwards
+  bearer credentials or owns OAuth login and consent. Modern MCP requests are
+  stateless and validate mirrored routing headers against body metadata, while
+  prior initialization-based revisions are accepted without framework session
+  state.
 - `assets`, `templates`, and `embed` provide overlaid embedded assets,
   a validated site-wide static URL, server-side templates, private bundle
   resources, desired-schema assets, and the shared web asset surface used by
@@ -228,8 +242,18 @@ the client-facing event type uses the payload schema name.
    JSON resources remain direct, paginated queries return Mool's `Page<T>`, and
    framework-generated JSON failures normalize into `ErrorReport`; raw responses
    remain an explicit application escape hatch.
-10. OpenAPI and schema metadata are produced from registered operations and
-   type metadata.
+10. When enabled, each `with_mcp` declaration claims the unclaimed MCP registry
+    entries in its bundle subtree. Site construction finalizes all service paths,
+    rejects unclaimed entries and endpoint/resource collisions, and builds a
+    deterministic catalog per service. Protected endpoints validate their own
+    canonical resource audience and map the subject to `AuthUser`. Discovery
+    filters tools using the same required `permit!` masks used again at call
+    time. Direct targets receive `McpToolContext`; route targets receive the
+    semantic object unchanged as an internal JSON body through the existing
+    router. Neither path receives the external bearer credential. Only public
+    OAuth metadata and JWKS may cross the service-owned cache boundary.
+11. OpenAPI and schema metadata are produced from registered operations and
+    type metadata.
 
 ## Extension Rules
 

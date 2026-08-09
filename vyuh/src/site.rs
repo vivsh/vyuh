@@ -399,6 +399,11 @@ impl SiteBuilder {
             .doc_engine
             .setup(&mut router, &bundle.ops, &self.conf.auth)?;
 
+        #[cfg(feature = "mcp")]
+        bundle
+            .mcp_engine
+            .setup(&mut router, &bundle.ops, &bundle.mcp_registry)?;
+
         router = router.fallback(route_not_found);
 
         let slash_router = Arc::new(

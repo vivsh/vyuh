@@ -579,7 +579,7 @@ async fn create_comment(
     let comment_table = Comment::table();
     let comments = db::from(&comment_table)
         .filter(comment_table.post_id.eq(db::val(post.post.id)))
-        .order_by(comment_table.created_at.asc())
+        .sort(comment_table.created_at.asc())
         .all::<CommentWithAuthor>()
         .exec(&mut db)
         .await?;
@@ -652,7 +652,7 @@ async fn list_users(
     let page = query.resolve(DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
     let table = User::table();
     let users = db::from(&table)
-        .order_by(table.created_at.desc())
+        .sort(table.created_at.desc())
         .page::<User, _>(page.page, page.per_page, &mut db)
         .await?;
     Ok(Json(users.map(UserOut::from)))
@@ -877,7 +877,7 @@ async fn query_posts(
     page: vyuh::routes::PageBounds,
 ) -> Result<db::Page<PostWithAuthor>, Error> {
     let table = Post::table();
-    let scope = db::from(&table).order_by(table.created_at.desc());
+    let scope = db::from(&table).sort(table.created_at.desc());
     let scope = if include_all {
         scope
     } else {

@@ -475,7 +475,14 @@ impl IntoArgPart for site::Site {
 
 impl IntoArgPart for axum::extract::Request {
     fn into_arg_part() -> ArgPart {
-        ArgPart::Ignore
+        #[cfg(feature = "mcp")]
+        {
+            ArgPart::RawRequest
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            ArgPart::Ignore
+        }
     }
 }
 

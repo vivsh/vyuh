@@ -137,10 +137,11 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> crate::callables::IntoArgPart
             .iter()
             .filter_map(|(bit, name)| {
                 let role_bit = (1 as RoleType).checked_shl(*bit as u32)?;
-                (MASK & role_bit != 0).then(|| Cow::Borrowed(*name))
+                (MASK & role_bit != 0).then_some(Cow::Borrowed(*name))
             })
             .collect();
-        crate::callables::ArgPart::Composite(vec![
+        #[allow(unused_mut)]
+        let mut parts = vec![
             crate::callables::ArgPart::Authentication,
             crate::callables::ArgPart::Security {
                 scheme: Cow::Borrowed("vyuhAuth"),
@@ -151,7 +152,13 @@ impl<const MASK: RoleType, R: BitRole, O: HasPerm> crate::callables::IntoArgPart
                 crate::callables::ReturnSpec::error(401, "Unauthorized."),
                 crate::callables::ReturnSpec::error(403, "Forbidden."),
             ]),
-        ])
+        ];
+        #[cfg(feature = "mcp")]
+        parts.push(crate::callables::ArgPart::Authorization {
+            mask: MASK,
+            join_all: O::join_all(),
+        });
+        crate::callables::ArgPart::Composite(parts)
     }
 }
 

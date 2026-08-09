@@ -934,6 +934,7 @@ impl From<CallError> for Error {
             CallError::MissingField(field) => Self::bad_request(format!("missing field: {field}")),
             CallError::InvalidArgument(msg) => Self::bad_request(msg),
             CallError::Unauthorized => Self::new(ErrorKind::Unauthorized),
+            CallError::Forbidden => Self::new(ErrorKind::Forbidden),
             CallError::NotFound(msg) => Self::not_found(msg),
             CallError::Other(err) => Self {
                 kind: ErrorKind::Other,

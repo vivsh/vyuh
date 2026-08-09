@@ -21,6 +21,8 @@ pub mod emitters;
 pub mod errors;
 pub mod file_storage;
 pub mod logging;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod middlewares;
 pub(crate) mod notifiers;
 pub mod observability;

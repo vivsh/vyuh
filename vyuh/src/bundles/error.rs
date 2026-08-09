@@ -31,6 +31,10 @@ pub enum BundleError {
     #[error("API doc generation failed: {0}")]
     DocGen(String),
 
+    #[cfg(feature = "mcp")]
+    #[error("MCP configuration failed: {0}")]
+    Mcp(String),
+
     #[error("route registry construction failed: {0}")]
     RouteRegistry(String),
 

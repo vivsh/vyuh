@@ -483,6 +483,77 @@ pub fn generate_bundle_part<T: darling::FromMeta + Default>(
     }
 }
 
+/// Generates a bundle part and appends configuration-specific fluent calls.
+pub(crate) fn generate_bundle_part_with<T: darling::FromMeta + Default>(
+    attr: TokenStream,
+    item: TokenStream,
+    attr_name: &str,
+    conf_builder: fn(&T, &FnSpec) -> Result<proc_macro2::TokenStream, syn::Error>,
+    decorator: fn(&T) -> proc_macro2::TokenStream,
+) -> TokenStream {
+    let attr2 = attr.into();
+    let item2 = item.into();
+    match generate_impl_with(attr2, item2, attr_name, conf_builder, decorator) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generates a named three-argument bundle factory registration.
+pub(crate) fn generate_named_bundle_part<T: darling::FromMeta + Default>(
+    attr: TokenStream,
+    item: TokenStream,
+    attr_name: &str,
+    conf_builder: fn(&T, &FnSpec) -> Result<proc_macro2::TokenStream, syn::Error>,
+) -> TokenStream {
+    let attr = attr.into();
+    let item = item.into();
+    match generate_named_impl::<T>(attr, item, attr_name, conf_builder) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+fn generate_named_impl<T: darling::FromMeta + Default>(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+    attr_name: &str,
+    conf_builder: fn(&T, &FnSpec) -> Result<proc_macro2::TokenStream, syn::Error>,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let mut spec = extract_func_spec(&item, attr_name)?;
+    let conf = parse_and_apply_metadata::<T>(attr, &mut spec)?;
+    let conf_tokens = conf_builder(&conf, &spec)?;
+    let patch_chain = build_patch_chain(&spec);
+    Ok(emit_named_registration(
+        &spec,
+        attr_name,
+        &item,
+        &conf_tokens,
+        &patch_chain,
+    ))
+}
+
+fn generate_impl_with<T: darling::FromMeta + Default>(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+    attr_name: &str,
+    conf_builder: fn(&T, &FnSpec) -> Result<proc_macro2::TokenStream, syn::Error>,
+    decorator: fn(&T) -> proc_macro2::TokenStream,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let mut spec = extract_func_spec(&item, attr_name)?;
+    let conf = parse_and_apply_metadata::<T>(attr, &mut spec)?;
+    let conf_tokens = conf_builder(&conf, &spec)?;
+    let mut patch_chain = build_patch_chain(&spec);
+    patch_chain.extend(decorator(&conf));
+    Ok(emit_registration(
+        &spec,
+        attr_name,
+        &item,
+        &conf_tokens,
+        &patch_chain,
+    ))
+}
+
 /// Implementation of bundle part generation.
 pub(crate) fn generate_impl<T: darling::FromMeta + Default>(
     attr: proc_macro2::TokenStream,
@@ -546,6 +617,33 @@ fn emit_registration(
         #[doc(hidden)]
         fn #wrapper_fn() -> ::vyuh::bundles::BundlePart {
             ::vyuh::bundles::#factory(#handler_fn, #conf_tokens) #patch_chain
+        }
+    }
+}
+
+fn emit_named_registration(
+    spec: &FnSpec,
+    attr_name: &str,
+    item: &proc_macro2::TokenStream,
+    conf_tokens: &proc_macro2::TokenStream,
+    patch_chain: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let name = &spec.name;
+    let handler = syn::Ident::new(name, Span::call_site());
+    let wrapper = syn::Ident::new(&format!("__bundle_part_{name}"), Span::call_site());
+    let factory = syn::Ident::new(attr_name, Span::call_site());
+    let handler = if spec.method {
+        quote! { Self::#handler }
+    } else {
+        quote! { #handler }
+    };
+    quote! {
+        #item
+
+        #[allow(non_snake_case)]
+        #[doc(hidden)]
+        fn #wrapper() -> ::vyuh::bundles::BundlePart {
+            ::vyuh::bundles::#factory(#name, #handler, #conf_tokens) #patch_chain
         }
     }
 }

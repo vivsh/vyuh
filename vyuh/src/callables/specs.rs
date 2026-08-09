@@ -71,6 +71,10 @@ pub enum CallError {
     #[error("Unauthorized")]
     Unauthorized,
 
+    /// Authenticated identity lacks the required application permission.
+    #[error("Forbidden")]
+    Forbidden,
+
     /// Resource not found
     #[error("Not found: {0}")]
     NotFound(Cow<'static, str>),
@@ -90,6 +94,9 @@ impl From<std::convert::Infallible> for CallError {
 #[derive(Clone)]
 pub struct TypeSchema {
     pub(crate) type_schema: fn(&mut schemars::SchemaGenerator) -> schemars::Schema,
+
+    #[cfg(feature = "mcp")]
+    pub(crate) root_schema: fn() -> schemars::Schema,
 
     pub(crate) type_id: fn() -> TypeId,
 
@@ -123,8 +130,15 @@ impl TypeSchema {
         fn converter<T: JsonSchema>(genr: &mut schemars::SchemaGenerator) -> schemars::Schema {
             genr.subschema_for::<T>()
         }
+        #[cfg(feature = "mcp")]
+        fn root<T: JsonSchema>() -> schemars::Schema {
+            use schemars::generate::SchemaSettings;
+            schemars::SchemaGenerator::new(SchemaSettings::draft07()).into_root_schema_for::<T>()
+        }
         Self {
             type_schema: converter::<T>,
+            #[cfg(feature = "mcp")]
+            root_schema: root::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
             validated: false,
@@ -139,8 +153,17 @@ impl TypeSchema {
                 "format": "binary"
             })
         }
+        #[cfg(feature = "mcp")]
+        fn root() -> schemars::Schema {
+            schemars::json_schema!({
+                "type": "string",
+                "format": "binary"
+            })
+        }
         Self {
             type_schema: converter,
+            #[cfg(feature = "mcp")]
+            root_schema: root,
             type_id: || TypeId::of::<axum::body::Bytes>(),
             type_name: || "axum::body::Bytes",
             validated: false,
@@ -158,8 +181,19 @@ impl TypeSchema {
             }
             schemars::Schema::try_from(value).unwrap_or_default()
         }
+        #[cfg(feature = "mcp")]
+        fn root<T: JsonSchema>() -> schemars::Schema {
+            use schemars::generate::SchemaSettings;
+            let schema = schemars::SchemaGenerator::new(SchemaSettings::draft07())
+                .into_root_schema_for::<T>();
+            let mut value = schema.to_value();
+            strip_validation_keywords(&mut value);
+            schemars::Schema::try_from(value).unwrap_or_default()
+        }
         Self {
             type_schema: converter::<T>,
+            #[cfg(feature = "mcp")]
+            root_schema: root::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
             validated: false,
@@ -183,8 +217,17 @@ impl TypeSchema {
             T::apply_validation_schema(&mut value, genr.definitions_mut());
             schemars::Schema::try_from(value).unwrap_or_default()
         }
+        #[cfg(feature = "mcp")]
+        fn root<T>() -> schemars::Schema
+        where
+            T: JsonSchema + crate::validation::ValidationSchema,
+        {
+            converter::<T>(&mut schemars::SchemaGenerator::default())
+        }
         Self {
             type_schema: converter::<T>,
+            #[cfg(feature = "mcp")]
+            root_schema: root::<T>,
             type_id: || TypeId::of::<T>(),
             type_name: || std::any::type_name::<T>(),
             validated: true,
@@ -194,6 +237,12 @@ impl TypeSchema {
     /// Generates JSON schema using provided generator.
     pub fn schema(&self, genr: &mut schemars::SchemaGenerator) -> schemars::Schema {
         (self.type_schema)(genr)
+    }
+
+    /// Generates a self-contained root schema for MCP transport contracts.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn root_schema(&self) -> schemars::Schema {
+        (self.root_schema)()
     }
 
     /// Returns runtime `TypeId` for type checking.
@@ -247,6 +296,9 @@ fn strip_validation_keywords(value: &mut serde_json::Value) {
 pub enum ArgPart {
     /// Runtime-injected argument (e.g. `Site`, `State<T>`); not visible in OpenAPI.
     Ignore,
+    /// Raw HTTP request access, tracked separately for MCP route eligibility.
+    #[cfg(feature = "mcp")]
+    RawRequest,
     /// Extracted from HTTP headers
     Header(TypeSchema),
 
@@ -273,6 +325,13 @@ pub enum ArgPart {
     Security {
         scheme: Cow<'static, str>,
         scopes: Vec<Cow<'static, str>>,
+        join_all: bool,
+    },
+
+    /// Application role requirement retained for MCP discovery authorization.
+    #[cfg(feature = "mcp")]
+    Authorization {
+        mask: crate::auth::RoleType,
         join_all: bool,
     },
 
