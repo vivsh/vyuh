@@ -1,3 +1,4 @@
+use crate::auth::{Audience, AuthError, AuthUser, LoginResponse, RequestCredentialLocation};
 #[cfg(all(
     feature = "test-support",
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
@@ -195,6 +196,15 @@ impl TestSite {
     /// Returns the built site for test data setup and framework state assertions.
     pub fn site(&self) -> &Site {
         &self.inner.site
+    }
+
+    /// Issues credentials through the site's normal default authentication provider.
+    pub async fn login(
+        &self,
+        user: AuthUser,
+        audiences: &[Audience],
+    ) -> Result<LoginResponse, AuthError> {
+        self.site().auth().login(user, audiences).await
     }
 
     pub fn request(&self, method: Method, path: &str) -> TestRequestBuilder {
@@ -439,6 +449,32 @@ impl TestRequestBuilder {
         self
     }
 
+    /// Applies the issued access credential through its configured request selector.
+    ///
+    /// This mirrors bearer, custom-header, cookie (including CSRF), and query-token
+    /// providers without tests hard-coding their delivery details.
+    pub fn with_login<T>(mut self, login: &LoginResponse<T>) -> Self {
+        let access = login.credentials().access();
+        match login.request_selector() {
+            RequestCredentialLocation::Header { name, scheme } => {
+                let value = scheme
+                    .as_deref()
+                    .map(|scheme| format!("{scheme} {access}"))
+                    .unwrap_or_else(|| access.to_owned());
+                self.headers.push((name.clone(), value));
+            }
+            RequestCredentialLocation::Cookie { name, csrf } => {
+                self.append_cookie(name, access);
+                if let Some((cookie, header, token)) = csrf {
+                    self.append_cookie(cookie, token);
+                    self.headers.push((header.clone(), token.clone()));
+                }
+            }
+            RequestCredentialLocation::Query { name } => self.append_query(name, access),
+        }
+        self
+    }
+
     pub fn body(mut self, body: Body) -> Self {
         self.body = Some(body);
         self
@@ -466,6 +502,33 @@ impl TestRequestBuilder {
             self.path = format!("{}?{}", self.path, query);
         }
         self
+    }
+
+    /// Adds a cookie to the request while retaining any earlier cookies.
+    fn append_cookie(&mut self, name: &str, value: &str) {
+        if let Some((_, existing)) = self
+            .headers
+            .iter_mut()
+            .find(|(header, _)| header.eq_ignore_ascii_case("cookie"))
+        {
+            existing.push_str("; ");
+            existing.push_str(name);
+            existing.push('=');
+            existing.push_str(value);
+            return;
+        }
+        self.headers
+            .push(("cookie".to_string(), format!("{name}={value}")));
+    }
+
+    /// Adds one encoded query value without replacing existing query parameters.
+    fn append_query(&mut self, name: &str, value: &str) {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair(name, value);
+        let query = serializer.finish();
+        let separator = if self.path.contains('?') { '&' } else { '?' };
+        self.path.push(separator);
+        self.path.push_str(&query);
     }
 
     pub async fn send(self) -> TestResponse {

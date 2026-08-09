@@ -256,6 +256,62 @@ site-secret key. New state uses the active secret and in-flight state accepts
 configured fallback secrets during rotation. The state binds login method,
 credential provider, audiences, and expiry.
 
+### Passwordless email and phone login
+
+Passwordless methods use the same typed `begin` and `complete` operations as
+MFA and federated login. They authenticate existing accounts only: application
+resolvers return `Option<AuthUser>`, so account creation and account linking
+remain application-owned.
+
+```rust
+const EMAIL_OTP: LoginMethod<EmailAddress, EmailOtp> =
+    LoginMethod::new("email-otp");
+const PHONE_OTP: LoginMethod<PhoneNumber, PhoneOtp> =
+    LoginMethod::new("phone-otp");
+
+let auth = AuthConf::default()
+    .passwordless_store(LoginChallenges)
+    .method(EMAIL_OTP, EmailLogin::otp(AccountEmails, AccountEmailSender))
+    .method(PHONE_OTP, PhoneLogin::otp(AccountPhones, SmsGateway));
+```
+
+Email methods require the `email` feature. Vyuh never composes passwordless
+mail content: applications own email and SMS delivery. Magic links require an
+explicit absolute HTTPS callback URL and expose the generated URL only to the
+handler that began the flow:
+
+```rust
+const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> =
+    LoginMethod::new("email-link");
+
+let link = EmailLogin::magic_link(AccountEmails)
+    .callback_url("https://app.example.com/auth/email/callback")
+    .stateful();
+```
+
+Applications own routes and delivery. A magic-link start exposes
+`challenge.magic_link_url()` only to the initiating handler, which may render
+any branded email with arbitrary application context. Stateless links are the
+default and remain reusable until expiry; `.stateful()` requires the durable
+store and consumes a link once. OTP senders receive a redacted code message;
+the code is never returned in the HTTP challenge. Unknown and known identifiers
+receive the same acknowledgement.
+
+`PasswordlessStore` is mandatory. It is application-provided durable storage
+that atomically creates/suppresses challenges, limits proof attempts, consumes a
+successful proof exactly once, and discards undeliverable challenges. Vyuh
+passes only opaque IDs, keyed proof digests, sealed state, and delivery limits
+to that store; it never persists raw OTPs, links, or identity details. The
+fixed defaults are a 15-minute magic link, a 10-minute six-digit OTP, five
+verification attempts, 60-second resend delay, and five deliveries per
+principal per hour.
+
+Phone input must already be canonical E.164. `EmailOtpSender` and
+`PhoneOtpSender` are the delivery integration points; each receives a redacted
+message and may expose its code only to the delivery adapter. Vyuh intentionally
+includes no provider-specific email/SMS integration, background delivery
+retries, passwordless signup, or passwordless MFA composition.
+
 ## Default JWT login
 
 `AuthConf::default()` registers one bearer JWT provider using HS256 and

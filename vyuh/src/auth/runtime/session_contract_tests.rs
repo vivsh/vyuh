@@ -132,6 +132,7 @@ fn mock_login_response() -> LoginResponse {
         None,
         3600,
         Vec::new(),
+        super::super::CredentialLocation::bearer().request_selector(None),
     )
 }
 

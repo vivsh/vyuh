@@ -240,6 +240,7 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
         target: LoginTarget,
         codec: &'a ChallengeCodec,
         _secrets: &'a SecretRing,
+        _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, LoginChallenge> {
         Box::pin(async move { self.begin_inner(method, input, target, codec).await })
     }
@@ -251,6 +252,7 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
         codec: &'a ChallengeCodec,
         _secrets: &'a SecretRing,
         state_store: Option<&'a LoginStateStoreRuntime>,
+        _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
         Box::pin(async move { self.complete_inner(method, input, codec, state_store).await })
     }

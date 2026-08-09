@@ -15,8 +15,9 @@ use super::{
     Audience, AudienceId, AuthError, AuthProvider, AuthToken, AuthUser, CodecDefinition,
     CredentialLocation, CsrfConf, CustomClaims, ErasedDecoder, ErasedEncoder, ErasedKeyLifecycle,
     ErasedLifecycle, Jwt, LoginDefinitionInner, LoginMethod, LoginProviderDefinition,
-    LoginStateStore, LoginStateStoreRuntime, ProviderDocLocation, ProviderId, SecretRing,
-    TokenClaims, TokenDecoder, TokenEncoder, TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
+    LoginStateStore, LoginStateStoreRuntime, PasswordlessStore, PasswordlessStoreRuntime,
+    ProviderDocLocation, ProviderId, SecretRing, TokenClaims, TokenDecoder, TokenEncoder,
+    TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
 };
 
 /// Opaque request-binding material attached to issued credentials.
@@ -617,6 +618,7 @@ pub struct AuthConf {
     providers: Vec<ProviderDefinitionInner>,
     login_methods: Vec<LoginDefinitionInner>,
     login_state_store: Option<LoginStateStoreRuntime>,
+    passwordless_store: Option<PasswordlessStoreRuntime>,
 }
 
 impl Default for AuthConf {
@@ -627,6 +629,7 @@ impl Default for AuthConf {
             providers: Vec::new(),
             login_methods: Vec::new(),
             login_state_store: None,
+            passwordless_store: None,
         }
     }
 }
@@ -682,6 +685,12 @@ impl AuthConf {
         self
     }
 
+    /// Configures durable one-time storage required by passwordless login methods.
+    pub fn passwordless_store(mut self, value: impl PasswordlessStore) -> Self {
+        self.passwordless_store = Some(PasswordlessStoreRuntime::new(value));
+        self
+    }
+
     pub(crate) fn definitions(&self) -> Vec<ProviderDefinitionInner> {
         let mut output = Vec::with_capacity(self.providers.len() + 1);
         if self.default_enabled {
@@ -711,6 +720,16 @@ impl AuthConf {
 
     pub(crate) fn login_state_store_runtime(&self) -> Option<LoginStateStoreRuntime> {
         self.login_state_store.clone()
+    }
+
+    pub(crate) fn passwordless_store_runtime(&self) -> Option<PasswordlessStoreRuntime> {
+        self.passwordless_store.clone()
+    }
+
+    pub(crate) fn requires_passwordless_store(&self) -> bool {
+        self.login_methods
+            .iter()
+            .any(|definition| definition.runtime.requires_passwordless_store())
     }
 
     pub(crate) fn default_audience_id(&self) -> Result<Option<AudienceId>, AuthError> {

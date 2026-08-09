@@ -55,6 +55,10 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
         Ok(())
     }
 
+    fn requires_passwordless_store(&self) -> bool {
+        false
+    }
+
     fn initialize(&self) -> LoginFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
@@ -70,6 +74,7 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
         _target: LoginTarget,
         _codec: &'a ChallengeCodec,
         _secrets: &'a SecretRing,
+        _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, LoginChallenge> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -81,6 +86,7 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
         _codec: &'a ChallengeCodec,
         _secrets: &'a SecretRing,
         _state_store: Option<&'a LoginStateStoreRuntime>,
+        _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -207,6 +213,7 @@ where
                     target,
                     self.authenticator.challenge_codec(),
                     self.authenticator.secret_ring(),
+                    self.authenticator.passwordless_store(),
                 )
                 .await
         }
@@ -227,6 +234,7 @@ where
                     self.authenticator.challenge_codec(),
                     self.authenticator.secret_ring(),
                     self.authenticator.login_state_store(),
+                    self.authenticator.passwordless_store(),
                 )
                 .await?;
             if completed.target.provider != resolved.provider {

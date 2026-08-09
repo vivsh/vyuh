@@ -33,6 +33,7 @@ pub struct Authenticator {
     login_methods: Arc<Vec<LoginDefinitionInner>>,
     indexes: Arc<RuntimeIndexes>,
     login_state_store: Option<super::LoginStateStoreRuntime>,
+    passwordless_store: Option<super::PasswordlessStoreRuntime>,
     secrets: SecretRing,
     challenge_codec: super::ChallengeCodec,
     metrics: Arc<AuthMetrics>,
@@ -161,6 +162,10 @@ impl Authenticator {
 
     pub(crate) fn login_state_store(&self) -> Option<&super::LoginStateStoreRuntime> {
         self.login_state_store.as_ref()
+    }
+
+    pub(crate) fn passwordless_store(&self) -> Option<&super::PasswordlessStoreRuntime> {
+        self.passwordless_store.as_ref()
     }
 
     pub(crate) fn default_audience(&self) -> Option<&AudienceId> {

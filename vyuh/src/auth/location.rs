@@ -179,6 +179,22 @@ enum LocationKind {
 #[derive(Clone, Debug)]
 pub(crate) struct CredentialLocation(LocationKind);
 
+/// A validated request selector retained with an issued login result for test clients.
+#[derive(Clone)]
+pub(crate) enum RequestCredentialLocation {
+    Header {
+        name: String,
+        scheme: Option<String>,
+    },
+    Cookie {
+        name: String,
+        csrf: Option<(String, String, String)>,
+    },
+    Query {
+        name: String,
+    },
+}
+
 pub(crate) struct RequestCredentialScan<'a> {
     parts: &'a Parts,
     cookies: Option<ParsedCookies<'a>>,
@@ -322,6 +338,24 @@ impl CredentialLocation {
             LocationKind::Header { .. } => Ok(None),
             LocationKind::Cookie(cookie) => cookie_header(cookie, value, ttl_seconds).map(Some),
             LocationKind::Query(_) => Ok(None),
+        }
+    }
+
+    /// Captures the configured request selector for an issued access credential.
+    pub(crate) fn request_selector(
+        &self,
+        csrf: Option<(String, String, String)>,
+    ) -> RequestCredentialLocation {
+        match &self.0 {
+            LocationKind::Header { name, scheme, .. } => RequestCredentialLocation::Header {
+                name: name.clone(),
+                scheme: scheme.clone(),
+            },
+            LocationKind::Cookie(cookie) => RequestCredentialLocation::Cookie {
+                name: cookie.name.clone(),
+                csrf,
+            },
+            LocationKind::Query(name) => RequestCredentialLocation::Query { name: name.clone() },
         }
     }
 

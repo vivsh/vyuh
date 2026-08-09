@@ -305,9 +305,12 @@ impl TokenRuntime {
             }
             _ => None,
         };
-        let (access_body, access_attachments) = delivery(&self.access, &access)?;
+        let (access_body, access_attachments, csrf) = delivery(&self.access, &access)?;
         let (refresh_body, refresh_attachments) = match (&self.refresh, &refresh_value) {
-            (Some(conf), Some(value)) => delivery(conf, value)?,
+            (Some(conf), Some(value)) => {
+                let (body, attachments, _) = delivery(conf, value)?;
+                (body, attachments)
+            }
             _ => (None, Vec::new()),
         };
         let attachments = access_attachments
@@ -321,6 +324,7 @@ impl TokenRuntime {
             refresh_body,
             self.access.ttl_seconds,
             attachments,
+            self.access.location.request_selector(csrf),
         );
         Ok((response, pair.refresh))
     }

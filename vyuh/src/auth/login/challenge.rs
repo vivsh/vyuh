@@ -31,6 +31,10 @@ pub enum LoginChallengeKind {
     Redirect,
     /// Return a JSON challenge for an additional local factor.
     Factor,
+    /// Return a magic link to an application-owned delivery handler.
+    MagicLink,
+    /// Return an opaque challenge token for a passwordless code.
+    Code,
 }
 
 /// A response-ready continuation challenge for OIDC or MFA login.
@@ -47,6 +51,17 @@ enum Challenge {
         methods: Vec<String>,
         expires_in: i64,
     },
+    #[cfg(feature = "email")]
+    MagicLink {
+        url: Option<String>,
+        expires_in: i64,
+    },
+    Code {
+        token: String,
+        channel: &'static str,
+        expires_in: i64,
+        resend_in: i64,
+    },
 }
 
 impl LoginChallenge {
@@ -56,6 +71,9 @@ impl LoginChallenge {
             #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => LoginChallengeKind::Redirect,
             Challenge::Factor { .. } => LoginChallengeKind::Factor,
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { .. } => LoginChallengeKind::MagicLink,
+            Challenge::Code { .. } => LoginChallengeKind::Code,
         }
     }
 
@@ -65,6 +83,9 @@ impl LoginChallenge {
             #[cfg(feature = "federated")]
             Challenge::Redirect { url, .. } => Some(url),
             Challenge::Factor { .. } => None,
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { .. } => None,
+            Challenge::Code { .. } => None,
         }
     }
 
@@ -72,6 +93,9 @@ impl LoginChallenge {
     pub fn token(&self) -> Option<&str> {
         match &self.challenge {
             Challenge::Factor { token, .. } => Some(token),
+            Challenge::Code { token, .. } => Some(token),
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { .. } => None,
             #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => None,
         }
@@ -81,6 +105,9 @@ impl LoginChallenge {
     pub fn methods(&self) -> &[String] {
         match &self.challenge {
             Challenge::Factor { methods, .. } => methods,
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { .. } => &[],
+            Challenge::Code { .. } => &[],
             #[cfg(feature = "federated")]
             Challenge::Redirect { .. } => &[],
         }
@@ -92,6 +119,9 @@ impl LoginChallenge {
             #[cfg(feature = "federated")]
             Challenge::Redirect { expires_in, .. } => *expires_in,
             Challenge::Factor { expires_in, .. } => *expires_in,
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { expires_in, .. } => *expires_in,
+            Challenge::Code { expires_in, .. } => *expires_in,
         }
     }
 
@@ -113,6 +143,40 @@ impl LoginChallenge {
         }
     }
 
+    #[cfg(feature = "email")]
+    pub(crate) fn magic_link(url: Option<String>, expires_in: i64) -> Self {
+        Self {
+            challenge: Challenge::MagicLink { url, expires_in },
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Returns a generated magic-link URL for application-owned delivery.
+    #[cfg(feature = "email")]
+    pub fn magic_link_url(&self) -> Option<&str> {
+        match &self.challenge {
+            Challenge::MagicLink { url, .. } => url.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn code(
+        token: String,
+        channel: &'static str,
+        expires_in: i64,
+        resend_in: i64,
+    ) -> Self {
+        Self {
+            challenge: Challenge::Code {
+                token,
+                channel,
+                expires_in,
+                resend_in,
+            },
+            attachments: Vec::new(),
+        }
+    }
+
     #[cfg(feature = "federated")]
     pub(crate) fn redirect(url: String, expires_in: i64) -> Self {
         Self {
@@ -129,6 +193,17 @@ pub(crate) struct FactorChallengeSchema {
     expires_in: i64,
 }
 
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct PasswordlessChallengeSchema {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_token: Option<String>,
+    channel: String,
+    expires_in: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resend_in: Option<i64>,
+    ok: bool,
+}
+
 impl IntoResponse for LoginChallenge {
     fn into_response(self) -> Response {
         let mut response = match self.challenge {
@@ -142,6 +217,28 @@ impl IntoResponse for LoginChallenge {
                 challenge_token: token,
                 methods,
                 expires_in,
+            })
+            .into_response(),
+            #[cfg(feature = "email")]
+            Challenge::MagicLink { expires_in, .. } => Json(PasswordlessChallengeSchema {
+                challenge_token: None,
+                channel: "email".into(),
+                expires_in,
+                resend_in: None,
+                ok: true,
+            })
+            .into_response(),
+            Challenge::Code {
+                token,
+                channel,
+                expires_in,
+                resend_in,
+            } => Json(PasswordlessChallengeSchema {
+                challenge_token: Some(token),
+                channel: channel.into(),
+                expires_in,
+                resend_in: Some(resend_in),
+                ok: true,
             })
             .into_response(),
         };

@@ -11,7 +11,11 @@ use crate::auth::{
 };
 
 type ResponseAttachments = Vec<(axum::http::HeaderName, axum::http::HeaderValue)>;
-type Delivery = (Option<String>, ResponseAttachments);
+type Delivery = (
+    Option<String>,
+    ResponseAttachments,
+    Option<(String, String, String)>,
+);
 
 pub(super) fn issue_token(
     id: &ProviderId,
@@ -45,11 +49,14 @@ pub(super) fn delivery(conf: &KindRuntime, value: &str) -> Result<Delivery, Auth
     };
     let body = (attachment.is_none() && !conf.location.is_cookie()).then(|| value.to_owned());
     let mut attachments = attachment.into_iter().collect::<Vec<_>>();
-    if let Some(csrf) = &conf.csrf {
+    let csrf_request = if let Some(csrf) = &conf.csrf {
         let token = uuid::Uuid::new_v4().simple().to_string();
         attachments.push(csrf.attachment(&token, conf.ttl_seconds)?);
-    }
-    Ok((body, attachments))
+        Some((csrf.cookie.name.clone(), csrf.header_name.clone(), token))
+    } else {
+        None
+    };
+    Ok((body, attachments, csrf_request))
 }
 
 pub(super) fn validate_token(

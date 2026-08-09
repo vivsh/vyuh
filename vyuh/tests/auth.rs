@@ -28,6 +28,8 @@ use vyuh::{
     testing::TestSite,
 };
 
+#[path = "auth/passwordless.rs"]
+mod passwordless;
 #[path = "auth/provider_flows.rs"]
 mod provider_flows;
 #[path = "auth/rotation.rs"]
@@ -712,6 +714,37 @@ async fn password_login_issues_default_credentials() -> Result<(), AuthError> {
         .await?;
     assert!(!login.credentials().access().is_empty());
     assert!(login.credentials().refresh().is_some());
+    Ok(())
+}
+
+/// Verifies test-site login can authenticate a request through the bearer selector.
+#[tokio::test]
+async fn test_site_login_authenticates_a_bearer_request() -> Result<(), AuthError> {
+    let site = Site::build(config(), bundle()).await.map_err(auth_error)?;
+    let test = TestSite::new(site);
+    let login = test.login(AuthUser::new("test-user"), &[REPORTS]).await?;
+    test.get("/me")
+        .with_login(&login)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::OK);
+    Ok(())
+}
+
+/// Verifies test-site login includes cookie and CSRF credentials for unsafe requests.
+#[tokio::test]
+async fn test_site_login_authenticates_a_cookie_request() -> Result<(), AuthError> {
+    let auth = configured_token_auth(TokenConf::cookie("access"), TokenConf::cookie("refresh"));
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let test = TestSite::new(site);
+    let login = test.login(AuthUser::new("cookie-user"), &[REPORTS]).await?;
+    test.post("/me")
+        .with_login(&login)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::OK);
     Ok(())
 }
 

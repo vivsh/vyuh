@@ -44,8 +44,14 @@ pub use login::ComposedMfaLogin;
 pub use login::{
     BasicCredentials, BasicLogin, LoginAuth, LoginChallenge, LoginChallengeKind, LoginMethod,
     LoginStateStore, MfaLogin, MfaMethod, MfaResponse, MfaVerifier, PasswordCredentials,
-    PasswordLogin, PasswordVerifier, PresentedSecret,
+    PasswordLogin, PasswordVerifier, PasswordlessAttempt, PasswordlessChallenge, PasswordlessStart,
+    PasswordlessStore, PhoneLogin, PhoneLoginResolver, PhoneNumber, PhoneOtp, PhoneOtpMessage,
+    PhoneOtpSender, PresentedSecret,
 };
+#[cfg(feature = "email")]
+pub use login::{EmailAddress, EmailLogin, EmailLoginResolver, EmailOtp, MagicLinkCallback};
+#[cfg(feature = "email")]
+pub use login::{EmailOtpMessage, EmailOtpSender};
 #[cfg(feature = "federated")]
 pub use login::{
     FederatedCallback, FederatedIdentity, FederatedLogin, FederatedProvider, FederatedStart,
@@ -75,10 +81,12 @@ pub(crate) use config::{
 };
 pub(crate) use identity::{AudienceId, ProviderId};
 pub(crate) use lifecycle::{ErasedKeyLifecycle, ErasedLifecycle};
-pub(crate) use location::{CredentialLocation, ProviderDocLocation, RequestCredentialScan};
+pub(crate) use location::{
+    CredentialLocation, ProviderDocLocation, RequestCredentialLocation, RequestCredentialScan,
+};
 pub(crate) use login::{
     ChallengeCodec, LoginDefinitionInner, LoginMethodId, LoginProviderDefinition,
-    LoginStateStoreRuntime, NoChallenge,
+    LoginStateStoreRuntime, NoChallenge, PasswordlessStoreRuntime,
 };
 pub(crate) use metrics::AuthMetrics;
 

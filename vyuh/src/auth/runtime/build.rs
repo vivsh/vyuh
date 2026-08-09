@@ -15,6 +15,7 @@ struct PreparedAuth {
     providers: Vec<PreparedProvider>,
     login_methods: Vec<LoginDefinitionInner>,
     login_state_store: Option<LoginStateStoreRuntime>,
+    passwordless_store: Option<crate::auth::PasswordlessStoreRuntime>,
     secrets: SecretRing,
     challenge_codec: ChallengeCodec,
     default_audience: Option<AudienceId>,
@@ -50,6 +51,7 @@ fn prepare(
     let login_methods = conf.login_definitions();
     validate_definitions(&definitions)?;
     validate_login_definitions(&login_methods)?;
+    validate_passwordless_store(conf)?;
     let secrets = SecretRing::new(secret, fallbacks, project_dir, conf.minimum_secret_length())?;
     for method in &login_methods {
         method.runtime.prepare(&secrets)?;
@@ -63,10 +65,21 @@ fn prepare(
         providers,
         login_methods,
         login_state_store: conf.login_state_store_runtime(),
+        passwordless_store: conf.passwordless_store_runtime(),
         secrets,
         challenge_codec,
         default_audience,
     })
+}
+
+/// Ensures passwordless methods cannot start without durable proof storage.
+fn validate_passwordless_store(conf: &AuthConf) -> Result<(), AuthError> {
+    if conf.requires_passwordless_store() && conf.passwordless_store_runtime().is_none() {
+        return Err(AuthError::InvalidProviderConfig(
+            "passwordless login requires AuthConf::passwordless_store".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Builds network-backed providers sequentially and freezes all runtime indexes.
@@ -82,6 +95,7 @@ async fn finish(prepared: PreparedAuth) -> Result<Authenticator, AuthError> {
         login_methods: Arc::new(prepared.login_methods),
         indexes: Arc::new(indexes),
         login_state_store: prepared.login_state_store,
+        passwordless_store: prepared.passwordless_store,
         secrets: prepared.secrets,
         challenge_codec: prepared.challenge_codec,
         metrics: Arc::new(AuthMetrics::new(

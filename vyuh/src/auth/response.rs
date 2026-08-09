@@ -7,6 +7,7 @@ use axum::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::auth::RequestCredentialLocation;
 use crate::callables::{IntoReturnPart, ReturnPart};
 
 /// Credentials issued together by one complete authentication provider.
@@ -64,6 +65,7 @@ pub struct LoginResponse<T = DefaultLoginData> {
     data: T,
     credentials: Credentials,
     attachments: Vec<(HeaderName, HeaderValue)>,
+    request_selector: RequestCredentialLocation,
 }
 
 impl LoginResponse {
@@ -73,11 +75,13 @@ impl LoginResponse {
         refresh_body: Option<String>,
         expires_in: i64,
         attachments: Vec<(HeaderName, HeaderValue)>,
+        request_selector: RequestCredentialLocation,
     ) -> Self {
         Self {
             data: DefaultLoginData::new(access_body, refresh_body, expires_in),
             credentials,
             attachments,
+            request_selector,
         }
     }
 
@@ -87,6 +91,7 @@ impl LoginResponse {
             data,
             credentials: self.credentials,
             attachments: self.attachments,
+            request_selector: self.request_selector,
         }
     }
 }
@@ -100,6 +105,10 @@ impl<T> LoginResponse<T> {
     /// Returns the deliberately redacted issued credentials.
     pub fn credentials(&self) -> &Credentials {
         &self.credentials
+    }
+
+    pub(crate) fn request_selector(&self) -> &RequestCredentialLocation {
+        &self.request_selector
     }
 
     /// Applies provider-managed headers or cookies to an existing response.
