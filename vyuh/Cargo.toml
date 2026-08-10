@@ -74,7 +74,7 @@ serde_urlencoded = "0.7"
 rust-silos = { version = "^0.3.2" }
 
 vyuh-macros = { path = "../vyuh-macros", version = "0.2.17" }
-db_core = { package = "mool", version = "0.2.6" }
+db_core = { package = "mool", version = "0.2.7" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"
 notify = "^8.1"
