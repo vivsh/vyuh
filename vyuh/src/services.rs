@@ -1,4 +1,12 @@
-use std::{any::TypeId, ops::Deref, pin::Pin, sync::Arc};
+use std::{
+    any::TypeId,
+    ops::Deref,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -174,6 +182,58 @@ impl IntoArgPart for DbPool {
 struct ServiceWorker {
     name: String,
     func: callables::Callable<ServiceWorkContext, ServiceError>,
+    status: Arc<AtomicU8>,
+}
+
+/// Observable lifecycle state of one configured service worker.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceWorkerStatus {
+    Ready,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ServiceWorkerStatus {
+    /// Returns the stable console and serialization label for this worker state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Aggregate lifecycle state of one configured service.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStatus {
+    Ready,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ServiceStatus {
+    /// Returns the stable console and serialization label for this service state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Safe console-facing metadata for one configured service worker.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceWorkerInfo {
+    pub name: String,
+    pub status: ServiceWorkerStatus,
 }
 
 impl ServiceWorker {
@@ -187,12 +247,30 @@ impl ServiceWorker {
         ServiceWorker {
             name,
             func: callable,
+            status: Arc::new(AtomicU8::new(ServiceWorkerStatus::Ready as u8)),
         }
     }
 
+    /// Invokes the worker and records its terminal result for runtime inspection.
     async fn call(&self, ctx: ServiceWorkContext) -> Result<(), ServiceError> {
-        self.func.call(ctx).await?;
-        Ok(())
+        self.status
+            .store(ServiceWorkerStatus::Running as u8, Ordering::Release);
+        let result = self.func.call(ctx).await.map(|_| ());
+        self.status.store(
+            match result {
+                Ok(()) => ServiceWorkerStatus::Completed,
+                Err(_) => ServiceWorkerStatus::Failed,
+            } as u8,
+            Ordering::Release,
+        );
+        result
+    }
+
+    fn info(&self) -> ServiceWorkerInfo {
+        ServiceWorkerInfo {
+            name: self.name.clone(),
+            status: worker_status(self.status.load(Ordering::Acquire)),
+        }
     }
 }
 
@@ -219,7 +297,14 @@ struct ServiceEntry {
 pub struct ServiceInfo {
     pub type_name: &'static str,
     pub facades: Vec<&'static str>,
-    pub workers: Vec<String>,
+    pub workers: Vec<ServiceWorkerInfo>,
+    pub status: ServiceStatus,
+}
+
+struct ServiceRecord {
+    type_name: &'static str,
+    facades: Vec<&'static str>,
+    workers: Vec<ServiceWorker>,
 }
 
 #[derive(Clone)]
@@ -365,7 +450,7 @@ impl ServiceRegistry {
 pub struct ServiceEngine {
     services: IndexMap<TypeId, AnyBox>,
     workers: Vec<ServiceWorker>,
-    infos: Vec<ServiceInfo>,
+    records: Vec<ServiceRecord>,
 }
 
 impl ServiceEngine {
@@ -373,7 +458,7 @@ impl ServiceEngine {
         Self {
             services: IndexMap::new(),
             workers: vec![],
-            infos: Vec::new(),
+            records: Vec::new(),
         }
     }
 
@@ -387,18 +472,14 @@ impl ServiceEngine {
                 site: partial_site.clone(),
             });
             let entry = entry_future.await?;
-            let info = ServiceInfo {
+            let record = ServiceRecord {
                 type_name: entry.type_name,
                 facades: entry
                     .facades
                     .iter()
                     .map(|facade| facade.type_name)
                     .collect(),
-                workers: entry
-                    .workers
-                    .iter()
-                    .map(|worker| worker.name.clone())
-                    .collect(),
+                workers: entry.workers.clone(),
             };
             for facade in entry.facades {
                 let iface = (facade.coerce_fn)(entry.inner.clone())?;
@@ -408,7 +489,7 @@ impl ServiceEngine {
                 self.services.insert(facade.type_id, iface);
             }
             self.workers.extend(entry.workers);
-            self.infos.push(info);
+            self.records.push(record);
         }
         Ok(())
     }
@@ -438,7 +519,55 @@ impl ServiceEngine {
     }
 
     pub(crate) fn infos(&self) -> Vec<ServiceInfo> {
-        self.infos.clone()
+        self.records.iter().map(ServiceRecord::info).collect()
+    }
+}
+
+impl ServiceRecord {
+    fn info(&self) -> ServiceInfo {
+        let workers = self
+            .workers
+            .iter()
+            .map(ServiceWorker::info)
+            .collect::<Vec<_>>();
+        ServiceInfo {
+            type_name: self.type_name,
+            facades: self.facades.clone(),
+            status: service_status(&workers),
+            workers,
+        }
+    }
+}
+
+fn service_status(workers: &[ServiceWorkerInfo]) -> ServiceStatus {
+    if workers
+        .iter()
+        .any(|worker| matches!(worker.status, ServiceWorkerStatus::Failed))
+    {
+        return ServiceStatus::Failed;
+    }
+    if workers
+        .iter()
+        .any(|worker| matches!(worker.status, ServiceWorkerStatus::Running))
+    {
+        return ServiceStatus::Running;
+    }
+    if !workers.is_empty()
+        && workers
+            .iter()
+            .all(|worker| matches!(worker.status, ServiceWorkerStatus::Completed))
+    {
+        return ServiceStatus::Completed;
+    }
+    ServiceStatus::Ready
+}
+
+fn worker_status(value: u8) -> ServiceWorkerStatus {
+    match value {
+        1 => ServiceWorkerStatus::Running,
+        2 => ServiceWorkerStatus::Completed,
+        3 => ServiceWorkerStatus::Failed,
+        _ => ServiceWorkerStatus::Ready,
     }
 }
 
@@ -507,5 +636,45 @@ impl axum::response::IntoResponse for ServiceError {
             "service_error",
             self.to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServiceStatus, ServiceWorkerInfo, ServiceWorkerStatus, service_status};
+
+    /// Verifies worker failures take precedence in the aggregate service state.
+    #[test]
+    fn failed_worker_marks_service_failed() {
+        let workers = [
+            worker(ServiceWorkerStatus::Completed),
+            worker(ServiceWorkerStatus::Failed),
+        ];
+        assert_eq!(service_status(&workers), ServiceStatus::Failed);
+    }
+
+    /// Verifies active workers keep a service running until every worker completes.
+    #[test]
+    fn running_worker_marks_service_running() {
+        let workers = [
+            worker(ServiceWorkerStatus::Completed),
+            worker(ServiceWorkerStatus::Running),
+        ];
+        assert_eq!(service_status(&workers), ServiceStatus::Running);
+    }
+
+    /// Verifies services stay ready before workers start and complete after all finish.
+    #[test]
+    fn service_status_tracks_worker_lifecycle() {
+        assert_eq!(service_status(&[]), ServiceStatus::Ready);
+        let workers = [worker(ServiceWorkerStatus::Completed)];
+        assert_eq!(service_status(&workers), ServiceStatus::Completed);
+    }
+
+    fn worker(status: ServiceWorkerStatus) -> ServiceWorkerInfo {
+        ServiceWorkerInfo {
+            name: "worker".to_string(),
+            status,
+        }
     }
 }
