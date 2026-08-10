@@ -5,8 +5,8 @@ enabled by default in debug builds at `/console`, disabled by default in release
 builds, protected by an application-owned access policy, and read-only in this
 pass.
 
-Use it for inspecting registered operations, task records, runtime status,
-OpenAPI for application routes, and redacted runtime configuration. Do not use
+Use it for inspecting registered routes, commands, services, emitters, signals, task records, runtime status,
+compiled migration state, OpenAPI for application routes, and redacted runtime configuration. Do not use
 it as an application admin framework or a command/task execution surface.
 
 ## Mental Model
@@ -88,16 +88,24 @@ All endpoints are mounted under `ConsoleConf.path`.
 | `GET` | `/` | canonical status overview page |
 | `GET` | `/overview` | status overview page |
 | `GET` | `/runtime` | formatted site, process, and system runtime page |
-| `GET` | `/operations` | operation listing page with in-page inspector |
-| `GET` | `/operations/{id}` | operation detail page |
+| `GET` | `/routes` | application HTTP routes with an in-page contract inspector |
+| `GET` | `/commands` | registered CLI commands and their argument metadata |
+| `GET` | `/services` | configured services, interfaces, and worker lifecycle state |
+| `GET` | `/emitters` | cron, periodic, and database-notify emitters |
+| `GET` | `/signals` | registered signal handlers and payload contracts |
 | `GET` | `/tasks` | task listing page with filters and in-page inspector |
 | `GET` | `/tasks/{id}` | task detail page |
 | `GET` | `/schedules` | durable task schedule listing with in-page inspector |
+| `GET` | `/logs` | bounded configured file-log viewer and detail inspector |
 | `GET` | `/openapi` | OpenAPI page for non-console routes |
 | `GET` | `/conf` | redacted runtime configuration page |
+| `GET` | `/migrations` | applied/pending migration state and desired schema entities |
 | `GET` | `/api/session` | inspect the current authenticated console identity |
-| `GET` | `/api/operations` | list/search operation metadata |
-| `GET` | `/api/operations/{id}` | inspect one operation |
+| `GET` | `/api/routes` | list/search application HTTP route metadata |
+| `GET` | `/api/commands` | list/search command metadata |
+| `GET` | `/api/services` | list/search service and worker status metadata |
+| `GET` | `/api/emitters` | list/search emitter metadata |
+| `GET` | `/api/signals` | list/search signal metadata |
 | `GET` | `/api/tasks` | list task records |
 | `GET` | `/api/tasks/{id}` | inspect one task record |
 | `GET` | `/api/schedules` | list task-targeted schedule definitions and cursors |
@@ -108,6 +116,19 @@ All endpoints are mounted under `ConsoleConf.path`.
 
 There are no mutating endpoints in v1. Console cannot run commands, retry or
 cancel tasks, fire signals, or control services.
+
+## Migrations
+
+When Vyuh is compiled with the `migrations` feature, the console includes a
+read-only migration page. It shows each composed migration ID, its application
+or crate namespace, and whether Gaman's tracking store marks it applied or
+pending. It also lists desired schema entities from each registered migration
+source, including tables, views, functions, and enums.
+
+The page never generates, applies, fakes, merges, or repairs migrations. Use
+the deployment CLI for those operations. If the tracking store is unavailable,
+the console shows the desired sources and entities but explicitly marks
+migration status unavailable.
 
 ## Assets And Templates
 
@@ -135,29 +156,21 @@ The HTML templates live under `vyuh/web/templates/console/**` and are loaded
 through the same bundle asset template path used by application templates.
 Applications do not need to copy console assets to enable the built-in console.
 
-## Operations
+## Inspection Pages
 
-`/api/operations` is the single operation listing endpoint. Use query
-parameters for filtering:
+Console separates operational concepts instead of presenting one mixed
+operation browser. **Routes**, **Signals**, and **Emitters** expose the same
+typed-operation inspector with `q`, `tag`, `owner`, `hidden`, `limit`, and
+`cursor` filters. Each page excludes Console's own routes and shows the
+selected operation's input, output, authorization, and metadata in the
+right-side inspector.
 
-```text
-/console/api/operations?kind=route&q=user&hidden=false&limit=50
-```
-
-Supported filters:
-
-- `kind`: `route`, `command`, `task`, `service`, `signal`, `cron`,
-  `periodic`, `pgnotify`, or `api_doc`.
-- `q`: text search across name, summary, description, and path.
-- `tag`: operation tag.
-- `owner`: operation owner.
-- `hidden`: `true` or `false`.
-- `limit` and `cursor`: offset-style pagination.
-
-The response includes operation metadata derived from the same bundle operation
-model used by routes, OpenAPI, commands, tasks, signals, emitters, and services.
-The HTML operations page uses the same filters and keeps selected operation
-request/response details in a right-side inspector.
+**Commands** exposes command names, summaries, and validated arguments.
+**Services** exposes each service's concrete type, exposed interfaces, workers,
+and current worker-derived state: `ready`, `running`, `completed`, or `failed`.
+Both pages support bounded `q`, `limit`, and `cursor` filtering. They are
+read-only views over the built site; Console never starts, stops, or invokes a
+service or command.
 
 ## OpenAPI
 
@@ -240,6 +253,10 @@ responses use `Cache-Control: no-store`, and values are escaped before HTML
 rendering, but applications should still avoid writing credentials or secrets
 to logs.
 
+Selecting an entry re-reads only its authenticated file location. If the file
+rotates or is replaced before the detail view is opened, Console renders a safe
+"no longer available" notice instead of a server error.
+
 ## Status
 
 `/api/status` returns one redaction-safe object. `/runtime` renders the same
@@ -250,7 +267,7 @@ The status object includes:
 
 - site fields: Vyuh version, package name, host, port, project directory,
   timezone, database backend, uptime, enabled compile-time features, operation
-  count, command count, and service count;
+  count, route count, command count, and service count;
 - process fields: PID, executable path, current directory, argv, memory, virtual
   memory, CPU usage, and platform-supported thread/open-file counts;
 - system fields: hostname, OS, kernel, architecture, CPU, load average, memory,

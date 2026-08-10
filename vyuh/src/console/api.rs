@@ -3,12 +3,12 @@ use crate::{
     console::{
         access::ConsoleGuard,
         logs::{LogError, limit as log_limit},
-        query::{
-            LogQuery, OperationQuery, TaskQuery, filter_operations, is_console_operation,
-            task_limit_max,
-        },
+        query::{InspectionQuery, LogQuery, TaskQuery, is_console_operation, task_limit_max},
         schedules::{SchedulePage, ScheduleQuery, page as schedule_page},
-        types::{ConfigOut, OperationOut, Page, SessionOut, TaskDetailOut, TaskOut},
+        types::{
+            CommandOut, ConfigOut, OperationOut, Page, ServiceOut, SessionOut, TaskDetailOut,
+            TaskOut,
+        },
     },
     routes::{Json, Path, Query},
 };
@@ -21,50 +21,86 @@ pub async fn session(guard: ConsoleGuard) -> Json<SessionOut> {
     Json(SessionOut::from(guard.user()))
 }
 
-pub async fn operations(
+pub async fn routes(
     site: Site,
     operation_id: OperationId,
     _guard: ConsoleGuard,
-    Query(query): Query<OperationQuery>,
+    Query(query): Query<InspectionQuery>,
 ) -> Json<Page<OperationOut>> {
-    let conf = &site.conf().console;
     let console_bundle_id = console_bundle_id(&site, operation_id);
-    let (items, next_cursor) = filter_operations(
-        site.operations().list(),
+    Json(super::pages::inspection_page(
+        &site,
         &query,
         console_bundle_id,
-        conf.page_size_default,
-        conf.page_size_max,
-    );
-    Json(Page {
-        items: items
-            .into_iter()
-            .map(|op| OperationOut::from_operation(op, &site))
-            .collect(),
-        next_cursor,
-    })
+        is_route,
+    ))
 }
 
-pub async fn operation_detail(
+pub async fn signals(
     site: Site,
     operation_id: OperationId,
     _guard: ConsoleGuard,
-    Path(id): Path<String>,
-) -> Result<Json<OperationOut>, Error> {
-    let id = id
-        .parse::<crate::OperationId>()
-        .map_err(|_| Error::not_found("operation was not found"))?;
+    Query(query): Query<InspectionQuery>,
+) -> Json<Page<OperationOut>> {
     let console_bundle_id = console_bundle_id(&site, operation_id);
-    site.operations()
-        .find(id)
-        .filter(|op| !is_console_operation(op, console_bundle_id))
-        .map(|op| OperationOut::from_operation(op, &site))
-        .map(Json)
-        .ok_or_else(|| Error::not_found("operation was not found"))
+    Json(super::pages::inspection_page(
+        &site,
+        &query,
+        console_bundle_id,
+        is_signal,
+    ))
+}
+
+pub async fn emitters(
+    site: Site,
+    operation_id: OperationId,
+    _guard: ConsoleGuard,
+    Query(query): Query<InspectionQuery>,
+) -> Json<Page<OperationOut>> {
+    let console_bundle_id = console_bundle_id(&site, operation_id);
+    Json(super::pages::inspection_page(
+        &site,
+        &query,
+        console_bundle_id,
+        is_emitter,
+    ))
+}
+
+pub async fn commands(
+    site: Site,
+    _guard: ConsoleGuard,
+    Query(query): Query<InspectionQuery>,
+) -> Json<Page<CommandOut>> {
+    Json(super::pages::command_page(&site, &query))
+}
+
+pub async fn services(
+    site: Site,
+    _guard: ConsoleGuard,
+    Query(query): Query<InspectionQuery>,
+) -> Json<Page<ServiceOut>> {
+    Json(super::pages::service_page(&site, &query))
 }
 
 fn console_bundle_id(site: &Site, operation_id: OperationId) -> Option<uuid::Uuid> {
     site.operations().find(operation_id)?.bundle_id
+}
+
+fn is_route(kind: &crate::OperationKind) -> bool {
+    matches!(kind, crate::OperationKind::Route)
+}
+
+fn is_signal(kind: &crate::OperationKind) -> bool {
+    matches!(kind, crate::OperationKind::Signal)
+}
+
+fn is_emitter(kind: &crate::OperationKind) -> bool {
+    matches!(
+        kind,
+        crate::OperationKind::Cron
+            | crate::OperationKind::Periodic
+            | crate::OperationKind::PgNotify
+    )
 }
 
 pub async fn tasks(

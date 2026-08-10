@@ -1,0 +1,12 @@
+<header class="vyuh-console-global-header">
+  <div class="vyuh-console-page-identity">
+    <h1>{{ title }}</h1>
+    <p>{{ subtitle }}</p>
+  </div>
+  <div class="vyuh-console-global-actions">
+    <span class="vyuh-console-health {% if health.ready %}is-ready{% else %}is-attention{% endif %}"><i></i>{{ health.label }}</span>
+    <small>v{{ version }}</small>
+    <a class="vyuh-console-icon-button" href="{{ refresh_url }}" aria-label="Refresh {{ title }}"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
+    {% if page_action %}<a class="vyuh-console-site-button" href="{{ page_action.url }}">{{ page_action.label }} <svg><use href="#vyuh-icon-external"></use></svg></a>{% endif %}
+  </div>
+</header>

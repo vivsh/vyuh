@@ -7,8 +7,7 @@ use crate::{
 };
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
-pub struct OperationQuery {
-    pub kind: Option<String>,
+pub struct InspectionQuery {
     pub q: Option<String>,
     pub selected: Option<String>,
     pub tag: Option<String>,
@@ -95,23 +94,23 @@ fn parse_date(
     Some(time.and_utc())
 }
 
-pub fn filter_operations<'a>(
+pub fn filter_inspections<'a>(
     operations: impl Iterator<Item = &'a Operation>,
-    query: &OperationQuery,
+    query: &InspectionQuery,
     console_bundle_id: Option<uuid::Uuid>,
     default_limit: usize,
     max_limit: usize,
+    matches_kind: fn(&OperationKind) -> bool,
 ) -> (Vec<&'a Operation>, Option<String>) {
     let offset = parse_cursor(query.cursor.as_deref());
     let limit = clamp_limit(query.limit, default_limit, max_limit);
-    let kind = query.kind.as_deref().and_then(parse_kind);
     let q = query.q.as_deref().map(str::to_lowercase);
     let tag = query.tag.as_deref();
     let owner = query.owner.as_deref();
 
     let mut filtered = operations
         .filter(|op| !is_console_operation(op, console_bundle_id))
-        .filter(|op| kind.as_ref().is_none_or(|kind| &op.kind == kind))
+        .filter(|op| matches_kind(&op.kind))
         .filter(|op| query.hidden.is_none_or(|hidden| op.hidden == hidden))
         .filter(|op| owner.is_none_or(|owner| op.owner.as_deref() == Some(owner)))
         .filter(|op| tag.is_none_or(|tag| op.tags.iter().any(|candidate| candidate == tag)))
@@ -128,11 +127,7 @@ pub fn filter_operations<'a>(
         })
         .collect::<Vec<_>>();
 
-    filtered.sort_by(|left, right| {
-        kind_key(&left.kind)
-            .cmp(kind_key(&right.kind))
-            .then_with(|| left.name.cmp(&right.name))
-    });
+    filtered.sort_by(|left, right| left.name.cmp(&right.name));
 
     let page = filtered
         .into_iter()
@@ -165,37 +160,4 @@ pub fn parse_cursor(cursor: Option<&str>) -> usize {
 
 fn contains(value: &str, needle_lower: &str) -> bool {
     value.to_lowercase().contains(needle_lower)
-}
-
-fn parse_kind(value: &str) -> Option<OperationKind> {
-    match value {
-        "cron" => Some(OperationKind::Cron),
-        "periodic" => Some(OperationKind::Periodic),
-        "pgnotify" | "pg_notify" => Some(OperationKind::PgNotify),
-        "signal" => Some(OperationKind::Signal),
-        "task" => Some(OperationKind::Task),
-        "command" => Some(OperationKind::Command),
-        "route" => Some(OperationKind::Route),
-        "api_doc" | "apidoc" => Some(OperationKind::ApiDoc),
-        "service" => Some(OperationKind::Service),
-        #[cfg(feature = "mcp")]
-        "mcp_tool" | "mcptool" => Some(OperationKind::McpTool),
-        _ => None,
-    }
-}
-
-fn kind_key(kind: &OperationKind) -> &'static str {
-    match kind {
-        OperationKind::Cron => "cron",
-        OperationKind::Periodic => "periodic",
-        OperationKind::PgNotify => "pgnotify",
-        OperationKind::Signal => "signal",
-        OperationKind::Task => "task",
-        OperationKind::Command => "command",
-        OperationKind::Route => "route",
-        OperationKind::ApiDoc => "api_doc",
-        OperationKind::Service => "service",
-        #[cfg(feature = "mcp")]
-        OperationKind::McpTool => "mcp_tool",
-    }
 }

@@ -2,17 +2,6 @@
 
 {% block content %}
 <section class="vyuh-console-screen">
-  <header class="vyuh-console-topbar">
-    <div>
-      <h1>Configuration</h1>
-      <p>Complete redacted SiteConf for this Vyuh application</p>
-    </div>
-    <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ urls.conf }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
-      <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
-    </div>
-  </header>
-
   <nav class="vyuh-console-tabs" aria-label="Configuration sections">
     <a href="#site-conf" aria-current="page">Site Configuration</a>
     <a href="#database-conf">Database</a>
@@ -26,9 +15,9 @@
 
   <div class="vyuh-console-config-grid">
     <article class="vyuh-console-card is-span-wide">
-      <header><h2>Configuration Summary</h2></header>
+      <header><h2>Configuration at a glance</h2></header>
       <div class="vyuh-console-summary-strip">
-        <div class="vyuh-console-summary-item"><span class="vyuh-console-icon-mini is-ember"><svg><use href="#vyuh-icon-docs"></use></svg></span><dl><dt>Environment</dt><dd>{{ conf.site.timezone }}</dd></dl></div>
+        <div class="vyuh-console-summary-item"><span class="vyuh-console-icon-mini is-ember"><svg><use href="#vyuh-icon-docs"></use></svg></span><dl><dt>Timezone</dt><dd>{{ conf.site.timezone }}</dd></dl></div>
         <div class="vyuh-console-summary-item"><span class="vyuh-console-icon-mini is-green"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><dl><dt>Host</dt><dd>{{ conf.site.host }}:{{ conf.site.port }}</dd></dl></div>
         <div class="vyuh-console-summary-item"><span class="vyuh-console-icon-mini is-violet"><svg><use href="#vyuh-icon-database"></use></svg></span><dl><dt>Backend</dt><dd>{{ conf.database.backend }}</dd></dl></div>
         <div class="vyuh-console-summary-item"><span class="vyuh-console-icon-mini is-yellow"><svg><use href="#vyuh-icon-gear"></use></svg></span><dl><dt>Console</dt><dd>{{ conf.console.path }}</dd></dl></div>
@@ -36,33 +25,6 @@
       </div>
     </article>
 
-    <article class="vyuh-console-card">
-      <header><h2>Actions</h2></header>
-      <div class="vyuh-console-action-list is-flat">
-        <a href="{{ urls.openapi }}"><svg><use href="#vyuh-icon-external"></use></svg><span>View OpenAPI</span></a>
-      </div>
-    </article>
-
-    <article class="vyuh-console-card is-code">
-      <header><h2>SiteConf</h2></header>
-      <div class="vyuh-console-code"><pre><code>{{ payload }}</code></pre></div>
-    </article>
-
-    <article class="vyuh-console-card">
-      <header><h2>Configuration Sections</h2></header>
-      <div class="vyuh-console-section-list">
-        <button type="button"><span>site</span><b>6</b></button>
-        <button type="button"><span>database</span><b>4</b></button>
-        <button type="button"><span>auth</span><b>8</b></button>
-        <button type="button"><span>console</span><b>7</b></button>
-        <button type="button"><span>tasks</span><b>5</b></button>
-        <button type="button"><span>emitters</span><b>4</b></button>
-        <button type="button"><span>uploads</span><b>7</b></button>
-        <button type="button"><span>channels</span><b>7</b></button>
-        <button type="button"><span>http</span><b>9</b></button>
-        <button type="button"><span>logging</span><b>{{ conf.logging.rules | length }}</b></button>
-      </div>
-    </article>
   </div>
 
   <div class="vyuh-console-info-grid">
@@ -144,5 +106,10 @@
       </dl>
     </article>
   </div>
+
+  <details class="vyuh-console-raw-config">
+    <summary>Full redacted configuration</summary>
+    <div class="vyuh-console-code"><pre><code>{{ payload }}</code></pre></div>
+  </details>
 </section>
 {% endblock %}

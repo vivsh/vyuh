@@ -1,21 +1,19 @@
+use std::{fs, path::PathBuf};
+
 use axum::http::{StatusCode, header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "cors")]
-use crate::middlewares::{CorsConf, HttpConf};
-#[cfg(feature = "cors")]
-use crate::routes::CorsMiddleware;
 use crate::{
-    Data, Site, SiteConf, bundles,
+    Data, Error, Site, SiteConf, bundles,
+    commands::CommandConf,
     console::{CONSOLE_AUDIENCE, ConsoleAccess, ConsoleConf},
     emitters::{CronConf, EmitterExecutor},
+    logging::{LogRule, LogSink, LoggingConf, Rotation},
     routes::{Json, Methods, RouteConf},
+    services::{Service, ServiceInstance},
     testing::TestSite,
 };
-#[cfg(feature = "cors")]
-use tower_http::cors::CorsLayer;
-
 async fn ping() -> Json<&'static str> {
     Json("pong")
 }
@@ -76,6 +74,9 @@ async fn invoice_signal() -> Data<InvoiceSignal> {
     }))
 }
 
+#[bundles::signal]
+async fn invoice_signal_handler(Data(_event): Data<InvoiceSignal>) {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ConsoleTaskJob {
     message: String,
@@ -90,6 +91,23 @@ async fn scheduled_console_task() -> Data<ConsoleTaskJob> {
     Data(std::sync::Arc::new(ConsoleTaskJob {
         message: "scheduled".into(),
     }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct ConsoleCommandInput {
+    dry_run: bool,
+}
+
+async fn console_test_command(Data(_input): Data<ConsoleCommandInput>) -> Result<(), Error> {
+    Ok(())
+}
+
+struct ConsoleService;
+
+impl Service for ConsoleService {}
+
+async fn console_test_service() -> ServiceInstance<ConsoleService> {
+    ConsoleService.into()
 }
 
 fn app_bundle() -> crate::bundles::Bundle {
@@ -139,6 +157,18 @@ fn scheduled_task_bundle() -> crate::bundles::Bundle {
     )]))
 }
 
+fn inspection_bundle() -> crate::bundles::Bundle {
+    scheduled_task_bundle()
+        .merge(bundles::bundle! { invoice_signal_handler })
+        .merge(bundles::bundle([
+            bundles::command(
+                console_test_command,
+                CommandConf::new("console:test").description("Console command fixture."),
+            ),
+            bundles::service(console_test_service),
+        ]))
+}
+
 /// Verifies console URLs use the shared site-wide static URL for each built site.
 #[tokio::test]
 async fn console_urls_are_site_local() {
@@ -168,12 +198,20 @@ async fn console_urls_are_site_local() {
         Some("/static/console/js/console.js")
     );
     assert_eq!(
+        root.console_urls().map(|urls| urls.migrations.as_str()),
+        Some("/console/migrations")
+    );
+    assert_eq!(
         nested.console_urls().map(|urls| urls.home.as_str()),
         Some("/dynrs/console")
     );
     assert_eq!(
         nested.console_urls().map(|urls| urls.script_path.as_str()),
         Some("/static/console/js/console.js")
+    );
+    assert_eq!(
+        nested.console_urls().map(|urls| urls.migrations.as_str()),
+        Some("/dynrs/console/migrations")
     );
 }
 
@@ -197,7 +235,7 @@ async fn nested_console_pages_use_shared_assets() {
     assert!(overview.contains("&#x2f;static&#x2f;console&#x2f;js&#x2f;console.js"));
 
     let error = client
-        .get("/dynrs/console/operations/not-a-uuid")
+        .get("/dynrs/console/routes/not-a-uuid")
         .header(header::COOKIE.as_str(), &cookie)
         .send()
         .await;
@@ -356,9 +394,16 @@ async fn console_development_access_is_open_and_warns() {
         .unwrap();
     let client = TestSite::new(site);
 
-    let page = client.get("/console/overview").send().await;
+    let page = client.get("/console").send().await;
     assert_eq!(page.status(), StatusCode::OK);
-    assert!(page.text().await.contains("Development access is open"));
+    let page = page.text().await;
+    assert!(page.contains("Development access is open"));
+    assert!(page.contains("Application Runtime"));
+    client
+        .get("/console/overview")
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
     client
         .get("/console/api/status")
         .send()
@@ -538,6 +583,137 @@ async fn console_logs_require_file_sink() {
     assert!(api.text().await.contains("\"configured\":false"));
 }
 
+/// Verifies focused console pages replace the generic operation browser.
+#[tokio::test]
+async fn console_inspection_pages_show_their_own_runtime_concepts() {
+    let site = Site::build(
+        SiteConf::default()
+            .log_init(false)
+            .console(ConsoleConf::default().enabled(true)),
+        inspection_bundle(),
+    )
+    .await
+    .unwrap();
+    let client = TestSite::new(site);
+
+    let routes = client.get("/console/routes").send().await;
+    assert_eq!(routes.status(), StatusCode::OK);
+    assert!(routes.text().await.contains("Registered Routes"));
+
+    let commands = client.get("/console/commands").send().await;
+    assert_eq!(commands.status(), StatusCode::OK);
+    assert!(commands.text().await.contains("console:test"));
+
+    let services = client.get("/console/services").send().await;
+    assert_eq!(services.status(), StatusCode::OK);
+    assert!(services.text().await.contains("ConsoleService"));
+
+    let emitters = client.get("/console/emitters").send().await;
+    assert_eq!(emitters.status(), StatusCode::OK);
+    assert!(emitters.text().await.contains("scheduled_console_task"));
+
+    let signals = client.get("/console/signals").send().await;
+    assert_eq!(signals.status(), StatusCode::OK);
+    assert!(signals.text().await.contains("invoice_signal_handler"));
+
+    let api = client.get("/console/api/services").send().await;
+    assert_eq!(api.status(), StatusCode::OK);
+    assert!(api.text().await.contains("\"status\":\"ready\""));
+
+    client
+        .get("/console/operations")
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+/// Verifies a selected file-log entry renders and a rotated entry stays a safe console response.
+#[tokio::test]
+async fn console_log_details_are_inspectable_after_file_rotation() -> Result<(), String> {
+    let root = log_test_directory();
+    let logs = root.join("logs");
+    fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
+    let file = logs.join("APP.2026-08-10");
+    fs::write(
+        &file,
+        "{\"timestamp\":\"2026-08-10T12:00:00Z\",\"level\":\"ERROR\",\"target\":\"app::worker\",\"fields\":{\"message\":\"test failure\",\"job\":\"sync\"}}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let conf = SiteConf::default()
+        .project_dir(root.to_string_lossy())
+        .log_init(false)
+        .logging(LoggingConf {
+            env_prefix: None,
+            rules: vec![LogRule {
+                name: "APP".into(),
+                sink: LogSink::File {
+                    dir: "logs".into(),
+                    rotation: Rotation::Daily,
+                },
+                default_filter: "error".into(),
+            }],
+        })
+        .console(ConsoleConf::default().enabled(true));
+    let site = Site::build(conf, app_bundle())
+        .await
+        .map_err(|error| error.to_string())?;
+    let client = TestSite::new(site);
+    let page = client.get("/console/logs").send().await;
+    if page.status() != StatusCode::OK {
+        return Err("logs page did not render".to_string());
+    }
+    let body = page.text().await;
+    let selected =
+        log_selection_url(&body).map_err(|error| format!("{error}; rendered page: {body}"))?;
+    let token = selected
+        .strip_prefix("/console/logs?selected=")
+        .ok_or_else(|| "log detail URL was malformed".to_string())?;
+    let runtime = client
+        .site()
+        .console_logs()
+        .ok_or_else(|| "log runtime was unavailable".to_string())?;
+    let entry = runtime
+        .selected(&crate::console::query::LogQuery {
+            selected: Some(token.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| format!("direct log selection failed: {error}"))?;
+    if entry.is_none() {
+        return Err("direct log selection returned no entry".to_string());
+    }
+    let detail = client.get(&selected).send().await;
+    let detail_status = detail.status();
+    let detail_body = detail.text().await;
+    if detail_status != StatusCode::OK || !detail_body.contains("test failure") {
+        return Err(format!(
+            "selected log entry did not render: {detail_status}; body: {detail_body}"
+        ));
+    }
+    fs::remove_file(&file).map_err(|error| error.to_string())?;
+    let stale = client.get(&selected).send().await;
+    if stale.status() != StatusCode::OK || !stale.text().await.contains("no longer available") {
+        return Err("rotated log entry did not render a safe notice".to_string());
+    }
+    fs::remove_dir_all(root).map_err(|error| error.to_string())
+}
+
+fn log_test_directory() -> PathBuf {
+    std::env::temp_dir().join(format!("vyuh-console-log-detail-{}", uuid::Uuid::new_v4()))
+}
+
+fn log_selection_url(page: &str) -> Result<String, String> {
+    let marker = "href=\"&#x2f;console&#x2f;logs?selected=";
+    let start = page
+        .find(marker)
+        .ok_or_else(|| "log page did not contain a detail link".to_string())?;
+    let remaining = &page[start + marker.len()..];
+    let end = remaining
+        .find('"')
+        .ok_or_else(|| "log detail link was malformed".to_string())?;
+    Ok(format!("/console/logs?selected={}", &remaining[..end]))
+}
+
 /// Verifies console access adds no process-global authentication state.
 #[test]
 fn console_access_has_no_global_runtime_state() {
@@ -549,214 +725,8 @@ fn console_access_has_no_global_runtime_state() {
 }
 
 #[cfg(feature = "cors")]
-#[tokio::test]
-async fn console_html_pages_and_assets_work() -> Result<(), crate::auth::AuthError> {
-    let conf = SiteConf::default()
-        .log_init(false)
-        .console(ConsoleConf::default().enabled(true));
-    let bundle = app_bundle().layer(CorsMiddleware::new(CorsLayer::permissive()));
-    let site = Site::build(conf, bundle).await.unwrap();
-    let ping_id = site
-        .operations()
-        .list()
-        .find(|op| op.name == "ping")
-        .map(|op| op.id)
-        .unwrap();
-    let invoice_signal_id = site
-        .operations()
-        .list()
-        .find(|op| op.name == "invoice_signal")
-        .map(|op| op.id)
-        .unwrap();
-    let console_operation_id = site
-        .operations()
-        .list()
-        .find(|op| op.name == "console_operations")
-        .map(|op| op.id)
-        .unwrap();
-    let cookie = console_cookie(&site).await.unwrap();
-    let stylesheet = site
-        .console_urls()
-        .map(|urls| urls.stylesheet_path.clone())
-        .ok_or_else(|| crate::auth::AuthError::Internal("console runtime missing".into()))?;
-    let client = TestSite::new(site);
-
-    let overview = client
-        .get("/console")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(overview.status(), StatusCode::OK, "home page failed");
-    let overview = overview.text().await;
-    assert!(overview.contains("Overview"));
-
-    let overview = client
-        .get("/console/overview")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(overview.status(), StatusCode::OK, "overview page failed");
-    let overview = overview.text().await;
-    assert!(overview.contains("Overview"));
-
-    let runtime = client
-        .get("/console/runtime")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(runtime.status(), StatusCode::OK, "runtime page failed");
-    let runtime = runtime.text().await;
-    assert!(runtime.contains("System Info"));
-    assert!(runtime.contains("aria-current=\"page\""));
-    assert!(runtime.contains("System Environment"));
-    assert!(runtime.contains("Resource Usage"));
-    assert!(runtime.contains("Build Information"));
-    assert!(!runtime.contains("api/status"));
-
-    let operations = client
-        .get("/console/operations?kind=route&q=ping")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(
-        operations.status(),
-        StatusCode::OK,
-        "operations page failed"
-    );
-    let operations = operations.text().await;
-    assert!(operations.contains("ping"));
-    assert!(!operations.contains("api/operations"));
-
-    let operations = client
-        .get("/console/operations")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(
-        operations.status(),
-        StatusCode::OK,
-        "default operations page failed"
-    );
-    let operations = operations.text().await;
-    assert!(operations.contains("ping"));
-    assert!(!operations.contains("value=\"none\""));
-    assert!(!operations.contains("console_operations"));
-    assert!(!operations.contains("console_api_status"));
-
-    let api_operations = client
-        .get("/console/api/operations")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(
-        api_operations.status(),
-        StatusCode::OK,
-        "api operations page failed"
-    );
-    let api_operations = api_operations.text().await;
-    assert!(api_operations.contains("ping"));
-    assert!(!api_operations.contains("console_operations"));
-
-    let console_detail = client
-        .get(&format!("/console/api/operations/{console_operation_id}"))
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(console_detail.status(), StatusCode::NOT_FOUND);
-
-    let selected = client
-        .get(&format!("/console/operations?selected={ping_id}"))
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(
-        selected.status(),
-        StatusCode::OK,
-        "selected operation page failed"
-    );
-    let selected = selected.text().await;
-    assert!(selected.contains("aria-selected=\"true\""));
-    assert!(selected.contains("Methods"));
-    assert!(selected.contains("Request"));
-    assert!(selected.contains("Response"));
-    assert!(selected.contains("Middleware"));
-    assert!(selected.contains("operation middleware"));
-    assert!(selected.contains("API-visible request metadata"));
-    assert!(selected.contains("origin"));
-    assert!(selected.contains("request_id"));
-    assert!(selected.contains("site middleware"));
-
-    let selected = client
-        .get(&format!("/console/operations?selected={invoice_signal_id}"))
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(
-        selected.status(),
-        StatusCode::OK,
-        "selected typed operation page failed"
-    );
-    let selected = selected.text().await;
-    assert!(selected.contains("InvoiceSignal"));
-    assert!(selected.contains("invoice_id"));
-    assert!(selected.contains("Raw JSON schema"));
-
-    let tasks = client
-        .get("/console/tasks")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(tasks.status(), StatusCode::OK, "tasks page failed");
-    let tasks = tasks.text().await;
-    assert!(tasks.contains("No task records yet."));
-    assert!(tasks.contains("name=\"limit\""));
-    assert!(tasks.contains("100 per page"));
-    assert!(!tasks.contains("api/tasks"));
-
-    let conf = client
-        .get("/console/conf")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(conf.status(), StatusCode::OK, "config page failed");
-    let conf = conf.text().await;
-    assert!(conf.contains("Configuration"));
-    assert!(conf.contains("aria-current=\"page\""));
-    assert!(conf.contains("Authentication"));
-    assert!(conf.contains("HTTP Pipeline"));
-    assert!(!conf.contains("Open raw"));
-    assert!(!conf.contains("Download as JSON"));
-    assert!(!conf.contains("api/conf"));
-    assert!(!conf.contains(">01<"));
-    assert!(conf.contains("&lt;redacted&gt;"));
-    assert!(!conf.contains("secret_key"));
-    assert!(!conf.contains("DATABASE_URL"));
-
-    let openapi = client
-        .get("/console/openapi")
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(openapi.status(), StatusCode::OK, "openapi page failed");
-    let openapi = openapi.text().await;
-    assert!(openapi.contains("OpenAPI"));
-    assert!(openapi.contains("vyuh-console-sidebar"));
-    assert!(openapi.contains("redoc"));
-    assert!(openapi.contains("spec-url"));
-    assert!(openapi.contains("is-redoc"));
-    assert!(!openapi.contains("Raw JSON"));
-    assert!(!openapi.contains("Application routes only"));
-    assert!(!openapi.contains("console_operations"));
-
-    let css = client.get(&stylesheet).send().await;
-    assert_eq!(css.status(), StatusCode::OK, "stylesheet failed");
-    assert_eq!(
-        css.header(header::CONTENT_TYPE.as_str())
-            .and_then(|value| value.to_str().ok()),
-        Some("text/css")
-    );
-    Ok(())
-}
+#[path = "tests/web.rs"]
+mod web;
 
 /// Verifies console task inspection exposes lifecycle data without task values.
 #[tokio::test]
@@ -871,7 +841,7 @@ async fn console_status_is_cached_within_ttl() {
 
 /// Verifies console route fragments retain one immutable shared origin bundle ID.
 #[tokio::test]
-async fn console_operations_share_origin_bundle() {
+async fn console_routes_share_origin_bundle() {
     let site = Site::build(
         SiteConf::default()
             .log_init(false)
@@ -883,7 +853,7 @@ async fn console_operations_share_origin_bundle() {
     let console_id = site
         .operations()
         .list()
-        .find(|operation| operation.name == "console_operations")
+        .find(|operation| operation.name == "console_routes")
         .and_then(|operation| operation.bundle_id);
     let app_id = site
         .operations()

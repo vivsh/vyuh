@@ -1,0 +1,63 @@
+{% extends "console/layout.html" %}
+
+{% block content %}
+<section class="vyuh-console-screen">
+  <div class="vyuh-console-stat-grid is-four">
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-cpu"></use></svg></span><div><h3>Visible</h3><strong>{{ summary.total }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-pulse"></use></svg></span><div><h3>Running</h3><strong>{{ summary.running }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-yellow"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>Workers</h3><strong>{{ summary.workers }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-violet"><svg><use href="#vyuh-icon-docs"></use></svg></span><div><h3>Interfaces</h3><strong>{{ summary.interfaces }}</strong><p>On this page</p></div></article>
+  </div>
+
+  <form class="vyuh-console-toolbar" method="get" action="{{ urls.services }}">
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search services..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
+    <a class="vyuh-console-reset" href="{{ urls.services }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
+  </form>
+
+  <div class="vyuh-console-data-grid">
+    <article class="vyuh-console-card">
+      <header><h2>Registered Services <span class="vyuh-console-badge">Alphabetical</span></h2></header>
+      <div class="vyuh-console-table">
+        <table>
+          <thead><tr><th>Service</th><th>Status</th><th>Workers</th><th>Interfaces</th><th></th></tr></thead>
+          <tbody>
+            {% for service in page.items %}
+            <tr {% if selected_service and selected_service.type_name == service.type_name %}aria-selected="true"{% endif %}>
+              <td><a class="vyuh-console-row-title" href="{{ selected_url }}{{ service.type_name }}">{{ service.type_name }}</a></td>
+              <td><span class="vyuh-console-badge is-service-{{ service.status }}">{{ service.status }}</span></td>
+              <td>{{ service.workers | length }}</td>
+              <td>{{ service.facades | length }}</td>
+              <td><a href="{{ selected_url }}{{ service.type_name }}" aria-label="Inspect {{ service.type_name }}">›</a></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5"><div class="vyuh-console-empty"><strong>No services match this filter.</strong><span>Register services through bundles to inspect them here.</span></div></td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <footer class="vyuh-console-pagination">
+        <span>Showing {{ page.items | length }} services</span>
+        <nav>{% if page.next_cursor %}<a href="{{ next_url }}">Next</a>{% endif %}</nav>
+      </footer>
+    </article>
+
+    <aside class="vyuh-console-inspector">
+      {% if selected_service %}
+      <header><h2>Service Details</h2><a href="{{ list_url }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <span class="vyuh-console-badge is-service-{{ selected_service.status }}">{{ selected_service.status }}</span>
+      <h3>{{ selected_service.type_name }}</h3>
+      <dl class="vyuh-console-kv"><div><dt>Interfaces</dt><dd>{% if selected_service.facades %}{{ selected_service.facades | join(", ") }}{% else %}-{% endif %}</dd></div></dl>
+      {% for worker in selected_service.workers %}
+      <article class="vyuh-console-muted-panel"><strong>{{ worker.name }}</strong><code>{{ worker.status }}</code></article>
+      {% else %}
+      <article class="vyuh-console-muted-panel"><strong>Workers</strong><code>This service has no background workers.</code></article>
+      {% endfor %}
+      {% else %}
+      <header><h2>Service Details</h2></header>
+      <p>Select a service to inspect its interfaces and worker state.</p>
+      {% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}

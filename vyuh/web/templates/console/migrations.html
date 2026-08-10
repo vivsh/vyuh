@@ -1,0 +1,72 @@
+{% extends "console/layout.html" %}
+
+{% block content %}
+<section class="vyuh-console-screen">
+  {% if available %}
+  <div class="vyuh-console-stat-grid is-four">
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-check"></use></svg></span><div><h3>Applied</h3><strong>{{ summary.applied }}</strong><p>Migration history</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-yellow"><svg><use href="#vyuh-icon-clock"></use></svg></span><div><h3>Pending</h3><strong>{{ summary.pending }}</strong><p>Awaiting deployment</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>Sources</h3><strong>{{ summary.sources }}</strong><p>Composed crates</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-violet"><svg><use href="#vyuh-icon-database"></use></svg></span><div><h3>Entities</h3><strong>{{ summary.entities }}</strong><p>Desired schema</p></div></article>
+  </div>
+
+  {% if not tracking_available %}
+  <aside class="vyuh-console-log-notice" role="status">Migration sources and desired entities are available, but the database tracking state could not be read.</aside>
+  {% endif %}
+
+  <div class="vyuh-console-data-grid">
+    <article class="vyuh-console-card">
+      <header><h2>Migration History <span class="vyuh-console-badge">Read-only</span></h2></header>
+      <div class="vyuh-console-table">
+        <table>
+          <thead><tr><th>Migration</th><th>Source</th><th>Status</th></tr></thead>
+          <tbody>
+            {% for migration in migrations %}
+            <tr>
+              <td><code>{{ migration.id }}</code></td>
+              <td>{{ migration.source }}</td>
+              <td>{% if migration.applied %}<span class="vyuh-console-badge is-success">Applied</span>{% else %}<span class="vyuh-console-badge is-pending">Pending</span>{% endif %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="3"><div class="vyuh-console-empty"><strong>No migration status is available.</strong><span>Apply migrations through the deployment CLI, then refresh this page.</span></div></td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+
+    <aside class="vyuh-console-inspector">
+      <header><h2>Migration Sources</h2></header>
+      <p>Each source contributes one crate-owned migration history to the application graph.</p>
+      {% for source in sources %}
+      <article class="vyuh-console-muted-panel"><strong>{{ source }}</strong><code>{% if source == "Application" %}root application{% else %}crate namespace{% endif %}</code></article>
+      {% else %}
+      <article class="vyuh-console-muted-panel"><strong>No sources registered.</strong><code>Register a bundle migration source to add history.</code></article>
+      {% endfor %}
+      <article class="vyuh-console-muted-panel"><strong>Deployment boundary</strong><span>This console never generates, applies, fakes, or repairs migrations.</span></article>
+    </aside>
+  </div>
+
+  <article class="vyuh-console-card">
+    <header><h2>Tracked Entities <span class="vyuh-console-badge">Desired schema</span></h2></header>
+    <div class="vyuh-console-table">
+      <table>
+        <thead><tr><th>Entity</th><th>Kind</th><th>Source</th><th>Details</th></tr></thead>
+        <tbody>
+          {% for entity in entities %}
+          <tr><td><code>{{ entity.name }}</code></td><td>{{ entity.kind }}</td><td>{{ entity.source }}</td><td>{{ entity.detail }}</td></tr>
+          {% else %}
+          <tr><td colspan="4"><div class="vyuh-console-empty"><strong>No desired schema entities are registered.</strong><span>Schema contributors appear here after their bundles are composed into the site.</span></div></td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+  {% else %}
+  <article class="vyuh-console-card vyuh-console-empty">
+    <strong>Migration support is not compiled into this application.</strong>
+    <span>Build with Vyuh's <code>migrations</code> feature to inspect migration state and desired schema entities.</span>
+  </article>
+  {% endif %}
+</section>
+{% endblock %}

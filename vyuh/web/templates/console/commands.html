@@ -1,0 +1,66 @@
+{% extends "console/layout.html" %}
+
+{% block content %}
+<section class="vyuh-console-screen">
+  <div class="vyuh-console-stat-grid is-four">
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-terminal"></use></svg></span><div><h3>Visible</h3><strong>{{ summary.total }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-docs"></use></svg></span><div><h3>Documented</h3><strong>{{ summary.documented }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-yellow"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>Arguments</h3><strong>{{ summary.arguments }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-violet"><svg><use href="#vyuh-icon-check"></use></svg></span><div><h3>No Arguments</h3><strong>{{ summary.argument_free }}</strong><p>On this page</p></div></article>
+  </div>
+
+  <form class="vyuh-console-toolbar" method="get" action="{{ urls.commands }}">
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search commands..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
+    <a class="vyuh-console-reset" href="{{ urls.commands }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
+  </form>
+
+  <div class="vyuh-console-data-grid">
+    <article class="vyuh-console-card">
+      <header><h2>Registered Commands <span class="vyuh-console-badge">Alphabetical</span></h2></header>
+      <div class="vyuh-console-table">
+        <table>
+          <thead><tr><th>Name</th><th>Summary</th><th>Arguments</th><th></th></tr></thead>
+          <tbody>
+            {% for command in page.items %}
+            <tr {% if selected_command and selected_command.name == command.name %}aria-selected="true"{% endif %}>
+              <td><a class="vyuh-console-row-title" href="{{ selected_url }}{{ command.name }}">{{ command.name }}</a></td>
+              <td>{% if command.summary %}{{ command.summary }}{% else %}-{% endif %}</td>
+              <td>{{ command.args | length }}</td>
+              <td><a href="{{ selected_url }}{{ command.name }}" aria-label="Inspect {{ command.name }}">›</a></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4"><div class="vyuh-console-empty"><strong>No commands match this filter.</strong><span>Register commands through bundles to inspect them here.</span></div></td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <footer class="vyuh-console-pagination">
+        <span>Showing {{ page.items | length }} commands</span>
+        <nav>{% if page.next_cursor %}<a href="{{ next_url }}">Next</a>{% endif %}</nav>
+      </footer>
+    </article>
+
+    <aside class="vyuh-console-inspector">
+      {% if selected_command %}
+      <header><h2>Command Details</h2><a href="{{ list_url }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <h3>{{ selected_command.name }}</h3>
+      <p>{% if selected_command.summary %}{{ selected_command.summary }}{% else %}No description registered.{% endif %}</p>
+      <dl class="vyuh-console-kv"><div><dt>Arguments</dt><dd>{{ selected_command.args | length }}</dd></div></dl>
+      {% for arg in selected_command.args %}
+      <article class="vyuh-console-schema-card">
+        <header><div><strong>{{ arg.name }}</strong><span>{{ arg.type_name }}</span></div><code>{% if arg.required %}required{% else %}optional{% endif %}</code></header>
+        {% if arg.description %}<p>{{ arg.description }}</p>{% endif %}
+        {% if arg.hints %}<p><code>{{ arg.hints | join(", ") }}</code></p>{% endif %}
+      </article>
+      {% else %}
+      <article class="vyuh-console-muted-panel"><strong>Arguments</strong><code>This command accepts no arguments.</code></article>
+      {% endfor %}
+      {% else %}
+      <header><h2>Command Details</h2></header>
+      <p>Select a command to inspect its arguments and help metadata.</p>
+      {% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}

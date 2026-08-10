@@ -21,6 +21,40 @@ pub struct SessionOut {
     pub scopes: Vec<String>,
 }
 
+/// Read-only console metadata for one registered command.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommandOut {
+    pub name: String,
+    pub summary: Option<String>,
+    pub args: Vec<CommandArgOut>,
+}
+
+/// One command argument rendered by the console inspector.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommandArgOut {
+    pub name: String,
+    pub type_name: String,
+    pub required: bool,
+    pub description: Option<String>,
+    pub hints: Vec<String>,
+}
+
+/// Read-only runtime metadata for one configured service.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ServiceOut {
+    pub type_name: String,
+    pub status: String,
+    pub facades: Vec<String>,
+    pub workers: Vec<ServiceWorkerOut>,
+}
+
+/// One service worker and its current in-process lifecycle state.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ServiceWorkerOut {
+    pub name: String,
+    pub status: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AuthorizationOut {
     pub mode: &'static str,
@@ -69,6 +103,48 @@ impl OperationOut {
                 .map(MiddlewareOut::from_info)
                 .collect(),
             returns: op.returns.iter().map(SchemaItem::from_return).collect(),
+        }
+    }
+}
+
+impl From<&crate::commands::CommandInfo> for CommandOut {
+    fn from(command: &crate::commands::CommandInfo) -> Self {
+        Self {
+            name: command.name.clone(),
+            summary: command.summary.clone(),
+            args: command.args.iter().map(CommandArgOut::from).collect(),
+        }
+    }
+}
+
+impl From<&crate::commands::CommandArgInfo> for CommandArgOut {
+    fn from(arg: &crate::commands::CommandArgInfo) -> Self {
+        Self {
+            name: arg.name.clone(),
+            type_name: arg.type_name.to_string(),
+            required: arg.required,
+            description: arg.description.clone(),
+            hints: arg.hints.clone(),
+        }
+    }
+}
+
+impl From<&crate::services::ServiceInfo> for ServiceOut {
+    fn from(service: &crate::services::ServiceInfo) -> Self {
+        Self {
+            type_name: service.type_name.to_string(),
+            status: service.status.as_str().to_owned(),
+            facades: service.facades.iter().map(ToString::to_string).collect(),
+            workers: service.workers.iter().map(ServiceWorkerOut::from).collect(),
+        }
+    }
+}
+
+impl From<&crate::services::ServiceWorkerInfo> for ServiceWorkerOut {
+    fn from(worker: &crate::services::ServiceWorkerInfo) -> Self {
+        Self {
+            name: worker.name.clone(),
+            status: worker.status.as_str().to_owned(),
         }
     }
 }

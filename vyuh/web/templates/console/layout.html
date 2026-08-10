@@ -33,37 +33,40 @@
 
   <div class="vyuh-console-app">
     <aside class="vyuh-console-sidebar">
-      <a class="vyuh-console-brand" href="{{ urls.overview }}">
+      <a class="vyuh-console-brand" href="{{ urls.runtime }}">
         <img src="{{ assets.logo }}" alt="Vyuh logo">
         <span>Vyuh</span>
       </a>
       <nav class="vyuh-console-nav" aria-label="Console pages">
-        <strong>Console</strong>
-        <a href="{{ urls.overview }}" {% if active == "overview" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-dashboard"></use></svg><span>Overview</span></a>
+        <span class="vyuh-console-nav-label">System</span>
         <a href="{{ urls.runtime }}" {% if active == "runtime" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-monitor"></use></svg><span>System Info</span></a>
+        <span class="vyuh-console-nav-label">Application</span>
+        <a href="{{ urls.routes }}" {% if active == "routes" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Routes</span></a>
+        <a href="{{ urls.services }}" {% if active == "services" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-cpu"></use></svg><span>Services</span></a>
+        <a href="{{ urls.openapi }}" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
+        <span class="vyuh-console-nav-label">Runtime</span>
         <a href="{{ urls.tasks }}" {% if active == "tasks" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-check"></use></svg><span>Tasks</span></a>
         <a href="{{ urls.schedules }}" {% if active == "schedules" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-clock"></use></svg><span>Schedules</span></a>
-        <a href="{{ urls.operations }}" {% if active == "operations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Operations</span></a>
+        <a href="{{ urls.emitters }}" {% if active == "emitters" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-clock"></use></svg><span>Emitters</span></a>
+        <a href="{{ urls.signals }}" {% if active == "signals" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-pulse"></use></svg><span>Signals</span></a>
+        <span class="vyuh-console-nav-label">Operations</span>
+        <a href="{{ urls.commands }}" {% if active == "commands" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-terminal"></use></svg><span>Commands</span></a>
         <a href="{{ urls.logs }}" {% if active == "logs" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-terminal"></use></svg><span>Logs</span></a>
-        <a href="{{ urls.openapi }}" {% if active == "openapi" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-docs"></use></svg><span>OpenAPI (ReDoc)</span></a>
+        {% if migrations_available %}<a href="{{ urls.migrations }}" {% if active == "migrations" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-clipboard"></use></svg><span>Migrations</span></a>{% endif %}
+        <a href="{{ urls.conf }}" {% if active == "conf" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-gear"></use></svg><span>Configurations</span></a>
       </nav>
-      <nav class="vyuh-console-nav" aria-label="Console settings">
-        <strong>Settings</strong>
-        <a href="{{ urls.conf }}" {% if active == "conf" %}aria-current="page"{% endif %}><svg><use href="#vyuh-icon-gear"></use></svg><span>Console Settings</span></a>
-      </nav>
-      <footer class="vyuh-console-sidebar-footer">
-        <span><i></i>System Healthy</span>
-        <small>v{{ version }}</small>
-      </footer>
     </aside>
     <main class="vyuh-console-page">
-      {% if development_access %}
-      <aside class="vyuh-console-development-notice" role="status">
-        <strong>Development access is open.</strong>
-        <span>Configure ConsoleConf::access(...) before enabling Console outside debug builds.</span>
-      </aside>
-      {% endif %}
-      {% block content %}{% endblock %}
+      {% include "console/partials/topbar.html" %}
+      <div class="vyuh-console-page-content">
+        {% if development_access %}
+        <aside class="vyuh-console-development-notice" role="status">
+          <strong>Development access is open.</strong>
+          <span>Configure ConsoleConf::access(...) before enabling Console outside debug builds.</span>
+        </aside>
+        {% endif %}
+        {% block content %}{% endblock %}
+      </div>
       <footer class="vyuh-console-footer">
         <img src="{{ assets.logo }}" alt="">
         <span>Vyuh Console v{{ version }}</span>

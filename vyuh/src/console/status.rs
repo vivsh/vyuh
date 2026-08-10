@@ -76,6 +76,7 @@ pub struct SiteStatus {
     pub uptime_seconds: u64,
     pub features: Vec<&'static str>,
     pub operation_count: usize,
+    pub route_count: usize,
     pub command_count: usize,
     pub service_count: usize,
 }
@@ -127,6 +128,7 @@ pub fn collect(site: &Site) -> StatusOut {
     let conf = site.conf();
     let load = System::load_average();
     let task_health = site.task_health();
+    let (operation_count, route_count) = operation_counts(site);
 
     StatusOut {
         site: SiteStatus {
@@ -139,7 +141,8 @@ pub fn collect(site: &Site) -> StatusOut {
             database_backend: database_backend(),
             uptime_seconds: site.uptime().as_secs(),
             features: enabled_features(),
-            operation_count: site.operations().list().count(),
+            operation_count,
+            route_count,
             command_count: site.console_command_infos().len(),
             service_count: site.console_service_infos().len(),
         },
@@ -189,6 +192,17 @@ pub fn collect(site: &Site) -> StatusOut {
                 .map(|failure| failure.as_str().to_string()),
         },
     }
+}
+
+fn operation_counts(site: &Site) -> (usize, usize) {
+    site.operations()
+        .list()
+        .fold((0, 0), |(all, routes), operation| {
+            (
+                all + 1,
+                routes + usize::from(operation.kind == crate::OperationKind::Route),
+            )
+        })
 }
 
 fn enabled_features() -> Vec<&'static str> {

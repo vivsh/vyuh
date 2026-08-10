@@ -2,16 +2,6 @@
 
 {% block content %}
 <section class="vyuh-console-screen">
-  <header class="vyuh-console-topbar">
-    <div>
-      <h1>Logs</h1>
-      <p>Bounded newest-first view of configured JSON file logs</p>
-    </div>
-    <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ urls.logs }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
-    </div>
-  </header>
-
   {% if page.configured %}
   <form class="vyuh-console-toolbar" method="get" action="{{ urls.logs }}">
     <select name="rule">
@@ -49,8 +39,8 @@
               <td><time datetime="{{ entry.timestamp }}">{{ entry.timestamp }}</time></td>
               <td><span class="vyuh-console-badge is-log-{{ entry.level | lower }}">{{ entry.level }}</span></td>
               <td><code>{{ entry.target }}</code></td>
-              <td><a class="vyuh-console-row-title" href="{{ urls.logs }}?selected={{ entry.id }}">{{ entry.message }}</a></td>
-              <td><a href="{{ urls.logs }}?selected={{ entry.id }}">›</a></td>
+              <td><a class="vyuh-console-row-title" href="{{ selected_url }}{{ entry.id }}">{{ entry.message }}</a></td>
+              <td><a href="{{ selected_url }}{{ entry.id }}" aria-label="Inspect log entry">›</a></td>
             </tr>
             {% else %}
             <tr><td colspan="5"><div class="vyuh-console-empty"><strong>No matching log entries.</strong><span>Adjust the filters or refresh after new events are written.</span></div></td></tr>
@@ -66,21 +56,24 @@
 
     <aside class="vyuh-console-inspector">
       {% if selected_log %}
-      <header><h2>Log Details</h2><a href="{{ urls.logs }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <header><h2>Log Details</h2><a href="{{ list_url }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
       <span class="vyuh-console-badge is-log-{{ selected_log.level | lower }}">{{ selected_log.level }}</span>
       <h3>{{ selected_log.target }}</h3>
       <p>{{ selected_log.timestamp }} · {{ selected_log.rule }}</p>
       <article class="vyuh-console-muted-panel"><strong>Message</strong><code>{{ selected_log.message }}</code></article>
       <dl class="vyuh-console-kv">
-        {% for key, value in selected_log.fields %}
+        {% for key, value in selected_log.fields|items %}
         <div><dt>{{ key }}</dt><dd>{{ value }}</dd></div>
         {% endfor %}
       </dl>
       {% for span in selected_log.spans %}
-      <article class="vyuh-console-muted-panel"><strong>{{ span.name }}</strong><code>{% for key, value in span.fields %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% endfor %}</code></article>
+      <article class="vyuh-console-muted-panel"><strong>{{ span.name }}</strong><code>{% for key, value in span.fields|items %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% endfor %}</code></article>
       {% endfor %}
       {% else %}
       <header><h2>Log Details</h2></header>
+      {% if selected_unavailable %}
+      <div class="vyuh-console-log-notice">This log entry is no longer available. It may have been rotated or replaced; refresh to inspect current entries.</div>
+      {% endif %}
       <p>Select an entry to inspect its structured fields and span context.</p>
       {% endif %}
     </aside>

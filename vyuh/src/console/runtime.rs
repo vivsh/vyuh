@@ -49,13 +49,17 @@ impl ConsoleRuntime {
 /// Browser-facing URLs required by the built-in console templates.
 pub(crate) struct ViewUrls {
     pub(crate) home: String,
-    pub(crate) overview: String,
     pub(crate) runtime: String,
+    pub(crate) routes: String,
+    pub(crate) commands: String,
+    pub(crate) services: String,
+    pub(crate) emitters: String,
+    pub(crate) signals: String,
     pub(crate) tasks: String,
     pub(crate) schedules: String,
-    pub(crate) operations: String,
     pub(crate) logs: String,
     pub(crate) conf: String,
+    pub(crate) migrations: String,
     pub(crate) openapi: String,
     pub(crate) api_openapi: String,
     pub(crate) stylesheet_path: String,
@@ -67,20 +71,24 @@ pub(crate) struct ViewUrls {
 impl ViewUrls {
     /// Resolves every console route from one finalized route registry.
     fn new(routes: &Routes<'_>, assets: &AssetUrls) -> Result<Self, String> {
-        let home = required_url(&routes, "console_home")?;
+        let home = required_url(routes, "console_home")?;
         let stylesheet_path = assets
             .url(&format!("css/{}", stylesheet_name()))
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            overview: required_url(&routes, "console_overview")?,
-            runtime: required_url(&routes, "console_runtime")?,
-            tasks: required_url(&routes, "console_tasks")?,
-            schedules: required_url(&routes, "console_schedules")?,
-            operations: required_url(&routes, "console_operations")?,
-            logs: required_url(&routes, "console_logs")?,
-            conf: required_url(&routes, "console_conf")?,
-            openapi: required_url(&routes, "console_openapi")?,
-            api_openapi: required_url(&routes, "console_api_openapi")?,
+            runtime: required_url(routes, "console_runtime")?,
+            routes: required_url(routes, "console_routes")?,
+            commands: required_url(routes, "console_commands")?,
+            services: required_url(routes, "console_services")?,
+            emitters: required_url(routes, "console_emitters")?,
+            signals: required_url(routes, "console_signals")?,
+            tasks: required_url(routes, "console_tasks")?,
+            schedules: required_url(routes, "console_schedules")?,
+            logs: required_url(routes, "console_logs")?,
+            conf: required_url(routes, "console_conf")?,
+            migrations: required_url(routes, "console_migrations")?,
+            openapi: required_url(routes, "console_openapi")?,
+            api_openapi: required_url(routes, "console_api_openapi")?,
             home,
             stylesheet_path,
             script_path: assets

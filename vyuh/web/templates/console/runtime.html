@@ -2,19 +2,6 @@
 
 {% block content %}
 <section class="vyuh-console-screen">
-  <header class="vyuh-console-topbar">
-    <div>
-      <h1>System Info</h1>
-      <p>Snapshot of the running system</p>
-    </div>
-    <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ urls.runtime }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
-      <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option><option>30s</option></select></label>
-    </div>
-  </header>
-
-  <p class="vyuh-console-captured">Captured from the cached status collector <a href="{{ urls.runtime }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Refresh now</a></p>
-
   <div class="vyuh-console-stat-grid is-five">
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-clock"></use></svg></span><div><h3>Uptime</h3><strong>{{ status.site.uptime_seconds }}s</strong><p>Site lifetime</p></div></article>
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>CPU Usage</h3><strong>{{ cpu.global }}</strong><p>{{ status.system.cpu_count }} cores</p></div></article>
@@ -24,6 +11,18 @@
   </div>
 
   <div class="vyuh-console-info-grid">
+    <article class="vyuh-console-card">
+      <header><h2>Application Runtime</h2><span class="vyuh-console-badge is-success">Ready</span></header>
+      <dl class="vyuh-console-kv">
+        <div><dt>Operations</dt><dd>{{ status.site.operation_count }}</dd></div>
+        <div><dt>Routes</dt><dd>{{ status.site.route_count }}</dd></div>
+        <div><dt>Commands</dt><dd>{{ status.site.command_count }}</dd></div>
+        <div><dt>Services</dt><dd>{{ status.site.service_count }}</dd></div>
+        <div><dt>Task Runner</dt><dd>{{ status.tasks.state }}</dd></div>
+        <div><dt>Task Ready</dt><dd>{{ status.tasks.ready }}</dd></div>
+      </dl>
+    </article>
+
     <article class="vyuh-console-card">
       <header><h2>System Environment</h2></header>
       <dl class="vyuh-console-kv">

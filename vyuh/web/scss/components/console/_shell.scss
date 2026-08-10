@@ -50,9 +50,15 @@
 }
 
 .vyuh-console-page {
-  display: grid;
-  gap: $vyuh-space-7;
+  display: flex;
+  flex-direction: column;
   padding: $vyuh-space-6 $vyuh-space-7 0;
+}
+
+.vyuh-console-page-content {
+  display: grid;
+  gap: $vyuh-console-screen-gap;
+  padding-top: $vyuh-console-screen-gap;
 }
 
 .vyuh-console-screen {
@@ -68,6 +74,7 @@
   display: flex;
   gap: $vyuh-space-3;
   justify-content: center;
+  margin-top: $vyuh-space-7;
   padding: 0 0 $vyuh-space-6;
 }
 

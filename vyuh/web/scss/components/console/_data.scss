@@ -71,6 +71,13 @@
 .vyuh-console-badge.is-log-info { @include vyuh-status(blue); }
 .vyuh-console-badge.is-log-debug { background: rgba($vyuh-ink, 0.08); color: $vyuh-muted; }
 .vyuh-console-badge.is-log-trace { background: rgba($vyuh-ink, 0.04); color: $vyuh-ink-soft; }
+.vyuh-console-badge.is-service-ready { @include vyuh-status(blue); }
+.vyuh-console-badge.is-service-running { @include vyuh-status(green); }
+.vyuh-console-badge.is-service-completed {
+  background: rgba($vyuh-ink, 0.08);
+  color: $vyuh-ink;
+}
+.vyuh-console-badge.is-service-failed { @include vyuh-status(red); }
 
 .vyuh-console-inspector {
   align-self: start;

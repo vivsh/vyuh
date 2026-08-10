@@ -1,5 +1,4 @@
-.vyuh-console-config-grid .is-span-wide,
-.vyuh-console-config-grid .is-code {
+.vyuh-console-config-grid .is-span-wide {
   grid-column: 1;
 }
 
@@ -36,29 +35,20 @@
   overflow-wrap: anywhere;
 }
 
-.vyuh-console-section-list {
-  display: grid;
+.vyuh-console-raw-config {
+  background: rgba($vyuh-white, 0.56);
+  border: $vyuh-border-subtle;
+  border-radius: $vyuh-radius-sm;
+  padding: $vyuh-space-3 $vyuh-space-4;
 }
 
-.vyuh-console-section-list button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-bottom: $vyuh-border-subtle;
+.vyuh-console-raw-config summary {
   color: $vyuh-ink;
-  display: flex;
-  justify-content: space-between;
-  min-height: $vyuh-control-height;
-  padding: 0;
+  cursor: pointer;
+  font-size: $vyuh-text-sm;
+  font-weight: 500;
 }
 
-.vyuh-console-section-list button:last-child {
-  border-bottom: 0;
-}
-
-.vyuh-console-section-list b {
-  background: rgba($vyuh-ink, 0.06);
-  border-radius: $vyuh-radius-pill;
-  min-width: $vyuh-space-6;
-  padding: $vyuh-space-1 $vyuh-space-2;
+.vyuh-console-raw-config .vyuh-console-code {
+  margin-top: $vyuh-space-3;
 }

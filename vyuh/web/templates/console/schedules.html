@@ -2,24 +2,6 @@
 
 {% block content %}
 <section class="vyuh-console-screen">
-  <header class="vyuh-console-topbar">
-    <div>
-      <h1>Schedules</h1>
-      <p>Durable cron and periodic task submissions</p>
-    </div>
-    <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ urls.schedules }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
-      <label class="vyuh-console-select"><span>Auto refresh</span><select><option>Off</option></select></label>
-    </div>
-  </header>
-
-  <nav class="vyuh-console-tabs" aria-label="Schedule sections">
-    <a href="{{ urls.schedules }}" {% if not query.source %}aria-current="page"{% endif %}>All schedules</a>
-    <a href="{{ urls.schedules }}?source=cron" {% if query.source == "cron" %}aria-current="page"{% endif %}>Cron</a>
-    <a href="{{ urls.schedules }}?source=periodic" {% if query.source == "periodic" %}aria-current="page"{% endif %}>Periodic</a>
-    <a href="{{ urls.schedules }}?awaiting_first_run=true" {% if query.awaiting_first_run %}aria-current="page"{% endif %}>Awaiting first run</a>
-  </nav>
-
   <div class="vyuh-console-stat-grid is-four">
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>Configured</h3><strong>{{ page.configured }}</strong><p>Total schedules</p></div></article>
     <article class="vyuh-console-stat"><span class="vyuh-console-icon is-yellow"><svg><use href="#vyuh-icon-clock"></use></svg></span><div><h3>Cron</h3><strong>{{ page.cron }}</strong><p>Cron schedules</p></div></article>
@@ -43,35 +25,34 @@
 
   <div class="vyuh-console-data-grid">
     <article class="vyuh-console-card">
-      <header><h2>Registered schedules <span class="vyuh-console-badge">Read-only</span></h2></header>
+      <header><h2>Registered schedules <span class="vyuh-console-badge">Alphabetical</span></h2></header>
       <div class="vyuh-console-table">
         <table>
-          <thead><tr><th>Source</th><th>Schedule</th><th>Target task</th><th>Lane</th><th>Last submitted</th><th>Next expected</th><th></th></tr></thead>
+          <thead><tr><th>Source</th><th>Schedule</th><th>Target task</th><th>Next expected</th><th></th></tr></thead>
           <tbody>
             {% for schedule in page.items %}
             <tr {% if selected_schedule and selected_schedule.name == schedule.name %}aria-selected="true"{% endif %}>
               <td><span class="vyuh-console-badge">{{ schedule.source }}</span></td>
-              <td><a class="vyuh-console-row-title" href="{{ urls.schedules }}?selected={{ schedule.name }}">{{ schedule.name }}</a></td>
-              <td>{{ schedule.task }}</td><td>{{ schedule.lane }}</td>
-              <td>{% if schedule.last_submitted_display %}<time datetime="{{ schedule.last_submitted_at }}">{{ schedule.last_submitted_display }}</time>{% else %}Never{% endif %}</td>
+              <td><a class="vyuh-console-row-title" href="{{ selected_url }}{{ schedule.name }}">{{ schedule.name }}</a></td>
+              <td>{{ schedule.task }}</td>
               <td>{% if schedule.next_expected_display %}<time datetime="{{ schedule.next_expected_at }}">{{ schedule.next_expected_display }}</time>{% else %}-{% endif %}</td>
-              <td><a href="{{ urls.schedules }}?selected={{ schedule.name }}">›</a></td>
+              <td><a href="{{ selected_url }}{{ schedule.name }}" aria-label="Inspect {{ schedule.name }}">›</a></td>
             </tr>
             {% else %}
-            <tr><td colspan="7"><div class="vyuh-console-empty"><strong>No task schedules are registered.</strong><span>Task-targeted cron and periodic emitters appear here after site construction.</span></div></td></tr>
+            <tr><td colspan="5"><div class="vyuh-console-empty"><strong>No task schedules are registered.</strong><span>Task-targeted cron and periodic emitters appear here after site construction.</span></div></td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
       <footer class="vyuh-console-pagination">
         <span>Showing {{ page.items | length }} of {{ page.total }} schedules</span>
-        <nav>{% if previous_page %}<a href="{{ urls.schedules }}?page={{ previous_page }}">Previous</a>{% endif %}{% if next_page %}<a href="{{ urls.schedules }}?page={{ next_page }}">Next</a>{% endif %}</nav>
+        <nav>{% if previous_url %}<a href="{{ previous_url }}">Previous</a>{% endif %}{% if next_url %}<a href="{{ next_url }}">Next</a>{% endif %}</nav>
       </footer>
     </article>
 
     <aside class="vyuh-console-inspector">
       {% if selected_schedule %}
-      <header><h2>Schedule Details</h2><a href="{{ urls.schedules }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <header><h2>Schedule Details</h2><a href="{{ list_url }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
       <span class="vyuh-console-badge">{{ selected_schedule.source }}</span>
       <h3>{{ selected_schedule.name }}</h3>
       <p>Task-targeted durable schedule</p>

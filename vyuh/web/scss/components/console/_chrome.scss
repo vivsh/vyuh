@@ -1,29 +1,78 @@
-.vyuh-console-topbar {
-  align-items: start;
+.vyuh-console-global-header {
+  align-items: center;
+  border-bottom: $vyuh-border-subtle;
   display: flex;
   gap: $vyuh-space-6;
+  height: $vyuh-console-topbar-height;
   justify-content: space-between;
 }
 
-.vyuh-console-topbar h1 {
+.vyuh-console-page-identity {
+  min-width: 0;
+}
+
+.vyuh-console-page-identity h1 {
   font-family: $vyuh-font-display;
-  font-size: $vyuh-text-3xl;
+  font-size: $vyuh-text-2xl;
   letter-spacing: 0;
   margin: 0;
 }
 
-.vyuh-console-topbar p,
-.vyuh-console-captured {
+.vyuh-console-page-identity p {
   color: $vyuh-muted;
   font-size: $vyuh-text-sm;
-  margin: $vyuh-space-2 0 0;
+  margin: $vyuh-space-1 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.vyuh-console-actions {
+.vyuh-console-global-actions {
   align-items: center;
   display: flex;
+  flex: 0 0 auto;
   gap: $vyuh-space-3;
   justify-content: end;
+}
+
+.vyuh-console-global-header small {
+  color: $vyuh-muted;
+  padding-left: $vyuh-space-3;
+  position: relative;
+}
+
+.vyuh-console-global-header small::before {
+  background: $vyuh-line;
+  content: "";
+  height: $vyuh-space-4;
+  left: 0;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+}
+
+.vyuh-console-health {
+  align-items: center;
+  color: $vyuh-ink-soft;
+  display: inline-flex;
+  font-size: $vyuh-text-xs;
+  font-weight: $vyuh-label-weight;
+  gap: $vyuh-space-3;
+}
+
+.vyuh-console-health i {
+  border-radius: $vyuh-radius-pill;
+  height: $vyuh-space-2;
+  width: $vyuh-space-2;
+}
+
+.vyuh-console-health.is-ready i {
+  background: $vyuh-success;
+}
+
+.vyuh-console-health.is-attention i {
+  background: $vyuh-warning;
 }
 
 .vyuh-console-icon-button,
@@ -60,7 +109,6 @@
   min-width: $vyuh-space-10;
 }
 
-.vyuh-console-sidebar-footer i,
 .vyuh-console-status {
   background: $vyuh-success;
   border-radius: $vyuh-radius-pill;

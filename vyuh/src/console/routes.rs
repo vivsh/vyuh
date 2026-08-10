@@ -25,7 +25,7 @@ fn root_parts(conf: &ConsoleConf) -> Vec<bundles::BundlePart> {
             "console_home",
             conf.path.clone(),
             Methods::GET,
-            pages::overview,
+            pages::runtime,
         ),
     ]
 }
@@ -33,12 +33,6 @@ fn root_parts(conf: &ConsoleConf) -> Vec<bundles::BundlePart> {
 /// Returns console navigation routes under the configured console path.
 fn dashboard_parts(prefix: &str) -> Vec<bundles::BundlePart> {
     vec![
-        route(
-            "console_overview",
-            path(prefix, "/overview"),
-            Methods::GET,
-            pages::overview,
-        ),
         route(
             "console_runtime",
             path(prefix, "/runtime"),
@@ -52,6 +46,12 @@ fn dashboard_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             pages::conf,
         ),
         route(
+            "console_migrations",
+            path(prefix, "/migrations"),
+            Methods::GET,
+            pages::migrations,
+        ),
+        route(
             "console_openapi",
             path(prefix, "/openapi"),
             Methods::GET,
@@ -60,20 +60,38 @@ fn dashboard_parts(prefix: &str) -> Vec<bundles::BundlePart> {
     ]
 }
 
-/// Returns console operation and task inspection routes under the configured path.
+/// Returns console inspection routes under the configured path.
 fn inspection_parts(prefix: &str) -> Vec<bundles::BundlePart> {
     vec![
         route(
-            "console_operations",
-            path(prefix, "/operations"),
+            "console_routes",
+            path(prefix, "/routes"),
             Methods::GET,
-            pages::operations,
+            pages::routes,
         ),
         route(
-            "console_operation_detail",
-            path(prefix, "/operations/{id}"),
+            "console_commands",
+            path(prefix, "/commands"),
             Methods::GET,
-            pages::operation_detail,
+            pages::commands,
+        ),
+        route(
+            "console_services",
+            path(prefix, "/services"),
+            Methods::GET,
+            pages::services,
+        ),
+        route(
+            "console_emitters",
+            path(prefix, "/emitters"),
+            Methods::GET,
+            pages::emitters,
+        ),
+        route(
+            "console_signals",
+            path(prefix, "/signals"),
+            Methods::GET,
+            pages::signals,
         ),
         route(
             "console_tasks",
@@ -112,16 +130,34 @@ fn api_parts(prefix: &str) -> Vec<bundles::BundlePart> {
             api::session,
         ),
         route(
-            "console_api_operations",
-            path(prefix, "/api/operations"),
+            "console_api_routes",
+            path(prefix, "/api/routes"),
             Methods::GET,
-            api::operations,
+            api::routes,
         ),
         route(
-            "console_api_operation_detail",
-            path(prefix, "/api/operations/{id}"),
+            "console_api_commands",
+            path(prefix, "/api/commands"),
             Methods::GET,
-            api::operation_detail,
+            api::commands,
+        ),
+        route(
+            "console_api_services",
+            path(prefix, "/api/services"),
+            Methods::GET,
+            api::services,
+        ),
+        route(
+            "console_api_emitters",
+            path(prefix, "/api/emitters"),
+            Methods::GET,
+            api::emitters,
+        ),
+        route(
+            "console_api_signals",
+            path(prefix, "/api/signals"),
+            Methods::GET,
+            api::signals,
         ),
         route(
             "console_api_tasks",

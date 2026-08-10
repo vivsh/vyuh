@@ -1,15 +1,6 @@
 @media (max-width: 1200px) {
-  .vyuh-console-app {
-    grid-template-columns: 1fr;
-  }
-
-  .vyuh-console-app .vyuh-console-sidebar {
-    grid-template-rows: auto;
-  }
-
   .vyuh-console-stat-grid,
   .vyuh-console-stat-grid.is-five,
-  .vyuh-console-overview-grid,
   .vyuh-console-info-grid,
   .vyuh-console-config-grid,
   .vyuh-console-data-grid {
@@ -22,26 +13,135 @@
 }
 
 @media (max-width: 992px) {
-  .vyuh-console-shell {
-    grid-template-columns: 1fr;
+  .vyuh-console-app {
+    display: block;
+    min-height: 0;
+    overflow: visible;
   }
 
-  .vyuh-console-sidebar,
-  .vyuh-console-detail {
-    border: 0;
+  .vyuh-console-app .vyuh-console-sidebar {
+    align-items: center;
+    border-bottom: $vyuh-border-subtle;
+    border-right: 0;
+    display: grid;
+    gap: $vyuh-space-3;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
+    padding: $vyuh-space-3 $vyuh-space-4;
+  }
+
+  .vyuh-console-app .vyuh-console-sidebar::after {
+    display: none;
+  }
+
+  .vyuh-console-brand {
+    flex: 0 0 auto;
+    font-size: $vyuh-text-2xl;
+    grid-row: 1 / span 2;
+    margin: 0;
+  }
+
+  .vyuh-console-brand img {
+    height: $vyuh-space-7;
+    width: $vyuh-space-7;
+  }
+
+  .vyuh-console-nav {
+    display: flex;
+    flex: 1 1 auto;
+    gap: $vyuh-space-2;
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    margin: 0;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .vyuh-console-nav-label {
+    display: none;
+  }
+
+  .vyuh-console-nav a {
+    flex: 0 0 auto;
+    min-height: $vyuh-control-height-sm;
+    padding: $vyuh-space-2 $vyuh-space-3;
+  }
+
+  .vyuh-console-page {
+    padding: $vyuh-space-5 $vyuh-space-4 0;
   }
 }
 
 @media (max-width: 768px) {
-  .vyuh-console-topbar,
-  .vyuh-console-actions,
+  .vyuh-console-global-header,
+  .vyuh-console-global-actions,
   .vyuh-console-pagination {
     align-items: stretch;
     flex-direction: column;
     grid-template-columns: 1fr;
   }
 
+  .vyuh-console-global-header {
+    height: auto;
+    padding-bottom: $vyuh-space-3;
+  }
+
   .vyuh-console-page {
     padding: $vyuh-space-4;
+  }
+
+  .vyuh-console-screen {
+    gap: $vyuh-space-4;
+    padding-bottom: $vyuh-space-5;
+  }
+
+  .vyuh-console-page-identity h1 {
+    font-size: $vyuh-text-2xl;
+  }
+
+  .vyuh-console-page-identity p {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .vyuh-console-global-actions {
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .vyuh-console-toolbar > * {
+    flex: 1 1 100%;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .vyuh-console-toolbar label {
+    min-width: 0;
+  }
+
+  .vyuh-console-tabs {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    white-space: nowrap;
+  }
+
+  .vyuh-console-card,
+  .vyuh-console-inspector {
+    padding: $vyuh-space-3;
+  }
+
+  .vyuh-console-table {
+    max-width: 100%;
+    overscroll-behavior-inline: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .vyuh-console-summary-strip {
+    grid-template-columns: 1fr;
   }
 }

@@ -160,16 +160,3 @@
 .vyuh-console-progress.is-yellow i {
   background: $vyuh-saffron;
 }
-
-.vyuh-console-captured {
-  align-items: center;
-  display: inline-flex;
-  gap: $vyuh-space-4;
-}
-
-.vyuh-console-captured a {
-  align-items: center;
-  color: $vyuh-ember;
-  display: inline-flex;
-  gap: $vyuh-space-2;
-}

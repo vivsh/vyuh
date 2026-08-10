@@ -2,17 +2,6 @@
 
 {% block content %}
 <section class="vyuh-console-screen">
-  <header class="vyuh-console-topbar">
-    <div>
-      <h1>OpenAPI</h1>
-      <p>Application route documentation rendered inside the Vyuh console.</p>
-    </div>
-    <div class="vyuh-console-actions">
-      <a class="vyuh-console-icon-button" href="{{ urls.openapi }}" aria-label="Refresh"><svg><use href="#vyuh-icon-refresh"></use></svg></a>
-      <a class="vyuh-console-site-button" href="{{ urls.api_openapi }}">JSON <svg><use href="#vyuh-icon-external"></use></svg></a>
-    </div>
-  </header>
-
   <article class="vyuh-console-card is-redoc">
     <redoc spec-url="{{ urls.api_openapi }}" hide-download-button></redoc>
   </article>

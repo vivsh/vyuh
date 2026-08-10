@@ -16,7 +16,7 @@
   background: rgba($vyuh-paper-warm, 0.72);
   border-right: $vyuh-border-subtle;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 100%;
   padding: $vyuh-space-7 $vyuh-space-4 $vyuh-space-5;
   position: relative;
@@ -54,15 +54,17 @@
   display: grid;
   gap: $vyuh-space-1;
   margin-bottom: $vyuh-space-5;
+  overflow-y: auto;
   position: relative;
   z-index: 1;
 }
 
-.vyuh-console-nav strong {
-  color: $vyuh-ember;
+.vyuh-console-nav-label {
+  color: $vyuh-muted;
+  display: block;
   font-size: $vyuh-text-xs;
   letter-spacing: $vyuh-tracking-kicker;
-  padding: $vyuh-space-3 $vyuh-space-3 $vyuh-space-2;
+  padding: $vyuh-space-3 $vyuh-space-3 $vyuh-space-1;
   text-transform: uppercase;
 }
 
@@ -89,21 +91,4 @@
 .vyuh-console-nav a[aria-current="page"] svg,
 .vyuh-console-nav a:hover svg {
   color: $vyuh-ember;
-}
-
-.vyuh-console-sidebar-footer {
-  align-self: end;
-  border-top: $vyuh-border-subtle;
-  display: grid;
-  gap: $vyuh-space-4;
-  padding: $vyuh-space-5 $vyuh-space-3 0;
-  position: relative;
-  z-index: 1;
-}
-
-.vyuh-console-sidebar-footer span {
-  align-items: center;
-  color: $vyuh-muted;
-  display: inline-flex;
-  gap: $vyuh-space-3;
 }

@@ -1,0 +1,118 @@
+{% extends "console/layout.html" %}
+
+{% block content %}
+<section class="vyuh-console-screen">
+  <div class="vyuh-console-stat-grid is-four">
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-ember"><svg><use href="#vyuh-icon-clipboard"></use></svg></span><div><h3>Visible</h3><strong>{{ summary.total }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-green"><svg><use href="#vyuh-icon-docs"></use></svg></span><div><h3>Documented</h3><strong>{{ summary.documented }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-yellow"><svg><use href="#vyuh-icon-terminal"></use></svg></span><div><h3>Inputs</h3><strong>{{ summary.inputs }}</strong><p>On this page</p></div></article>
+    <article class="vyuh-console-stat"><span class="vyuh-console-icon is-violet"><svg><use href="#vyuh-icon-check"></use></svg></span><div><h3>Outputs</h3><strong>{{ summary.outputs }}</strong><p>On this page</p></div></article>
+  </div>
+
+  <form class="vyuh-console-toolbar" method="get" action="{{ section.url }}">
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search {{ section.title | lower }}..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <select name="owner">
+      <option value="">All Owners</option>
+      {% for owner in filters.owners %}<option value="{{ owner }}" {% if query.owner == owner %}selected{% endif %}>{{ owner }}</option>{% endfor %}
+    </select>
+    <select name="tag">
+      <option value="">All Tags</option>
+      {% for tag in filters.tags %}<option value="{{ tag }}" {% if query.tag == tag %}selected{% endif %}>{{ tag }}</option>{% endfor %}
+    </select>
+    <button type="submit"><svg><use href="#vyuh-icon-search"></use></svg>Filter</button>
+    <a class="vyuh-console-reset" href="{{ section.url }}"><svg><use href="#vyuh-icon-refresh"></use></svg>Reset</a>
+  </form>
+
+  <div class="vyuh-console-data-grid">
+    <article class="vyuh-console-card">
+      <header><h2>Registered {{ section.title }} <span class="vyuh-console-badge">Alphabetical</span></h2></header>
+      <div class="vyuh-console-table">
+        <table>
+          {% if section.active == "routes" %}
+          <thead><tr><th>Route</th><th>Methods</th><th>Path</th><th>Owner</th><th></th></tr></thead>
+          {% elif section.active == "signals" %}
+          <thead><tr><th>Handler</th><th>Inputs</th><th>Outputs</th><th>Owner</th><th></th></tr></thead>
+          {% else %}
+          <thead><tr><th>Emitter</th><th>Trigger</th><th>Inputs</th><th>Outputs</th><th></th></tr></thead>
+          {% endif %}
+          <tbody>
+            {% for op in page.items %}
+            <tr {% if selected_operation and selected_operation.id == op.id %}aria-selected="true"{% endif %}>
+              <td><a class="vyuh-console-row-title" href="{{ selected_url }}{{ op.id }}">{{ op.name }}</a></td>
+              {% if section.active == "routes" %}
+              <td>{% for method in op.methods %}<span class="vyuh-console-badge is-method">{{ method }}</span>{% endfor %}</td>
+              <td><code>{{ op.path }}</code></td>
+              <td>{% if op.owner %}{{ op.owner }}{% else %}-{% endif %}</td>
+              {% elif section.active == "signals" %}
+              <td>{{ op.args | length }}</td><td>{{ op.returns | length }}</td>
+              <td>{% if op.owner %}{{ op.owner }}{% else %}-{% endif %}</td>
+              {% else %}
+              <td><span class="vyuh-console-badge is-info">{{ op.kind }}</span></td>
+              <td>{{ op.args | length }}</td><td>{{ op.returns | length }}</td>
+              {% endif %}
+              <td><a href="{{ selected_url }}{{ op.id }}" aria-label="Inspect {{ op.name }}">›</a></td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5"><div class="vyuh-console-empty"><strong>No {{ section.title | lower }} match this filter.</strong><span>Clear the search or adjust the available metadata filters.</span></div></td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <footer class="vyuh-console-pagination">
+        <span>Showing {{ page.items | length }} {{ section.title | lower }}</span>
+        <nav>{% if page.next_cursor %}<a href="{{ next_url }}">Next</a>{% endif %}</nav>
+      </footer>
+    </article>
+
+    <aside class="vyuh-console-inspector">
+      {% if selected_operation %}
+      <header><h2>{{ section.singular }} Details</h2><a href="{{ list_url }}" aria-label="Close"><svg><use href="#vyuh-icon-x"></use></svg></a></header>
+      <span class="vyuh-console-badge is-info">{{ selected_operation.kind }}</span>
+      <h3>{{ selected_operation.name }}</h3>
+      <p>{% if selected_operation.description %}{{ selected_operation.description }}{% elif selected_operation.summary %}{{ selected_operation.summary }}{% else %}No description registered.{% endif %}</p>
+      <dl class="vyuh-console-kv">
+        {% if section.active == "routes" %}
+        <div><dt>Path</dt><dd>{{ selected_operation.path }}</dd></div>
+        <div><dt>Methods</dt><dd>{{ selected_operation.methods | join(", ") }}</dd></div>
+        {% endif %}
+        <div><dt>Owner</dt><dd>{% if selected_operation.owner %}{{ selected_operation.owner }}{% else %}-{% endif %}</dd></div>
+        {% if selected_operation.authorization %}
+        <div><dt>Scope rule</dt><dd>{{ selected_operation.authorization.mode }}</dd></div>
+        <div><dt>Scopes</dt><dd>{{ selected_operation.authorization.scopes | join(", ") }}</dd></div>
+        {% endif %}
+      </dl>
+      <nav class="vyuh-console-tabs is-compact" role="tablist" data-console-tabs aria-label="{{ section.singular }} detail sections">
+        <button type="button" role="tab" id="inspection-request-tab" aria-controls="inspection-request-panel" aria-selected="true">Input</button>
+        <button type="button" role="tab" id="inspection-response-tab" aria-controls="inspection-response-panel" aria-selected="false" tabindex="-1">Output</button>
+        <button type="button" role="tab" id="inspection-metadata-tab" aria-controls="inspection-metadata-panel" aria-selected="false" tabindex="-1">Metadata</button>
+      </nav>
+      <section class="vyuh-console-tab-panel" role="tabpanel" id="inspection-request-panel" aria-labelledby="inspection-request-tab">
+        {% for arg in selected_operation.args %}
+        {% include "console/partials/schema_card.html" %}
+        {% else %}
+        <article class="vyuh-console-muted-panel"><strong>Input</strong><code>No typed inputs registered.</code></article>
+        {% endfor %}
+      </section>
+      <section class="vyuh-console-tab-panel" role="tabpanel" id="inspection-response-panel" aria-labelledby="inspection-response-tab" hidden>
+        {% for ret in selected_operation.returns %}
+        {% set arg = ret %}
+        {% include "console/partials/schema_card.html" %}
+        {% else %}
+        <article class="vyuh-console-muted-panel"><strong>Output</strong><code>No response schema registered.</code></article>
+        {% endfor %}
+      </section>
+      <section class="vyuh-console-tab-panel" role="tabpanel" id="inspection-metadata-panel" aria-labelledby="inspection-metadata-tab" hidden>
+        <dl class="vyuh-console-kv">
+          <div><dt>ID</dt><dd>{{ selected_operation.id }}</dd></div>
+          <div><dt>Tags</dt><dd>{% if selected_operation.tags %}{{ selected_operation.tags | join(", ") }}{% else %}-{% endif %}</dd></div>
+          <div><dt>Hidden</dt><dd>{{ selected_operation.hidden }}</dd></div>
+        </dl>
+      </section>
+      {% else %}
+      <header><h2>{{ section.singular }} Details</h2></header>
+      <p>Select a row to inspect its typed metadata without leaving this page.</p>
+      {% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}

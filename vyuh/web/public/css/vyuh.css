@@ -13722,9 +13722,15 @@ body {
 }
 
 .vyuh-console-page {
-  display: grid;
-  gap: 2rem;
+  display: flex;
+  flex-direction: column;
   padding: 1.5rem 2rem 0;
+}
+
+.vyuh-console-page-content {
+  display: grid;
+  gap: 1.25rem;
+  padding-top: 1.25rem;
 }
 
 .vyuh-console-screen {
@@ -13740,6 +13746,7 @@ body {
   display: flex;
   gap: 0.75rem;
   justify-content: center;
+  margin-top: 2rem;
   padding: 0 0 1.5rem;
 }
 
@@ -13765,7 +13772,7 @@ body {
   background: rgba(255, 250, 244, 0.72);
   border-right: 1px solid rgba(16, 24, 39, 0.08);
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 100%;
   padding: 2rem 1rem 1.25rem;
   position: relative;
@@ -13803,15 +13810,17 @@ body {
   display: grid;
   gap: 0.25rem;
   margin-bottom: 1.25rem;
+  overflow-y: auto;
   position: relative;
   z-index: 1;
 }
 
-.vyuh-console-nav strong {
-  color: #ec5b1a;
+.vyuh-console-nav-label {
+  color: #5d6875;
+  display: block;
   font-size: 0.75rem;
   letter-spacing: 0.08em;
-  padding: 0.75rem 0.75rem 0.5rem;
+  padding: 0.75rem 0.75rem 0.25rem;
   text-transform: uppercase;
 }
 
@@ -13840,49 +13849,81 @@ body {
   color: #ec5b1a;
 }
 
-.vyuh-console-sidebar-footer {
-  align-self: end;
-  border-top: 1px solid rgba(16, 24, 39, 0.08);
-  display: grid;
-  gap: 1rem;
-  padding: 1.25rem 0.75rem 0;
-  position: relative;
-  z-index: 1;
-}
-
-.vyuh-console-sidebar-footer span {
+.vyuh-console-global-header {
   align-items: center;
-  color: #5d6875;
-  display: inline-flex;
-  gap: 0.75rem;
-}
-
-.vyuh-console-topbar {
-  align-items: start;
+  border-bottom: 1px solid rgba(16, 24, 39, 0.08);
   display: flex;
   gap: 1.5rem;
+  height: 4.5rem;
   justify-content: space-between;
 }
 
-.vyuh-console-topbar h1, .vyuh-console-topbar .h1 {
+.vyuh-console-page-identity {
+  min-width: 0;
+}
+
+.vyuh-console-page-identity h1, .vyuh-console-page-identity .h1 {
   font-family: "Fraunces", Georgia, serif;
-  font-size: 2rem;
+  font-size: 1.625rem;
   letter-spacing: 0;
   margin: 0;
 }
 
-.vyuh-console-topbar p,
-.vyuh-console-captured {
+.vyuh-console-page-identity p {
   color: #5d6875;
   font-size: 0.875rem;
-  margin: 0.5rem 0 0;
+  margin: 0.25rem 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.vyuh-console-actions {
+.vyuh-console-global-actions {
   align-items: center;
   display: flex;
+  flex: 0 0 auto;
   gap: 0.75rem;
   justify-content: end;
+}
+
+.vyuh-console-global-header small, .vyuh-console-global-header .small {
+  color: #5d6875;
+  padding-left: 0.75rem;
+  position: relative;
+}
+
+.vyuh-console-global-header small::before, .vyuh-console-global-header .small::before {
+  background: rgba(16, 24, 39, 0.1);
+  content: "";
+  height: 1rem;
+  left: 0;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+}
+
+.vyuh-console-health {
+  align-items: center;
+  color: rgba(16, 24, 39, 0.72);
+  display: inline-flex;
+  font-size: 0.75rem;
+  font-weight: 600;
+  gap: 0.75rem;
+}
+
+.vyuh-console-health i {
+  border-radius: 999px;
+  height: 0.5rem;
+  width: 0.5rem;
+}
+
+.vyuh-console-health.is-ready i {
+  background: #2f7d4f;
+}
+
+.vyuh-console-health.is-attention i {
+  background: #a45f00;
 }
 
 .vyuh-console-icon-button,
@@ -13933,7 +13974,6 @@ body {
   min-width: 4rem;
 }
 
-.vyuh-console-sidebar-footer i,
 .vyuh-console-status {
   background: #2f7d4f;
   border-radius: 999px;
@@ -13951,7 +13991,6 @@ body {
 }
 
 .vyuh-console-stat-grid,
-.vyuh-console-overview-grid,
 .vyuh-console-info-grid,
 .vyuh-console-config-grid {
   display: grid;
@@ -13964,10 +14003,6 @@ body {
 
 .vyuh-console-stat-grid.is-five {
   grid-template-columns: repeat(auto-fit, minmax(11.75rem, 1fr));
-}
-
-.vyuh-console-overview-grid {
-  grid-template-columns: 1.2fr 1.2fr 1fr;
 }
 
 .vyuh-console-info-grid {
@@ -14280,19 +14315,6 @@ body {
   background: #f59e0b;
 }
 
-.vyuh-console-captured {
-  align-items: center;
-  display: inline-flex;
-  gap: 1rem;
-}
-
-.vyuh-console-captured a {
-  align-items: center;
-  color: #ec5b1a;
-  display: inline-flex;
-  gap: 0.5rem;
-}
-
 .vyuh-operation-row {
   align-items: start;
   background: rgba(255, 255, 255, 0.62);
@@ -14383,6 +14405,26 @@ body {
   color: rgba(16, 24, 39, 0.72);
 }
 
+.vyuh-console-badge.is-service-ready {
+  background: rgba(35, 116, 171, 0.1);
+  color: #2374ab;
+}
+
+.vyuh-console-badge.is-service-running {
+  background: rgba(47, 125, 79, 0.1);
+  color: #2f7d4f;
+}
+
+.vyuh-console-badge.is-service-completed {
+  background: rgba(16, 24, 39, 0.08);
+  color: #101827;
+}
+
+.vyuh-console-badge.is-service-failed {
+  background: rgba(184, 50, 50, 0.1);
+  color: #b83232;
+}
+
 .vyuh-console-inspector {
   align-self: start;
   padding: 1rem;
@@ -14403,8 +14445,7 @@ body {
   padding: 0;
 }
 
-.vyuh-console-config-grid .is-span-wide,
-.vyuh-console-config-grid .is-code {
+.vyuh-console-config-grid .is-span-wide {
   grid-column: 1;
 }
 
@@ -14441,43 +14482,27 @@ body {
   overflow-wrap: anywhere;
 }
 
-.vyuh-console-section-list {
-  display: grid;
+.vyuh-console-raw-config {
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(16, 24, 39, 0.08);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
 }
 
-.vyuh-console-section-list button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid rgba(16, 24, 39, 0.08);
+.vyuh-console-raw-config summary {
   color: #101827;
-  display: flex;
-  justify-content: space-between;
-  min-height: 2.75rem;
-  padding: 0;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
 }
 
-.vyuh-console-section-list button:last-child {
-  border-bottom: 0;
-}
-
-.vyuh-console-section-list b {
-  background: rgba(16, 24, 39, 0.06);
-  border-radius: 999px;
-  min-width: 1.5rem;
-  padding: 0.25rem 0.5rem;
+.vyuh-console-raw-config .vyuh-console-code {
+  margin-top: 0.75rem;
 }
 
 @media (max-width: 1200px) {
-  .vyuh-console-app {
-    grid-template-columns: 1fr;
-  }
-  .vyuh-console-app .vyuh-console-sidebar {
-    grid-template-rows: auto;
-  }
   .vyuh-console-stat-grid,
   .vyuh-console-stat-grid.is-five,
-  .vyuh-console-overview-grid,
   .vyuh-console-info-grid,
   .vyuh-console-config-grid,
   .vyuh-console-data-grid {
@@ -14488,24 +14513,115 @@ body {
   }
 }
 @media (max-width: 992px) {
-  .vyuh-console-shell {
-    grid-template-columns: 1fr;
+  .vyuh-console-app {
+    display: block;
+    min-height: 0;
+    overflow: visible;
   }
-  .vyuh-console-sidebar,
-  .vyuh-console-detail {
-    border: 0;
+  .vyuh-console-app .vyuh-console-sidebar {
+    align-items: center;
+    border-bottom: 1px solid rgba(16, 24, 39, 0.08);
+    border-right: 0;
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
+    padding: 0.75rem 1rem;
+  }
+  .vyuh-console-app .vyuh-console-sidebar::after {
+    display: none;
+  }
+  .vyuh-console-brand {
+    flex: 0 0 auto;
+    font-size: 1.625rem;
+    grid-row: 1/span 2;
+    margin: 0;
+  }
+  .vyuh-console-brand img {
+    height: 2rem;
+    width: 2rem;
+  }
+  .vyuh-console-nav {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 0.5rem;
+    grid-column: 2;
+    grid-row: 1/span 2;
+    margin: 0;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+  .vyuh-console-nav-label {
+    display: none;
+  }
+  .vyuh-console-nav a {
+    flex: 0 0 auto;
+    min-height: 2.5rem;
+    padding: 0.5rem 0.75rem;
+  }
+  .vyuh-console-page {
+    padding: 1.25rem 1rem 0;
   }
 }
 @media (max-width: 768px) {
-  .vyuh-console-topbar,
-  .vyuh-console-actions,
+  .vyuh-console-global-header,
+  .vyuh-console-global-actions,
   .vyuh-console-pagination {
     align-items: stretch;
     flex-direction: column;
     grid-template-columns: 1fr;
   }
+  .vyuh-console-global-header {
+    height: auto;
+    padding-bottom: 0.75rem;
+  }
   .vyuh-console-page {
     padding: 1rem;
+  }
+  .vyuh-console-screen {
+    gap: 1rem;
+    padding-bottom: 1.25rem;
+  }
+  .vyuh-console-page-identity h1, .vyuh-console-page-identity .h1 {
+    font-size: 1.625rem;
+  }
+  .vyuh-console-page-identity p {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+  .vyuh-console-global-actions {
+    align-items: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .vyuh-console-toolbar > * {
+    flex: 1 1 100%;
+    min-width: 0;
+    width: 100%;
+  }
+  .vyuh-console-toolbar label {
+    min-width: 0;
+  }
+  .vyuh-console-tabs {
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    white-space: nowrap;
+  }
+  .vyuh-console-card,
+  .vyuh-console-inspector {
+    padding: 0.75rem;
+  }
+  .vyuh-console-table {
+    max-width: 100%;
+    overscroll-behavior-inline: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .vyuh-console-summary-strip {
+    grid-template-columns: 1fr;
   }
 }
 html {
@@ -16192,7 +16308,6 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-bottom: 1rem;
   padding: 0.75rem 1rem;
 }
 
