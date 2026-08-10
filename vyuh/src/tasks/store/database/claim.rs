@@ -166,7 +166,7 @@ impl DbTaskStore {
         }
         let table = Self::table();
         let changed = db::from(&table)
-            .batch_update(
+            .update_many(
                 &candidates,
                 (
                     &table.status,

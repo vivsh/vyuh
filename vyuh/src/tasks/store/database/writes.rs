@@ -116,7 +116,7 @@ impl DbTaskStore {
         if !rows.is_empty() {
             let table = Self::table();
             db::from(&table)
-                .batch_insert(&rows)
+                .insert_many(&rows)
                 .batch_size(self.batch_size)
                 .exec(transaction)
                 .await?;
@@ -255,7 +255,7 @@ impl DbTaskStore {
             0
         } else {
             db::from(&table)
-                .batch_update(&rows, (&table.lane_name, &table.updated_at))
+                .update_many(&rows, (&table.lane_name, &table.updated_at))
                 .batch_size(self.batch_size)
                 .exec(&mut transaction)
                 .await?
@@ -542,7 +542,7 @@ async fn upsert_key_owners(
     }
     let table = DbTaskStore::idempotency_table();
     db::from(&table)
-        .batch_upsert(rows, (&table.task_name, &table.key_value))
+        .upsert_many(rows, (&table.task_name, &table.key_value))
         .update_only(&table.updated_at)
         .batch_size(batch_size)
         .exec(transaction)
@@ -625,7 +625,7 @@ async fn replace_expired_owners(
         .exec(&mut *transaction)
         .await?;
     db::from(&table)
-        .batch_insert(&replacements)
+        .insert_many(&replacements)
         .exec(transaction)
         .await?;
     owners.retain(|owner| !replaced_ids.contains(&owner.id));
@@ -918,7 +918,7 @@ pub(super) async fn batch_update_rows(
     }
     let table = DbTaskStore::table();
     let changed = db::from(&table)
-        .batch_update(
+        .update_many(
             rows,
             (
                 &table.status,
@@ -956,7 +956,7 @@ async fn batch_renew(
     }
     let table = DbTaskStore::table();
     db::from(&table)
-        .batch_update(rows, (&table.leased_until, &table.updated_at))
+        .update_many(rows, (&table.leased_until, &table.updated_at))
         .batch_size(batch_size)
         .exec(transaction)
         .await?;
@@ -1005,7 +1005,7 @@ async fn insert_schedule_if_missing(
     {
         use crate::db::backend::IgnoreConflictsExt as _;
         db::from(&table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_conflicts_on(&table.name)
             .exec(transaction)
             .await?;
@@ -1014,7 +1014,7 @@ async fn insert_schedule_if_missing(
     {
         use crate::db::backend::IgnoreErrorsExt as _;
         db::from(&table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_errors()
             .exec(transaction)
             .await?;
@@ -1099,7 +1099,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         let plan = db::from(&table)
-            .batch_insert(&[row])
+            .insert_many(&[row])
             .ignore_conflicts_on(&table.name)
             .plan()
             .map_err(|error| error.to_string())?;

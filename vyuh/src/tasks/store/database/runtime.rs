@@ -298,7 +298,7 @@ async fn insert_runtime_if_missing(
     {
         use crate::db::backend::IgnoreConflictsExt as _;
         db::from(table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_conflicts_on(&table.id)
             .exec(transaction)
             .await?;
@@ -307,7 +307,7 @@ async fn insert_runtime_if_missing(
     {
         use crate::db::backend::IgnoreErrorsExt as _;
         db::from(table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_errors()
             .exec(transaction)
             .await?;
@@ -325,7 +325,7 @@ async fn insert_rate_if_missing(
     {
         use crate::db::backend::IgnoreConflictsExt as _;
         db::from(table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_conflicts_on(&table.lane_name)
             .exec(transaction)
             .await?;
@@ -334,7 +334,7 @@ async fn insert_rate_if_missing(
     {
         use crate::db::backend::IgnoreErrorsExt as _;
         db::from(table)
-            .batch_insert(std::slice::from_ref(row))
+            .insert_many(std::slice::from_ref(row))
             .ignore_errors()
             .exec(transaction)
             .await?;
@@ -359,7 +359,7 @@ mod tests {
             updated_at: now,
         };
         let runtime_plan = db::from(&runtime)
-            .batch_insert(&[runtime_row])
+            .insert_many(&[runtime_row])
             .ignore_conflicts_on(&runtime.id)
             .plan()
             .map_err(|error| error.to_string())?;
@@ -374,7 +374,7 @@ mod tests {
             updated_at: now,
         };
         let rate_plan = db::from(&rates)
-            .batch_insert(&[rate_row])
+            .insert_many(&[rate_row])
             .ignore_conflicts_on(&rates.lane_name)
             .plan()
             .map_err(|error| error.to_string())?;
