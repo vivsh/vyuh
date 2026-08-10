@@ -432,7 +432,8 @@ async fn upload_openapi_site() -> (vyuh::Site, tempfile::TempDir) {
         bundles::OpenApiConf::default()
             .title("Uploads")
             .version("0.1.0")
-            .spec("/openapi.json"),
+            .spec("/openapi.json")
+            .public(),
     );
     let site = vyuh::Site::build(conf, bundle).await.unwrap();
     (site, dir)

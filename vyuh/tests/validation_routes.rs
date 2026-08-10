@@ -129,7 +129,8 @@ async fn validation_site(openapi: bool) -> vyuh::Site {
             bundles::OpenApiConf::default()
                 .title("Validation API")
                 .version("0.1.0")
-                .spec("/openapi.json"),
+                .spec("/openapi.json")
+                .public(),
         )
     } else {
         bundle

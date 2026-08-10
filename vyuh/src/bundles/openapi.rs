@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 
+use axum::{
+    extract::FromRequestParts,
+    response::{IntoResponse, Response},
+};
 use bytes::Bytes;
 
 use crate::OperationId;
 use crate::Site;
 use crate::apidocs::{ApiDocGenerator, ApiMeta, DocViewer, OpenApiVersion};
-use crate::auth::{AuthConf, AuthUser};
+use crate::auth::{AudienceId, AuthConf, AuthUser};
 use crate::callables::{Operation, OperationKind};
 use crate::routes::AxumRouter;
 
@@ -23,10 +27,11 @@ pub struct OpenApiConf {
     pub meta: ApiMeta,
     pub openapi_version: OpenApiVersion,
     pub viewer: Option<OpenApiViewerConf>,
-    /// Optional auth predicate for OpenAPI endpoints.
-    /// When `Some(f)`, the request must carry a valid configured credential; the
-    /// extracted `AuthUser` is then passed to `f`. Returning `false` yields `403 Forbidden`.
-    /// `None` (the default) leaves the endpoints publicly accessible.
+    /// Authentication policy for OpenAPI endpoints.
+    ///
+    /// The default requires a valid configured credential. Returning `false`
+    /// from the predicate yields `403 Forbidden`; use [`Self::public`] only
+    /// when publishing the complete API inventory is intentional.
     pub auth: Option<fn(&AuthUser) -> bool>,
 }
 
@@ -60,7 +65,7 @@ impl Default for OpenApiConf {
             meta: ApiMeta::default(),
             openapi_version: OpenApiVersion::V30,
             viewer: None,
-            auth: None,
+            auth: Some(authenticated),
         }
     }
 }
@@ -81,6 +86,12 @@ impl OpenApiConf {
     /// Enable a specific documentation viewer UI at the given path.
     pub fn viewer_with(mut self, path: impl Into<String>, viewer: DocViewer) -> Self {
         self.viewer = Some(OpenApiViewerConf::with_viewer(path, viewer));
+        self
+    }
+
+    /// Deliberately exposes the OpenAPI spec and optional viewer without authentication.
+    pub fn public(mut self) -> Self {
+        self.auth = None;
         self
     }
 
@@ -114,8 +125,10 @@ impl OpenApiConf {
         self
     }
 
-    /// Require authentication. The predicate receives the extracted `AuthUser`
-    /// and must return `true` to allow access; `false` yields `403 Forbidden`.
+    /// Restricts the OpenAPI endpoints to authenticated users accepted by `pred`.
+    ///
+    /// The predicate receives the extracted `AuthUser`; returning `false`
+    /// yields `403 Forbidden`.
     pub fn auth(mut self, pred: fn(&AuthUser) -> bool) -> Self {
         self.auth = Some(pred);
         self
@@ -201,21 +214,10 @@ impl DocEngine {
                         let body = b.clone();
                         async move {
                             use axum::http::{StatusCode, header};
-                            use axum::response::IntoResponse;
-                            if let Some(pred) = auth_pred {
-                                let (mut parts, _) = req.into_parts();
-                                if let Some(audience) = audience.clone() {
-                                    parts.extensions.insert(super::BundleRequestContext {
-                                        audience: Some(audience),
-                                    });
-                                }
-                                match <AuthUser as axum::extract::FromRequestParts<Site>>::from_request_parts(&mut parts, &site).await {
-                                    Err(e) => return e.into_response(),
-                                    Ok(user) if !pred(&user) => {
-                                        return StatusCode::FORBIDDEN.into_response();
-                                    }
-                                    Ok(_) => {}
-                                }
+                            if let Err(response) =
+                                authorize_docs(&site, req, audience.clone(), auth_pred).await
+                            {
+                                return response;
                             }
                             (
                                 StatusCode::OK,
@@ -248,21 +250,10 @@ impl DocEngine {
                             let body = h.clone();
                             async move {
                                 use axum::http::{StatusCode, header};
-                                use axum::response::IntoResponse;
-                                if let Some(pred) = auth_pred {
-                                    let (mut parts, _) = req.into_parts();
-                                    if let Some(audience) = audience.clone() {
-                                        parts.extensions.insert(super::BundleRequestContext {
-                                            audience: Some(audience),
-                                        });
-                                    }
-                                    match <AuthUser as axum::extract::FromRequestParts<Site>>::from_request_parts(&mut parts, &site).await {
-                                        Err(e) => return e.into_response(),
-                                        Ok(user) if !pred(&user) => {
-                                            return StatusCode::FORBIDDEN.into_response();
-                                        }
-                                        Ok(_) => {}
-                                    }
+                                if let Err(response) =
+                                    authorize_docs(&site, req, audience.clone(), auth_pred).await
+                                {
+                                    return response;
                                 }
                                 (
                                     StatusCode::OK,
@@ -279,6 +270,34 @@ impl DocEngine {
         }
         Ok(())
     }
+}
+
+fn authenticated(_: &AuthUser) -> bool {
+    true
+}
+
+/// Authenticates one documentation request and applies its configured access policy.
+async fn authorize_docs(
+    site: &Site,
+    request: axum::extract::Request,
+    audience: Option<AudienceId>,
+    predicate: Option<fn(&AuthUser) -> bool>,
+) -> Result<(), Response> {
+    let Some(predicate) = predicate else {
+        return Ok(());
+    };
+    let (mut parts, _) = request.into_parts();
+    if let Some(audience) = audience {
+        parts.extensions.insert(super::BundleRequestContext {
+            audience: Some(audience),
+        });
+    }
+    let user = AuthUser::from_request_parts(&mut parts, site)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    predicate(&user)
+        .then_some(())
+        .ok_or_else(|| axum::http::StatusCode::FORBIDDEN.into_response())
 }
 
 // ---------------------------------------------------------------------------

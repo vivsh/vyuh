@@ -38,7 +38,7 @@ scope requirements in the standard security scheme.
 ## Registration
 
 OpenAPI is registered on a `Bundle` with `with_openapi`. By default, Vyuh
-serves only the JSON spec:
+serves only the JSON spec and requires a valid configured credential:
 
 ```rust
 let bundle = routes.with_openapi(
@@ -47,6 +47,23 @@ let bundle = routes.with_openapi(
         .version("0.1.0"),
 );
 ```
+
+Use `.public()` only when the complete route inventory is intentionally part of
+the public API surface:
+
+```rust
+let bundle = routes.with_openapi(
+    bundles::OpenApiConf::default()
+        .title("Public Notes API")
+        .version("0.1.0")
+        .public(),
+);
+```
+
+Use `.auth(...)` to restrict the spec and optional viewer further, for example
+to an application-defined documentation-admin check. The OpenAPI security
+metadata describes the documented operations; it does not control access to the
+spec endpoint itself.
 
 Use `.spec(...)` to place the JSON spec under the same prefix as the API it
 describes:
