@@ -1,5 +1,6 @@
 
 target/
+.playwright-cli/
 .env
 .env.test
 Cargo.lock
