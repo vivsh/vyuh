@@ -18,7 +18,7 @@ let notes = bundles::bundle! { search_notes }.with_mcp(
 
 The engine authenticates only through `HYDRA`, receives the ordinary
 `AuthUser`, filters tools by `Permit<ScopeRule>`, and never forwards the original
-credential to a route-backed tool. Cookie and query credential providers are
+credential to a tool. Cookie and query credential providers are
 rejected for MCP; header token and `AuthKey` providers work normally.
 
 `McpConf::new` requires `.auth(PROVIDER)` or `.anonymous()`. Anonymous exposure
@@ -66,8 +66,7 @@ without exposing upstream responses or verifier details to MCP clients.
 
 ## Tools
 
-Direct `mcp_tool` callables and eligible typed JSON routes expose their one
-object payload as the tool input schema. The model never sees paths, headers,
-cookies, credentials, `AuthUser`, or permits. Route-backed tools reconstruct a
-controlled JSON request and run through the built Vyuh router; direct tools run
-through `McpToolContext`.
+Each `mcp_tool` callable exposes its one object payload as the tool input
+schema. The model never sees paths, headers, cookies, credentials, `AuthUser`,
+or permits. Tools run directly through `McpToolContext`; MCP never reconstructs
+or dispatches an HTTP route.

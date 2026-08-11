@@ -4,7 +4,7 @@ use crate::auth::{Audience, AuthProvider};
 
 use super::McpError;
 
-/// Protocol annotations attached to one direct or route-backed MCP tool.
+/// Protocol annotations attached to one direct MCP tool.
 #[derive(Clone, Debug, Default)]
 pub struct McpToolConf {
     pub(crate) read_only: Option<bool>,

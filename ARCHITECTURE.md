@@ -86,12 +86,11 @@ The `vyuh` crate is organized around these subsystems:
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
   operations and types.
 - `mcp` is an optional, tool-only Streamable HTTP subsystem over explicitly
-  registered semantic callables and eligible typed JSON routes. Bundle-owned
-  `McpToolRegistry` entries retain stable schemas, authorization metadata, and
-  either a direct callable or route target; `McpEngine` separately owns one or
-  more independently configured service endpoints. Direct tools execute through
-  `McpToolContext`, while route-backed tools reconstruct only a static-method
-  JSON request and dispatch through the built site router. The engine owns
+  registered semantic callables. Bundle-owned `McpToolRegistry` entries retain
+  stable schemas, authorization metadata, direct callable targets, and MCP
+  annotations; `McpEngine` separately owns one or more independently configured
+  service endpoints. Tools execute through `McpToolContext`, without a route
+  adapter. The engine owns
   protocol framing, scope-filtered discovery, protected-resource metadata,
   authentication through one selected Vyuh provider. Generic optional `auth::oauth`
   delegates external JWT/JWKS validation and bounded key rotation to a private
@@ -269,9 +268,9 @@ the client-facing event type uses the payload schema name.
     deterministic catalog per service. Protected endpoints validate their own
     canonical resource audience and map the subject to `AuthUser`. Discovery
     filters tools using the same normalized scope rules used again at call
-    time. Direct targets receive `McpToolContext`; route targets receive the
-    semantic object unchanged as an internal JSON body through the existing
-    router. Neither path receives the external bearer credential. Only public
+    time. Direct targets receive `McpToolContext`; the MCP engine does not
+    adapt or dispatch HTTP routes. Tools never receive the external bearer
+    credential. Only public
     OAuth metadata and JWKS remain inside the selected provider's per-site
     Huskarl verifier and never cross the application cache boundary.
 11. OpenAPI and schema metadata are produced from registered operations and

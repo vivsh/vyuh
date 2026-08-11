@@ -1688,8 +1688,6 @@ mod tests {
             conf: None,
             owner: None,
             hidden: false,
-            #[cfg(feature = "mcp")]
-            mcp: None,
             audience: None,
             bundle_id: None,
             slash_policy: None,

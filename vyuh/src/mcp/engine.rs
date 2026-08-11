@@ -143,7 +143,7 @@ impl McpEngine {
 }
 
 impl crate::bundles::Bundle {
-    /// Claims unowned direct and route-backed tools for one MCP service endpoint.
+    /// Claims unowned direct tools for one MCP service endpoint.
     ///
     /// Configuration and ownership failures are accumulated on the bundle and
     /// returned during site construction.

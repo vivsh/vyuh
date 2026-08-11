@@ -96,10 +96,6 @@ pub struct Operation {
     pub conf: Option<serde_json::Value>,
     pub owner: Option<String>,
     pub hidden: bool,
-    /// MCP exposure metadata for explicitly registered direct or route tools.
-    #[cfg(feature = "mcp")]
-    #[serde(skip)]
-    pub(crate) mcp: Option<crate::mcp::McpToolConf>,
     /// Effective audience inherited from the owning bundle tree.
     pub(crate) audience: Option<AudienceId>,
     pub(crate) bundle_id: Option<uuid::Uuid>,
@@ -210,8 +206,6 @@ impl Operation {
             conf: None,
             owner: None,
             hidden: true,
-            #[cfg(feature = "mcp")]
-            mcp: None,
             audience: None,
             bundle_id: None,
             slash_policy: None,
@@ -238,8 +232,6 @@ impl Operation {
             conf: None,
             owner: None,
             hidden: false,
-            #[cfg(feature = "mcp")]
-            mcp: None,
             audience: None,
             bundle_id: None,
             slash_policy: None,

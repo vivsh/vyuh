@@ -68,8 +68,6 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 /// - `description` - Detailed description for OpenAPI. Defaults to doc comments.
 /// - `arg(...)` - Override OpenAPI argument metadata by position/name.
 /// - `returns(...)` - Override or append OpenAPI response metadata.
-/// - `mcp` or `mcp(...)` - Opt an eligible JSON-body route into an owning
-///   bundle's feature-gated MCP service and optionally set tool annotations.
 ///
 /// # Examples
 ///
@@ -96,15 +94,6 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 ///     // ...
 /// }
 ///
-/// // Semantic MCP route tool
-/// #[route(
-///     path = "/users/update",
-///     method = "POST",
-///     mcp(idempotent = true)
-/// )]
-/// async fn update_user(Json(input): Json<UpdateUser>) -> Json<User> {
-///     // ...
-/// }
 /// ```
 #[proc_macro_attribute]
 pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {

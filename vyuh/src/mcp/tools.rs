@@ -100,15 +100,11 @@ pub(crate) fn definitions(
         let operation = operations
             .get(id)
             .ok_or_else(|| McpError::Config(format!("MCP operation {id} is missing")))?;
-        let conf = operation
-            .mcp
-            .as_ref()
-            .ok_or_else(|| McpError::InvalidTool(operation.name.clone()))?;
         let target = registry
             .target(*id)
             .cloned()
             .ok_or_else(|| McpError::Config(format!("MCP target {id} is missing")))?;
-        let tool = definition(operation, conf, target)?;
+        let tool = definition(operation, target)?;
         if output.insert(tool.name.clone(), tool).is_some() {
             return Err(McpError::InvalidTool(operation.name.clone()));
         }
@@ -121,13 +117,9 @@ pub(crate) fn definitions(
     Ok(output)
 }
 
-fn definition(
-    operation: &Operation,
-    conf: &McpToolConf,
-    target: McpToolTarget,
-) -> Result<ToolDefinition, McpError> {
+fn definition(operation: &Operation, target: McpToolTarget) -> Result<ToolDefinition, McpError> {
     validate_name(&operation.name)?;
-    let method = validate_target(operation, &target)?;
+    validate_target(operation)?;
     let (input_schema, authorization) = input_contract(operation)?;
     let output_schema = output_schema(operation)?;
     let validator = jsonschema::validator_for(&input_schema)
@@ -137,39 +129,18 @@ fn definition(
         description: tool_description(operation),
         input_schema,
         output_schema,
-        annotations: annotations(conf, method.as_ref()),
+        annotations: annotations(&target.conf),
         authorization,
         target,
         validator,
     })
 }
 
-fn validate_target(
-    operation: &Operation,
-    target: &McpToolTarget,
-) -> Result<Option<axum::http::Method>, McpError> {
-    match target {
-        McpToolTarget::Direct(_) if operation.kind == OperationKind::McpTool => Ok(None),
-        McpToolTarget::Route(_) if operation.kind == OperationKind::Route => {
-            validate_route_target(operation).map(Some)
-        }
-        _ => unsupported(operation, "registry target does not match operation kind"),
+fn validate_target(operation: &Operation) -> Result<(), McpError> {
+    if operation.kind == OperationKind::McpTool {
+        return Ok(());
     }
-}
-
-fn validate_route_target(operation: &Operation) -> Result<axum::http::Method, McpError> {
-    let methods = operation.http_methods();
-    if methods.len() != 1 {
-        return unsupported(operation, "exactly one HTTP method is required");
-    }
-    if operation.path.contains(['{', '}']) {
-        return unsupported(operation, "route path must be fully static");
-    }
-    let Some(method) = methods.first() else {
-        return unsupported(operation, "one HTTP method is required");
-    };
-    axum::http::Method::from_bytes(method.as_bytes())
-        .map_err(|_| McpError::InvalidTool(operation.name.clone()))
+    unsupported(operation, "only direct mcp_tool callables are supported")
 }
 
 fn input_contract(operation: &Operation) -> Result<(Value, ToolAuthorization), McpError> {
@@ -349,20 +320,10 @@ fn is_object_schema(schema: &Value) -> bool {
         || schema.get("properties").is_some()
 }
 
-fn annotations(conf: &McpToolConf, method: Option<&axum::http::Method>) -> ToolAnnotations {
+fn annotations(conf: &McpToolConf) -> ToolAnnotations {
     ToolAnnotations {
-        read_only_hint: conf.read_only.or_else(|| {
-            method
-                .is_some_and(|value| {
-                    matches!(*value, axum::http::Method::GET | axum::http::Method::HEAD)
-                })
-                .then_some(true)
-        }),
-        destructive_hint: conf.destructive.or_else(|| {
-            method
-                .is_some_and(|value| *value == axum::http::Method::DELETE)
-                .then_some(true)
-        }),
+        read_only_hint: conf.read_only,
+        destructive_hint: conf.destructive,
         idempotent_hint: conf.idempotent,
         open_world_hint: conf.open_world,
     }

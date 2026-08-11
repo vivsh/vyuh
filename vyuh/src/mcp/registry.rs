@@ -4,19 +4,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Error, OperationId, callables::Callable};
 
-use super::McpToolContext;
+use super::{McpToolConf, McpToolContext};
 
-/// Invocation target retained independently from protocol service nodes.
+/// Direct MCP invocation target retained independently from service nodes.
 #[derive(Clone)]
-pub(crate) enum McpToolTarget {
-    Route(OperationId),
-    Direct(Callable<McpToolContext, Error>),
+pub(crate) struct McpToolTarget {
+    pub(crate) callable: Callable<McpToolContext, Error>,
+    pub(crate) conf: McpToolConf,
 }
 
 /// Direct callable plus the operation metadata inserted into the bundle.
 pub(crate) struct McpDirectRegistration {
     pub(crate) operation: crate::Operation,
     pub(crate) callable: Callable<McpToolContext, Error>,
+    pub(crate) conf: McpToolConf,
 }
 
 /// MCP registrations collected while bundle parts are composed.
@@ -34,18 +35,14 @@ impl McpToolRegistry {
         }
     }
 
-    /// Registers one opted-in HTTP route.
-    pub(crate) fn register_route(&mut self, id: OperationId) {
-        self.targets.insert(id, McpToolTarget::Route(id));
-    }
-
     /// Registers one direct callable target.
     pub(crate) fn register_direct(
         &mut self,
         id: OperationId,
         callable: Callable<McpToolContext, Error>,
+        conf: McpToolConf,
     ) {
-        self.targets.insert(id, McpToolTarget::Direct(callable));
+        self.targets.insert(id, McpToolTarget { callable, conf });
     }
 
     /// Absorbs registrations and existing service claims from a child bundle.

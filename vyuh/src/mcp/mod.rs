@@ -1,7 +1,6 @@
 //! Feature-gated semantic MCP tools and independently configured services.
 //!
-//! Direct tools execute through [`McpToolContext`]. Eligible route-backed tools
-//! reconstruct a controlled JSON request and execute through the built router.
+//! Direct tools execute through [`McpToolContext`] without a route adapter.
 
 mod config;
 mod context;

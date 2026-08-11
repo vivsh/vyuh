@@ -296,7 +296,7 @@ fn strip_validation_keywords(value: &mut serde_json::Value) {
 pub enum ArgPart {
     /// Runtime-injected argument (e.g. `Site`, `State<T>`); not visible in OpenAPI.
     Ignore,
-    /// Raw HTTP request access, tracked separately for MCP route eligibility.
+    /// Raw HTTP request access excluded from generated API schemas.
     #[cfg(feature = "mcp")]
     RawRequest,
     /// Extracted from HTTP headers

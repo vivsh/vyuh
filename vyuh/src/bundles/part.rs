@@ -62,20 +62,6 @@ impl BundlePart {
         }
         self
     }
-
-    /// Exposes this HTTP route as an MCP tool when the owning bundle enables MCP.
-    #[cfg(feature = "mcp")]
-    pub fn mcp(mut self, conf: crate::mcp::McpToolConf) -> Self {
-        match &mut self.part {
-            BundlePartInner::Route(_, operation) => operation.mcp = Some(conf),
-            _ => {
-                self.part = BundlePartInner::Error(BundleError::Mcp(
-                    "only HTTP routes can be exposed as MCP tools".to_string(),
-                ));
-            }
-        }
-        self
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +132,8 @@ impl Bundle {
                 registration.operation.assign_bundle_id(self.id);
                 let id = registration.operation.id;
                 self.ops.insert(id, registration.operation);
-                self.mcp_registry.register_direct(id, registration.callable);
+                self.mcp_registry
+                    .register_direct(id, registration.callable, registration.conf);
             }
         }
         self
@@ -163,10 +150,6 @@ impl Bundle {
             return self;
         }
         let id = op.id;
-        #[cfg(feature = "mcp")]
-        if op.mcp.is_some() {
-            self.mcp_registry.register_route(id);
-        }
         let allow = allow_header(&op.methods);
         let router = router
             .fallback(move || method_not_allowed(allow.clone()))
@@ -251,12 +234,12 @@ where
         callable.inspect(),
     );
     operation.name = name.into();
-    operation.mcp = Some(conf);
     BundlePart {
         operation: None,
         part: BundlePartInner::McpTool(crate::mcp::McpDirectRegistration {
             operation,
             callable,
+            conf,
         }),
     }
 }
