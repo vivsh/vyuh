@@ -42,7 +42,7 @@ fn append_task_indexes(table: &mut db::Table) {
         ),
         index(
             "idx_vyuh_tasks_idempotency_key",
-            &["name", "idempotency_key"],
+            &["idempotency_key", "created_at", "id"],
             false,
             None,
         ),
@@ -173,6 +173,7 @@ mod tests {
             &[
                 "idx_vyuh_tasks_lane_pending_ready",
                 "idx_vyuh_tasks_lane_running_lease",
+                "idx_vyuh_tasks_idempotency_key",
                 "idx_vyuh_tasks_history",
             ],
         )?;

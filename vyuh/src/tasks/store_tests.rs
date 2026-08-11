@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use super::IdempotencyRetention;
 use vyuh::tasks::{
-    DEFAULT_TASK_LANE, TaskId, TaskLane, TaskLaneConf, TaskRate, TaskReceipt, TaskRetry,
-    TaskStatus,
+    DEFAULT_TASK_LANE, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskRate, TaskReceipt,
+    TaskRetry, TaskStatus,
     store::{
         AbstractTaskStore, LaneClaim, MemoryTaskStore, ScheduledTaskWrite, TaskCommit,
         TaskIdempotencyConf, TaskOutcome, TaskRecord, TaskScheduleConf, TaskStoreConf, TaskWrite,
@@ -97,6 +97,49 @@ fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
             .collect(),
         schedules: Vec::new(),
     }
+}
+
+/// Verifies exact idempotency-key inspection is scoped before status and pagination.
+#[tokio::test]
+async fn memory_store_filters_tasks_by_exact_idempotency_key() -> Result<(), vyuh::tasks::TaskError>
+{
+    let store = MemoryTaskStore::new(8);
+    store
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
+        .await?;
+
+    let mut email = task_record("email", EMAIL);
+    email.idempotency_key = Some("invoice-42".into());
+    email.idempotency_fingerprint = Some("email-intent".into());
+    let mut archive = task_record("archive", EMAIL);
+    archive.idempotency_key = Some("invoice-42".into());
+    archive.idempotency_fingerprint = Some("archive-intent".into());
+    let mut other = task_record("email", EMAIL);
+    other.idempotency_key = Some("invoice-420".into());
+    other.idempotency_fingerprint = Some("other-intent".into());
+
+    store
+        .store_tasks(vec![write(email), write(archive), write(other)])
+        .await?;
+
+    let page = store
+        .list_tasks(
+            TaskFilter::new()
+                .idempotency_key("invoice-42")
+                .status(TaskStatus::Pending)
+                .per_page(1),
+        )
+        .await?;
+
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items
+            .first()
+            .and_then(|task| task.idempotency_key.as_deref()),
+        Some("invoice-42")
+    );
+    Ok(())
 }
 
 /// Verifies one memory schedule cursor suppresses duplicate source occurrences.
