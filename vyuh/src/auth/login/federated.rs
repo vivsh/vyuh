@@ -252,7 +252,9 @@ impl FederatedLogin {
 
 struct FederatedRuntime {
     conf: FederatedLogin,
-    metadata: tokio::sync::RwLock<oidc::MetadataState>,
+    oidc_client: arc_swap::ArcSwapOption<oidc::CachedClient>,
+    oidc_discovery: tokio::sync::Mutex<oidc::DiscoveryState>,
+    oidc_notify: tokio::sync::Notify,
     http: Result<FederatedHttpClient, ()>,
     client_secret: OnceLock<Option<String>>,
 }
@@ -272,6 +274,10 @@ enum PendingFederated {
 
 impl ErasedLoginRuntime for FederatedRuntime {
     fn is_flow(&self) -> bool {
+        true
+    }
+
+    fn requires_login_state_store(&self) -> bool {
         true
     }
 
@@ -399,9 +405,8 @@ impl FederatedRuntime {
         };
         let mapper = self.mapper()?;
         let user = mapper.map(&identity).await?;
-        if let Some(store) = state_store {
-            store.consume(&state).await?;
-        }
+        let store = state_store.ok_or(AuthError::InvalidLoginState)?;
+        store.consume(&state).await?;
         let login = verified_federated(user, &identity);
         Ok(CompletedLogin {
             login,
@@ -507,7 +512,9 @@ impl LoginProviderDefinition<FederatedStart, FederatedCallback> for FederatedLog
         LoginRuntimeDefinition {
             runtime: Arc::new(FederatedRuntime {
                 conf: self,
-                metadata: tokio::sync::RwLock::new(oidc::MetadataState::default()),
+                oidc_client: arc_swap::ArcSwapOption::empty(),
+                oidc_discovery: tokio::sync::Mutex::new(oidc::DiscoveryState::default()),
+                oidc_notify: tokio::sync::Notify::new(),
                 http,
                 client_secret: OnceLock::new(),
             }),

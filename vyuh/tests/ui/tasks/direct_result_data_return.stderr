@@ -1,16 +1,25 @@
-error[E0277]: the trait bound `vyuh::Data<std::string::String>: IntoTaskOutcomePart` is not satisfied
+error[E0277]: the trait bound `vyuh::Data<std::string::String>: vyuh::tasks::IntoTaskOutcomePart` is not satisfied
   --> tests/ui/tasks/direct_result_data_return.rs:12:27
    |
 12 |     let _ = bundles::task(invalid_task, TaskDefinition::new("invalid_task"));
-   |             ------------- ^^^^^^^^^^^^ the trait `IntoTaskOutcomePart` is not implemented for `vyuh::Data<std::string::String>`
+   |             ------------- ^^^^^^^^^^^^ the trait `vyuh::tasks::IntoTaskOutcomePart` is not implemented for `vyuh::Data<std::string::String>`
    |             |
    |             required by a bound introduced by this call
    |
-   = help: the following other types implement trait `IntoTaskOutcomePart`:
-             ()
-             Result<T, E>
-             TaskState
-   = note: required for `Result<vyuh::Data<std::string::String>, vyuh::Error>` to implement `IntoTaskOutcomePart`
+help: the following other types implement trait `vyuh::tasks::IntoTaskOutcomePart`
+  --> src/tasks/handler.rs
+   |
+   |   impl IntoTaskOutcomePart for () {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()`
+...
+   | / impl<T, E> IntoTaskOutcomePart for Result<T, E>
+   | | where
+   | |     T: IntoTaskOutcomePart,
+   | |___________________________^ `Result<T, E>`
+...
+   |   impl IntoTaskOutcomePart for TaskState {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TaskState`
+   = note: required for `Result<vyuh::Data<std::string::String>, vyuh::Error>` to implement `vyuh::tasks::IntoTaskOutcomePart`
 note: required by a bound in `task`
   --> src/bundles/part.rs
    |

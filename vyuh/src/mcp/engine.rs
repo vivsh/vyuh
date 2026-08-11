@@ -12,19 +12,18 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     OperationId, Site,
-    auth::{AuthError, AuthProtectedResource, Authenticator},
+    auth::{AudienceId, AuthError, AuthProtectedResource, Authenticator},
     callables::Operation,
     routes::AxumRouter,
 };
 
-use super::{
-    McpConf, McpError, McpToolRegistry, config::McpAuth, protocol, tools, tools::ToolDefinition,
-};
+use super::{McpConf, McpError, McpToolRegistry, protocol, tools, tools::ToolDefinition};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 struct McpNode {
     marker_id: OperationId,
+    anchor_id: uuid::Uuid,
     operation_ids: Vec<OperationId>,
     conf: McpConf,
 }
@@ -41,6 +40,61 @@ impl McpEngine {
 
     pub(crate) fn merge(&mut self, other: Self) {
         self.nodes.extend(other.nodes);
+    }
+
+    pub(crate) fn finalize(
+        &mut self,
+        operations: &BTreeMap<OperationId, Operation>,
+        topology: &crate::bundles::BundleTopology,
+        registry: &mut McpToolRegistry,
+    ) -> Result<(), McpError> {
+        for node in &mut self.nodes {
+            node.operation_ids.clear();
+        }
+        for operation in operations
+            .values()
+            .filter(|value| value.kind == crate::callables::OperationKind::McpTool)
+        {
+            let Some(bundle_id) = operation.bundle_id else {
+                continue;
+            };
+            let Some(index) = self.nearest_node(topology, bundle_id) else {
+                continue;
+            };
+            let marker = operations
+                .get(&self.nodes[index].marker_id)
+                .ok_or_else(|| McpError::Config("MCP endpoint marker is missing".into()))?;
+            if marker.audience_id() != operation.audience_id() {
+                return Err(McpError::Config(format!(
+                    "MCP tool '{}' has a different effective audience than its service",
+                    operation.name
+                )));
+            }
+            self.nodes[index].operation_ids.push(operation.id);
+        }
+        let claimed = self
+            .nodes
+            .iter()
+            .flat_map(|node| node.operation_ids.iter().copied());
+        registry.claim(claimed);
+        Ok(())
+    }
+
+    fn nearest_node(
+        &self,
+        topology: &crate::bundles::BundleTopology,
+        bundle_id: uuid::Uuid,
+    ) -> Option<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| topology.contains(node.anchor_id, bundle_id))
+            .map(|(index, _)| index)
+            .max_by_key(|index| self.depth(topology, self.nodes[*index].anchor_id))
+    }
+
+    fn depth(&self, topology: &crate::bundles::BundleTopology, id: uuid::Uuid) -> usize {
+        topology.lineage(id).len()
     }
 
     pub(crate) fn setup(
@@ -73,7 +127,7 @@ impl McpEngine {
             .ok_or_else(|| McpError::Config("MCP endpoint marker is missing".to_string()))?;
         validate_collisions(operations, &endpoint, node.marker_id)?;
         let definitions = tools::definitions(&node.operation_ids, operations, registry)?;
-        if matches!(node.conf.auth, Some(McpAuth::Anonymous))
+        if node.conf.auth.is_none()
             && definitions
                 .values()
                 .any(|tool| tool.authorization.requires_identity())
@@ -82,23 +136,22 @@ impl McpEngine {
                 "anonymous MCP service '{endpoint}' contains authenticated tools"
             )));
         }
-        let protected = match node.conf.auth {
-            Some(McpAuth::Provider(provider)) => {
-                let selected = auth.using(provider);
-                selected
-                    .mcp_eligible()
-                    .map_err(|error| McpError::Config(error.to_string()))?;
-                selected
-                    .protected_resource(node.conf.audience)
-                    .map_err(|error| McpError::Config(error.to_string()))?
-            }
-            _ => None,
-        };
+        let audience = operations
+            .get(&node.marker_id)
+            .and_then(|operation| operation.audience_id().cloned());
+        let protected = audience
+            .as_ref()
+            .and_then(|value| auth.mcp_protected_resource(value));
         if protected.is_some() {
             let metadata = protected_resource_path(&endpoint);
             validate_well_known(operations, &metadata)?;
         }
-        let runtime = Arc::new(McpRuntime::new(node.conf.clone(), definitions, protected)?);
+        let runtime = Arc::new(McpRuntime::new(
+            node.conf.clone(),
+            audience,
+            definitions,
+            protected,
+        )?);
         let endpoint_runtime = Arc::clone(&runtime);
         let endpoint_route =
             axum::routing::post(move |State(site): State<Site>, request: Request| {
@@ -143,22 +196,11 @@ impl McpEngine {
 }
 
 impl crate::bundles::Bundle {
-    /// Claims unowned direct tools for one MCP service endpoint.
-    ///
-    /// Configuration and ownership failures are accumulated on the bundle and
-    /// returned during site construction.
-    pub fn with_mcp(mut self, mut conf: McpConf) -> Self {
+    pub(crate) fn register_mcp(&mut self, mut conf: McpConf) {
         if let Err(error) = conf.validate() {
             self.errors
                 .push(crate::bundles::BundleError::Mcp(error.to_string()));
-            return self;
-        }
-        let operation_ids = self.mcp_registry.claim_unclaimed();
-        if operation_ids.is_empty() {
-            self.errors.push(crate::bundles::BundleError::Mcp(
-                "MCP service has no unclaimed tool registrations".to_string(),
-            ));
-            return self;
+            return;
         }
         let mut marker =
             Operation::from_api_doc(&format!("__mcp__{}", conf.endpoint), &conf.endpoint);
@@ -168,15 +210,16 @@ impl crate::bundles::Bundle {
         self.ops.insert(marker_id, marker);
         self.mcp_engine.nodes.push(McpNode {
             marker_id,
-            operation_ids,
+            anchor_id: self.id,
+            operation_ids: Vec::new(),
             conf,
         });
-        self
     }
 }
 
 struct McpRuntime {
     conf: McpConf,
+    audience: Option<AudienceId>,
     tools: BTreeMap<String, ToolDefinition>,
     resource_metadata_url: Option<String>,
     metadata: Option<Json<Value>>,
@@ -186,12 +229,20 @@ struct McpRuntime {
 impl McpRuntime {
     fn new(
         conf: McpConf,
+        audience: Option<AudienceId>,
         tools: BTreeMap<String, ToolDefinition>,
         protected: Option<AuthProtectedResource>,
     ) -> Result<Self, McpError> {
         let resource_metadata_url = protected
             .as_ref()
-            .map(|_| protected_resource_url(conf.audience.as_str()))
+            .map(|_| {
+                audience
+                    .as_ref()
+                    .ok_or_else(|| {
+                        McpError::Config("protected MCP endpoint requires an audience".into())
+                    })
+                    .and_then(|value| protected_resource_url(value.as_str()))
+            })
             .transpose()?;
         let required_scopes = protected
             .as_ref()
@@ -199,12 +250,13 @@ impl McpRuntime {
             .unwrap_or_default();
         let metadata = protected.map(|value| {
             Json(json!({
-                "resource": conf.audience.as_str(), "authorization_servers": [value.issuer],
+                "resource": audience.as_ref().map(AudienceId::as_str), "authorization_servers": [value.issuer],
                 "scopes_supported": value.advertised_scopes, "bearer_methods_supported": ["header"]
             }))
         });
         Ok(Self {
             conf,
+            audience,
             tools,
             resource_metadata_url,
             metadata,
@@ -343,21 +395,23 @@ impl RpcReply {
 async fn handle_mcp(runtime: Arc<McpRuntime>, site: Site, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let headers = parts.headers.clone();
-    if let Err(status) = validate_transport(&headers, runtime.conf.audience.as_str()) {
+    let resource = runtime
+        .audience
+        .as_ref()
+        .map(AudienceId::as_str)
+        .unwrap_or("http://localhost");
+    if let Err(status) = validate_transport(&headers, resource) {
         return status.into_response();
     }
-    let user = match runtime.conf.auth {
-        Some(McpAuth::Provider(provider)) => match site
-            .auth()
-            .using(provider)
-            .authenticate(&parts, runtime.conf.audience)
-            .await
+    let user = match (runtime.conf.auth, runtime.audience.as_ref()) {
+        (Some(predicate), Some(audience)) => match site.auth().authenticate(&parts, audience).await
         {
-            Ok(user) => Some(user),
-            Err(error) => return auth_error(&runtime, site.auth(), error),
+            Ok(user) if predicate(&user) => Some(user),
+            Ok(_) => return StatusCode::FORBIDDEN.into_response(),
+            Err(error) => return auth_error(&runtime, error),
         },
-        Some(McpAuth::Anonymous) => None,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        (Some(_), None) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        (None, _) => None,
     };
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(value) => value,
@@ -375,7 +429,7 @@ async fn handle_mcp(runtime: Arc<McpRuntime>, site: Site, request: Request) -> R
         .into_response()
 }
 
-fn auth_error(runtime: &McpRuntime, auth: &Authenticator, error: AuthError) -> Response {
+fn auth_error(runtime: &McpRuntime, error: AuthError) -> Response {
     let (status, code) = match &error {
         AuthError::InsufficientScope | AuthError::AudienceMismatch | AuthError::Forbidden => {
             (StatusCode::FORBIDDEN, "insufficient_scope")
@@ -386,20 +440,13 @@ fn auth_error(runtime: &McpRuntime, auth: &Authenticator, error: AuthError) -> R
         _ => (StatusCode::UNAUTHORIZED, "invalid_token"),
     };
     let mut response = (status, Json(json!({"error": code}))).into_response();
-    let provider = match runtime.conf.auth {
-        Some(McpAuth::Provider(provider)) => auth.using(provider).challenge(&error).ok().flatten(),
-        _ => None,
-    };
-    if let (Some(metadata), Some(provider)) = (runtime.resource_metadata_url.as_deref(), provider) {
+    if let Some(metadata) = runtime.resource_metadata_url.as_deref() {
         let scope = if status == StatusCode::FORBIDDEN && !runtime.required_scopes.is_empty() {
             format!(", scope=\"{}\"", runtime.required_scopes.join(" "))
         } else {
             String::new()
         };
-        let challenge = format!(
-            "{} resource_metadata=\"{metadata}\", error=\"{code}\"{scope}",
-            provider.scheme
-        );
+        let challenge = format!("Bearer resource_metadata=\"{metadata}\", error=\"{code}\"{scope}");
         if let Ok(value) = HeaderValue::from_str(&challenge) {
             response
                 .headers_mut()
@@ -478,11 +525,8 @@ fn validate_node_collisions(
     if !endpoints.insert(endpoint.clone()) {
         errors.push(format!("duplicate MCP endpoint '{endpoint}'"));
     }
-    if !resources.insert(node.conf.audience.as_str().to_owned()) {
-        errors.push(format!(
-            "duplicate MCP resource URL '{}'",
-            node.conf.audience.as_str()
-        ));
+    if !resources.insert(endpoint.clone()) {
+        errors.push(format!("duplicate MCP resource URL '{endpoint}'"));
     }
 }
 

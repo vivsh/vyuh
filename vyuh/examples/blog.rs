@@ -66,7 +66,7 @@ use vyuh::{
 const BLOG: vyuh::auth::Audience = vyuh::auth::Audience::new("blog");
 
 fn blog_auth() -> AuthConf {
-    AuthConf::empty().provider(
+    AuthConf::default().provider(
         vyuh::auth::DEFAULT_AUTH_PROVIDER,
         TokenProvider::new(Jwt::hs256_site_secret())
             .without_refresh()
@@ -340,7 +340,7 @@ async fn session(site: Site, user: Option<AuthUser>) -> Result<Json<SessionOut>,
     let mut db = site.db();
     let table = User::table();
     let user = db::from(&table)
-        .filter(table.id.eq(db::val(user.parse_key()?)))
+        .filter(table.id.eq(db::val(user.parse_subject()?)))
         .one::<User>()
         .exec(&mut db)
         .await?;
@@ -361,7 +361,7 @@ async fn login(
         .one::<User>()
         .exec(&mut db)
         .await?;
-    if !check_password(&input.password, &user.password_hash)? {
+    if !check_password(&input.password, &user.password_hash).await? {
         return Err(Error::bad_request("invalid username or password"));
     }
     let mut response = CookieJson::new(SessionOut {
@@ -371,7 +371,8 @@ async fn login(
     let scopes = std::iter::once(BLOG_USE).chain(user.is_admin.then_some(BLOG_ADMIN));
     let login = site
         .auth()
-        .login(AuthUser::new(&subject).with_scopes(scopes), &[BLOG])
+        .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new(&subject).with_scopes(scopes), &[BLOG])
         .await?;
     login.write(response.response_mut());
     Ok(response)
@@ -381,7 +382,11 @@ async fn login(
 async fn logout(site: Site, request: Request) -> Result<CookieJson<OkOut>, Error> {
     let (parts, _) = request.into_parts();
     let mut response = CookieJson::new(OkOut::ok());
-    let logout = site.auth().logout(&parts).await?;
+    let logout = site
+        .auth()
+        .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
+        .logout(&parts)
+        .await?;
     logout.write(response.response_mut());
     Ok(response)
 }
@@ -423,7 +428,7 @@ async fn show_post(
         .all::<CommentWithAuthor>()
         .exec(&mut db)
         .await?;
-    let actor_id = user.as_ref().map(AuthUser::parse_key).transpose()?;
+    let actor_id = user.as_ref().map(AuthUser::parse_subject).transpose()?;
     let actor_is_admin = match actor_id {
         Some(id) => {
             let user_table = User::table();
@@ -448,7 +453,7 @@ async fn create_post(
     let mut db = site.db();
     let user_table = User::table();
     let admin = db::from(&user_table)
-        .filter(user_table.id.eq(db::val(user.into_user().parse_key()?)))
+        .filter(user_table.id.eq(db::val(user.into_user().parse_subject()?)))
         .one::<User>()
         .exec(&mut db)
         .await?;
@@ -565,7 +570,7 @@ async fn create_comment(
         .await?;
     let user_table = User::table();
     let author = db::from(&user_table)
-        .filter(user_table.id.eq(db::val(user.parse_key()?)))
+        .filter(user_table.id.eq(db::val(user.parse_subject()?)))
         .one::<User>()
         .exec(&mut db)
         .await?;
@@ -603,7 +608,7 @@ async fn delete_comment(site: Site, user: BlogUser, Path(id): Path<i64>) -> Resu
     let user = user.into_user();
     let user_table = User::table();
     let actor = db::from(&user_table)
-        .filter(user_table.id.eq(db::val(user.parse_key()?)))
+        .filter(user_table.id.eq(db::val(user.parse_subject()?)))
         .one::<User>()
         .exec(&mut db)
         .await?;
@@ -694,7 +699,7 @@ async fn delete_user(site: Site, user: AdminUser, Path(id): Path<i64>) -> Result
     let mut db = site.db();
     let table = User::table();
     let admin = db::from(&table)
-        .filter(table.id.eq(db::val(user.into_user().parse_key()?)))
+        .filter(table.id.eq(db::val(user.into_user().parse_subject()?)))
         .one::<User>()
         .exec(&mut db)
         .await?;
@@ -756,7 +761,7 @@ fn auth_bundle() -> bundles::Bundle {
         login,
         logout,
     }
-    .with_tags(["Authentication"])
+    .with_conf(bundles::conf().tags(["Authentication"]))
 }
 
 fn posts_bundle() -> bundles::Bundle {
@@ -770,7 +775,7 @@ fn posts_bundle() -> bundles::Bundle {
         update_status,
         delete_post,
     }
-    .with_tags(["Posts"])
+    .with_conf(bundles::conf().tags(["Posts"]))
 }
 
 fn comments_bundle() -> bundles::Bundle {
@@ -778,14 +783,14 @@ fn comments_bundle() -> bundles::Bundle {
         create_comment,
         delete_comment,
     }
-    .with_tags(["Comments"])
+    .with_conf(bundles::conf().tags(["Comments"]))
 }
 
 fn admin_bundle() -> bundles::Bundle {
     bundles::bundle! {
         admin_summary,
     }
-    .with_tags(["Admin"])
+    .with_conf(bundles::conf().tags(["Admin"]))
 }
 
 fn users_bundle() -> bundles::Bundle {
@@ -794,7 +799,7 @@ fn users_bundle() -> bundles::Bundle {
         create_user,
         delete_user,
     }
-    .with_tags(["Users"])
+    .with_conf(bundles::conf().tags(["Users"]))
 }
 
 fn app_bundle() -> bundles::Bundle {
@@ -811,8 +816,7 @@ fn app_bundle() -> bundles::Bundle {
         create_admin,
         CommandConf::new("users:create-admin").description("Create an administrator account."),
     )]))
-    .with_openapi(openapi_conf())
-    .with_audience(BLOG)
+    .with_conf(bundles::conf().audience(BLOG).openapi(openapi_conf()))
 }
 
 fn openapi_conf() -> bundles::OpenApiConf {
@@ -870,7 +874,7 @@ async fn insert_user(
     {
         return Err(Error::bad_request("username already exists"));
     }
-    let password_hash = make_password(password, None, None)?;
+    let password_hash = make_password(password, None, None).await?;
     Ok(db::from(&table)
         .returning::<User>()
         .insert(&NewUser {

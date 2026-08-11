@@ -112,7 +112,8 @@ Common inputs:
   metadata. See [Uploads](uploads.md).
 - `Valid<E>` wraps a request extractor and runs `Validate` after parsing.
 - `AuthUser` and `Permit<ScopeRule>` contribute security metadata. They
-  must be registered in a bundle with `with_audience(YOUR_AUDIENCE)`.
+  must be registered in a bundle with
+  `with_conf(bundles::conf().audience(YOUR_AUDIENCE))`.
 
 Common outputs:
 

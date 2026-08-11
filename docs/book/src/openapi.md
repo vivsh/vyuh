@@ -37,27 +37,27 @@ scope requirements in the standard security scheme.
 
 ## Registration
 
-OpenAPI is registered on a `Bundle` with `with_openapi`. By default, Vyuh
+OpenAPI is registered through `BundleConf`. By default, Vyuh
 serves only the JSON spec and requires a valid configured credential:
 
 ```rust
-let bundle = routes.with_openapi(
+let bundle = routes.with_conf(bundles::conf().openapi(
     bundles::OpenApiConf::default()
         .title("Notes API")
         .version("0.1.0"),
-);
+));
 ```
 
 Use `.public()` only when the complete route inventory is intentionally part of
 the public API surface:
 
 ```rust
-let bundle = routes.with_openapi(
+let bundle = routes.with_conf(bundles::conf().openapi(
     bundles::OpenApiConf::default()
         .title("Public Notes API")
         .version("0.1.0")
         .public(),
-);
+));
 ```
 
 Use `.auth(...)` to restrict the spec and optional viewer further, for example
@@ -69,52 +69,53 @@ Use `.spec(...)` to place the JSON spec under the same prefix as the API it
 describes:
 
 ```rust
-let bundle = routes.with_openapi(
+let bundle = routes.with_conf(bundles::conf().openapi(
     bundles::OpenApiConf::default()
         .title("Notes API")
         .version("0.1.0")
         .openapi_version(bundles::OpenApiVersion::V30)
         .description("Notes service API")
         .spec("/api/openapi.json"),
-);
+));
 ```
 
 Add `.viewer(...)` when the site should also serve an HTML documentation UI.
 Swagger UI is the default viewer:
 
 ```rust
-let bundle = routes.with_openapi(
+let bundle = routes.with_conf(bundles::conf().openapi(
     bundles::OpenApiConf::default()
         .spec("/api/openapi.json")
         .viewer("/api/docs"),
-);
+));
 ```
 
 Use `.viewer_with(...)` to choose another built-in viewer:
 
 ```rust
-let bundle = routes.with_openapi(
+let bundle = routes.with_conf(bundles::conf().openapi(
     bundles::OpenApiConf::default()
         .spec("/api/openapi.json")
         .viewer_with("/api/docs", bundles::DocViewer::Redoc),
-);
+));
 ```
 
 The JSON spec is generated during site build. Schema conversion or serialization
 errors fail startup instead of failing on the first documentation request.
 
-## Order Sensitivity
+## Aggregate Selection
 
-`with_openapi` snapshots the route operations that are already registered in the
-bundle. Routes added or merged after `with_openapi` will not appear in that
-generated spec.
+OpenAPI selection is finalized during `Site::build`. A declaration includes all
+visible HTTP route operations in its final bundle subtree, including routes from
+children merged after the declaration. Parent and child specifications may
+overlap deliberately.
 
-Register OpenAPI after all route registration and bundle merge steps for the API
-surface the spec should describe. Prefixes and metadata applied to already
-captured routes still affect the final generated paths and operation metadata.
+Endpoint markers are registered immediately, so a later `with_prefix` updates
+their final paths. The endpoint uses the owning bundle's effective audience by
+default; `.public()` is deliberate opt-in and `.auth(...)` adds an `AuthUser`
+policy.
 
-See [Bundles](bundles.md) for bundle composition rules and the general
-order-sensitive behavior of bundle-level APIs.
+See [Bundles](bundles.md) for configuration inheritance and composition rules.
 
 ## Schemas
 
@@ -320,7 +321,7 @@ use vyuh::prelude::*;
 use vyuh::auth::AuthUser;
 
 async fn me(user: AuthUser) -> Json<String> {
-    Json(user.key)
+    Json(user.subject().to_owned())
 }
 ```
 
@@ -330,7 +331,7 @@ PASETO, BRANCA, and custom token codecs contribute their `bearerFormat`; opaque
 `AuthKey` providers use OpenAPI `apiKey`. `AuthUser` routes also carry their
 effective bundle audience as `x-vyuh-audience` metadata. Unsafe operations that
 may authenticate through a cookie carry `x-vyuh-csrf-header` metadata.
-When a route omits `.with_audience(...)`, this extension contains the site's
+When a route omits `BundleConf::audience(...)`, this extension contains the site's
 configured default audience; strict explicit-audience mode rejects that route
 instead.
 

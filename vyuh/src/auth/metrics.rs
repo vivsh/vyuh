@@ -52,15 +52,6 @@ impl AuthMetrics {
     }
 }
 
-impl Clone for AuthMetrics {
-    fn clone(&self) -> Self {
-        Self {
-            providers: self.providers.clone(),
-            methods: self.methods.clone(),
-        }
-    }
-}
-
 impl MetricSet {
     fn new(names: impl IntoIterator<Item = String>) -> Self {
         let mut output = Self {
@@ -85,15 +76,22 @@ impl MetricSet {
     }
 
     fn increment(&self, name: &str, outcome: usize) {
-        match self.indexes.get(name) {
-            Some(index) => self.counters[*index][outcome].fetch_add(1, Ordering::Relaxed),
-            None => self.unknown[outcome].fetch_add(1, Ordering::Relaxed),
-        };
+        let counter = self
+            .indexes
+            .get(name)
+            .and_then(|index| self.counters.get(*index))
+            .and_then(|counts| counts.get(outcome));
+        if let Some(counter) = counter.or_else(|| self.unknown.get(outcome)) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn render(&self, output: &mut String, metric: &str, label: &str) {
         for (name, index) in &self.indexes {
-            for (outcome, count) in OUTCOMES.iter().zip(&self.counters[*index]) {
+            let Some(counts) = self.counters.get(*index) else {
+                continue;
+            };
+            for (outcome, count) in OUTCOMES.iter().zip(counts) {
                 let value = count.load(Ordering::Relaxed);
                 let _ = writeln!(
                     output,
@@ -107,25 +105,6 @@ impl MetricSet {
                 output,
                 "{metric}{{{label}=\"<unknown>\",outcome=\"{outcome}\"}} {value}"
             );
-        }
-    }
-}
-
-impl Clone for MetricSet {
-    fn clone(&self) -> Self {
-        let counters = self
-            .counters
-            .iter()
-            .map(|values| {
-                std::array::from_fn(|index| AtomicU64::new(values[index].load(Ordering::Relaxed)))
-            })
-            .collect();
-        Self {
-            indexes: self.indexes.clone(),
-            counters,
-            unknown: std::array::from_fn(|index| {
-                AtomicU64::new(self.unknown[index].load(Ordering::Relaxed))
-            }),
         }
     }
 }

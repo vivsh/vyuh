@@ -317,14 +317,27 @@ pub struct MagicLinkLogin {
     stateful: bool,
 }
 
+/// Explicit acknowledgement that a magic link may be reused until expiry.
+#[cfg(feature = "email")]
+#[derive(Clone, Copy, Debug)]
+pub struct UnsafeReusableMagicLinks(());
+
+#[cfg(feature = "email")]
+impl UnsafeReusableMagicLinks {
+    /// Acknowledges replay risk and enables stateless reusable magic links.
+    pub const fn allow() -> Self {
+        Self(())
+    }
+}
+
 #[cfg(feature = "email")]
 impl MagicLinkLogin {
-    /// Creates a delivery-agnostic magic-link method with stateless verification.
+    /// Creates a one-time magic-link method backed by the passwordless store.
     pub fn new(resolver: impl EmailLoginResolver) -> Self {
         Self {
             resolver: Arc::new(resolver),
             callback_url: None,
-            stateful: false,
+            stateful: true,
         }
     }
     /// Sets the absolute callback URL used only for generated magic links.
@@ -339,8 +352,8 @@ impl MagicLinkLogin {
         self
     }
 
-    /// Uses a sealed link that remains reusable until expiry.
-    pub fn stateless(mut self) -> Self {
+    /// Uses a sealed link that remains reusable until expiry after explicit acknowledgement.
+    pub fn stateless(mut self, _risk: UnsafeReusableMagicLinks) -> Self {
         self.stateful = false;
         self
     }
@@ -575,7 +588,7 @@ impl MagicLinkRuntime {
         let callback = self.callback_url()?;
         let pending = PendingPasswordless {
             identifier: email.as_str().into(),
-            subject: Some(user.key.to_string()),
+            subject: Some(user.subject().to_owned()),
             method: method.as_str().into(),
             channel: "email".into(),
         };
@@ -678,7 +691,7 @@ async fn complete_user(
     target: LoginTarget,
     method: &str,
 ) -> Result<CompletedLogin, AuthError> {
-    if pending.subject.as_deref() != Some(user.key.as_ref()) {
+    if pending.subject.as_deref() != Some(user.subject()) {
         return Err(AuthError::InvalidCredential);
     }
     user.validate()?;
@@ -771,7 +784,7 @@ impl PreparedChallenge {
         let (proof, code, _link, ttl) = proof_for(&id, &kind)?;
         let pending = PendingPasswordless {
             identifier: identifier.into(),
-            subject: user.map(|value| value.key.to_string()),
+            subject: user.map(|value| value.subject().to_owned()),
             method: method.as_str().into(),
             channel: kind.channel().into(),
         };

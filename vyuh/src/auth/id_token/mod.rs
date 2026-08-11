@@ -3,5 +3,5 @@
 mod config;
 mod runtime;
 
-pub use config::{IdToken, IdTokenClaims, IdTokenMapper};
+pub use config::{IdToken, IdTokenClaims, IdTokenMapper, IdTokenResource};
 pub(crate) use runtime::IdTokenRuntime;

@@ -4,25 +4,28 @@ Vyuh can expose explicitly registered semantic JSON operations as remote MCP
 tools behind the optional `mcp` feature. MCP owns protocol framing, tool
 discovery, and dispatch; Vyuh authentication owns every credential decision.
 
-Each service chooses one configured Vyuh provider or explicit anonymous access:
+Each service uses the owning bundle's effective audience and therefore the same
+central authentication registry as ordinary HTTP routes:
 
 ```rust,ignore
 const NOTES_MCP: Audience =
     Audience::new("https://api.example.com/mcp/notes");
-const HYDRA: AuthProvider = AuthProvider::new("hydra");
-
-let notes = bundles::bundle! { search_notes }.with_mcp(
-    McpConf::new("/mcp/notes", NOTES_MCP).auth(HYDRA),
+let notes = bundles::bundle! { search_notes }.with_conf(
+    bundles::conf()
+        .audience(NOTES_MCP)
+        .mcp(McpConf::new("/mcp/notes")),
 );
 ```
 
-The engine authenticates only through `HYDRA`, receives the ordinary
-`AuthUser`, filters tools by `Permit<ScopeRule>`, and never forwards the original
-credential to a tool. Cookie and query credential providers are
-rejected for MCP; header token and `AuthKey` providers work normally.
+The engine receives the ordinary `AuthUser`, filters tools by
+`Permit<ScopeRule>`, and never forwards the original credential to a tool.
+Use `.public()` for deliberate anonymous exposure or `.auth(predicate)` for an
+additional `AuthUser` check. Provider selection remains central and audience
+based; a provider eligible for the MCP audience can authenticate it just as it
+can any other route with that audience.
 
-`McpConf::new` requires `.auth(PROVIDER)` or `.anonymous()`. Anonymous exposure
-is deliberate and cannot claim a tool requiring `AuthUser` or `Permit<ScopeRule>`.
+Anonymous exposure is deliberate and cannot claim a tool requiring `AuthUser`
+or `Permit<ScopeRule>`.
 
 ## External OAuth
 
@@ -32,7 +35,7 @@ Hydra, Auth0, Keycloak, or another provider owns login, consent, PKCE, client
 registration, token issuance, and refresh.
 
 ```rust,ignore
-let auth = AuthConf::empty().provider(
+let auth = AuthConf::default().provider(
     HYDRA,
     OAuthResourceServer::discovery("https://auth.example.com")
         .resource(
@@ -48,13 +51,13 @@ let auth = AuthConf::empty().provider(
 OAuth discovery and JWKS validation are part of generic Vyuh auth. The provider
 validates issuer, signature, algorithm, audience, time claims, and all required
 upstream scopes before producing `AuthUser`. By default it maps `sub` to
-`AuthUser.key` with no application scopes. An explicit identity mapper resolves
+`AuthUser::subject()` with no application scopes. An explicit identity mapper resolves
 trusted application scopes. Upstream OAuth scopes are not copied into Vyuh
 application scopes automatically; `Permit<R>` evaluates only the mapped grants.
 
-MCP publishes RFC 9728 Protected Resource Metadata only for a selected provider
-that exposes OAuth resource metadata. Native token and key services do not
-advertise an OAuth flow. OAuth v1 accepts JWT access tokens only; opaque-token
+MCP publishes RFC 9728 Protected Resource Metadata only when exactly one
+central provider eligible for its audience exposes compatible metadata. Native
+token and key services do not advertise an OAuth flow. OAuth v1 accepts JWT access tokens only; opaque-token
 introspection is intentionally unsupported.
 
 OAuth providers initialize during `Site::build`. Their private per-site Huskarl

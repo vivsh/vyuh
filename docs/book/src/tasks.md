@@ -433,7 +433,7 @@ changing `bundle!` syntax:
 
 ```rust
 let bundle = bundles::bundle! { send_email }
-    .with_task_lane(TaskLaneConf::new(EMAIL, 2));
+    .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL, 2)));
 ```
 
 The application remains authoritative: `TaskConf::lane(...)` replaces that

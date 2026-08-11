@@ -13,7 +13,7 @@ use crate::auth::{AudienceId, AuthConf, AuthUser};
 use crate::callables::{Operation, OperationKind};
 use crate::routes::AxumRouter;
 
-use super::{Bundle, BundleError};
+use super::{Bundle, BundleError, BundleTopology};
 
 // ---------------------------------------------------------------------------
 // Public configuration type
@@ -71,6 +71,11 @@ impl Default for OpenApiConf {
 }
 
 impl OpenApiConf {
+    /// Creates an OpenAPI declaration at `path`.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self::default().spec(path)
+    }
+
     /// Override the path for the JSON spec endpoint.
     pub fn spec(mut self, path: impl Into<String>) -> Self {
         self.spec_path = path.into();
@@ -140,15 +145,14 @@ impl OpenApiConf {
 // ---------------------------------------------------------------------------
 
 /// A single OpenAPI doc registration inside a bundle.
-/// Holds stable operation UUIDs rather than live references so that
-/// `with_prefix` path updates propagate automatically before `setup` is called.
+/// Holds an ownership anchor so final subtree selection can happen at site build.
 pub(super) struct DocNode {
     /// UUID of the hidden spec-route operation in `Bundle::ops`.
     spec_op_id: OperationId,
     /// UUID of the hidden viewer-route operation in `Bundle::ops`, if any.
     doc_op_id: Option<OperationId>,
-    /// UUIDs of the visible operations to include in the generated spec.
-    operation_ids: Vec<OperationId>,
+    /// Bundle identity that roots the visible-operation subtree.
+    anchor_id: uuid::Uuid,
     meta: ApiMeta,
     openapi_version: OpenApiVersion,
     viewer: DocViewer,
@@ -185,6 +189,7 @@ impl DocEngine {
         router: &mut AxumRouter<Site>,
         ops: &BTreeMap<OperationId, Operation>,
         auth: &AuthConf,
+        topology: &BundleTopology,
     ) -> Result<(), BundleError> {
         for node in &self.nodes {
             let spec_path = ops
@@ -195,10 +200,15 @@ impl DocEngine {
                 .get(&node.spec_op_id)
                 .and_then(|operation| operation.audience_id().cloned());
 
-            let views: Vec<&Operation> = node
-                .operation_ids
-                .iter()
-                .filter_map(|id| ops.get(id))
+            let views: Vec<&Operation> = ops
+                .values()
+                .filter(|operation| {
+                    !operation.hidden
+                        && operation.kind == OperationKind::Route
+                        && operation
+                            .bundle_id
+                            .is_some_and(|id| topology.contains(node.anchor_id, id))
+                })
                 .collect();
 
             let spec_bytes = generate_spec(&views, &node.meta, node.openapi_version, auth)?;
@@ -301,7 +311,7 @@ async fn authorize_docs(
 }
 
 // ---------------------------------------------------------------------------
-// Bundle::with_openapi
+// Bundle registration
 // ---------------------------------------------------------------------------
 
 impl Bundle {
@@ -310,15 +320,7 @@ impl Bundle {
     /// Hidden `Operation` markers (kind `ApiDoc`, `hidden = true`) are inserted
     /// into the operation map so that `with_prefix` updates their paths automatically.
     /// `DocEngine::setup` resolves them to final paths at startup.
-    pub fn with_openapi(mut self, conf: OpenApiConf) -> Self {
-        // Snapshot UUIDs of visible operations now; the ops map is the canonical store.
-        let operation_ids: Vec<OperationId> = self
-            .ops
-            .values()
-            .filter(|op| !op.hidden && op.kind == OperationKind::Route)
-            .map(|op| op.id)
-            .collect();
-
+    pub(crate) fn register_openapi(&mut self, conf: OpenApiConf) {
         let mut spec_op = crate::callables::Operation::from_api_doc(
             &format!("__spec__{}", conf.spec_path),
             &conf.spec_path,
@@ -342,7 +344,7 @@ impl Bundle {
         self.doc_engine.register(DocNode {
             spec_op_id,
             doc_op_id,
-            operation_ids,
+            anchor_id: self.id,
             meta: conf.meta,
             openapi_version: conf.openapi_version,
             viewer: viewer
@@ -351,7 +353,6 @@ impl Bundle {
                 .unwrap_or(DocViewer::Swagger),
             auth: conf.auth,
         });
-        self
     }
 }
 
@@ -420,8 +421,8 @@ mod tests {
     }
 
     #[test]
-    fn with_openapi_snapshots_only_visible_routes() {
-        let route = operation(OperationKind::Route, "list_notes", "/notes");
+    fn openapi_selects_visible_routes_in_its_subtree() {
+        let mut route = operation(OperationKind::Route, "list_notes", "/notes");
         let signal = operation(OperationKind::Signal, "note_changed", "");
         let hidden_route = Operation {
             hidden: true,
@@ -433,19 +434,31 @@ mod tests {
         let hidden_route_id = hidden_route.id;
 
         let mut bundle = Bundle::new();
+        route.assign_bundle_id(bundle.id);
         bundle.ops.insert(route_id, route);
         bundle.ops.insert(signal_id, signal);
         bundle.ops.insert(hidden_route_id, hidden_route);
 
-        let bundle = bundle.with_openapi(OpenApiConf::default());
-        let operation_ids = &bundle.doc_engine.nodes[0].operation_ids;
-
-        assert_eq!(operation_ids, &[route_id]);
+        let bundle = bundle.with_conf(super::super::conf().openapi(OpenApiConf::default()));
+        let node = &bundle.doc_engine.nodes[0];
+        let views = bundle
+            .ops
+            .values()
+            .filter(|operation| {
+                !operation.hidden
+                    && operation.kind == OperationKind::Route
+                    && operation
+                        .bundle_id
+                        .is_some_and(|id| bundle.topology.contains(node.anchor_id, id))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, route_id);
     }
 
     #[test]
     fn default_openapi_registers_only_json_spec_marker() {
-        let bundle = Bundle::new().with_openapi(OpenApiConf::default());
+        let bundle = Bundle::new().with_conf(super::super::conf().openapi(OpenApiConf::default()));
         let node = &bundle.doc_engine.nodes[0];
         let spec_op = bundle.ops.get(&node.spec_op_id).unwrap();
 
@@ -457,8 +470,10 @@ mod tests {
 
     #[test]
     fn optional_viewer_registers_hidden_viewer_marker_with_origin_bundle_id() {
-        let bundle = Bundle::new()
-            .with_openapi(OpenApiConf::default().viewer_with("/docs", DocViewer::Redoc));
+        let bundle = Bundle::new().with_conf(
+            super::super::conf()
+                .openapi(OpenApiConf::default().viewer_with("/docs", DocViewer::Redoc)),
+        );
         let node = &bundle.doc_engine.nodes[0];
         let doc_op_id = node.doc_op_id.unwrap();
         let doc_op = bundle.ops.get(&doc_op_id).unwrap();
@@ -473,10 +488,12 @@ mod tests {
     #[test]
     fn prefixed_openapi_viewer_uses_final_paths_and_relative_spec_url() {
         let bundle = Bundle::new()
-            .with_openapi(
-                OpenApiConf::default()
-                    .spec("/api/openapi.json")
-                    .viewer("/api/docs"),
+            .with_conf(
+                super::super::conf().openapi(
+                    OpenApiConf::default()
+                        .spec("/api/openapi.json")
+                        .viewer("/api/docs"),
+                ),
             )
             .with_prefix("/v1");
         let node = &bundle.doc_engine.nodes[0];

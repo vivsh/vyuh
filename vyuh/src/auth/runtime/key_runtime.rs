@@ -77,7 +77,6 @@ impl ProviderRuntimeContract for KeyRuntime {
         &'a self,
         _user: AuthUser,
         _audiences: Vec<AudienceId>,
-        _binding: Option<String>,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -86,7 +85,6 @@ impl ProviderRuntimeContract for KeyRuntime {
         &'a self,
         _raw: &'a str,
         _parts: &'a Parts,
-        _audiences: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -110,15 +108,7 @@ impl KeyRuntime {
     ) -> Result<AuthUser, AuthError> {
         validate_credential_size(raw, self.definition.max_credential_bytes)?;
         validate_csrf(self.definition.csrf.as_ref(), parts)?;
-        let binding = match self.definition.binding {
-            Some(resolve) => Some(
-                resolve(parts)?
-                    .ok_or(AuthError::BindingMismatch)?
-                    .into_inner(),
-            ),
-            None => None,
-        };
-        let request = KeyRequest::new(audience.as_str(), binding.as_deref());
+        let request = KeyRequest::new(audience.as_str());
         let presented = PresentedCredential::new(raw);
         let user = self.definition.verifier.verify(&presented, request).await?;
         validate_subject(&user)?;

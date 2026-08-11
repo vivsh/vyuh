@@ -121,7 +121,7 @@ feature.
 - JSON resources and bounded lists stay unwrapped; database-backed lists use
   `Json<routes::Page<T>>` with `PageParams` for the shared pagination shape.
 - Provider auth is explicit through `AuthUser` and a bundle audience, while
-  setup stays small with `AuthConf::default()`.
+  the tutorial deliberately opts into `AuthConf::development()`.
 - OpenAPI is attached once and follows the bundle tree automatically.
 
 From here, the next useful pages are [Bundles](bundles.md), [Routes](routes.md),

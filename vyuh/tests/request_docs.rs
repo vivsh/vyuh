@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vyuh::{
     Data, SiteConf, SiteConfig, Validate,
-    auth::{Audience, AuthUser},
+    auth::{Audience, AuthConf, AuthUser, DEFAULT_AUTH_PROVIDER},
     bundles,
     routes::{BodyBytes, Json, Path, Query, StatusCode, Valid},
     testing::TestSite,
@@ -16,6 +16,7 @@ fn test_conf() -> SiteConf {
             env_prefix: None,
             rules: vec![],
         },
+        auth: AuthConf::development(),
         ..SiteConf::default()
     }
 }
@@ -111,12 +112,14 @@ async fn request_site(openapi: bool) -> vyuh::Site {
         webhook,
     };
     let bundle = if openapi {
-        bundle.with_openapi(
-            bundles::OpenApiConf::default()
-                .title("Request")
-                .version("0.1.0")
-                .spec("/openapi.json")
-                .public(),
+        bundle.with_conf(
+            bundles::conf().openapi(
+                bundles::OpenApiConf::default()
+                    .title("Request")
+                    .version("0.1.0")
+                    .spec("/openapi.json")
+                    .public(),
+            ),
         )
     } else {
         bundle
@@ -125,22 +128,21 @@ async fn request_site(openapi: bool) -> vyuh::Site {
 }
 
 fn docs_admin(user: &AuthUser) -> bool {
-    user.key.as_ref() == "docs-admin"
+    user.subject() == "docs-admin"
 }
 
 const DOCS: Audience = Audience::new("docs");
 
 async fn openapi_access_site(conf: bundles::OpenApiConf) -> Result<vyuh::Site, String> {
-    let bundle = bundles::bundle! { create_note }.with_openapi(conf);
+    let bundle = bundles::bundle! { create_note }.with_conf(bundles::conf().openapi(conf));
     vyuh::Site::build(test_conf(), bundle)
         .await
         .map_err(|error| error.to_string())
 }
 
 async fn audience_openapi_site(conf: bundles::OpenApiConf) -> Result<vyuh::Site, String> {
-    let bundle = bundles::bundle! { create_note }
-        .with_openapi(conf)
-        .with_audience(DOCS);
+    let bundle =
+        bundles::bundle! { create_note }.with_conf(bundles::conf().audience(DOCS).openapi(conf));
     vyuh::Site::build(test_conf(), bundle)
         .await
         .map_err(|error| error.to_string())
@@ -170,7 +172,8 @@ async fn openapi_access_is_private_by_default() -> Result<(), String> {
 
     let login = site
         .auth()
-        .login(AuthUser::new("reader"), &[])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("reader"), &[])
         .await
         .map_err(|error| error.to_string())?;
     client
@@ -195,7 +198,8 @@ async fn openapi_access_is_private_by_default() -> Result<(), String> {
     .await?;
     let denied_login = restricted
         .auth()
-        .login(AuthUser::new("reader"), &[])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("reader"), &[])
         .await
         .map_err(|error| error.to_string())?;
     TestSite::new(restricted.clone())
@@ -210,12 +214,14 @@ async fn openapi_access_is_private_by_default() -> Result<(), String> {
         audience_openapi_site(bundles::OpenApiConf::default().spec("/docs.json")).await?;
     let default_login = audience_site
         .auth()
-        .login(AuthUser::new("reader"), &[])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("reader"), &[])
         .await
         .map_err(|error| error.to_string())?;
     let docs_login = audience_site
         .auth()
-        .login(AuthUser::new("reader"), &[DOCS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("reader"), &[DOCS])
         .await
         .map_err(|error| error.to_string())?;
     let audience_client = TestSite::new(audience_site.clone());
@@ -224,7 +230,7 @@ async fn openapi_access_is_private_by_default() -> Result<(), String> {
         .with_login(&default_login)
         .send()
         .await
-        .assert_status(StatusCode::FORBIDDEN);
+        .assert_status(StatusCode::UNAUTHORIZED);
     audience_client
         .get("/docs.json")
         .with_login(&docs_login)

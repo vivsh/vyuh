@@ -1,6 +1,9 @@
 //! OpenID Connect discovery, PKCE exchange, verification, and key rotation.
 
-use std::time::{Duration as StdDuration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration as StdDuration, Instant},
+};
 
 use openidconnect::{
     AccessTokenHash, AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken,
@@ -15,15 +18,9 @@ use super::{
 };
 use crate::auth::AuthError;
 
-#[derive(Clone)]
-struct CachedMetadata {
-    value: CoreProviderMetadata,
-    loaded_at: Instant,
-}
-
 #[derive(Default)]
-pub(super) struct MetadataState {
-    current: Option<CachedMetadata>,
+pub(super) struct DiscoveryState {
+    in_flight: bool,
     last_key_refresh: Option<Instant>,
 }
 
@@ -36,14 +33,20 @@ type ConfiguredClient = openidconnect::core::CoreClient<
     openidconnect::EndpointMaybeSet,
 >;
 
-struct FederatedClient {
+pub(super) struct CachedClient {
     client: ConfiguredClient,
     loaded_at: Instant,
 }
 
+enum RefreshAction {
+    Discover,
+    Wait,
+    Reuse(Arc<CachedClient>),
+}
+
 impl FederatedRuntime {
     pub(super) async fn initialize_oidc(&self) -> Result<(), AuthError> {
-        self.metadata().await.map(|_| ())
+        self.client().await.map(|_| ())
     }
 
     pub(super) async fn begin_oidc(
@@ -107,9 +110,8 @@ impl FederatedRuntime {
         scopes: Vec<String>,
         return_to: Option<String>,
     ) -> Result<FederatedIdentity, AuthError> {
-        let metadata = self.refresh_for_missing_key(observed).await?;
-        let refreshed = self.configured_client(metadata)?;
-        let verifier = refreshed.id_token_verifier();
+        let refreshed = self.refresh_for_missing_key(observed).await?;
+        let verifier = refreshed.client.id_token_verifier();
         let id_token = response.id_token().ok_or(AuthError::InvalidCredential)?;
         let claims = id_token
             .claims(&verifier, &nonce)
@@ -118,32 +120,11 @@ impl FederatedRuntime {
         identity_from_claims(self.conf.provider, claims, scopes, return_to)
     }
 
-    async fn metadata(&self) -> Result<CachedMetadata, AuthError> {
-        if let Some(value) = self.cached_metadata().await {
+    async fn client(&self) -> Result<Arc<CachedClient>, AuthError> {
+        if let Some(value) = self.fresh_client() {
             return Ok(value);
         }
-        let mut state = self.metadata.write().await;
-        if let Some(value) = fresh_metadata(state.current.as_ref()) {
-            return Ok(value);
-        }
-        match self.discover().await {
-            Ok(value) => {
-                let value = CachedMetadata {
-                    value,
-                    loaded_at: Instant::now(),
-                };
-                state.current = Some(value.clone());
-                Ok(value)
-            }
-            Err(error) => state.current.clone().ok_or(error),
-        }
-    }
-
-    async fn client(&self) -> Result<FederatedClient, AuthError> {
-        let metadata = self.metadata().await?;
-        let loaded_at = metadata.loaded_at;
-        let client = self.configured_client(metadata.value)?;
-        Ok(FederatedClient { client, loaded_at })
+        self.refresh_client(None).await
     }
 
     fn configured_client(
@@ -167,34 +148,80 @@ impl FederatedRuntime {
     async fn refresh_for_missing_key(
         &self,
         observed: Instant,
-    ) -> Result<CoreProviderMetadata, AuthError> {
-        let mut state = self.metadata.write().await;
-        if let Some(current) = &state.current
-            && current.loaded_at != observed
-        {
-            return Ok(current.value.clone());
-        }
-        if state
-            .last_key_refresh
-            .is_some_and(|value| value.elapsed() < StdDuration::from_secs(60))
-        {
-            return state
-                .current
-                .as_ref()
-                .map(|value| value.value.clone())
-                .ok_or(AuthError::ProviderUnavailable);
-        }
-        state.last_key_refresh = Some(Instant::now());
-        let value = self.discover().await?;
-        state.current = Some(CachedMetadata {
-            value: value.clone(),
-            loaded_at: Instant::now(),
-        });
-        Ok(value)
+    ) -> Result<Arc<CachedClient>, AuthError> {
+        self.refresh_client(Some(observed)).await
     }
 
-    async fn cached_metadata(&self) -> Option<CachedMetadata> {
-        fresh_metadata(self.metadata.read().await.current.as_ref())
+    async fn refresh_client(
+        &self,
+        observed: Option<Instant>,
+    ) -> Result<Arc<CachedClient>, AuthError> {
+        loop {
+            let notified = self.oidc_notify.notified();
+            match self.claim_refresh(observed).await? {
+                RefreshAction::Reuse(value) => return Ok(value),
+                RefreshAction::Wait => notified.await,
+                RefreshAction::Discover => {
+                    let previous = self.oidc_client.load_full();
+                    let result = self.discover_client().await;
+                    self.finish_refresh(result.as_ref().ok()).await;
+                    return result.or_else(|error| match (observed, previous) {
+                        (None, Some(value)) => Ok(value),
+                        _ => Err(error),
+                    });
+                }
+            }
+        }
+    }
+
+    async fn claim_refresh(&self, observed: Option<Instant>) -> Result<RefreshAction, AuthError> {
+        let current = self.oidc_client.load_full();
+        if let Some(value) = reusable_client(current.as_ref(), observed) {
+            return Ok(RefreshAction::Reuse(value));
+        }
+        let mut state = self.oidc_discovery.lock().await;
+        let current = self.oidc_client.load_full();
+        if let Some(value) = reusable_client(current.as_ref(), observed) {
+            return Ok(RefreshAction::Reuse(value));
+        }
+        if state.in_flight {
+            return Ok(RefreshAction::Wait);
+        }
+        if observed.is_some()
+            && state
+                .last_key_refresh
+                .is_some_and(|value| value.elapsed() < StdDuration::from_secs(60))
+        {
+            return current
+                .map(RefreshAction::Reuse)
+                .ok_or(AuthError::ProviderUnavailable);
+        }
+        state.in_flight = true;
+        if observed.is_some() {
+            state.last_key_refresh = Some(Instant::now());
+        }
+        Ok(RefreshAction::Discover)
+    }
+
+    async fn discover_client(&self) -> Result<Arc<CachedClient>, AuthError> {
+        let metadata = self.discover().await?;
+        Ok(Arc::new(CachedClient {
+            client: self.configured_client(metadata)?,
+            loaded_at: Instant::now(),
+        }))
+    }
+
+    async fn finish_refresh(&self, value: Option<&Arc<CachedClient>>) {
+        if let Some(value) = value {
+            self.oidc_client.store(Some(value.clone()));
+        }
+        self.oidc_discovery.lock().await.in_flight = false;
+        self.oidc_notify.notify_waiters();
+    }
+
+    fn fresh_client(&self) -> Option<Arc<CachedClient>> {
+        let value = self.oidc_client.load_full()?;
+        (value.loaded_at.elapsed() < StdDuration::from_secs(3600)).then_some(value)
     }
 
     async fn discover(&self) -> Result<CoreProviderMetadata, AuthError> {
@@ -234,10 +261,16 @@ fn granted_scopes(response: &openidconnect::core::CoreTokenResponse) -> Vec<Stri
         .collect()
 }
 
-fn fresh_metadata(value: Option<&CachedMetadata>) -> Option<CachedMetadata> {
-    value
-        .filter(|value| value.loaded_at.elapsed() < StdDuration::from_secs(3600))
-        .cloned()
+fn reusable_client(
+    value: Option<&Arc<CachedClient>>,
+    observed: Option<Instant>,
+) -> Option<Arc<CachedClient>> {
+    let value = value?;
+    match observed {
+        Some(observed) if value.loaded_at != observed => Some(value.clone()),
+        None if value.loaded_at.elapsed() < StdDuration::from_secs(3600) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn missing_signing_key(error: &ClaimsVerificationError) -> bool {

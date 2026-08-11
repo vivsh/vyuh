@@ -40,7 +40,7 @@ pub struct DefaultLoginData {
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    token_type: Option<&'static str>,
+    token_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_in: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,12 +48,17 @@ pub struct DefaultLoginData {
 }
 
 impl DefaultLoginData {
-    pub(crate) fn new(access: Option<String>, refresh: Option<String>, expires_in: i64) -> Self {
+    pub(crate) fn new(
+        access: Option<String>,
+        refresh: Option<String>,
+        expires_in: i64,
+        token_type: Option<String>,
+    ) -> Self {
         let visible = access.is_some() || refresh.is_some();
         Self {
             access_token: access,
             refresh_token: refresh,
-            token_type: visible.then_some("Bearer"),
+            token_type: visible.then_some(token_type).flatten(),
             expires_in: visible.then_some(expires_in),
             ok: (!visible).then_some(true),
         }
@@ -77,8 +82,9 @@ impl LoginResponse {
         attachments: Vec<(HeaderName, HeaderValue)>,
         request_selector: RequestCredentialLocation,
     ) -> Self {
+        let token_type = request_selector.token_type().map(str::to_owned);
         Self {
-            data: DefaultLoginData::new(access_body, refresh_body, expires_in),
+            data: DefaultLoginData::new(access_body, refresh_body, expires_in, token_type),
             credentials,
             attachments,
             request_selector,
@@ -102,7 +108,7 @@ impl<T> LoginResponse<T> {
         &self.data
     }
 
-    /// Returns the deliberately redacted issued credentials.
+    /// Returns the deliberately exposed issued credentials.
     pub fn credentials(&self) -> &Credentials {
         &self.credentials
     }
@@ -112,7 +118,7 @@ impl<T> LoginResponse<T> {
     }
 
     /// Applies provider-managed headers or cookies to an existing response.
-    pub fn write(&self, response: &mut Response) {
+    pub fn write<B>(&self, response: &mut HttpResponse<B>) {
         for (name, value) in &self.attachments {
             response.headers_mut().append(name, value.clone());
         }

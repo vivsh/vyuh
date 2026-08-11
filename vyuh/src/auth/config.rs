@@ -2,7 +2,7 @@
 
 use std::{fmt, future::Future, path::PathBuf, sync::Arc};
 
-use axum::http::{HeaderName, request::Parts};
+use axum::http::HeaderName;
 use chrono::Duration;
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -19,33 +19,6 @@ use super::{
     ProviderDocLocation, ProviderId, SecretRing, TokenClaims, TokenDecoder, TokenEncoder,
     TokenLifecycle, identity::DEFAULT_AUTH_PROVIDER,
 };
-
-/// Opaque request-binding material attached to issued credentials.
-///
-/// The value is intentionally redacted and cannot be serialized or formatted.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AuthBinding(String);
-
-impl AuthBinding {
-    /// Creates binding material resolved by application request policy.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl fmt::Debug for AuthBinding {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AuthBinding(<redacted>)")
-    }
-}
 
 /// Source for token signing, verification, or encryption key material.
 #[derive(Clone, PartialEq, Eq)]
@@ -137,22 +110,16 @@ impl TokenVerifier for EmbeddedVerifier {
 /// Context supplied while resolving an opaque authentication key.
 pub struct KeyRequest<'a> {
     audience: &'a str,
-    binding: Option<&'a str>,
 }
 
 impl<'a> KeyRequest<'a> {
-    pub(crate) const fn new(audience: &'a str, binding: Option<&'a str>) -> Self {
-        Self { audience, binding }
+    pub(crate) const fn new(audience: &'a str) -> Self {
+        Self { audience }
     }
 
     /// Returns the API audience requested by the current operation.
     pub const fn audience(&self) -> &'a str {
         self.audience
-    }
-
-    /// Returns application-resolved request binding state when configured.
-    pub const fn binding(&self) -> Option<&'a str> {
-        self.binding
     }
 }
 
@@ -183,9 +150,6 @@ impl<T: KeyVerifier> ErasedKeyVerifier for T {
         Box::pin(KeyVerifier::verify(self, credential, request))
     }
 }
-
-/// Resolves optional request-binding material for one configured provider.
-pub type BindingResolver = fn(&Parts) -> Result<Option<AuthBinding>, AuthError>;
 
 /// Extraction, delivery, and lifetime policy for one token kind.
 #[derive(Clone)]
@@ -288,7 +252,6 @@ pub struct TokenProvider {
     pub(crate) refresh: Option<TokenConf>,
     pub(crate) verifier: Arc<dyn ErasedTokenVerifier>,
     pub(crate) lifecycle: Option<Arc<dyn ErasedLifecycle>>,
-    pub(crate) binding: Option<BindingResolver>,
     pub(crate) leeway_seconds: i64,
     pub(crate) issuer: Option<String>,
     pub(crate) custom_claims: Option<CustomClaims>,
@@ -304,7 +267,6 @@ impl TokenProvider {
             refresh: Some(TokenConf::bearer().ttl(Duration::days(7))),
             verifier: Arc::new(EmbeddedVerifier),
             lifecycle: None,
-            binding: None,
             leeway_seconds: 0,
             issuer: None,
             custom_claims: None,
@@ -376,12 +338,6 @@ impl TokenProvider {
         self
     }
 
-    /// Binds issued tokens to application-resolved request state.
-    pub fn binding(mut self, value: BindingResolver) -> Self {
-        self.binding = Some(value);
-        self
-    }
-
     /// Allows bounded clock skew during framework temporal validation.
     pub fn leeway(mut self, value: Duration) -> Self {
         self.leeway_seconds = value.num_seconds().max(0);
@@ -419,7 +375,6 @@ impl fmt::Debug for TokenProvider {
 pub struct AuthKey {
     pub(crate) location: CredentialLocation,
     pub(crate) verifier: Arc<dyn ErasedKeyVerifier>,
-    pub(crate) binding: Option<BindingResolver>,
     pub(crate) csrf: Option<CsrfConf>,
     pub(crate) max_credential_bytes: usize,
     pub(crate) lifecycle: Option<Arc<dyn ErasedKeyLifecycle>>,
@@ -463,18 +418,11 @@ impl AuthKey {
         Self {
             location,
             verifier: Arc::new(verifier),
-            binding: None,
             csrf,
             max_credential_bytes: 16 * 1024,
             lifecycle: None,
             audiences: None,
         }
-    }
-
-    /// Requires application-resolved request binding for accepted keys.
-    pub fn binding(mut self, resolver: BindingResolver) -> Self {
-        self.binding = Some(resolver);
-        self
     }
 
     /// Replaces the default double-submit policy for a cookie key.
@@ -592,6 +540,24 @@ impl ProviderKind {
             Self::IdToken(_) => None,
         }
     }
+
+    /// Returns the explicitly configured route audiences for this provider.
+    pub(crate) fn declared_audiences(&self) -> Option<Vec<Audience>> {
+        match self {
+            Self::Token(value) => value.audiences.clone(),
+            Self::Key(value) => value.audiences.clone(),
+            #[cfg(feature = "oauth")]
+            Self::OAuth(value) => Some(value.route_audiences().collect()),
+            #[cfg(feature = "id-token")]
+            Self::IdToken(value) => Some(
+                value
+                    .resources
+                    .iter()
+                    .map(|(audience, _)| *audience)
+                    .collect(),
+            ),
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -607,6 +573,11 @@ impl ProviderDefinitionInner {
             name: DEFAULT_AUTH_PROVIDER,
             kind,
         }
+    }
+
+    /// Returns the provider's explicitly declared audience coverage.
+    pub(crate) fn declared_audiences(&self) -> Option<Vec<Audience>> {
+        self.kind.declared_audiences()
     }
 }
 
@@ -624,7 +595,7 @@ pub struct AuthConf {
 impl Default for AuthConf {
     fn default() -> Self {
         Self {
-            default_enabled: true,
+            default_enabled: false,
             default_audience: Some(super::DEFAULT_AUDIENCE),
             providers: Vec::new(),
             login_methods: Vec::new(),
@@ -635,10 +606,10 @@ impl Default for AuthConf {
 }
 
 impl AuthConf {
-    /// Creates configuration without an implicit JWT provider.
-    pub fn empty() -> Self {
+    /// Creates development configuration with the built-in JWT provider.
+    pub fn development() -> Self {
         Self {
-            default_enabled: false,
+            default_enabled: true,
             ..Self::default()
         }
     }
@@ -700,6 +671,12 @@ impl AuthConf {
         output
     }
 
+    /// Adds validated bundle-owned provider definitions to the central registry input.
+    pub(crate) fn extend_definitions(mut self, definitions: Vec<ProviderDefinitionInner>) -> Self {
+        self.providers.extend(definitions);
+        self
+    }
+
     /// Rejects application provider IDs reserved for framework-owned providers.
     pub(crate) fn validate_provider_names(&self) -> Result<(), AuthError> {
         let Some(definition) = self
@@ -730,6 +707,12 @@ impl AuthConf {
         self.login_methods
             .iter()
             .any(|definition| definition.runtime.requires_passwordless_store())
+    }
+
+    pub(crate) fn requires_login_state_store(&self) -> bool {
+        self.login_methods
+            .iter()
+            .any(|definition| definition.runtime.requires_login_state_store())
     }
 
     pub(crate) fn default_audience_id(&self) -> Result<Option<AudienceId>, AuthError> {
@@ -971,4 +954,27 @@ pub(crate) fn build_codec(
     provider: ProviderId,
 ) -> Result<super::CodecRuntime, AuthError> {
     super::codecs::build(value, secrets, claims, provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies ordinary default configuration does not install an implicit provider.
+    #[test]
+    fn default_configuration_has_no_provider() {
+        assert!(AuthConf::default().definitions().is_empty());
+        assert_eq!(
+            AuthConf::default().summary().default_audience.as_deref(),
+            Some(super::super::DEFAULT_AUDIENCE.as_str())
+        );
+    }
+
+    /// Verifies development configuration deliberately installs one unrestricted provider.
+    #[test]
+    fn development_configuration_installs_unrestricted_provider() {
+        let definitions = AuthConf::development().definitions();
+        assert_eq!(definitions.len(), 1);
+        assert!(definitions[0].declared_audiences().is_none());
+    }
 }

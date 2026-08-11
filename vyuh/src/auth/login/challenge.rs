@@ -245,6 +245,14 @@ pub(crate) struct PasswordlessChallengeSchema {
     ok: bool,
 }
 
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum LoginChallengeSchema {
+    Factor(FactorChallengeSchema),
+    Passwordless(PasswordlessChallengeSchema),
+}
+
 impl IntoResponse for LoginChallenge {
     fn into_response(self) -> Response {
         let mut response = match self.challenge {
@@ -293,7 +301,10 @@ impl IntoResponse for LoginChallenge {
 
 impl IntoReturnPart for LoginChallenge {
     fn into_return_part() -> ReturnPart {
-        ReturnPart::Unknown
+        ReturnPart::Body(
+            crate::callables::TypeSchema::wrap::<LoginChallengeSchema>(),
+            "application/json".into(),
+        )
     }
 }
 
@@ -408,7 +419,7 @@ pub(crate) struct SealedLoginState {
     pub(crate) payload: serde_json::Value,
 }
 
-/// Optional application storage for atomically consuming login continuation IDs.
+/// Application storage for atomically consuming login continuation IDs.
 pub trait LoginStateStore: Send + Sync + 'static {
     /// Returns `true` only when this continuation ID is consumed for the first time.
     fn consume<'a>(

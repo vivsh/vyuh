@@ -72,11 +72,11 @@ impl Bundle {
     pub(super) fn add_part(mut self, part: BundlePart) -> Self {
         // Non-route parts contribute an operation to the ops store (no name_index entry
         // since reversal is only meaningful for HTTP routes).
-        if !matches!(&part.part, BundlePartInner::Route(..)) {
-            if let Some(mut op) = part.operation {
-                op.assign_bundle_id(self.id);
-                self.ops.insert(op.id, op);
-            }
+        if !matches!(&part.part, BundlePartInner::Route(..))
+            && let Some(mut op) = part.operation
+        {
+            op.assign_bundle_id(self.id);
+            self.ops.insert(op.id, op);
         }
         match part.part {
             BundlePartInner::Route(router, mut op) => {
@@ -198,7 +198,7 @@ where
         crate::callables::Operation::from_specs(crate::callables::OperationKind::Route, &spec);
     op.path = meta.path.clone().into();
     op.name = meta.name.clone().into();
-    op.methods = meta.methods.clone().into();
+    op.methods = meta.methods;
     op.slash_policy = meta.slash;
     op = op.with_conf(&meta);
     op.returns

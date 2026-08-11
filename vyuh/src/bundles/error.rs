@@ -4,6 +4,8 @@ use crate::signals::SignalError;
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum BundleError {
+    #[error("bundle configuration failed: {0}")]
+    Config(String),
     #[error("authentication bundle configuration failed: {0}")]
     Auth(String),
     #[error(transparent)]

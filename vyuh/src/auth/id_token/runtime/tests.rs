@@ -97,6 +97,18 @@ struct Claims<'a> {
     email: &'a str,
 }
 
+#[derive(Serialize)]
+struct PartyClaims<'a> {
+    sub: &'a str,
+    iss: &'a str,
+    aud: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    azp: Option<&'a str>,
+    exp: u64,
+    iat: u64,
+    email: &'a str,
+}
+
 fn fake_client(key: &TestKey) -> FakeClient {
     let metadata = Bytes::from(format!(
         r#"{{"issuer":"{ISSUER}","token_endpoint":"{ISSUER}/token","jwks_uri":"{JWKS}","response_types_supported":["code"]}}"#
@@ -118,6 +130,29 @@ fn token(key: &TestKey, audience: &str, expiry: u64) -> Result<String, TestError
             iss: ISSUER,
             aud: audience,
             exp: expiry,
+            iat: now()?,
+            email: "system@example.com",
+        },
+        &key.encoding,
+    )
+    .map_err(|_| TestError::TokenEncoding)
+}
+
+fn party_token(
+    key: &TestKey,
+    audiences: serde_json::Value,
+    authorized_party: Option<&str>,
+) -> Result<String, TestError> {
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("key-1".into());
+    encode(
+        &header,
+        &PartyClaims {
+            sub: "system-user",
+            iss: ISSUER,
+            aud: audiences,
+            azp: authorized_party,
+            exp: now()?.saturating_add(300),
             iat: now()?,
             email: "system@example.com",
         },
@@ -169,7 +204,45 @@ async fn authenticates_signed_identity_token() -> Result<(), TestError> {
         .authenticate(&token, &parts(&token)?, &audience)
         .await
         .map_err(|_| TestError::Runtime)?;
-    assert_eq!(user.key.to_string(), "system-user");
+    assert_eq!(user.subject(), "system-user");
+    Ok(())
+}
+
+/// Authorized-party validation rejects mismatches and requires `azp` for multi-audience tokens.
+#[tokio::test]
+async fn validates_authorized_party() -> Result<(), TestError> {
+    let key = TestKey::generate()?;
+    let conf = IdToken::discovery(ISSUER)
+        .resource(
+            API,
+            IdTokenResource::new(TOKEN_AUDIENCE).authorized_party("client-id"),
+        )
+        .mapper(Mapper);
+    let runtime = runtime_with_conf(&key, conf)
+        .await
+        .map_err(|_| TestError::Runtime)?;
+    let audience = AudienceId::declared(API).map_err(|_| TestError::Runtime)?;
+    let valid = party_token(&key, serde_json::json!(TOKEN_AUDIENCE), Some("client-id"))?;
+    assert!(
+        runtime
+            .authenticate(&valid, &parts(&valid)?, &audience)
+            .await
+            .is_ok()
+    );
+    let mismatched = party_token(&key, serde_json::json!(TOKEN_AUDIENCE), Some("other"))?;
+    assert!(matches!(
+        runtime
+            .authenticate(&mismatched, &parts(&mismatched)?, &audience)
+            .await,
+        Err(AuthError::InvalidCredential)
+    ));
+    let missing = party_token(&key, serde_json::json!([TOKEN_AUDIENCE, "secondary"]), None)?;
+    assert!(matches!(
+        runtime
+            .authenticate(&missing, &parts(&missing)?, &audience)
+            .await,
+        Err(AuthError::InvalidCredential)
+    ));
     Ok(())
 }
 

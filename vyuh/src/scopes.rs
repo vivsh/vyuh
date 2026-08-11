@@ -201,24 +201,26 @@ impl<R: ScopeRule> Permit<R> {
 }
 
 impl<R: ScopeRule> FromRequestParts<Site> for Permit<R> {
-    type Rejection = AuthError;
+    type Rejection = crate::auth::AuthRejection;
 
     async fn from_request_parts(parts: &mut Parts, site: &Site) -> Result<Self, Self::Rejection> {
         if parts.extensions.get::<OperationId>().is_none() {
             validate_expr(R::EXPR).map_err(|_| {
-                AuthError::Internal("an application scope rule is invalid".to_string())
+                crate::auth::AuthRejection::plain(AuthError::Internal(
+                    "an application scope rule is invalid".to_string(),
+                ))
             })?;
         }
         let user = <AuthUser as FromRequestParts<Site>>::from_request_parts(parts, site).await?;
         if !R::EXPR.allows(&user) {
-            return Err(AuthError::Forbidden);
+            return Err(crate::auth::AuthRejection::plain(AuthError::Forbidden));
         }
         Ok(Self::new(user))
     }
 }
 
 impl<R: ScopeRule> OptionalFromRequestParts<Site> for Permit<R> {
-    type Rejection = AuthError;
+    type Rejection = crate::auth::AuthRejection;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -226,7 +228,7 @@ impl<R: ScopeRule> OptionalFromRequestParts<Site> for Permit<R> {
     ) -> Result<Option<Self>, Self::Rejection> {
         match <Self as FromRequestParts<Site>>::from_request_parts(parts, site).await {
             Ok(permit) => Ok(Some(permit)),
-            Err(AuthError::NoCredential) => Ok(None),
+            Err(error) if matches!(error.error(), AuthError::NoCredential) => Ok(None),
             Err(error) => Err(error),
         }
     }

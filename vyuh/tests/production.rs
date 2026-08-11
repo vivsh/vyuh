@@ -137,7 +137,7 @@ fn production_profile_rejects_cookie_without_csrf() {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::cookie("unsafe_auth").without_csrf());
-    let invalid = production_conf().auth(AuthConf::empty().provider(UNSAFE, provider));
+    let invalid = production_conf().auth(AuthConf::default().provider(UNSAFE, provider));
     let error = invalid
         .validate()
         .expect_err("cookie auth without CSRF must fail production validation");
@@ -156,7 +156,7 @@ fn production_profile_rejects_permissive_cors_and_insecure_cookies() {
             ..HttpConf::production()
         })
         .auth(
-            AuthConf::empty().provider(
+            AuthConf::default().provider(
                 AuthProvider::new("unsafe-access-cookie"),
                 TokenProvider::new(Jwt::hs256_site_secret())
                     .without_refresh()

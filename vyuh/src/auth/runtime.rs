@@ -10,7 +10,7 @@ mod session_contract_tests;
 mod token_runtime;
 mod validation;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::http::request::Parts;
 
@@ -18,10 +18,9 @@ use contract::{ProviderCapabilities, ProviderRuntime};
 use indexes::RuntimeIndexes;
 
 use super::{
-    Audience, AudienceId, AuthConf, AuthError, AuthMetrics, AuthProvider, AuthUser, LoginAuth,
-    LoginDefinitionInner, LoginMethod, LoginMethodId, LoginResponse, LogoutResponse, ProviderId,
-    RequestCredentialScan, SecretRing,
-    identity::{DEFAULT_AUTH_PROVIDER, resolve_audiences},
+    Audience, AudienceId, AuthBuildError, AuthConf, AuthError, AuthMetrics, AuthProvider, AuthUser,
+    LoginAuth, LoginDefinitionInner, LoginMethod, LoginMethodId, LoginResponse, LogoutResponse,
+    ProviderId, RequestCredentialScan, SecretRing, identity::resolve_audiences,
 };
 
 use key_runtime::KeyRuntime;
@@ -38,6 +37,7 @@ pub struct Authenticator {
     challenge_codec: super::ChallengeCodec,
     metrics: Arc<AuthMetrics>,
     default_audience: Option<AudienceId>,
+    challenges: Arc<BTreeMap<AudienceId, Arc<[axum::http::HeaderValue]>>>,
 }
 
 impl std::fmt::Debug for Authenticator {
@@ -47,6 +47,7 @@ impl std::fmt::Debug for Authenticator {
             .field("providers", &self.providers.len())
             .field("login_methods", &self.login_methods.len())
             .field("access_bindings", &self.indexes.access_binding_count())
+            .field("challenge_audiences", &self.challenges.len())
             .finish()
     }
 }
@@ -63,8 +64,9 @@ impl Authenticator {
         secret: &str,
         fallbacks: &[String],
         project_dir: &std::path::Path,
-    ) -> Result<Self, AuthError> {
-        build::authenticator(conf, secret, fallbacks, project_dir).await
+        audiences: Vec<AudienceId>,
+    ) -> Result<Self, AuthBuildError> {
+        build::authenticator(conf, secret, fallbacks, project_dir, audiences).await
     }
 
     /// Retains one provider descriptor for a later terminal operation.
@@ -75,57 +77,6 @@ impl Authenticator {
         }
     }
 
-    /// Retains one identity-proof descriptor using the default credential provider.
-    pub fn via<Start, Complete>(
-        &self,
-        method: LoginMethod<Start, Complete>,
-    ) -> LoginAuth<'_, Start, Complete>
-    where
-        Start: Send + 'static,
-        Complete: Send + 'static,
-    {
-        super::login::select(self, DEFAULT_AUTH_PROVIDER, method)
-    }
-
-    /// Creates access and optional refresh credentials through the default provider.
-    pub async fn login(
-        &self,
-        user: AuthUser,
-        audiences: &[Audience],
-    ) -> Result<LoginResponse, AuthError> {
-        self.using(DEFAULT_AUTH_PROVIDER)
-            .login(user, audiences)
-            .await
-    }
-
-    /// Creates bound credentials through the default provider.
-    pub async fn login_with_binding(
-        &self,
-        user: AuthUser,
-        audiences: &[Audience],
-        binding: super::AuthBinding,
-    ) -> Result<LoginResponse, AuthError> {
-        self.using(DEFAULT_AUTH_PROVIDER)
-            .login_with_binding(user, audiences, binding)
-            .await
-    }
-
-    /// Rotates a presented refresh credential through the default provider.
-    pub async fn refresh(
-        &self,
-        parts: &Parts,
-        audiences: &[Audience],
-    ) -> Result<LoginResponse, AuthError> {
-        self.using(DEFAULT_AUTH_PROVIDER)
-            .refresh(parts, audiences)
-            .await
-    }
-
-    /// Applies default-provider logout behavior and returns response attachments.
-    pub async fn logout(&self, parts: &Parts) -> Result<LogoutResponse, AuthError> {
-        self.using(DEFAULT_AUTH_PROVIDER).logout(parts).await
-    }
-
     pub(crate) async fn authenticate(
         &self,
         parts: &Parts,
@@ -134,7 +85,7 @@ impl Authenticator {
         let mut selected = None;
         let mut scan = RequestCredentialScan::new(parts);
         for position in self.indexes.access_for(audience) {
-            let provider = &self.providers[*position];
+            let provider = self.provider_at(*position)?;
             let Some(raw) = provider.access_location().extract_from(&mut scan)? else {
                 continue;
             };
@@ -146,10 +97,46 @@ impl Authenticator {
         let Some((position, raw)) = selected else {
             return Err(AuthError::NoCredential);
         };
-        let provider = &self.providers[position];
+        let provider = self.provider_at(position)?;
         let result = provider.authenticate(raw.as_ref(), parts, audience).await;
         self.record(provider.id(), &result);
         result
+    }
+
+    pub(crate) fn rejection(
+        &self,
+        error: AuthError,
+        audience: &AudienceId,
+    ) -> super::AuthRejection {
+        let challenges = if error.status() == axum::http::StatusCode::UNAUTHORIZED {
+            self.challenges.get(audience).cloned()
+        } else {
+            None
+        };
+        super::AuthRejection::new(error, challenges)
+    }
+
+    /// Returns OAuth protected-resource metadata only when one provider for the
+    /// audience can describe it unambiguously.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn mcp_protected_resource(
+        &self,
+        audience: &AudienceId,
+    ) -> Option<super::AuthProtectedResource> {
+        let mut protected = None;
+        for position in self.indexes.access_for(audience) {
+            let Some(provider) = self.providers.get(*position) else {
+                continue;
+            };
+            let Some(value) = provider.0.protected_resource(audience) else {
+                continue;
+            };
+            if protected.is_some() {
+                return None;
+            }
+            protected = Some(value);
+        }
+        protected
     }
 
     pub(crate) fn challenge_codec(&self) -> &super::ChallengeCodec {
@@ -204,7 +191,7 @@ impl Authenticator {
             super::AuthenticationContext::new(verified.auth_time, verified.methods, verified.acr);
         let user = verified.user.with_authentication(authentication);
         let runtime = self.provider(provider)?;
-        runtime.login(user, audiences, None).await
+        runtime.login(user, audiences).await
     }
 
     pub(crate) fn resolve_login_provider(
@@ -226,6 +213,12 @@ impl Authenticator {
             .ok_or_else(|| AuthError::ProviderNotFound(id.to_string()))
     }
 
+    fn provider_at(&self, position: usize) -> Result<&ProviderRuntime, AuthError> {
+        self.providers
+            .get(position)
+            .ok_or_else(|| AuthError::Internal("authentication provider index is invalid".into()))
+    }
+
     pub(crate) fn render_metrics(&self) -> String {
         self.metrics.render()
     }
@@ -244,55 +237,6 @@ impl Authenticator {
 }
 
 impl<'a> ProviderAuth<'a> {
-    #[cfg(feature = "mcp")]
-    pub(crate) fn mcp_eligible(&self) -> Result<(), AuthError> {
-        let provider = self.provider()?;
-        if provider.capabilities().authenticate && provider.access_location().is_header() {
-            Ok(())
-        } else {
-            Err(AuthError::InvalidProviderConfig(
-                "MCP providers must authenticate through one request header".into(),
-            ))
-        }
-    }
-
-    #[cfg(feature = "mcp")]
-    pub(crate) fn protected_resource(
-        &self,
-        audience: Audience,
-    ) -> Result<Option<super::AuthProtectedResource>, AuthError> {
-        let audience = AudienceId::declared(audience)?;
-        Ok(self.provider()?.0.protected_resource(&audience))
-    }
-
-    #[cfg(feature = "mcp")]
-    pub(crate) fn challenge(
-        &self,
-        error: &AuthError,
-    ) -> Result<Option<super::AuthChallenge>, AuthError> {
-        Ok(self.provider()?.0.challenge(error))
-    }
-    #[cfg(feature = "mcp")]
-    /// Authenticates one request through exactly this configured provider.
-    pub(crate) async fn authenticate(
-        &self,
-        parts: &Parts,
-        audience: Audience,
-    ) -> Result<AuthUser, AuthError> {
-        let result = async {
-            let audience = AudienceId::declared(audience)?;
-            let provider = self.provider()?;
-            let raw = provider
-                .access_location()
-                .extract(parts)?
-                .ok_or(AuthError::NoCredential)?;
-            provider.authenticate(&raw, parts, &audience).await
-        }
-        .await;
-        self.record(&result);
-        result
-    }
-
     /// Retains one identity-proof descriptor with this credential provider.
     pub fn via<Start, Complete>(
         &self,
@@ -305,8 +249,8 @@ impl<'a> ProviderAuth<'a> {
         super::login::select(self.authenticator, self.provider, method)
     }
 
-    /// Creates access and optional refresh credentials through this provider.
-    pub async fn login(
+    /// Issues access and optional refresh credentials through this provider.
+    pub async fn issue(
         &self,
         user: AuthUser,
         audiences: &[Audience],
@@ -318,30 +262,7 @@ impl<'a> ProviderAuth<'a> {
             if !provider.capabilities().login {
                 return Err(AuthError::UnsupportedProviderCapability);
             }
-            provider.login(user, audiences, None).await
-        }
-        .await;
-        self.record(&result);
-        result
-    }
-
-    /// Creates bound credentials through this provider.
-    pub async fn login_with_binding(
-        &self,
-        user: AuthUser,
-        audiences: &[Audience],
-        binding: super::AuthBinding,
-    ) -> Result<LoginResponse, AuthError> {
-        let result = async {
-            let audiences =
-                resolve_audiences(audiences, self.authenticator.default_audience.as_ref())?;
-            let provider = self.provider()?;
-            if !provider.capabilities().login {
-                return Err(AuthError::UnsupportedProviderCapability);
-            }
-            provider
-                .login(user, audiences, Some(binding.into_inner()))
-                .await
+            provider.login(user, audiences).await
         }
         .await;
         self.record(&result);
@@ -349,11 +270,7 @@ impl<'a> ProviderAuth<'a> {
     }
 
     /// Rotates a refresh credential accepted only by this provider.
-    pub async fn refresh(
-        &self,
-        parts: &Parts,
-        audiences: &[Audience],
-    ) -> Result<LoginResponse, AuthError> {
+    pub async fn refresh(&self, parts: &Parts) -> Result<LoginResponse, AuthError> {
         let result = async {
             let provider = self.provider()?;
             if !provider.capabilities().refresh {
@@ -363,9 +280,7 @@ impl<'a> ProviderAuth<'a> {
                 .refresh_location()
                 .ok_or(AuthError::UnsupportedProviderCapability)?;
             let raw = location.extract(parts)?.ok_or(AuthError::NoCredential)?;
-            let audiences =
-                resolve_audiences(audiences, self.authenticator.default_audience.as_ref())?;
-            provider.refresh(&raw, parts, &audiences).await
+            provider.refresh(&raw, parts).await
         }
         .await;
         self.record(&result);
@@ -423,10 +338,9 @@ impl ProviderRuntime {
         &self,
         user: AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
     ) -> Result<LoginResponse, AuthError> {
         self.audiences().validate_requested(&audiences)?;
-        self.0.login(user, audiences, binding).await
+        self.0.login(user, audiences).await
     }
 
     async fn authenticate(
@@ -444,14 +358,8 @@ impl ProviderRuntime {
         self.0.authenticate(raw, parts, audience).await
     }
 
-    async fn refresh(
-        &self,
-        raw: &str,
-        parts: &Parts,
-        audiences: &[AudienceId],
-    ) -> Result<LoginResponse, AuthError> {
-        self.audiences().validate_requested(audiences)?;
-        self.0.refresh(raw, parts, audiences).await
+    async fn refresh(&self, raw: &str, parts: &Parts) -> Result<LoginResponse, AuthError> {
+        self.0.refresh(raw, parts).await
     }
 
     async fn logout(

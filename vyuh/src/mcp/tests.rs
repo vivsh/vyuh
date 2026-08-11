@@ -9,14 +9,13 @@ use tower::ServiceExt;
 
 use crate::{
     Data, Site, SiteConf,
-    auth::{Audience, AuthProvider, AuthUser, DEFAULT_AUTH_PROVIDER},
+    auth::{Audience, AuthUser},
     bundles,
 };
 
 use super::McpConf;
 
 const MCP: Audience = Audience::new("https://api.example.com/mcp");
-const TOKEN: AuthProvider = AuthProvider::new("token");
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct Echo {
@@ -29,27 +28,34 @@ async fn echo(input: Data<Echo>) -> Data<Echo> {
 }
 
 #[test]
-fn requires_an_explicit_authentication_mode() {
-    let mut conf = McpConf::new("/mcp", MCP);
-    assert!(conf.validate().is_err());
+fn mcp_defaults_to_audience_authentication() {
+    let mut conf = McpConf::new("/mcp");
+    assert!(conf.validate().is_ok());
 }
 
 #[test]
-fn accepts_a_selected_provider_or_anonymous_mode() {
-    let mut protected = McpConf::new("/mcp", MCP).auth(TOKEN);
-    let mut anonymous = McpConf::new("/public", MCP).anonymous();
+fn accepts_predicate_or_public_access_modes() {
+    let mut protected = McpConf::new("/mcp").auth(|_| true);
+    let mut anonymous = McpConf::new("/public").public();
     assert!(protected.validate().is_ok());
     assert!(anonymous.validate().is_ok());
 }
 
 #[tokio::test]
-async fn uses_only_the_selected_vyuh_provider() -> Result<(), Box<dyn std::error::Error>> {
-    let bundle =
-        bundles::bundle! { echo }.with_mcp(McpConf::new("/mcp", MCP).auth(DEFAULT_AUTH_PROVIDER));
-    let site = Site::build(SiteConf::default().log_init(false), bundle).await?;
+async fn uses_the_central_audience_authenticator() -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = bundles::bundle! { echo }
+        .with_conf(bundles::conf().audience(MCP).mcp(McpConf::new("/mcp")));
+    let site = Site::build(
+        SiteConf::default()
+            .log_init(false)
+            .auth(crate::auth::AuthConf::development()),
+        bundle,
+    )
+    .await?;
     let login = site
         .auth()
-        .login(AuthUser::new("tool-user"), &[MCP])
+        .using(crate::auth::DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("tool-user"), &[MCP])
         .await?;
     let token = login.credentials().access();
     let request = Request::builder()
@@ -70,7 +76,11 @@ async fn uses_only_the_selected_vyuh_provider() -> Result<(), Box<dyn std::error
 /// Verifies MCP executes a direct callable without adapting an HTTP route.
 #[tokio::test]
 async fn invokes_direct_tool() -> Result<(), Box<dyn std::error::Error>> {
-    let bundle = bundles::bundle! { echo }.with_mcp(McpConf::new("/mcp", MCP).anonymous());
+    let bundle = bundles::bundle! { echo }.with_conf(
+        bundles::conf()
+            .audience(MCP)
+            .mcp(McpConf::new("/mcp").public()),
+    );
     let site = Site::build(SiteConf::default().log_init(false), bundle).await?;
     let request = Request::builder()
         .method("POST")

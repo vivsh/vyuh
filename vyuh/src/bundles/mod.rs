@@ -1,3 +1,4 @@
+mod config;
 mod error;
 mod openapi;
 mod part;
@@ -7,7 +8,7 @@ use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 use crate::middlewares::SlashPolicy;
 use crate::{
     Site,
-    auth::{Audience, AudienceId},
+    auth::{AudienceId, ProviderDefinitionInner},
     callables::OperationKind,
     commands::CommandRegistry,
     embed, emitters,
@@ -28,6 +29,7 @@ use openapi::DocEngine;
 pub use crate::apidocs::{DocViewer, OpenApiVersion};
 #[cfg(feature = "mcp")]
 pub use crate::mcp::{McpConf, McpToolConf};
+pub use config::{BundleConf, conf};
 pub use error::BundleError;
 pub use openapi::{OpenApiConf, OpenApiViewerConf};
 #[cfg(feature = "mcp")]
@@ -61,7 +63,42 @@ pub trait IntoBundle {
     fn into_bundle(self) -> Bundle;
 }
 
-/// Request-local bundle metadata installed by an audience-bearing bundle.
+/// Immutable parent links retained while one bundle graph is composed.
+#[derive(Clone, Default)]
+pub(crate) struct BundleTopology {
+    parents: BTreeMap<uuid::Uuid, uuid::Uuid>,
+}
+
+impl BundleTopology {
+    fn absorb(&mut self, child_root: uuid::Uuid, other: Self, parent: uuid::Uuid) {
+        self.parents.extend(other.parents);
+        self.parents.insert(child_root, parent);
+    }
+
+    pub(crate) fn contains(&self, root: uuid::Uuid, value: uuid::Uuid) -> bool {
+        let mut current = Some(value);
+        while let Some(node) = current {
+            if node == root {
+                return true;
+            }
+            current = self.parents.get(&node).copied();
+        }
+        false
+    }
+
+    pub(crate) fn lineage(&self, value: uuid::Uuid) -> Vec<uuid::Uuid> {
+        let mut values = vec![value];
+        let mut current = value;
+        while let Some(parent) = self.parents.get(&current).copied() {
+            values.push(parent);
+            current = parent;
+        }
+        values.reverse();
+        values
+    }
+}
+
+/// Request-local metadata used by generated endpoint adapters.
 #[derive(Clone, Debug)]
 pub(crate) struct BundleRequestContext {
     pub(crate) audience: Option<AudienceId>,
@@ -91,13 +128,12 @@ impl IntoBundle for axum::Router<Site> {
 /// the application.
 ///
 /// Build one with [`bundle()`], then compose with [`merge`], [`with_prefix`],
-/// [`layer`], [`with_tags`], and [`with_openapi`].
+/// [`layer`], and [`with_conf`].
 ///
 /// [`merge`]: Bundle::merge
 /// [`with_prefix`]: Bundle::with_prefix
 /// [`layer`]: Bundle::layer
-/// [`with_tags`]: Bundle::with_tags
-/// [`with_openapi`]: Bundle::with_openapi
+/// [`with_conf`]: Bundle::with_conf
 pub struct Bundle {
     pub(super) inner_router: routes::AxumRouter<Site>,
     /// All operations keyed by their stable UUID — routes, signals, tasks, commands,
@@ -107,7 +143,8 @@ pub struct Bundle {
     /// `Routes::reverse_url()` can look up a path by the human-readable name.
     pub(crate) name_index: BTreeMap<String, crate::OperationId>,
     pub(super) id: uuid::Uuid,
-    pub(crate) audience: Option<AudienceId>,
+    configs: BTreeMap<uuid::Uuid, BundleConf>,
+    pub(crate) topology: BundleTopology,
     label: Option<String>,
     pub(crate) signals: SignalRegistry,
     pub(crate) emitters: emitters::EmitterRegistry,
@@ -134,7 +171,8 @@ impl Bundle {
     fn new() -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            audience: None,
+            configs: BTreeMap::new(),
+            topology: BundleTopology::default(),
             label: None,
             inner_router: routes::AxumRouter::new(),
             ops: BTreeMap::new(),
@@ -169,38 +207,61 @@ impl Bundle {
         self.label.as_deref()
     }
 
-    /// Applies an audience requirement to this bundle and nested bundles that
-    /// do not declare their own audience.
-    pub fn with_audience(mut self, declared: Audience) -> Self {
-        let audience = match AudienceId::new(declared.as_str()) {
-            Ok(audience) => audience,
-            Err(error) => {
-                self.errors.push(BundleError::Auth(error.to_string()));
-                return self;
-            }
-        };
-        for operation in self.ops.values_mut() {
-            if operation.audience.is_none() {
-                operation.audience = Some(audience.clone());
-            }
+    /// Attaches declarative configuration to this bundle.
+    pub fn with_conf(mut self, mut conf: BundleConf) -> Self {
+        for openapi in conf.take_openapi() {
+            self.register_openapi(openapi);
         }
-        let context = BundleRequestContext {
-            audience: Some(audience.clone()),
-        };
-        self.inner_router = self.inner_router.layer(axum::Extension(context));
-        self.audience = Some(audience);
+        #[cfg(feature = "mcp")]
+        if let Some(mcp) = conf.take_mcp() {
+            self.register_mcp(mcp);
+        }
+        self.configs
+            .entry(self.id)
+            .and_modify(|current| current.merge(conf.clone()))
+            .or_insert(conf);
         self
     }
 
-    pub(crate) fn apply_default_audience(&mut self, audience: Option<AudienceId>) {
-        let Some(audience) = audience else {
-            return;
-        };
-        for operation in self.ops.values_mut() {
-            if operation.requires_bundle_audience() && operation.audience.is_none() {
-                operation.audience = Some(audience.clone());
+    /// Resolves inherited bundle configuration once before runtime construction.
+    pub(crate) fn finalize_conf(
+        &mut self,
+        default_audience: Option<AudienceId>,
+    ) -> Result<(), BundleError> {
+        self.validate_configurations()?;
+        self.register_task_lanes()?;
+        let updates = self.operation_updates(default_audience)?;
+        for (id, audience, tags, slash_policy) in updates {
+            let Some(operation) = self.ops.get_mut(&id) else {
+                continue;
+            };
+            operation.audience = audience;
+            append_tags(&mut operation.tags, tags);
+            if matches!(operation.kind, OperationKind::Route | OperationKind::ApiDoc) {
+                operation.slash_policy = slash_policy;
             }
         }
+        Ok(())
+    }
+
+    /// Returns central provider definitions contributed by audience-bearing bundles.
+    pub(crate) fn auth_definitions(&self) -> Result<Vec<ProviderDefinitionInner>, BundleError> {
+        let mut output = Vec::new();
+        for (id, conf) in &self.configs {
+            let Some(audience) = self.declared_audience(*id)? else {
+                if !conf.providers.is_empty() {
+                    return Err(BundleError::Auth(
+                        "bundle auth providers require BundleConf::audience".into(),
+                    ));
+                }
+                continue;
+            };
+            for provider in &conf.providers {
+                validate_provider_audience(provider, &audience)?;
+                output.push(provider.clone());
+            }
+        }
+        Ok(output)
     }
 
     pub(crate) fn normalize_authorization(&mut self) -> Result<(), BundleError> {
@@ -215,16 +276,6 @@ impl Bundle {
     /// Assigns a human-readable label to this bundle, for example in logging or diagnostics.
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
-        self
-    }
-
-    /// Contributes one complete default configuration for a named task lane.
-    ///
-    /// Configuration errors accumulate on the bundle and surface from site construction.
-    pub fn with_task_lane(mut self, lane: crate::tasks::TaskLaneConf) -> Self {
-        if let Err(error) = self.tasks.register_lane(lane) {
-            self.errors.push(BundleError::Task(Arc::new(error)));
-        }
         self
     }
 
@@ -263,28 +314,6 @@ impl Bundle {
         self.inner_router.clone()
     }
 
-    /// Appends tags to every operation in this bundle.
-    pub fn with_tags(
-        mut self,
-        tags: impl IntoIterator<Item = impl Into<Cow<'static, str>>>,
-    ) -> Self {
-        let tags: Vec<Cow<'static, str>> = tags.into_iter().map(|t| t.into()).collect();
-        for op in self.ops.values_mut() {
-            op.tags.extend(tags.iter().cloned());
-        }
-        self
-    }
-
-    /// Sets slash behavior for every route in this bundle.
-    pub fn with_slash_policy(mut self, policy: SlashPolicy) -> Self {
-        for op in self.ops.values_mut() {
-            if op.kind == OperationKind::Route {
-                op.slash_policy = Some(policy);
-            }
-        }
-        self
-    }
-
     /// Merges another bundle into this one.
     ///
     /// Routes, operations, services, signals, emitters, tasks, and commands from
@@ -295,14 +324,7 @@ impl Bundle {
     /// next time `validate()` is called. `SiteBuilder::build` always calls
     /// `validate()` before the site starts, so no error is silently swallowed.
     pub fn merge<B: IntoBundle>(mut self, other: B) -> Self {
-        let mut other = other.into_bundle();
-        if let Some(audience) = &self.audience {
-            for operation in other.ops.values_mut() {
-                if operation.audience.is_none() {
-                    operation.audience = Some(audience.clone());
-                }
-            }
-        }
+        let other = other.into_bundle();
         let router = match self.absorb(other) {
             Ok(r) => r,
             Err(e) => {
@@ -389,7 +411,7 @@ impl Bundle {
     /// Returns the other bundle's router so the caller can merge it.
     fn absorb(&mut self, mut other: Bundle) -> Result<axum::Router<Site>, BundleError> {
         self.errors.append(&mut other.errors);
-        for (name, _) in &other.name_index {
+        for name in other.name_index.keys() {
             if self.name_index.contains_key(name) {
                 return Err(BundleError::DuplicateRouteName { name: name.clone() });
             }
@@ -405,6 +427,13 @@ impl Bundle {
         }
         self.ops.extend(other.ops);
         self.name_index.extend(other.name_index);
+        self.topology.absorb(other.id, other.topology, self.id);
+        for (id, conf) in other.configs {
+            self.configs
+                .entry(id)
+                .and_modify(|current| current.merge(conf.clone()))
+                .or_insert(conf);
+        }
         self.signals.merge(other.signals);
         self.asset_dirs.extend(other.asset_dirs);
         self.url_info.merge(other.url_info);
@@ -430,6 +459,99 @@ impl Bundle {
         #[cfg(feature = "mcp")]
         self.mcp_registry.merge(other.mcp_registry);
         Ok(other.inner_router)
+    }
+
+    fn register_task_lanes(&mut self) -> Result<(), BundleError> {
+        for conf in self.configs.values() {
+            for lane in &conf.task_lanes {
+                self.tasks
+                    .register_lane(lane.clone())
+                    .map_err(|error| BundleError::Task(Arc::new(error)))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_configurations(&self) -> Result<(), BundleError> {
+        let errors = self
+            .configs
+            .values()
+            .flat_map(|conf| conf.errors.iter().cloned())
+            .map(BundleError::Config)
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(BundleError::ErrorList(errors))
+        }
+    }
+
+    fn operation_updates(
+        &self,
+        default_audience: Option<AudienceId>,
+    ) -> Result<Vec<OperationUpdate>, BundleError> {
+        self.ops
+            .values()
+            .map(|operation| self.operation_update(operation, default_audience.clone()))
+            .collect()
+    }
+
+    fn operation_update(
+        &self,
+        operation: &crate::callables::Operation,
+        default_audience: Option<AudienceId>,
+    ) -> Result<OperationUpdate, BundleError> {
+        let Some(bundle_id) = operation.bundle_id else {
+            return Ok((
+                operation.id,
+                operation.audience.clone(),
+                Vec::new(),
+                operation.slash_policy,
+            ));
+        };
+        let configs = self.configs_for(bundle_id);
+        let audience = configs
+            .iter()
+            .filter_map(|conf| conf.audience)
+            .next_back()
+            .map(AudienceId::declared)
+            .transpose()
+            .map_err(|error| BundleError::Auth(error.to_string()))?
+            .or_else(|| operation.audience.clone())
+            .or_else(|| {
+                (operation.requires_bundle_audience()
+                    || aggregate_requires_audience(&operation.kind))
+                .then_some(default_audience)
+                .flatten()
+            });
+        let tags = configs
+            .iter()
+            .flat_map(|conf| conf.tags.iter().cloned())
+            .collect();
+        let slash_policy = configs
+            .iter()
+            .filter_map(|conf| conf.slash_policy)
+            .next_back()
+            .or(operation.slash_policy);
+        Ok((operation.id, audience, tags, slash_policy))
+    }
+
+    fn configs_for(&self, id: uuid::Uuid) -> Vec<&BundleConf> {
+        self.topology
+            .lineage(id)
+            .into_iter()
+            .filter_map(|node| self.configs.get(&node))
+            .collect()
+    }
+
+    fn declared_audience(&self, id: uuid::Uuid) -> Result<Option<AudienceId>, BundleError> {
+        self.configs_for(id)
+            .into_iter()
+            .filter_map(|conf| conf.audience)
+            .next_back()
+            .map(AudienceId::declared)
+            .transpose()
+            .map_err(|error| BundleError::Auth(error.to_string()))
     }
 
     pub(super) fn validate_route_operation(
@@ -478,6 +600,46 @@ impl Bundle {
     }
 }
 
+type OperationUpdate = (
+    crate::OperationId,
+    Option<AudienceId>,
+    Vec<Cow<'static, str>>,
+    Option<SlashPolicy>,
+);
+
+fn append_tags(target: &mut Vec<Cow<'static, str>>, additions: Vec<Cow<'static, str>>) {
+    for tag in additions {
+        if !target.contains(&tag) {
+            target.push(tag);
+        }
+    }
+}
+
+fn validate_provider_audience(
+    provider: &ProviderDefinitionInner,
+    audience: &AudienceId,
+) -> Result<(), BundleError> {
+    let Some(audiences) = provider.declared_audiences() else {
+        return Err(BundleError::Auth(format!(
+            "bundle auth provider '{}' must explicitly declare audience '{}'",
+            provider.name.as_str(),
+            audience.as_str()
+        )));
+    };
+    if audiences.len() != 1
+        || audiences
+            .first()
+            .is_none_or(|value| value.as_str() != audience.as_str())
+    {
+        return Err(BundleError::Auth(format!(
+            "bundle auth provider '{}' must declare exactly audience '{}'",
+            provider.name.as_str(),
+            audience.as_str()
+        )));
+    }
+    Ok(())
+}
+
 impl Default for Bundle {
     fn default() -> Self {
         Self::new()
@@ -510,6 +672,20 @@ pub(crate) fn validate_route_prefix(path: &str) -> Result<(), String> {
         return Err("prefix must not end with '/'".to_string());
     }
     Ok(())
+}
+
+fn aggregate_requires_audience(kind: &OperationKind) -> bool {
+    if matches!(kind, OperationKind::ApiDoc) {
+        return true;
+    }
+    #[cfg(feature = "mcp")]
+    {
+        matches!(kind, OperationKind::McpTool)
+    }
+    #[cfg(not(feature = "mcp"))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -720,12 +896,13 @@ mod tests {
     /// Verifies two reusable bundles cannot silently contribute the same lane default.
     #[test]
     fn duplicate_task_lane_defaults_accumulate_a_bundle_error() {
-        let left =
-            Bundle::new().with_task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1));
-        let right =
-            Bundle::new().with_task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1));
-        let bundle = left.merge(right);
+        let left = Bundle::new()
+            .with_conf(conf().task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1)));
+        let right = Bundle::new()
+            .with_conf(conf().task_lane(crate::tasks::TaskLaneConf::new(EMAIL_TASK_LANE, 1)));
+        let mut bundle = left.merge(right);
+        let result = bundle.finalize_conf(None);
 
-        assert!(matches!(bundle.validate(), Err(BundleError::ErrorList(_))));
+        assert!(matches!(result, Err(BundleError::Task(_))));
     }
 }

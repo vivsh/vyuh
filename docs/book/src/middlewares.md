@@ -16,7 +16,7 @@ The main public pieces are:
 
 - `SiteConf::http(HttpConf)` for global middleware configuration.
 - `SlashPolicy` for deterministic trailing-slash behavior.
-- `Bundle::with_slash_policy(...)` for bundle-level slash policy.
+- `Bundle::with_conf(bundles::conf().slash_policy(...))` for bundle-level slash policy.
 - `RouteConf { slash: Some(...), .. }` and `#[bundles::route(..., slash = "...")]`
   for route-level slash policy.
 - `routes::Middleware` and `routes::layer_from(...)` for route or bundle
@@ -185,7 +185,9 @@ Bundle override:
 use vyuh::prelude::*;
 use vyuh::middlewares::SlashPolicy;
 
-let bundle = app_bundle().with_slash_policy(SlashPolicy::RedirectAppend);
+let bundle = app_bundle().with_conf(
+    bundles::conf().slash_policy(SlashPolicy::RedirectAppend),
+);
 ```
 
 Route override with the macro:

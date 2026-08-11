@@ -59,6 +59,10 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
         false
     }
 
+    fn requires_login_state_store(&self) -> bool {
+        false
+    }
+
     fn initialize(&self) -> LoginFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }

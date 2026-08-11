@@ -41,7 +41,7 @@ impl AuthProvider {
     }
 }
 
-/// The built-in JWT provider selected by [`super::AuthConf::default`].
+/// The built-in JWT provider installed by [`super::AuthConf::development`].
 pub const DEFAULT_AUTH_PROVIDER: AuthProvider = AuthProvider::new("default");
 
 /// The compatibility audience used when an application does not declare one.
@@ -150,10 +150,10 @@ impl AudienceId {
 /// The provider-independent identity accepted by Vyuh.
 #[derive(Clone, Serialize)]
 pub struct AuthUser {
-    pub key: Arc<str>,
+    subject: Arc<str>,
     scopes: Arc<[Scope]>,
     #[serde(skip)]
-    provider: ProviderId,
+    provider: Option<ProviderId>,
     #[serde(skip)]
     extra: Option<Arc<dyn Any + Send + Sync>>,
     #[serde(skip)]
@@ -162,14 +162,19 @@ pub struct AuthUser {
 
 impl AuthUser {
     /// Creates an identity without application scopes.
-    pub fn new(key: impl AsRef<str>) -> Self {
+    pub fn new(subject: impl AsRef<str>) -> Self {
         Self {
-            key: Arc::from(key.as_ref()),
+            subject: Arc::from(subject.as_ref()),
             scopes: Arc::from([]),
-            provider: ProviderId("default".into()),
+            provider: None,
             extra: None,
             authentication: AuthenticationContext::default(),
         }
+    }
+
+    /// Returns the stable provider-independent authenticated subject.
+    pub fn subject(&self) -> &str {
+        &self.subject
     }
 
     /// Adds one exact application scope.
@@ -230,8 +235,8 @@ impl AuthUser {
     }
 
     /// Returns the provider that accepted the presented credential.
-    pub fn provider(&self) -> &str {
-        self.provider.as_str()
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_ref().map(ProviderId::as_str)
     }
 
     /// Returns authenticated method and assurance metadata for this identity.
@@ -241,19 +246,22 @@ impl AuthUser {
 
     /// Returns whether this identity was accepted by `provider`.
     pub fn is_from(&self, provider: AuthProvider) -> bool {
-        self.provider.as_str() == provider.as_str()
+        self.provider()
+            .is_some_and(|value| value == provider.as_str())
     }
 
-    /// Parses the subject key into an application identifier.
-    pub fn parse_key<T>(&self) -> Result<T, AuthError>
+    /// Parses the subject into an application identifier.
+    pub fn parse_subject<T>(&self) -> Result<T, AuthError>
     where
         T: std::str::FromStr,
     {
-        self.key.parse().map_err(|_| AuthError::InvalidCredential)
+        self.subject
+            .parse()
+            .map_err(|_| AuthError::InvalidCredential)
     }
 
     pub(crate) fn set_provider(mut self, provider: ProviderId) -> Self {
-        self.provider = provider;
+        self.provider = Some(provider);
         self
     }
 
@@ -263,7 +271,7 @@ impl AuthUser {
     }
 
     pub(crate) fn validate(&self) -> Result<(), AuthError> {
-        if self.key.trim().is_empty() {
+        if self.subject.trim().is_empty() {
             return Err(AuthError::InvalidCredential);
         }
         crate::scopes::validate_scopes(&self.scopes).map_err(|_| AuthError::InvalidCredential)
@@ -274,7 +282,7 @@ impl fmt::Debug for AuthUser {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AuthUser")
-            .field("key", &self.key)
+            .field("subject", &self.subject)
             .field("scopes", &self.scopes)
             .field("provider", &self.provider)
             .field("extra", &self.extra.as_ref().map(|_| "<redacted>"))
@@ -285,7 +293,7 @@ impl fmt::Debug for AuthUser {
 
 impl PartialEq for AuthUser {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.provider == other.provider
+        self.subject == other.subject && self.provider == other.provider
     }
 }
 
@@ -293,7 +301,7 @@ impl Eq for AuthUser {}
 
 impl Hash for AuthUser {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.key.hash(state);
+        self.subject.hash(state);
         self.provider.hash(state);
     }
 }
@@ -334,6 +342,19 @@ pub(crate) fn resolve_audiences(
 mod tests {
     use super::*;
 
+    /// Verifies a newly constructed identity serializes its subject without a provider.
+    #[test]
+    fn new_identity_has_subject_without_provider() -> Result<(), AuthError> {
+        let user = AuthUser::new("user-42");
+        assert_eq!(user.subject(), "user-42");
+        assert_eq!(user.provider(), None);
+        let value = serde_json::to_value(user).map_err(|_| AuthError::InvalidCredential)?;
+        assert_eq!(value["subject"], "user-42");
+        assert!(value.get("key").is_none());
+        assert!(value.get("provider").is_none());
+        Ok(())
+    }
+
     /// Verifies removing runtime extras preserves grants, provider, and assurance metadata.
     #[test]
     fn without_extra_preserves_authenticated_identity() -> Result<(), AuthError> {
@@ -351,7 +372,7 @@ mod tests {
 
         assert!(user.extra::<&str>().is_none());
         assert!(user.has_scope(&Scope::of("users:read")));
-        assert_eq!(user.provider(), "accounts");
+        assert_eq!(user.provider(), Some("accounts"));
         assert_eq!(user.authentication(), &authentication);
         Ok(())
     }

@@ -1695,7 +1695,7 @@ mod tests {
     }
 
     fn cookie_auth(name: &str) -> AuthConf {
-        AuthConf::empty().provider(
+        AuthConf::default().provider(
             crate::auth::DEFAULT_AUTH_PROVIDER,
             crate::auth::TokenProvider::new(crate::auth::Jwt::hs256_site_secret())
                 .access(crate::auth::TokenConf::cookie(name)),
@@ -1957,7 +1957,7 @@ mod tests {
             crate::auth::AuthProvider::new("reports-auth");
         const ADMIN_AUTH: crate::auth::AuthProvider = crate::auth::AuthProvider::new("admin-auth");
 
-        let auth = AuthConf::empty()
+        let auth = AuthConf::default()
             .provider(
                 REPORTS_AUTH,
                 crate::auth::TokenProvider::new(crate::auth::Jwt::hs256_site_secret())

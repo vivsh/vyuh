@@ -233,6 +233,10 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
         validate_mfa_conf(&self.factors)
     }
 
+    fn requires_login_state_store(&self) -> bool {
+        true
+    }
+
     fn begin<'a>(
         &'a self,
         method: &'a LoginMethodId,
@@ -274,7 +278,7 @@ impl PasswordMfaRuntime {
         user.validate()?;
         let methods = self.available_methods(&user).await?;
         let pending = PendingMfa {
-            subject: user.key.to_string(),
+            subject: user.subject().to_owned(),
             scopes: user.scopes().to_vec(),
             methods: methods.clone(),
             auth_time: Utc::now().timestamp(),
@@ -317,9 +321,8 @@ impl PasswordMfaRuntime {
         }
         let user = AuthUser::new(&pending.subject).with_scopes(pending.scopes);
         let user = self.factors.verifier.verify(&user, &response).await?;
-        if let Some(store) = state_store {
-            store.consume(&state).await?;
-        }
+        let store = state_store.ok_or(AuthError::InvalidLoginState)?;
+        store.consume(&state).await?;
         let login = VerifiedLogin {
             user,
             methods: vec![self.input.method().into(), response.method.as_str().into()],

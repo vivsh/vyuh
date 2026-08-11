@@ -109,7 +109,6 @@ fn build_token(
         refresh,
         verifier: value.verifier,
         lifecycle: value.lifecycle,
-        binding: value.binding,
         leeway_seconds: value.leeway_seconds,
         default_audience,
         audiences,
@@ -265,7 +264,7 @@ mod tests {
     /// Verifies independent OAuth resource servers may share Bearer for disjoint audiences.
     #[test]
     fn oauth_bearer_selectors_are_unique_per_local_audience() {
-        let conf = AuthConf::empty()
+        let conf = AuthConf::default()
             .provider(FIRST, resource_server(REPORTS))
             .provider(SECOND, resource_server(ADMIN));
         assert!(validate_definitions(&conf.definitions()).is_ok());
@@ -274,7 +273,7 @@ mod tests {
     /// Verifies OAuth resource servers cannot share Bearer on one local audience.
     #[test]
     fn oauth_bearer_overlap_is_rejected_before_discovery() {
-        let conf = AuthConf::empty()
+        let conf = AuthConf::default()
             .provider(FIRST, resource_server(REPORTS))
             .provider(SECOND, resource_server(REPORTS));
         assert!(validate_definitions(&conf.definitions()).is_err());

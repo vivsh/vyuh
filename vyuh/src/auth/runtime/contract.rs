@@ -72,10 +72,6 @@ pub(crate) trait ProviderRuntimeContract: Send + Sync {
     ) -> Option<crate::auth::AuthProtectedResource> {
         None
     }
-    #[cfg(feature = "mcp")]
-    fn challenge(&self, _error: &AuthError) -> Option<crate::auth::AuthChallenge> {
-        None
-    }
     fn authenticate<'a>(
         &'a self,
         raw: &'a str,
@@ -86,13 +82,11 @@ pub(crate) trait ProviderRuntimeContract: Send + Sync {
         &'a self,
         user: AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>>;
     fn refresh<'a>(
         &'a self,
         raw: &'a str,
         parts: &'a Parts,
-        audiences: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>>;
     fn logout<'a>(&'a self, parts: &'a Parts) -> BoxFuture<'a, Result<ResponseHeaders, AuthError>>;
 }

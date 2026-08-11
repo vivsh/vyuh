@@ -21,7 +21,9 @@ pub use mfa::{MfaLogin, MfaMethod, MfaResponse, MfaVerifier};
 pub use model::{BasicCredentials, LoginMethod, NoChallenge, PasswordCredentials, PresentedSecret};
 pub use password::{BasicLogin, PasswordLogin, PasswordVerifier};
 #[cfg(feature = "email")]
-pub use passwordless::{EmailAddress, EmailLoginResolver, MagicLinkCallback, MagicLinkLogin};
+pub use passwordless::{
+    EmailAddress, EmailLoginResolver, MagicLinkCallback, MagicLinkLogin, UnsafeReusableMagicLinks,
+};
 pub use passwordless::{
     Otp, OtpLogin, OtpLoginResolver, OtpPolicy, PasswordlessAddress, PasswordlessAttempt,
     PasswordlessChallenge, PasswordlessStart, PasswordlessStore, PhoneNumber,

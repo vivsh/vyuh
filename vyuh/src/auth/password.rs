@@ -3,63 +3,66 @@ use ring::{
     digest, pbkdf2,
     rand::{SecureRandom, SystemRandom},
 };
-
-use super::AuthError;
+use thiserror::Error;
 
 const DJANGO_5_2_PBKDF2_ITERATIONS: u32 = 1_000_000;
+const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
 const UNUSABLE_PASSWORD_PREFIX: &str = "!";
 const UNUSABLE_PASSWORD_SUFFIX_LEN: usize = 40;
 
+/// Password hashing and encoded-hash validation failures.
+#[derive(Debug, Error)]
+pub enum PasswordError {
+    /// The selected PBKDF2 algorithm is unsupported.
+    #[error("unsupported password algorithm")]
+    UnsupportedAlgorithm,
+    /// The requested or stored PBKDF2 work factor is invalid.
+    #[error("invalid password iterations")]
+    InvalidIterations,
+    /// The stored password hash has an invalid structure or encoding.
+    #[error("invalid password hash")]
+    InvalidHash,
+    /// Cryptographically secure randomness was unavailable.
+    #[error("password randomness unavailable")]
+    Randomness,
+    /// The asynchronous blocking worker could not complete.
+    #[error("password worker failed")]
+    Worker,
+}
+
 /// Creates a Django-compatible unusable password marker.
-pub fn unusable_password() -> Result<String, AuthError> {
+pub fn unusable_password() -> Result<String, PasswordError> {
     let mut bytes = [0_u8; UNUSABLE_PASSWORD_SUFFIX_LEN / 2];
     SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| AuthError::Internal("randomness unavailable".into()))?;
+        .map_err(|_| PasswordError::Randomness)?;
     Ok(format!("{UNUSABLE_PASSWORD_PREFIX}{}", hex(&bytes)))
 }
 
-/// Creates a Django-compatible PBKDF2 password hash.
-pub fn make_password(
+/// Creates a Django-compatible PBKDF2 password hash without blocking an async worker.
+pub async fn make_password(
     password: &str,
     salt: Option<&str>,
     algorithm: Option<&str>,
-) -> Result<String, AuthError> {
-    make_password_with_iterations(password, salt, algorithm, DJANGO_5_2_PBKDF2_ITERATIONS)
+) -> Result<String, PasswordError> {
+    make_password_with_iterations(password, salt, algorithm, DJANGO_5_2_PBKDF2_ITERATIONS).await
 }
 
 /// Creates a Django-compatible PBKDF2 hash with an application-selected work factor.
-pub fn make_password_with_iterations(
+pub async fn make_password_with_iterations(
     password: &str,
     salt: Option<&str>,
     algorithm: Option<&str>,
     iterations: u32,
-) -> Result<String, AuthError> {
-    let algorithm = algorithm.unwrap_or("pbkdf2_sha256");
-    let salt = match salt {
-        Some(value) => value.to_owned(),
-        None => random_salt()?,
-    };
-    let iterations = std::num::NonZeroU32::new(iterations)
-        .ok_or_else(|| AuthError::Internal("invalid PBKDF2 iterations".into()))?;
-    let (algorithm_id, length) = match algorithm {
-        "pbkdf2_sha256" => (pbkdf2::PBKDF2_HMAC_SHA256, digest::SHA256_OUTPUT_LEN),
-        "pbkdf2_sha1" => (pbkdf2::PBKDF2_HMAC_SHA1, digest::SHA1_OUTPUT_LEN),
-        _ => return Err(AuthError::Internal("unsupported password algorithm".into())),
-    };
-    let mut derived = vec![0; length];
-    pbkdf2::derive(
-        algorithm_id,
-        iterations,
-        salt.as_bytes(),
-        password.as_bytes(),
-        &mut derived,
-    );
-    Ok(format!(
-        "{algorithm}${}${salt}${}",
-        iterations.get(),
-        STANDARD.encode(derived)
-    ))
+) -> Result<String, PasswordError> {
+    let password = password.to_owned();
+    let salt = salt.map(str::to_owned);
+    let algorithm = algorithm.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        make_password_blocking(&password, salt.as_deref(), algorithm.as_deref(), iterations)
+    })
+    .await
+    .map_err(|_| PasswordError::Worker)?
 }
 
 /// Result of password verification including whether the stored work factor is stale.
@@ -70,24 +73,91 @@ pub struct PasswordVerification {
     pub needs_upgrade: bool,
 }
 
-/// Verifies a Django-compatible PBKDF2 password hash.
-pub fn check_password(password: &str, encoded: &str) -> Result<bool, AuthError> {
+/// Verifies a Django-compatible PBKDF2 password hash without blocking an async worker.
+pub async fn check_password(password: &str, encoded: &str) -> Result<bool, PasswordError> {
     check_password_with_upgrade(password, encoded, DJANGO_5_2_PBKDF2_ITERATIONS)
+        .await
         .map(|result| result.valid)
 }
 
 /// Verifies a stored hash and reports whether its iteration count should be upgraded.
-pub fn check_password_with_upgrade(
+pub async fn check_password_with_upgrade(
     password: &str,
     encoded: &str,
     preferred_iterations: u32,
-) -> Result<PasswordVerification, AuthError> {
+) -> Result<PasswordVerification, PasswordError> {
+    let password = password.to_owned();
+    let encoded = encoded.to_owned();
+    tokio::task::spawn_blocking(move || {
+        check_password_blocking(&password, &encoded, preferred_iterations)
+    })
+    .await
+    .map_err(|_| PasswordError::Worker)?
+}
+
+fn make_password_blocking(
+    password: &str,
+    salt: Option<&str>,
+    algorithm: Option<&str>,
+    iterations: u32,
+) -> Result<String, PasswordError> {
+    let name = algorithm.unwrap_or("pbkdf2_sha256");
+    let salt = salt.map(str::to_owned).map_or_else(random_salt, Ok)?;
+    if salt.is_empty() || salt.len() > 1024 {
+        return Err(PasswordError::InvalidHash);
+    }
+    let iterations = validate_iterations(iterations)?;
+    let (algorithm, length) = algorithm_details(name)?;
+    let mut derived = vec![0; length];
+    pbkdf2::derive(
+        algorithm,
+        iterations,
+        salt.as_bytes(),
+        password.as_bytes(),
+        &mut derived,
+    );
+    Ok(format!(
+        "{name}${}${salt}${}",
+        iterations.get(),
+        STANDARD.encode(derived)
+    ))
+}
+
+fn check_password_blocking(
+    password: &str,
+    encoded: &str,
+    preferred_iterations: u32,
+) -> Result<PasswordVerification, PasswordError> {
     if encoded.starts_with(UNUSABLE_PASSWORD_PREFIX) {
         return Ok(PasswordVerification {
             valid: false,
             needs_upgrade: false,
         });
     }
+    let (name, iterations, salt, hash) = password_parts(encoded)?;
+    let stored = validate_iterations(iterations)?;
+    let hash = STANDARD
+        .decode(hash)
+        .map_err(|_| PasswordError::InvalidHash)?;
+    let (algorithm, length) = algorithm_details(name)?;
+    if salt.is_empty() || salt.len() > 1024 || hash.len() != length {
+        return Err(PasswordError::InvalidHash);
+    }
+    let valid = pbkdf2::verify(
+        algorithm,
+        stored,
+        salt.as_bytes(),
+        password.as_bytes(),
+        &hash,
+    )
+    .is_ok();
+    Ok(PasswordVerification {
+        valid,
+        needs_upgrade: valid && stored.get() < preferred_iterations,
+    })
+}
+
+fn password_parts(encoded: &str) -> Result<(&str, u32, &str, &str), PasswordError> {
     let mut parts = encoded.split('$');
     let (Some(algorithm), Some(iterations), Some(salt), Some(hash), None) = (
         parts.next(),
@@ -96,40 +166,34 @@ pub fn check_password_with_upgrade(
         parts.next(),
         parts.next(),
     ) else {
-        return Err(AuthError::Internal("invalid password hash format".into()));
+        return Err(PasswordError::InvalidHash);
     };
-    let stored_iterations = iterations
+    let iterations = iterations
         .parse::<u32>()
-        .ok()
-        .and_then(std::num::NonZeroU32::new)
-        .ok_or_else(|| AuthError::Internal("invalid password iterations".into()))?;
-    let hash = STANDARD
-        .decode(hash)
-        .map_err(|_| AuthError::Internal("invalid password hash encoding".into()))?;
-    let algorithm = match algorithm {
-        "pbkdf2_sha256" => pbkdf2::PBKDF2_HMAC_SHA256,
-        "pbkdf2_sha1" => pbkdf2::PBKDF2_HMAC_SHA1,
-        _ => return Err(AuthError::Internal("unsupported password algorithm".into())),
-    };
-    let valid = pbkdf2::verify(
-        algorithm,
-        stored_iterations,
-        salt.as_bytes(),
-        password.as_bytes(),
-        &hash,
-    )
-    .is_ok();
-    Ok(PasswordVerification {
-        valid,
-        needs_upgrade: valid && stored_iterations.get() < preferred_iterations,
-    })
+        .map_err(|_| PasswordError::InvalidIterations)?;
+    Ok((algorithm, iterations, salt, hash))
 }
 
-fn random_salt() -> Result<String, AuthError> {
+fn validate_iterations(value: u32) -> Result<std::num::NonZeroU32, PasswordError> {
+    if value > MAX_PBKDF2_ITERATIONS {
+        return Err(PasswordError::InvalidIterations);
+    }
+    std::num::NonZeroU32::new(value).ok_or(PasswordError::InvalidIterations)
+}
+
+fn algorithm_details(name: &str) -> Result<(pbkdf2::Algorithm, usize), PasswordError> {
+    match name {
+        "pbkdf2_sha256" => Ok((pbkdf2::PBKDF2_HMAC_SHA256, digest::SHA256_OUTPUT_LEN)),
+        "pbkdf2_sha1" => Ok((pbkdf2::PBKDF2_HMAC_SHA1, digest::SHA1_OUTPUT_LEN)),
+        _ => Err(PasswordError::UnsupportedAlgorithm),
+    }
+}
+
+fn random_salt() -> Result<String, PasswordError> {
     let mut bytes = [0_u8; 16];
     SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| AuthError::Internal("randomness unavailable".into()))?;
+        .map_err(|_| PasswordError::Randomness)?;
     Ok(STANDARD.encode(bytes))
 }
 
@@ -141,24 +205,4 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verifies older Django iteration counts remain valid while requesting rehash.
-    #[test]
-    fn older_iteration_count_requests_upgrade() -> Result<(), AuthError> {
-        let encoded = make_password_with_iterations(
-            "correct horse",
-            Some("testsalt"),
-            Some("pbkdf2_sha256"),
-            1_000,
-        )?;
-        let result = check_password_with_upgrade("correct horse", &encoded, 2_000)?;
-        assert!(result.valid);
-        assert!(result.needs_upgrade);
-        Ok(())
-    }
 }

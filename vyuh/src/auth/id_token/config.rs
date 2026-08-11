@@ -12,6 +12,41 @@ use crate::auth::{
 const GOOGLE_ISSUER: &str = "https://accounts.google.com";
 const MAX_RESOURCES: usize = 64;
 
+/// External identity-token policy for one local route audience.
+#[derive(Clone, Debug)]
+pub struct IdTokenResource {
+    pub(crate) token_audience: String,
+    pub(crate) authorized_party: Option<String>,
+}
+
+impl IdTokenResource {
+    /// Creates a resource requiring one exact external token audience.
+    pub fn new(token_audience: impl Into<String>) -> Self {
+        Self {
+            token_audience: token_audience.into(),
+            authorized_party: None,
+        }
+    }
+
+    /// Requires an exact OpenID authorized-party client identifier.
+    pub fn authorized_party(mut self, client_id: impl Into<String>) -> Self {
+        self.authorized_party = Some(client_id.into());
+        self
+    }
+}
+
+impl From<String> for IdTokenResource {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for IdTokenResource {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
 /// Cryptographically verified claims from one external identity token.
 #[derive(Clone)]
 pub struct IdTokenClaims {
@@ -101,7 +136,7 @@ impl<T: IdTokenMapper> ErasedIdTokenMapper for T {
 pub struct IdToken {
     pub(crate) issuer: String,
     pub(crate) issuer_aliases: Vec<String>,
-    pub(crate) resources: Vec<(Audience, String)>,
+    pub(crate) resources: Vec<(Audience, IdTokenResource)>,
     pub(crate) mapper: Option<Arc<dyn ErasedIdTokenMapper>>,
     pub(crate) location: CredentialLocation,
     pub(crate) csrf: Option<CsrfConf>,
@@ -139,8 +174,8 @@ impl IdToken {
     }
 
     /// Maps one Vyuh route audience to the exact external JWT audience.
-    pub fn resource(mut self, audience: Audience, token_audience: impl Into<String>) -> Self {
-        self.resources.push((audience, token_audience.into()));
+    pub fn resource(mut self, audience: Audience, resource: impl Into<IdTokenResource>) -> Self {
+        self.resources.push((audience, resource.into()));
         self
     }
 
@@ -228,16 +263,23 @@ impl IdToken {
     }
 }
 
-fn validate_resources(values: &[(Audience, String)]) -> Result<(), AuthError> {
+fn validate_resources(values: &[(Audience, IdTokenResource)]) -> Result<(), AuthError> {
     if values.is_empty() || values.len() > MAX_RESOURCES {
         return Err(AuthError::InvalidProviderConfig(
             "identity-token providers require between 1 and 64 resources".into(),
         ));
     }
     let mut names = std::collections::BTreeSet::new();
-    for (audience, token_audience) in values {
+    for (audience, resource) in values {
         let id = AudienceId::declared(*audience)?;
-        if !names.insert(id.as_str().to_owned()) || !valid_token_audience(token_audience) {
+        let valid_party = resource
+            .authorized_party
+            .as_deref()
+            .is_none_or(valid_token_audience);
+        if !names.insert(id.as_str().to_owned())
+            || !valid_token_audience(&resource.token_audience)
+            || !valid_party
+        {
             return Err(AuthError::InvalidProviderConfig(
                 "identity-token resources require unique audiences and bounded token audiences"
                     .into(),

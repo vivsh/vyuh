@@ -36,7 +36,6 @@ impl MockSessionRuntime {
         &self,
         _user: AuthUser,
         _audiences: Vec<AudienceId>,
-        _binding: Option<String>,
     ) -> Result<LoginResponse, AuthError> {
         Ok(mock_login_response())
     }
@@ -54,7 +53,6 @@ impl MockSessionRuntime {
         &self,
         _raw: &str,
         _parts: &Parts,
-        _audiences: &[AudienceId],
     ) -> Result<LoginResponse, AuthError> {
         Ok(mock_login_response())
     }
@@ -104,17 +102,15 @@ impl ProviderRuntimeContract for MockSessionRuntime {
         &'a self,
         user: AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
-        Box::pin(MockSessionRuntime::login(self, user, audiences, binding))
+        Box::pin(MockSessionRuntime::login(self, user, audiences))
     }
     fn refresh<'a>(
         &'a self,
         raw: &'a str,
         parts: &'a Parts,
-        audiences: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
-        Box::pin(MockSessionRuntime::refresh(self, raw, parts, audiences))
+        Box::pin(MockSessionRuntime::refresh(self, raw, parts))
     }
     fn logout<'a>(
         &'a self,
@@ -153,16 +149,14 @@ async fn stateful_provider_fits_runtime_contract() -> Result<(), AuthError> {
     assert!(capabilities.refresh);
     assert!(capabilities.logout);
     let login = runtime
-        .login(AuthUser::new("user-123"), vec![audience.clone()], None)
+        .login(AuthUser::new("user-123"), vec![audience.clone()])
         .await?;
     assert_eq!(login.credentials().access(), "session-id");
     let user = runtime
         .authenticate("session-id", &parts, &audience)
         .await?;
-    assert_eq!(user.key.as_ref(), "session-user");
-    let refreshed = runtime
-        .refresh("session-id", &parts, std::slice::from_ref(&audience))
-        .await?;
+    assert_eq!(user.subject(), "session-user");
+    let refreshed = runtime.refresh("session-id", &parts).await?;
     assert_eq!(refreshed.credentials().access(), "session-id");
     assert!(runtime.logout(&parts).await?.is_empty());
     Ok(())

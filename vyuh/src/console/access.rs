@@ -53,8 +53,11 @@ impl FromRequestParts<Site> for ConsoleGuard {
 /// Extracts an optional user while keeping console audience failures opaque.
 async fn optional_user(parts: &mut Parts, site: &Site) -> Result<Option<AuthUser>, AuthError> {
     match <Option<AuthUser> as FromRequestParts<Site>>::from_request_parts(parts, site).await {
-        Err(AuthError::AudienceMismatch) => Err(AuthError::InvalidCredential),
-        result => result,
+        Err(error) if matches!(error.error(), AuthError::AudienceMismatch) => {
+            Err(AuthError::InvalidCredential)
+        }
+        Err(error) => Err(error.into_error()),
+        Ok(user) => Ok(user),
     }
 }
 

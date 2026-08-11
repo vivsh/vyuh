@@ -3,3 +3,9 @@ error[E0432]: unresolved import `vyuh::auth::OidcLogin`
   |
 1 | use vyuh::auth::OidcLogin;
   |     ^^^^^^^^^^^^^^^^^^^^^ no `OidcLogin` in `auth`
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::auth::OidcLogin;
+1 + use vyuh::auth::OtpLogin;
+  |

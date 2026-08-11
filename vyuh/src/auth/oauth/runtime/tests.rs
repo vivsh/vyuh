@@ -383,7 +383,7 @@ async fn validates_signed_oauth_token() -> Result<(), TestError> {
         )
         .await
         .map_err(|_| TestError::UnexpectedUri)?;
-    assert_eq!(user.key.to_string(), "oauth-user");
+    assert_eq!(user.subject(), "oauth-user");
     assert!(user.scopes().is_empty());
     assert_eq!(client.calls(OAUTH_METADATA)?, 1);
     assert_eq!(client.calls(JWKS)?, 1);

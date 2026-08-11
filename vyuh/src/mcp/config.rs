@@ -1,6 +1,6 @@
 //! MCP endpoint and tool configuration.
 
-use crate::auth::{Audience, AuthProvider};
+use crate::auth::AuthUser;
 
 use super::McpError;
 
@@ -31,38 +31,30 @@ impl McpToolConf {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum McpAuth {
-    Provider(AuthProvider),
-    Anonymous,
-}
-
 /// Configuration for one bundle-owned remote MCP endpoint.
 #[derive(Clone, Debug)]
 pub struct McpConf {
     pub(crate) endpoint: String,
-    pub(crate) audience: Audience,
-    pub(crate) auth: Option<McpAuth>,
+    pub(crate) auth: Option<fn(&AuthUser) -> bool>,
     pub(crate) errors: Vec<String>,
 }
 impl McpConf {
-    /// Creates an MCP endpoint. Choose [`Self::auth`] or [`Self::anonymous`] explicitly.
-    pub fn new(endpoint: impl Into<String>, audience: Audience) -> Self {
+    /// Creates an MCP endpoint protected by its owning bundle's audience.
+    pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: endpoint.into(),
-            audience,
-            auth: None,
+            auth: Some(authenticated),
             errors: Vec::new(),
         }
     }
-    /// Selects the one configured Vyuh credential provider accepted by this endpoint.
-    pub fn auth(mut self, provider: AuthProvider) -> Self {
-        self.auth = Some(McpAuth::Provider(provider));
+    /// Restricts this endpoint to authenticated users accepted by `pred`.
+    pub fn auth(mut self, pred: fn(&AuthUser) -> bool) -> Self {
+        self.auth = Some(pred);
         self
     }
-    /// Explicitly exposes tools without credentials.
-    pub fn anonymous(mut self) -> Self {
-        self.auth = Some(McpAuth::Anonymous);
+    /// Deliberately exposes this endpoint without authentication.
+    pub fn public(mut self) -> Self {
+        self.auth = None;
         self
     }
     pub(crate) fn validate(&mut self) -> Result<(), McpError> {
@@ -72,14 +64,14 @@ impl McpConf {
         if self.endpoint == "/" {
             self.errors.push("endpoint cannot be the root path".into());
         }
-        if self.auth.is_none() {
-            self.errors
-                .push("MCP service must select auth(provider) or anonymous()".into());
-        }
         if self.errors.is_empty() {
             Ok(())
         } else {
             Err(McpError::Config(self.errors.join("; ")))
         }
     }
+}
+
+fn authenticated(_: &AuthUser) -> bool {
+    true
 }

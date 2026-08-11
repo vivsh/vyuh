@@ -210,15 +210,16 @@ configuration.
 let api = notes::bundle()
     .merge(users::bundle())
     .with_prefix("/v1")
-    .with_tags(["api", "v1"]);
+    .with_conf(bundles::conf().tags(["api", "v1"]));
 ```
 
 `with_prefix` prefixes route paths and operation metadata. Prefixes must start
 with `/`, must not be `/`, and must not end with `/`.
 
-`with_tags` adds tags to all current operations in the bundle. `layer` applies
-middleware to all routes in the bundle; middleware that exposes metadata also
-updates operations for documentation.
+`BundleConf` declares bundle policy and contributions. Tags accumulate from
+ancestor bundles, while a child audience or slash policy overrides an inherited
+value. `layer` applies middleware to all routes in the bundle; middleware that
+exposes metadata also updates operations for documentation.
 
 After `Site::build`, route reversal and resolution use `site.routes()`, while
 operation lookup and iteration use `site.operations()`. Bundles retain this
@@ -228,28 +229,35 @@ Each operation receives its origin bundle ID when registered. That identity is
 immutable: merging or prefixing bundles changes composed behavior and paths but
 never rewrites an operation's origin.
 
-## OpenAPI Order
+## Bundle Configuration and Final Aggregates
 
-`with_openapi` snapshots route operations already registered in the bundle.
-Routes added or merged after `with_openapi` do not appear in that generated
-spec.
+Use `bundles::conf()` with `Bundle::with_conf` for audience, tags, slash policy,
+task-lane defaults, OpenAPI declarations, MCP declarations, and narrowly scoped
+central-auth provider contributions. It intentionally does not contain site
+secrets, server/database settings, auth lifecycle configuration, or global task
+runtime policy.
 
-Call `with_openapi` after route registration and merge steps for the API surface
-being documented:
+OpenAPI and MCP are finalized at site build from the declaration's final bundle
+subtree. An OpenAPI declaration includes all visible HTTP routes in its subtree;
+overlapping parent and child specs are allowed. An MCP declaration owns tool
+operations in its subtree unless a nearer nested MCP declaration owns them.
 
 ```rust
 let api = notes::bundle()
     .merge(users::bundle())
     .with_prefix("/v1")
-    .with_openapi(
-        bundles::OpenApiConf::default()
-            .title("Notes API")
-            .spec("/openapi.json"),
+    .with_conf(
+        bundles::conf()
+            .audience(NOTES)
+            .tags(["notes"])
+            .openapi(bundles::OpenApiConf::new("/openapi.json").title("Notes API")),
     );
 ```
 
-Prefixes and metadata applied to already captured operations still affect final
-paths and operation metadata.
+Bundle auth contributions merge into the single site auth registry. They require
+the owning bundle to declare one audience, and the contributed provider must
+explicitly declare exactly that audience. Shared or multi-audience providers
+belong in `SiteConf.auth`.
 
 ## Examples
 
@@ -274,9 +282,7 @@ cargo run -p vyuh --features sqlite --example tasks
 - Use `bundle!` for ordinary static, same-module macro registrations.
 - Use `bundles::bundle([...])` for generated or conditional bundle parts.
 - Return `Bundle` values from feature modules and compose them with `merge`.
-- Apply `with_prefix`, `with_tags`, and `layer` at clear composition boundaries.
-- Call `with_openapi` after the routes for that spec have been registered and
-  merged.
+- Apply `with_prefix`, `with_conf`, and `layer` at clear composition boundaries.
 
 ## Failure Modes
 
@@ -287,12 +293,12 @@ cargo run -p vyuh --features sqlite --example tasks
   identity, fail before the site starts.
 - Duplicate root migration sources or duplicate migration namespaces fail
   before the site starts.
-- OpenAPI captures only routes registered before `with_openapi`.
+- Bundle-auth provider contributions must have exactly the bundle audience.
 
 ## Current Limitations
 
 - `bundle!` only works with macro-registered items visible in the current
   module.
-- Bundle composition is order-sensitive for APIs that snapshot metadata.
+- Aggregate declarations reflect their final subtree, not registration order.
 - Macros are convenience only; direct registration is the canonical escape hatch
   for generated or conditional registrations.

@@ -148,14 +148,14 @@ async fn main() -> Result<(), SiteError> {
         signup,
         heartbeat,
     }
-    .with_openapi(
+    .with_conf(bundles::conf().openapi(
         bundles::OpenApiConf::default()
             .title("Vyuh Example")
             .version("0.1.0")
             .description("A route, a cron emitter, and generated OpenAPI.")
             .spec("/openapi.json")
             .viewer("/docs"),
-    );
+    ));
 
     Site::run(SiteConf::from_env_with_files()?, app).await
 }
@@ -167,7 +167,7 @@ through the same bundle.
 
 `Valid<Data<Signup>>` parses and validates request data at the handler
 boundary. `Data<UserCreated>` becomes the JSON response body and response
-schema. `with_openapi(...)` exposes the generated spec and docs page without
+schema. `with_conf(bundles::conf().openapi(...))` exposes the generated spec and docs page without
 adding per-route OpenAPI code. `Site::run(...)` is the standard application
 entrypoint.
 

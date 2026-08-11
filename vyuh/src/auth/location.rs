@@ -195,6 +195,18 @@ pub(crate) enum RequestCredentialLocation {
     },
 }
 
+impl RequestCredentialLocation {
+    pub(crate) fn token_type(&self) -> Option<&str> {
+        match self {
+            Self::Header {
+                scheme: Some(scheme),
+                ..
+            } => Some(scheme),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct RequestCredentialScan<'a> {
     parts: &'a Parts,
     cookies: Option<ParsedCookies<'a>>,
@@ -359,6 +371,17 @@ impl CredentialLocation {
         }
     }
 
+    pub(crate) fn challenge(&self) -> Option<HeaderValue> {
+        let LocationKind::Header {
+            scheme: Some(scheme),
+            ..
+        } = &self.0
+        else {
+            return None;
+        };
+        HeaderValue::try_from(format!("{scheme} realm=\"vyuh\"")).ok()
+    }
+
     pub(crate) fn clear(&self) -> Result<Option<(HeaderName, HeaderValue)>, AuthError> {
         let LocationKind::Cookie(cookie) = &self.0 else {
             return Ok(None);
@@ -368,11 +391,6 @@ impl CredentialLocation {
 
     pub(crate) fn is_cookie(&self) -> bool {
         matches!(self.0, LocationKind::Cookie(_))
-    }
-
-    #[cfg(feature = "mcp")]
-    pub(crate) fn is_header(&self) -> bool {
-        matches!(self.0, LocationKind::Header { .. })
     }
 
     pub(crate) fn default_csrf(&self) -> Option<CsrfConf> {

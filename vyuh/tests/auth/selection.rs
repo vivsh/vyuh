@@ -16,13 +16,13 @@ async fn provider_login_errors_are_terminal() -> Result<(), AuthError> {
     let unknown = site
         .auth()
         .using(UNKNOWN_PROVIDER)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await;
     assert!(matches!(unknown, Err(AuthError::ProviderNotFound(_))));
     let invalid = site
         .auth()
         .using(INVALID_PROVIDER)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await;
     assert!(matches!(invalid, Err(AuthError::InvalidProviderId(_))));
     Ok(())
@@ -36,10 +36,7 @@ async fn provider_request_errors_are_terminal() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let parts = empty_parts();
     assert!(matches!(
-        site.auth()
-            .using(UNKNOWN_PROVIDER)
-            .refresh(&parts, &[REPORTS])
-            .await,
+        site.auth().using(UNKNOWN_PROVIDER).refresh(&parts).await,
         Err(AuthError::ProviderNotFound(_))
     ));
     assert!(matches!(
@@ -53,7 +50,9 @@ async fn provider_request_errors_are_terminal() -> Result<(), AuthError> {
 #[tokio::test]
 async fn flow_provider_errors_are_terminal() -> Result<(), AuthError> {
     let method = PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
-    let auth = AuthConf::default().method(PASSWORD_MFA, method);
+    let auth = AuthConf::default()
+        .method(PASSWORD_MFA, method)
+        .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
@@ -80,6 +79,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_PASSWORD)
         .login(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -89,6 +89,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
     assert!(matches!(login, Err(AuthError::LoginMethodNotFound(_))));
     let begin = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_MFA)
         .begin(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -98,6 +99,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
     assert!(matches!(begin, Err(AuthError::LoginMethodNotFound(_))));
     let complete = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_MFA)
         .complete(MfaResponse::totp("opaque-state", "123456"))
         .await;
@@ -108,14 +110,15 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
 /// Verifies default refresh never probes a separately selected provider.
 #[tokio::test]
 async fn default_refresh_does_not_probe_other_providers() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(ALTERNATE, TokenProvider::new(Jwt::hs256_site_secret()));
+    let auth =
+        AuthConf::default().provider(ALTERNATE, TokenProvider::new(Jwt::hs256_site_secret()));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
         .using(ALTERNATE)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let refresh = login
         .credentials()
@@ -123,22 +126,19 @@ async fn default_refresh_does_not_probe_other_providers() -> Result<(), AuthErro
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
     assert!(matches!(
-        site.auth().refresh(&parts, &[REPORTS]).await,
+        site.auth()
+            .using(DEFAULT_AUTH_PROVIDER)
+            .refresh(&parts)
+            .await,
         Err(AuthError::ProviderNotFound(_))
     ));
-    assert!(
-        site.auth()
-            .using(ALTERNATE)
-            .refresh(&parts, &[REPORTS])
-            .await
-            .is_ok()
-    );
+    assert!(site.auth().using(ALTERNATE).refresh(&parts).await.is_ok());
     Ok(())
 }
 
-/// Verifies default logout does not clear a separately selected provider's cookies.
+/// Verifies logout only clears credentials for the explicitly selected provider.
 #[tokio::test]
-async fn default_logout_does_not_touch_other_providers() -> Result<(), AuthError> {
+async fn selected_logout_clears_selected_provider() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .access(TokenConf::cookie("alternate_access"))
         .refresh(TokenConf::cookie("alternate_refresh"));
@@ -147,19 +147,6 @@ async fn default_logout_does_not_touch_other_providers() -> Result<(), AuthError
         .await
         .map_err(auth_error)?;
     let parts = alternate_cookie_parts(&site).await?;
-    let mut default_response = axum::response::Response::new(axum::body::Body::empty());
-    site.auth()
-        .logout(&parts)
-        .await?
-        .write(&mut default_response);
-    assert_eq!(
-        default_response
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .count(),
-        0
-    );
     let mut selected_response = axum::response::Response::new(axum::body::Body::empty());
     site.auth()
         .using(ALTERNATE)
@@ -183,7 +170,12 @@ async fn logout_response_is_response_ready() -> Result<(), AuthError> {
     let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let response = site.auth().logout(&empty_parts()).await?.into_response();
+    let response = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .logout(&empty_parts())
+        .await?
+        .into_response();
     assert_eq!(response.status(), vyuh::routes::StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024)
         .await
@@ -198,7 +190,11 @@ async fn malformed_logout_credential_fails() -> Result<(), AuthError> {
     let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let result = site.auth().logout(&bearer_parts("malformed")?).await;
+    let result = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .logout(&bearer_parts("malformed")?)
+        .await;
     assert!(matches!(result, Err(AuthError::InvalidCredential)));
     Ok(())
 }
@@ -215,7 +211,7 @@ async fn alternate_cookie_parts(site: &Site) -> Result<axum::http::request::Part
     let login = site
         .auth()
         .using(ALTERNATE)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut response);

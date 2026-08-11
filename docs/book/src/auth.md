@@ -30,15 +30,15 @@ const API: Audience = Audience::new("api");
 const REPORTS: Audience = Audience::new("reports");
 
 async fn me(user: AuthUser) -> Json<String> {
-    Json(user.key.to_string())
+    Json(user.subject().to_owned())
 }
 
 let api = bundles::bundle! { me }
-    .with_audience(API);
+    .with_conf(bundles::conf().audience(API));
 ```
 
-Audience names are validated during site construction and login. Duplicate
-audiences are removed while preserving order. An audience controls where a
+Audience names are validated during site construction and credential issuance.
+Duplicate audiences in presented tokens are rejected. An audience controls where a
 credential is accepted; scopes control what the identity may do within that
 surface.
 
@@ -48,7 +48,10 @@ token unrestricted:
 
 ```rust
 // Both use the configured default audience.
-site.auth().login(user, &[]).await?;
+site.auth()
+    .using(DEFAULT_AUTH_PROVIDER)
+    .issue(user, &[])
+    .await?;
 let routes = bundles::bundle! { me };
 
 // Applications can choose a more meaningful default.
@@ -59,8 +62,8 @@ A legacy authenticated token with no `aud` claim owns only that default. An
 explicit `aud: []` is invalid, and the default is never added to explicitly
 listed audiences. Applications that require every route and call site to name
 an audience use `AuthConf::require_explicit_audiences()`; site construction then
-rejects authenticated routes without `.with_audience(...)`, and empty login or
-refresh slices fail.
+rejects authenticated routes without `BundleConf::audience(...)`, and empty login or
+issuance audience slices fail.
 
 Construct identities with exact application scopes:
 
@@ -80,7 +83,9 @@ let restored = AuthUser::new("user-789")
     .with_scopes(database_scopes);
 ```
 
-`AuthUser` exposes its stable `key`, normalized scopes, and accepting provider. A token
+`AuthUser` exposes its stable `subject`, normalized scopes, and optional accepting
+provider. A newly constructed identity has no provider; successful authentication
+records the provider that accepted it. A token
 or key verifier can attach request-only data with `with_extra`; handlers recover
 it with `extra::<T>()`. Extras are not serialized into tokens and are redacted
 from diagnostics. `without_extra()` removes only this runtime data; provider and
@@ -111,7 +116,7 @@ impl ScopeRule for ManageUsers {
 }
 
 async fn update_user(permit: Permit<ManageUsers>) -> Json<String> {
-    Json(permit.user().key.to_string())
+    Json(permit.user().subject().to_owned())
 }
 ```
 
@@ -162,12 +167,13 @@ authorization controls.
 const PASSWORD: LoginMethod<PasswordCredentials> =
     LoginMethod::new("password");
 
-let auth = AuthConf::default().method(
+let auth = AuthConf::development().method(
     PASSWORD,
     PasswordLogin::new(AccountPasswords),
 );
 
 site.auth()
+    .using(DEFAULT_AUTH_PROVIDER)
     .via(PASSWORD)
     .login(credentials, &[API])
     .await?;
@@ -201,7 +207,7 @@ safe account lookup and password verification. Both body credentials and Basic
 exchange can share that verifier:
 
 ```rust
-let auth = AuthConf::default()
+let auth = AuthConf::development()
     .method(PASSWORD, PasswordLogin::new(AccountPasswords))
     .method(BASIC, BasicLogin::new(AccountPasswords));
 ```
@@ -221,13 +227,17 @@ const PASSWORD_MFA: LoginMethod<PasswordCredentials, MfaResponse> =
 let method = PasswordLogin::new(AccountPasswords).then(
     MfaLogin::new(AccountFactors).totp().recovery_codes(),
 );
+
+let auth = AuthConf::development()
+    .method(PASSWORD_MFA, method)
+    .login_state_store(LoginStates);
 ```
 
 The first route calls `begin(credentials, &[API])` and returns
 `LoginChallenge`. The completion route calls
 `complete(MfaResponse::totp(challenge, code))`. No credential is issued before
-the factor succeeds. An optional `AuthConf::login_state_store` atomically
-consumes continuation IDs for strict replay protection.
+the factor succeeds. `AuthConf::login_state_store` is required and atomically
+consumes continuation IDs before successful completion.
 
 ### Federated login
 
@@ -244,8 +254,8 @@ let google = FederatedLogin::google()
 
 `FederatedLogin::oidc(issuer)`, `google()`, `github()`, and `facebook()` share
 the same `begin` and `complete` handler API. The start route calls
-`via(GOOGLE).begin(FederatedStart::new(), &[API])`; the callback calls
-`via(GOOGLE).complete(callback)`. OIDC and Google validate discovery,
+`using(APP_AUTH).via(GOOGLE).begin(FederatedStart::new(), &[API])`; the callback
+calls `using(APP_AUTH).via(GOOGLE).complete(callback)`. OIDC and Google validate discovery,
 Authorization Code, PKCE-S256, state, nonce, ID-token signature, issuer,
 audience, expiry, and access-token hash. GitHub and Facebook use their
 provider-specific code exchange and bounded authenticated profile APIs. A
@@ -267,7 +277,7 @@ remain application-owned.
 const OTP: LoginMethod<PasswordlessAddress, Otp> =
     LoginMethod::new("otp");
 
-let auth = AuthConf::default()
+let auth = AuthConf::development()
     .passwordless_store(LoginChallenges)
     .method(
         OTP,
@@ -285,6 +295,7 @@ SMS, or other channel:
 
 ```rust
 let mut challenge = site.auth()
+    .using(DEFAULT_AUTH_PROVIDER)
     .via(OTP)
     .begin(PasswordlessAddress::email(input.email), &[API])
     .await?;
@@ -309,15 +320,15 @@ const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> =
     LoginMethod::new("email-link");
 
 let link = MagicLinkLogin::new(AccountEmails)
-    .callback_url("https://app.example.com/auth/email/callback")
-    .stateful();
+    .callback_url("https://app.example.com/auth/email/callback");
 ```
 
-Applications own routes and delivery. A magic-link start exposes
+Applications own routes and delivery. Magic links are stateful and one-time by
+default. A magic-link start exposes
 `challenge.magic_link_url()` only to the initiating handler, which may render
-any branded email with arbitrary application context. Stateless links are the
-default and remain reusable until expiry; `.stateful()` requires the durable
-store and consumes a link once. OTP delivery values are redacted and never
+any branded email with arbitrary application context. Reusable links require the
+deliberate `.stateless(UnsafeReusableMagicLinks::allow())` acknowledgement.
+OTP delivery values are redacted and never
 returned in HTTP challenge JSON. Unknown and known identifiers receive the
 same acknowledgement.
 
@@ -336,11 +347,12 @@ enumeration. Vyuh intentionally includes no provider-specific email/SMS
 integration, background delivery retries, passwordless signup, or passwordless
 MFA composition.
 
-## Default JWT login
+## Deliberate development JWT provider
 
-`AuthConf::default()` registers one bearer JWT provider using HS256 and
-`SiteConf.secret_key`. It issues a one-hour access token and a seven-day refresh
-token:
+`AuthConf::default()` registers no providers. For local development and examples,
+`AuthConf::development()` deliberately installs the framework JWT provider using
+HS256 and `SiteConf.secret_key`. It issues a one-hour access token and a seven-day
+refresh token:
 
 ```rust
 use vyuh::auth::{AuthConf, AuthUser, LoginResponse};
@@ -348,22 +360,28 @@ use vyuh::prelude::*;
 
 async fn login(site: Site) -> Result<LoginResponse, Error> {
     let user = AuthUser::new("user-123");
-    Ok(site.auth().login(user, &[API]).await?)
+    Ok(site.auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(user, &[API])
+        .await?)
 }
 
 let conf = SiteConf::default()
     .secret_key("replace-with-at-least-32-random-characters")
-    .auth(AuthConf::default());
+    .auth(AuthConf::development());
 ```
 
-`login`, rather than a framework login route, remains the credential-creation
-API. Applications can call it directly with an already verified `AuthUser`, or
-select a configured identity-proof method through `.via(...)`.
+`issue` trusts an already established `AuthUser`; it performs no identity proof.
+`login` is reserved for a configured proof method selected through `.via(...)`.
+Vyuh adds neither operation as an implicit route.
 
 For multiple API surfaces, pass one slice:
 
 ```rust
-site.auth().login(user, &[API, REPORTS]).await?;
+site.auth()
+    .using(DEFAULT_AUTH_PROVIDER)
+    .issue(user, &[API, REPORTS])
+    .await?;
 ```
 
 There is no `issue_many` operation and no separate refresh provider.
@@ -380,26 +398,27 @@ use axum::extract::Request;
 
 async fn refresh(site: Site, request: Request) -> Result<LoginResponse, Error> {
     let (parts, _) = request.into_parts();
-    Ok(site.auth().refresh(&parts, &[API]).await?)
+    Ok(site.auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
+        .await?)
 }
 ```
 
-Without `using`, refresh always selects `DEFAULT_AUTH_PROVIDER`. A route for a
-different complete provider selects it explicitly:
+Every credential operation selects a provider explicitly:
 
 ```rust
 site.auth()
     .using(APP_AUTH)
-    .refresh(&parts, &[API])
+    .refresh(&parts)
     .await?;
 ```
 
 Refresh extracts only the selected provider's refresh credential, verifies its format and
-`TokenKind`, validates time, provider, binding, and lifecycle state, then runs
-the provider's `TokenVerifier`. Requested audiences must already be present in
-the refresh token, so a refresh may preserve or narrow authority but cannot add
-it. The result contains a new access token and a rotated refresh token with the
-same family identifier.
+`TokenKind`, validates time, provider, audience, and lifecycle state, then runs
+the provider's `TokenVerifier`. Refresh accepts no audience argument and
+preserves the refresh token's complete audience set. The result contains a new
+access token and a rotated refresh token with the same family identifier.
 
 Stateless rotation is the default: an old refresh token remains valid until it
 expires. Add a `TokenLifecycle` to atomically consume token IDs, detect replay,
@@ -411,7 +430,10 @@ and revoke a refresh family when the application needs stateful rotation.
 credential delivery:
 
 ```rust
-let login = site.auth().login(user, &[API]).await?;
+let login = site.auth()
+    .using(DEFAULT_AUTH_PROVIDER)
+    .issue(user, &[API])
+    .await?;
 
 let access = login.credentials().access();
 let refresh = login.credentials().refresh();
@@ -422,10 +444,11 @@ login.write(&mut response);
 ```
 
 For body-delivered tokens, the default JSON contains `access_token`, optional
-`refresh_token`, `token_type`, and `expires_in`. Cookie-delivered values are
-omitted. When every credential is delivered by cookie, the body is `{ "ok":
-true }`. Replacing the body with `.data(value)` does not discard cookies or
-response headers.
+`refresh_token`, scheme-derived `token_type`, and `expires_in`. `token_type` is
+omitted for cookie, query, and scheme-less locations. Cookie-delivered values
+are omitted. When every credential is delivered by cookie, the body is
+`{ "ok": true }`. Replacing the body with `.data(value)` does not discard
+cookies or response headers.
 
 `Credentials` deliberately exposes values only through `access()` and
 `refresh()`. It does not implement `Debug`, `Display`, or `Serialize`.
@@ -436,7 +459,7 @@ An `AuthProvider` name beginning with `vyuh-` is reserved for framework-owned pr
 rejected when the site is built. Application providers should use an
 application-specific name such as `app-auth` or `partner-token`.
 
-Use `AuthConf::empty()` when no implicit provider is wanted. An `AuthProvider`
+Use `AuthConf::default()` when no implicit provider is wanted. An `AuthProvider`
 is a stable name for one complete configured authentication system:
 
 ```rust
@@ -447,7 +470,7 @@ use vyuh::auth::{
 
 const APP_AUTH: AuthProvider = AuthProvider::new("app-auth");
 
-let auth = AuthConf::empty().provider(
+let auth = AuthConf::default().provider(
     APP_AUTH,
     TokenProvider::new(Jwt::hs256_site_secret())
         .access(TokenConf::bearer().ttl(Duration::minutes(15)))
@@ -463,18 +486,18 @@ Select it for login or refresh without changing the operation shape:
 ```rust
 site.auth()
     .using(APP_AUTH)
-    .login(user, &[API])
+    .issue(user, &[API])
     .await?;
 
 site.auth()
     .using(APP_AUTH)
-    .refresh(&parts, &[API])
+    .refresh(&parts)
     .await?;
 ```
 
-The unselected `login`, `refresh`, and `logout` conveniences all mean the
-default provider. Refresh and logout never probe or mutate another provider;
-multi-provider routes must select their provider with `using`.
+Credential issuance, method login, refresh, and logout have no unselected
+provider convenience. Every terminal chain begins with `using(PROVIDER)`, so
+provider choice remains visible at the call site.
 
 ### Audience-scoped providers
 
@@ -484,7 +507,7 @@ audiences through `resource(...)`. Token and opaque-key providers may restrict
 their route coverage explicitly:
 
 ```rust
-let auth = AuthConf::empty()
+let auth = AuthConf::default()
     .provider(
         REPORTS_AUTH,
         TokenProvider::new(Jwt::hs256_site_secret())
@@ -553,7 +576,9 @@ are rejected instead of choosing one.
 
 Every parseable format authenticates the same private `AuthToken` envelope:
 provider, `TokenKind`, subject, scopes, audiences, timestamps, token and family
-IDs, optional issuer and binding, and optional authenticated payload data.
+IDs, optional issuer, and optional authenticated payload data. Version-two
+credentials containing the removed legacy `binding` claim are rejected rather
+than silently treated as ordinary bearer credentials.
 Normal handlers never extract `AuthToken`; they extract `AuthUser`.
 
 The version-two envelope serializes application grants as the standard
@@ -595,7 +620,7 @@ let asymmetric = TokenProvider::new(
 `env`, or `inline`. Key material and source values remain redacted from
 diagnostics and are resolved during site construction.
 
-Issuer, temporal, audience, binding, and lifecycle policy belongs to
+Issuer, temporal, audience, and lifecycle policy belongs to
 `TokenProvider` and runs exactly once after format authentication. For example,
 `.issuer("https://api.example.com")` and `.leeway(Duration::seconds(30))` apply
 equally to JWT, PASETO, BRANCA, Django signing, and custom codecs.
@@ -635,7 +660,7 @@ selection, bounded JWKS retention, rotation, single-flight refresh, and
 unknown-key refresh throttling are handled by a private Huskarl runtime. Its
 state belongs to the built site and is not coupled to `site.cache()`.
 
-The default identity mapping is `sub` to `AuthUser.key` with no application
+The default identity mapping is `sub` to `AuthUser::subject()` with no application
 scopes. Upstream OAuth scopes are credential policy; an explicit identity
 mapper decides which Vyuh application scopes to grant:
 
@@ -663,13 +688,19 @@ Workspace `systemIdToken`:
 IdToken::google()
     .resource(
         GMAIL,
-        "https://example.com/integrations/gmail/member-context",
+        IdTokenResource::new(
+            "https://example.com/integrations/gmail/member-context",
+        )
+        .authorized_party("workspace-client-id"),
     )
     .mapper(GmailSystemIdentity)
 ```
 
-`resource(local_audience, token_audience)` keeps Vyuh route capability separate
-from the external token audience. `IdToken` is verify-only and supports the
+`resource(local_audience, resource)` keeps Vyuh route capability separate from
+the external token audience. The expected authorized party defaults to the
+external audience and can be overridden with `.authorized_party(...)`. A
+multi-audience token must contain a matching non-empty `azp`; a present `azp`
+must always match. `IdToken` is verify-only and supports the
 same bearer, header, cookie, and explicit unsafe-query extraction vocabulary as
 other providers. The mapper receives bounded verified claims and performs
 application checks such as service-account email or hosted domain. It never
@@ -789,8 +820,8 @@ second algorithm.
 ## Application verification and lifecycle
 
 A `TokenVerifier` runs only after extraction, size limits, cryptographic
-authentication, provider and kind checks, temporal validation, requested
-audiences, CSRF, and binding. It may reject a user, replace stale scopes, or add
+authentication, provider and kind checks, temporal validation, token
+audiences, and CSRF. It may reject a user, replace stale scopes, or add
 runtime extras:
 
 ```rust
@@ -868,7 +899,10 @@ use axum::{extract::Request, response::Response};
 async fn logout(site: Site, request: Request) -> Result<Response, Error> {
     let (parts, _) = request.into_parts();
     let mut response = Json(serde_json::json!({ "ok": true })).into_response();
-    let logout = site.auth().logout(&parts).await?;
+    let logout = site.auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .logout(&parts)
+        .await?;
     logout.write(&mut response);
     Ok(response)
 }
@@ -879,7 +913,10 @@ For the default `{ "ok": true }` body, return `LogoutResponse` directly:
 ```rust
 async fn logout(site: Site, request: Request) -> Result<LogoutResponse, Error> {
     let (parts, _) = request.into_parts();
-    Ok(site.auth().logout(&parts).await?)
+    Ok(site.auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .logout(&parts)
+        .await?)
 }
 ```
 
@@ -894,8 +931,10 @@ claim server-side revocation.
 Vyuh bounds credential input before decoding, pins algorithms, binds locally
 issued tokens to their provider, validates expiry and `not_before`, rejects
 audience escalation, short-circuits malformed credentials, and renders generic
-`401`, `403`, `500`, and provider-unavailable `503` bodies. Raw keys, tokens,
-bindings, and key material are redacted from formatting and serialization.
+`401`, `403`, `500`, and provider-unavailable `503` bodies. Scheme-based
+credential locations add their precomputed `WWW-Authenticate` challenge to
+`401` responses. Raw keys, tokens, and key material are redacted from formatting
+and serialization.
 
 Prometheus output includes `vyuh_auth_attempts_total` with configured provider
 names, one fixed `<unknown>` selector bucket, and safe outcome classes, plus
@@ -915,8 +954,9 @@ attachment, and capability boundaries, so a future stateful provider can fit
 the same handler and `Authenticator` APIs without introducing session-specific
 routes or extractors.
 
-Vyuh's Django-compatible `make_password`, `check_password`, and
-`unusable_password` helpers remain available independently of token format.
+Vyuh's Django-compatible asynchronous `make_password` and `check_password`
+helpers run PBKDF2 on Tokio's blocking pool. Their work-factor variants are also
+asynchronous and return `PasswordError`; `unusable_password` remains synchronous.
 
 ## Migration from the halted auth redesign
 
@@ -926,7 +966,7 @@ as follows:
 - register identity proof with `AuthConf::method`, reserving `login` for the
   runtime operation;
 - configure the default credential provider through
-  `AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider)` instead of
+  `AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider)` instead of
   default-provider convenience fields;
 - construct sources with `TokenConf::{bearer,header,cookie,query}` or the
   parallel `AuthKey` constructors instead of `CredentialLocation`;
@@ -937,8 +977,13 @@ as follows:
   `AuthUser::authentication()` and handle its `auth_time()` as optional;
 - remove `?` after `using(...)` and `via(...)`; selection errors are returned
   by the following terminal operation;
-- replace `logout(parts, response).await?` with
-  `let logout = logout(parts).await?; logout.write(response);`.
+- replace direct `AuthUser::key` access with `subject()` or `parse_subject()`;
+- select every credential operation with `using(PROVIDER)`, use `issue` for an
+  already verified identity, and reserve `via(METHOD).login` for identity proof;
+- replace `logout(parts, response).await?` with an explicitly selected
+  `let logout = site.auth().using(PROVIDER).logout(parts).await?;` followed by
+  `logout.write(response)`.
 
 Access and refresh remain `TokenKind` values inside one provider, and all
-`login` and `refresh` calls continue to take `&[Audience]`.
+login and issuance operations take `&[Audience]`; refresh preserves the
+credential's full audience set and takes no audience argument.

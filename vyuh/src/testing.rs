@@ -1,4 +1,6 @@
-use crate::auth::{Audience, AuthError, AuthUser, LoginResponse, RequestCredentialLocation};
+use crate::auth::{
+    Audience, AuthError, AuthProvider, AuthUser, LoginResponse, RequestCredentialLocation,
+};
 #[cfg(all(
     feature = "test-support",
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
@@ -198,13 +200,18 @@ impl TestSite {
         &self.inner.site
     }
 
-    /// Issues credentials through the site's normal default authentication provider.
+    /// Issues credentials through one explicitly selected authentication provider.
     pub async fn login(
         &self,
+        provider: AuthProvider,
         user: AuthUser,
         audiences: &[Audience],
     ) -> Result<LoginResponse, AuthError> {
-        self.site().auth().login(user, audiences).await
+        self.site()
+            .auth()
+            .using(provider)
+            .issue(user, audiences)
+            .await
     }
 
     pub fn request(&self, method: Method, path: &str) -> TestRequestBuilder {

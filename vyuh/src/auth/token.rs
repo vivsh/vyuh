@@ -68,8 +68,8 @@ pub struct AuthToken {
     family_id: Option<String>,
     #[serde(rename = "iss", skip_serializing_if = "Option::is_none")]
     issuer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    binding: Option<String>,
+    #[serde(rename = "binding", skip_serializing_if = "Option::is_none")]
+    legacy_binding: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     payload: serde_json::Value,
 }
@@ -162,10 +162,6 @@ impl AuthToken {
         self.audiences = Some(values);
     }
 
-    pub(crate) fn binding_value(&self) -> Option<&str> {
-        self.binding.as_deref()
-    }
-
     pub(crate) fn authentication_time(&self) -> Result<Option<DateTime<Utc>>, AuthError> {
         self.auth_time.map(timestamp).transpose()
     }
@@ -182,7 +178,7 @@ impl AuthToken {
             version: 2,
             provider: input.provider,
             kind: input.kind,
-            subject: input.user.key.to_string(),
+            subject: input.user.subject().to_owned(),
             scopes: input.user.scopes().iter().cloned().collect(),
             audiences: Some(input.audiences),
             issued_at,
@@ -194,7 +190,7 @@ impl AuthToken {
             token_id: Some(uuid::Uuid::new_v4().to_string()),
             family_id: input.family_id,
             issuer: input.issuer,
-            binding: input.binding,
+            legacy_binding: None,
             payload: serde_json::Value::Null,
         }
     }
@@ -207,7 +203,6 @@ pub(crate) struct LocalToken<'a> {
     pub(crate) audiences: Vec<AudienceId>,
     pub(crate) expires_at: i64,
     pub(crate) family_id: Option<String>,
-    pub(crate) binding: Option<String>,
     pub(crate) issuer: Option<String>,
 }
 
@@ -344,14 +339,6 @@ impl AuthTokenBuilder {
         self
     }
 
-    /// Sets authenticated credential binding.
-    pub fn binding(mut self, value: Option<super::AuthBinding>) -> Self {
-        if let Ok(token) = &mut self.token {
-            token.binding = value.map(super::AuthBinding::into_inner);
-        }
-        self
-    }
-
     /// Sets bounded, authenticated application payload data.
     pub fn payload(mut self, value: impl Into<serde_json::Value>) -> Self {
         if let Ok(token) = &mut self.token {
@@ -383,7 +370,7 @@ struct AuthTokenDraft {
     token_id: Option<String>,
     family_id: Option<String>,
     issuer: Option<String>,
-    binding: Option<String>,
+    legacy_binding: Option<String>,
     payload: serde_json::Value,
 }
 
@@ -404,7 +391,7 @@ impl AuthTokenDraft {
             token_id: None,
             family_id: None,
             issuer: None,
-            binding: None,
+            legacy_binding: None,
             payload: serde_json::Value::Null,
         }
     }
@@ -427,7 +414,7 @@ impl AuthTokenDraft {
             token_id: self.token_id,
             family_id: self.family_id,
             issuer: self.issuer,
-            binding: self.binding,
+            legacy_binding: self.legacy_binding,
             payload: self.payload,
         })
     }
@@ -468,11 +455,15 @@ where
         Some(WireAudiences::One(value)) => vec![value],
         Some(WireAudiences::Many(values)) => values,
     };
-    values
-        .into_iter()
-        .map(|value| AudienceId::new(value).map_err(serde::de::Error::custom))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
+    let mut output = Vec::with_capacity(values.len());
+    for value in values {
+        let value = AudienceId::new(value).map_err(serde::de::Error::custom)?;
+        if output.contains(&value) {
+            return Err(serde::de::Error::custom("duplicate token audience"));
+        }
+        output.push(value);
+    }
+    Ok(Some(output))
 }
 
 fn scopes_empty(scopes: &std::sync::Arc<[Scope]>) -> bool {
@@ -522,7 +513,7 @@ fn validate_names(token: &AuthToken) -> Result<(), AuthError> {
         || invalid_optional_name(token.token_id.as_deref(), 512)
         || invalid_optional_name(token.family_id.as_deref(), 512)
         || invalid_optional_name(token.issuer.as_deref(), 2048)
-        || invalid_optional_name(token.binding.as_deref(), 2048)
+        || token.legacy_binding.is_some()
     {
         return Err(AuthError::InvalidCredential);
     }
@@ -690,6 +681,28 @@ mod tests {
             token.audiences().collect::<Vec<_>>(),
             vec!["api", "reports"]
         );
+        Ok(())
+    }
+
+    /// Verifies duplicate token audiences are rejected during deserialization.
+    #[test]
+    fn duplicate_audiences_are_rejected() {
+        let result =
+            serde_json::from_value::<AuthToken>(token_json(serde_json::json!(["api", "api"])));
+        assert!(result.is_err());
+    }
+
+    /// Verifies a legacy credential binding cannot downgrade into a bearer credential.
+    #[test]
+    fn legacy_binding_is_rejected() -> Result<(), AuthError> {
+        let mut value = token_json(serde_json::json!(["api"]));
+        value["binding"] = serde_json::json!("legacy-device-key");
+        let token =
+            serde_json::from_value::<AuthToken>(value).map_err(|_| AuthError::InvalidCredential)?;
+        assert!(matches!(
+            validate_structure(&token),
+            Err(AuthError::InvalidCredential)
+        ));
         Ok(())
     }
 

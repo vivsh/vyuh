@@ -8,7 +8,8 @@ async fn default_login_returns_pair() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     assert!(!login.credentials().access().is_empty());
     assert!(login.credentials().refresh().is_some());
@@ -23,7 +24,8 @@ async fn default_login_body_contains_token_pair() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let response = login.into_response();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -43,7 +45,8 @@ async fn access_authenticates_user() -> Result<(), AuthError> {
     let site = Site::build(config(), bundle()).await.map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let header = format!("Bearer {}", login.credentials().access());
     let response = TestSite::new(site)
@@ -55,6 +58,66 @@ async fn access_authenticates_user() -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Verifies bearer failures expose the precomputed scheme challenge.
+#[tokio::test]
+async fn bearer_failure_includes_authentication_challenge() -> Result<(), AuthError> {
+    let site = Site::build(config(), bundle()).await.map_err(auth_error)?;
+    let response = TestSite::new(site).get("/me").send().await;
+    assert_eq!(response.status(), vyuh::routes::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response
+            .header("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer realm=\"vyuh\"")
+    );
+    Ok(())
+}
+
+/// Verifies scheme-less credential locations do not emit authentication challenges.
+#[tokio::test]
+async fn query_failure_omits_authentication_challenge() -> Result<(), AuthError> {
+    let provider = TokenProvider::new(Jwt::hs256_site_secret())
+        .without_refresh()
+        .access(TokenConf::query("token", UnsafeQueryCredentials::allow()));
+    let auth = AuthConf::default().provider(ALTERNATE, provider);
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let response = TestSite::new(site).get("/me").send().await;
+    assert_eq!(response.status(), vyuh::routes::StatusCode::UNAUTHORIZED);
+    assert!(response.header("www-authenticate").is_none());
+    Ok(())
+}
+
+/// Verifies an authentication provider outage maps to service unavailable.
+#[tokio::test]
+async fn provider_outage_returns_service_unavailable() -> Result<(), AuthError> {
+    let provider = TokenProvider::new(Jwt::hs256_site_secret()).verifier(UnavailableVerifier);
+    let auth = AuthConf::default().provider(ALTERNATE, provider);
+    let site = Site::build(config().auth(auth), bundle())
+        .await
+        .map_err(auth_error)?;
+    let login = site
+        .auth()
+        .using(ALTERNATE)
+        .issue(AuthUser::new("outage-user"), &[REPORTS])
+        .await?;
+    let response = TestSite::new(site)
+        .get("/me")
+        .header(
+            "authorization",
+            &format!("Bearer {}", login.credentials().access()),
+        )
+        .send()
+        .await;
+    assert_eq!(
+        response.status(),
+        vyuh::routes::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(response.header("www-authenticate").is_none());
+    Ok(())
+}
+
 /// Verifies refresh rotates both credentials and keeps its audiences.
 #[tokio::test]
 async fn refresh_rotates_pair() -> Result<(), AuthError> {
@@ -63,14 +126,19 @@ async fn refresh_rotates_pair() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let refresh = login
         .credentials()
         .refresh()
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
-    let rotated = site.auth().refresh(&parts, &[REPORTS]).await?;
+    let rotated = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
+        .await?;
     assert_ne!(rotated.credentials().access(), login.credentials().access());
     assert_ne!(
         rotated.credentials().refresh(),
@@ -87,12 +155,14 @@ async fn refresh_rejects_access() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let parts = bearer_parts(login.credentials().access())?;
     let error = site
         .auth()
-        .refresh(&parts, &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("access refresh unexpectedly succeeded".into()))?;
@@ -100,28 +170,39 @@ async fn refresh_rejects_access() -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Verifies refresh may narrow but cannot add audiences.
+/// Verifies refresh preserves the refresh credential's complete audience set.
 #[tokio::test]
-async fn refresh_rejects_escalation() -> Result<(), AuthError> {
-    let site = Site::build(config(), bundles::Bundle::default())
+async fn refresh_preserves_all_audiences() -> Result<(), AuthError> {
+    let site = Site::build(config(), dual_audience_bundle())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS, ADMIN])
         .await?;
     let refresh = login
         .credentials()
         .refresh()
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
-    let error = site
+    let rotated = site
         .auth()
-        .refresh(&parts, &[ADMIN])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
+        .await?;
+    let header = format!("Bearer {}", rotated.credentials().access());
+    let test = TestSite::new(site);
+    test.get("/me")
+        .header("authorization", &header)
+        .send()
         .await
-        .err()
-        .ok_or_else(|| AuthError::Internal("audience escalation unexpectedly succeeded".into()))?;
-    assert!(matches!(error, AuthError::AudienceMismatch));
+        .assert_status(vyuh::routes::StatusCode::OK);
+    test.get("/admin-me")
+        .header("authorization", &header)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::OK);
     Ok(())
 }
 
@@ -131,14 +212,14 @@ async fn selected_provider_is_complete() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .access(TokenConf::header("x-access"))
         .refresh(TokenConf::header("x-refresh"));
-    let conf = config().auth(AuthConf::empty().provider(ALTERNATE, provider));
+    let conf = config().auth(AuthConf::default().provider(ALTERNATE, provider));
     let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
         .using(ALTERNATE)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     assert!(login.credentials().refresh().is_some());
     Ok(())
@@ -153,7 +234,7 @@ async fn locally_issued_tokens_are_provider_bound() -> Result<(), AuthError> {
     let second = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::header("x-auth-b"));
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .provider(SHARED_A, first)
         .provider(SHARED_B, second);
     let site = Site::build(config().auth(auth), bundle())
@@ -162,7 +243,7 @@ async fn locally_issued_tokens_are_provider_bound() -> Result<(), AuthError> {
     let login = site
         .auth()
         .using(SHARED_A)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     TestSite::new(site)
         .get("/me")
@@ -182,7 +263,7 @@ async fn malformed_credential_short_circuits_other_providers() -> Result<(), Aut
     let second = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::header("x-auth-b"));
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .provider(SHARED_A, first)
         .provider(SHARED_B, second);
     let site = Site::build(config().auth(auth), bundle())
@@ -191,7 +272,7 @@ async fn malformed_credential_short_circuits_other_providers() -> Result<(), Aut
     let valid = site
         .auth()
         .using(SHARED_B)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     TestSite::new(site)
         .get("/me")
@@ -209,7 +290,7 @@ async fn credential_size_limit_is_enforced() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::bearer().max_credential_bytes(16));
-    let conf = config().auth(AuthConf::empty().provider(ALTERNATE, provider));
+    let conf = config().auth(AuthConf::default().provider(ALTERNATE, provider));
     let site = Site::build(conf, bundle()).await.map_err(auth_error)?;
     TestSite::new(site)
         .get("/me")
@@ -231,14 +312,14 @@ async fn mixed_access_and_refresh_codecs_rotate() -> Result<(), AuthError> {
             .ttl(chrono::Duration::days(7))
             .codec(DjangoSigning::site_secret()),
     );
-    let conf = config().auth(AuthConf::empty().provider(MIXED, provider));
+    let conf = config().auth(AuthConf::default().provider(MIXED, provider));
     let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
         .using(MIXED)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     assert_eq!(login.credentials().access().split('.').count(), 3);
     let refresh = login
@@ -249,7 +330,7 @@ async fn mixed_access_and_refresh_codecs_rotate() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(MIXED)
-        .refresh(&bearer_parts(refresh)?, &[REPORTS])
+        .refresh(&bearer_parts(refresh)?)
         .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
@@ -264,7 +345,7 @@ async fn django_cross_language_fixture_authenticates() -> Result<(), AuthError> 
     let provider = TokenProvider::new(DjangoSigning::site_secret()).without_refresh();
     let conf = config()
         .secret_key(fixture.secret)
-        .auth(AuthConf::empty().provider(DJANGO, provider));
+        .auth(AuthConf::default().provider(DJANGO, provider));
     let site = Site::build(conf, bundle()).await.map_err(auth_error)?;
     let response = TestSite::new(site)
         .get("/me")
@@ -274,7 +355,7 @@ async fn django_cross_language_fixture_authenticates() -> Result<(), AuthError> 
     response
         .assert_json(
             vyuh::routes::StatusCode::OK,
-            &serde_json::json!({ "key": "django-user", "provider": "django" }),
+            &serde_json::json!({ "subject": "django-user", "provider": "django" }),
         )
         .await;
     Ok(())
@@ -287,7 +368,7 @@ async fn django_legacy_fixture_uses_default_audience() -> Result<(), AuthError> 
         serde_json::from_str::<DjangoFixture>(include_str!("../fixtures/django_signing.json"))
             .map_err(auth_error)?;
     let provider = TokenProvider::new(DjangoSigning::site_secret()).without_refresh();
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .default_audience(REPORTS)
         .provider(DJANGO, provider);
     let conf = config().secret_key(fixture.secret).auth(auth);
@@ -307,12 +388,12 @@ async fn django_legacy_fixture_uses_default_audience() -> Result<(), AuthError> 
 #[tokio::test]
 async fn django_signing_rejects_tampering() -> Result<(), AuthError> {
     let provider = TokenProvider::new(DjangoSigning::site_secret()).without_refresh();
-    let conf = config().auth(AuthConf::empty().provider(DJANGO, provider));
+    let conf = config().auth(AuthConf::default().provider(DJANGO, provider));
     let site = Site::build(conf, bundle()).await.map_err(auth_error)?;
     let login = site
         .auth()
         .using(DJANGO)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut token = login.credentials().access().to_owned();
     token.push('x');
@@ -366,12 +447,12 @@ async fn assert_provider_round_trip(
     name: AuthProvider,
     provider: TokenProvider,
 ) -> Result<(), AuthError> {
-    let conf = config().auth(AuthConf::empty().provider(name, provider));
+    let conf = config().auth(AuthConf::default().provider(name, provider));
     let site = Site::build(conf, bundle()).await.map_err(auth_error)?;
     let login = site
         .auth()
         .using(name)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let client = TestSite::new(site);
     let response = client
@@ -400,28 +481,25 @@ async fn assert_provider_round_trip(
 #[tokio::test]
 async fn lifecycle_rejects_replay() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret()).lifecycle(ReplayStore::default());
-    let conf = config().auth(AuthConf::empty().provider(ROTATING, provider));
+    let conf = config().auth(AuthConf::default().provider(ROTATING, provider));
     let site = Site::build(conf, bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
         .using(ROTATING)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let refresh = login
         .credentials()
         .refresh()
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
-    site.auth()
-        .using(ROTATING)
-        .refresh(&parts, &[REPORTS])
-        .await?;
+    site.auth().using(ROTATING).refresh(&parts).await?;
     let error = site
         .auth()
         .using(ROTATING)
-        .refresh(&parts, &[REPORTS])
+        .refresh(&parts)
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("refresh replay unexpectedly succeeded".into()))?;
@@ -445,7 +523,7 @@ async fn opaque_key_authenticates_user() -> Result<(), AuthError> {
     response
         .assert_json(
             vyuh::routes::StatusCode::OK,
-            &serde_json::json!({ "key": "service-1", "provider": "api-key" }),
+            &serde_json::json!({ "subject": "service-1", "provider": "api-key" }),
         )
         .await;
     Ok(())
@@ -477,7 +555,7 @@ async fn opaque_key_logout_revokes_when_configured() -> Result<(), AuthError> {
 #[tokio::test]
 async fn verify_only_token_provider_is_not_an_issuer() -> Result<(), AuthError> {
     let provider = TokenProvider::verify_only(ExternalDecoder, "External");
-    let conf = config().auth(AuthConf::empty().provider(EXTERNAL, provider));
+    let conf = config().auth(AuthConf::default().provider(EXTERNAL, provider));
     let site = Site::build(conf, bundle()).await.map_err(auth_error)?;
     let response = TestSite::new(site.clone())
         .get("/me")
@@ -488,7 +566,7 @@ async fn verify_only_token_provider_is_not_an_issuer() -> Result<(), AuthError> 
     let login = site
         .auth()
         .using(EXTERNAL)
-        .login(AuthUser::new("external-user"), &[REPORTS])
+        .issue(AuthUser::new("external-user"), &[REPORTS])
         .await;
     assert!(matches!(
         login,
@@ -497,7 +575,7 @@ async fn verify_only_token_provider_is_not_an_issuer() -> Result<(), AuthError> 
     let refresh = site
         .auth()
         .using(EXTERNAL)
-        .refresh(&bearer_parts("externally-verified")?, &[REPORTS])
+        .refresh(&bearer_parts("externally-verified")?)
         .await;
     assert!(matches!(
         refresh,
@@ -515,7 +593,8 @@ async fn cookie_login_hides_tokens() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut response);
@@ -532,7 +611,8 @@ async fn cookie_login_default_body_is_ok() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let response = login.into_response();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -549,11 +629,15 @@ async fn response_header_delivery_is_explicit() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::cookie("access").response_header("x-new-auth-token"));
-    let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
+    let auth = AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider);
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let login = site.auth().login(AuthUser::new("user-1"), &[]).await?;
+    let login = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[])
+        .await?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut response);
     assert!(response.headers().contains_key("x-new-auth-token"));
@@ -570,7 +654,8 @@ async fn cookie_authentication_requires_csrf() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut response);
@@ -604,7 +689,8 @@ async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut response);
@@ -614,11 +700,18 @@ async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
     let cookie_header = format!("refresh={refresh}; refresh_csrf={csrf}");
     let missing = cookie_parts(&cookie_header, None)?;
     assert!(matches!(
-        site.auth().refresh(&missing, &[REPORTS]).await,
+        site.auth()
+            .using(DEFAULT_AUTH_PROVIDER)
+            .refresh(&missing)
+            .await,
         Err(AuthError::InvalidCsrfToken)
     ));
     let valid = cookie_parts(&cookie_header, Some(csrf))?;
-    let rotated = site.auth().refresh(&valid, &[REPORTS]).await?;
+    let rotated = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&valid)
+        .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
 }
@@ -632,7 +725,8 @@ async fn cookie_logout_clears_complete_provider_state() -> Result<(), AuthError>
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let mut issued = axum::response::Response::new(axum::body::Body::empty());
     login.write(&mut issued);
@@ -641,7 +735,11 @@ async fn cookie_logout_clears_complete_provider_state() -> Result<(), AuthError>
     let csrf = cookie_value(&cookies, "access_csrf")?;
     let request = cookie_parts(&format!("access={access}; access_csrf={csrf}"), Some(csrf))?;
     let mut response = axum::response::Response::new(axum::body::Body::empty());
-    let logout = site.auth().logout(&request).await?;
+    let logout = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .logout(&request)
+        .await?;
     logout.write(&mut response);
     assert_eq!(response.headers().get_all("set-cookie").iter().count(), 4);
     Ok(())
@@ -687,7 +785,8 @@ async fn login_response_preserves_data() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?
         .data(serde_json::json!({ "user": "user-1" }));
     assert_eq!(login.data_ref(), &serde_json::json!({ "user": "user-1" }));
@@ -701,7 +800,11 @@ async fn login_uses_default_for_empty_audiences() -> Result<(), AuthError> {
     let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let result = site.auth().login(AuthUser::new("user-1"), &[]).await;
+    let result = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[])
+        .await;
     assert!(result.is_ok());
     Ok(())
 }
@@ -709,7 +812,7 @@ async fn login_uses_default_for_empty_audiences() -> Result<(), AuthError> {
 /// Verifies an authenticated route without metadata uses the configured default audience.
 #[tokio::test]
 async fn route_without_audience_uses_site_default() -> Result<(), AuthError> {
-    let auth = AuthConf::default().default_audience(REPORTS);
+    let auth = AuthConf::development().default_audience(REPORTS);
     let site = Site::build(config().auth(auth), bundle_without_audience())
         .await
         .map_err(auth_error)?;
@@ -719,7 +822,11 @@ async fn route_without_audience_uses_site_default() -> Result<(), AuthError> {
         .find(|operation| operation.path == "/me-default")
         .ok_or_else(|| AuthError::Internal("default-audience route is missing".into()))?;
     assert_eq!(operation.audience(), Some("reports"));
-    let login = site.auth().login(AuthUser::new("user-1"), &[]).await?;
+    let login = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[])
+        .await?;
     TestSite::new(site)
         .get("/me-default")
         .header(
@@ -736,7 +843,7 @@ async fn route_without_audience_uses_site_default() -> Result<(), AuthError> {
 #[tokio::test]
 async fn missing_token_audience_maps_only_to_default() -> Result<(), AuthError> {
     let provider = TokenProvider::verify_only(AudienceLessDecoder, "Legacy");
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .default_audience(REPORTS)
         .provider(EXTERNAL, provider);
     let site = Site::build(config().auth(auth), bundle_without_audience())
@@ -755,10 +862,10 @@ async fn missing_token_audience_maps_only_to_default() -> Result<(), AuthError> 
 #[tokio::test]
 async fn missing_token_audience_cannot_escalate() -> Result<(), AuthError> {
     let provider = TokenProvider::verify_only(AudienceLessDecoder, "Legacy");
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .default_audience(REPORTS)
         .provider(EXTERNAL, provider);
-    let protected = bundle_without_audience().with_audience(ADMIN);
+    let protected = bundle_without_audience().with_conf(bundles::conf().audience(ADMIN));
     let site = Site::build(config().auth(auth), protected)
         .await
         .map_err(auth_error)?;
@@ -767,7 +874,7 @@ async fn missing_token_audience_cannot_escalate() -> Result<(), AuthError> {
         .header("authorization", "Bearer legacy-token")
         .send()
         .await
-        .assert_status(vyuh::routes::StatusCode::FORBIDDEN);
+        .assert_status(vyuh::routes::StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
@@ -777,12 +884,20 @@ async fn refresh_empty_audiences_uses_site_default() -> Result<(), AuthError> {
     let site = Site::build(config(), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let login = site.auth().login(AuthUser::new("user-1"), &[]).await?;
+    let login = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[])
+        .await?;
     let refresh = login
         .credentials()
         .refresh()
         .ok_or(AuthError::InvalidCredential)?;
-    let rotated = site.auth().refresh(&bearer_parts(refresh)?, &[]).await?;
+    let rotated = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&bearer_parts(refresh)?)
+        .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
 }
@@ -809,7 +924,11 @@ async fn strict_audience_mode_rejects_empty_login_audiences() -> Result<(), Auth
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let result = site.auth().login(AuthUser::new("user-1"), &[]).await;
+    let result = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[])
+        .await;
     assert!(result.is_err());
     Ok(())
 }
@@ -828,7 +947,7 @@ async fn strict_audience_mode_rejects_route_without_audience() -> Result<(), Aut
 async fn duplicate_access_selector_is_rejected() -> Result<(), AuthError> {
     let duplicate = TokenProvider::new(Jwt::hs256_site_secret());
     let result = Site::build(
-        config().auth(AuthConf::default().provider(ALTERNATE, duplicate)),
+        config().auth(AuthConf::development().provider(ALTERNATE, duplicate)),
         bundles::Bundle::default(),
     )
     .await;
@@ -854,7 +973,7 @@ async fn assert_bearer_status(
 /// Verifies one access selector can serve statically disjoint local audiences.
 #[tokio::test]
 async fn shared_access_selector_dispatches_by_audience() -> Result<(), AuthError> {
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .provider(
             SHARED_A,
             TokenProvider::new(Jwt::hs256_site_secret())
@@ -873,12 +992,12 @@ async fn shared_access_selector_dispatches_by_audience() -> Result<(), AuthError
     let reports = site
         .auth()
         .using(SHARED_A)
-        .login(AuthUser::new("reports-user"), &[REPORTS])
+        .issue(AuthUser::new("reports-user"), &[REPORTS])
         .await?;
     let admin = site
         .auth()
         .using(SHARED_B)
-        .login(AuthUser::new("admin-user"), &[ADMIN])
+        .issue(AuthUser::new("admin-user"), &[ADMIN])
         .await?;
     let client = TestSite::new(site);
     assert_bearer_status(
@@ -908,7 +1027,7 @@ async fn shared_access_selector_dispatches_by_audience() -> Result<(), AuthError
 /// Verifies overlapping local audiences still reject a shared access selector.
 #[tokio::test]
 async fn shared_selector_with_overlapping_audience_is_rejected() -> Result<(), AuthError> {
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .provider(
             SHARED_A,
             TokenProvider::new(Jwt::hs256_site_secret())
@@ -932,7 +1051,7 @@ async fn empty_provider_audience_set_is_rejected() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .audiences([]);
-    let auth = AuthConf::empty().provider(SHARED_A, provider);
+    let auth = AuthConf::default().provider(SHARED_A, provider);
     let result = Site::build(config().auth(auth), bundles::Bundle::default()).await;
     assert!(result.is_err());
     Ok(())
@@ -944,7 +1063,7 @@ async fn duplicate_provider_audience_is_rejected() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .audiences([REPORTS, REPORTS]);
-    let auth = AuthConf::empty().provider(SHARED_A, provider);
+    let auth = AuthConf::default().provider(SHARED_A, provider);
     let result = Site::build(config().auth(auth), bundles::Bundle::default()).await;
     assert!(result.is_err());
     Ok(())
@@ -953,7 +1072,7 @@ async fn duplicate_provider_audience_is_rejected() -> Result<(), AuthError> {
 /// Verifies explicit provider operations cannot exceed static audience coverage.
 #[tokio::test]
 async fn selected_provider_rejects_unconfigured_audience() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         SHARED_A,
         TokenProvider::new(Jwt::hs256_site_secret())
             .without_refresh()
@@ -965,7 +1084,7 @@ async fn selected_provider_rejects_unconfigured_audience() -> Result<(), AuthErr
     let result = site
         .auth()
         .using(SHARED_A)
-        .login(AuthUser::new("user"), &[ADMIN])
+        .issue(AuthUser::new("user"), &[ADMIN])
         .await;
     assert!(matches!(result, Err(AuthError::AudienceMismatch)));
     Ok(())
@@ -986,7 +1105,7 @@ async fn refresh_selector_can_match_another_provider_access_selector() -> Result
     let login = site
         .auth()
         .using(ALTERNATE)
-        .login(AuthUser::new("user"), &[REPORTS])
+        .issue(AuthUser::new("user"), &[REPORTS])
         .await?;
     assert!(login.credentials().refresh().is_some());
     Ok(())
@@ -1007,7 +1126,11 @@ async fn duplicate_bearer_values_are_rejected() -> Result<(), AuthError> {
         "authorization",
         axum::http::HeaderValue::from_static("Bearer second"),
     );
-    let result = site.auth().refresh(&request.into_parts().0, &[]).await;
+    let result = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&request.into_parts().0)
+        .await;
     assert!(matches!(result, Err(AuthError::MalformedLocation)));
     Ok(())
 }
@@ -1017,7 +1140,7 @@ async fn duplicate_bearer_values_are_rejected() -> Result<(), AuthError> {
 async fn duplicate_query_credentials_are_rejected() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .refresh(TokenConf::query("token", UnsafeQueryCredentials::allow()));
-    let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
+    let auth = AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider);
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
@@ -1025,7 +1148,11 @@ async fn duplicate_query_credentials_are_rejected() -> Result<(), AuthError> {
         .uri("/refresh?token=one&token=two")
         .body(axum::body::Body::empty())
         .map_err(auth_error)?;
-    let result = site.auth().refresh(&request.into_parts().0, &[]).await;
+    let result = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&request.into_parts().0)
+        .await;
     assert!(matches!(result, Err(AuthError::MalformedLocation)));
     Ok(())
 }
@@ -1036,13 +1163,14 @@ async fn duplicate_cookie_credentials_are_rejected() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .without_refresh()
         .access(TokenConf::cookie("access"));
-    let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
+    let auth = AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider);
     let site = Site::build(config().auth(auth), bundle())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("cookie-user"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("cookie-user"), &[REPORTS])
         .await?;
     let cookie = format!("access={0}; access={0}", login.credentials().access());
     TestSite::new(site)

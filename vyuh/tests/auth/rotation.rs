@@ -10,7 +10,8 @@ async fn site_secret_fallback_verifies_old_token() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = old_site
         .auth()
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let token = login.credentials().access().to_owned();
     let new_conf = config().secret_key(current).secret_key_fallbacks([old]);
@@ -33,14 +34,14 @@ async fn jwt_rs256_rotation_accepts_retired_key() -> Result<(), AuthError> {
     )
     .key_id("old");
     let old_auth =
-        AuthConf::empty().provider(ROTATING, TokenProvider::new(old_codec).without_refresh());
+        AuthConf::default().provider(ROTATING, TokenProvider::new(old_codec).without_refresh());
     let old_site = Site::build(config().auth(old_auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = old_site
         .auth()
         .using(ROTATING)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     let old_token = login.credentials().access().to_owned();
     assert_retired_token_accepted(old_token).await
@@ -50,7 +51,7 @@ async fn jwt_rs256_rotation_accepts_retired_key() -> Result<(), AuthError> {
 async fn assert_retired_token_accepted(old_token: String) -> Result<(), AuthError> {
     let new_codec = rotating_verifier();
     let new_auth =
-        AuthConf::empty().provider(ROTATING, TokenProvider::new(new_codec).without_refresh());
+        AuthConf::default().provider(ROTATING, TokenProvider::new(new_codec).without_refresh());
     let new_site = Site::build(config().auth(new_auth), bundle())
         .await
         .map_err(auth_error)?;
@@ -71,7 +72,7 @@ async fn jwt_rs256_rotation_rejects_unknown_key_id() -> Result<(), AuthError> {
         KeySource::inline(include_str!("../fixtures/jwt-old-public.pem")),
     )
     .key_id("unknown");
-    let issuer_auth = AuthConf::empty().provider(
+    let issuer_auth = AuthConf::default().provider(
         ROTATING,
         TokenProvider::new(unknown_codec).without_refresh(),
     );
@@ -81,14 +82,14 @@ async fn jwt_rs256_rotation_rejects_unknown_key_id() -> Result<(), AuthError> {
     let login = issuer
         .auth()
         .using(ROTATING)
-        .login(AuthUser::new("user-1"), &[REPORTS])
+        .issue(AuthUser::new("user-1"), &[REPORTS])
         .await?;
     assert_unknown_token_rejected(login.credentials().access()).await
 }
 
 /// Verifies an otherwise valid token cannot bypass the configured key-ID set.
 async fn assert_unknown_token_rejected(token: &str) -> Result<(), AuthError> {
-    let verifier_auth = AuthConf::empty().provider(
+    let verifier_auth = AuthConf::default().provider(
         ROTATING,
         TokenProvider::new(rotating_verifier()).without_refresh(),
     );

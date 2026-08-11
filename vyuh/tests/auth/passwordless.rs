@@ -104,7 +104,7 @@ impl PasswordlessStore for ChallengeStore {
 /// Verifies one OTP method handles a phone address and issues normal credentials.
 #[tokio::test]
 async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -113,6 +113,7 @@ async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> 
 
     let mut challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
@@ -125,16 +126,21 @@ async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> 
         .ok_or(AuthError::InvalidCredential)?
         .code()
         .to_owned();
-    let login = site.auth().via(OTP).complete(Otp::new(token, code)).await?;
+    let login = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .via(OTP)
+        .complete(Otp::new(token, code))
+        .await?;
 
     assert!(!login.credentials().access().is_empty());
     Ok(())
 }
 
-/// Verifies replaying a consumed OTP challenge fails without issuing another credential.
+/// Verifies atomic proof consumption permits exactly one concurrent OTP completion.
 #[tokio::test]
 async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -143,6 +149,7 @@ async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
 
     let mut challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
@@ -156,19 +163,19 @@ async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
         .code()
         .to_owned();
 
-    site.auth()
-        .via(OTP)
-        .complete(Otp::new(token.clone(), code.clone()))
-        .await?;
-    let replay = site.auth().via(OTP).complete(Otp::new(token, code)).await;
-    assert!(matches!(replay, Err(AuthError::InvalidCredential)));
+    let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(OTP);
+    let first = selected.complete(Otp::new(token.clone(), code.clone()));
+    let second = selected.complete(Otp::new(token, code));
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert!(first.is_err() || second.is_err());
     Ok(())
 }
 
 /// Verifies OTP methods cannot build without durable challenge storage.
 #[tokio::test]
 async fn otp_requires_a_durable_challenge_store() -> Result<(), AuthError> {
-    let auth = AuthConf::default().method(OTP, OtpLogin::new(Accounts));
+    let auth = AuthConf::development().method(OTP, OtpLogin::new(Accounts));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
@@ -182,7 +189,7 @@ async fn otp_requires_a_durable_challenge_store() -> Result<(), AuthError> {
 #[tokio::test]
 async fn invalid_otp_policy_fails_site_construction() -> Result<(), AuthError> {
     let auth =
-        AuthConf::default().method(OTP, OtpLogin::new(Accounts).policy(OtpPolicy::numeric(3)));
+        AuthConf::development().method(OTP, OtpLogin::new(Accounts).policy(OtpPolicy::numeric(3)));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
@@ -195,7 +202,7 @@ async fn invalid_otp_policy_fails_site_construction() -> Result<(), AuthError> {
 /// Verifies unresolved principals never receive a proof delivery value.
 #[tokio::test]
 async fn unknown_otp_address_has_no_delivery_value() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -204,6 +211,7 @@ async fn unknown_otp_address_has_no_delivery_value() -> Result<(), AuthError> {
 
     let mut challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::phone("+15550000000"), &[REPORTS])
         .await?;
@@ -216,7 +224,7 @@ async fn unknown_otp_address_has_no_delivery_value() -> Result<(), AuthError> {
 /// Verifies the Base32 policy generates the requested unambiguous code shape.
 #[tokio::test]
 async fn base32_otp_policy_generates_a_bounded_code() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(
             OTP,
@@ -227,6 +235,7 @@ async fn base32_otp_policy_generates_a_bounded_code() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let mut challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
@@ -249,7 +258,7 @@ async fn base32_otp_policy_generates_a_bounded_code() -> Result<(), AuthError> {
 async fn otp_challenge_json_never_contains_a_code() -> Result<(), AuthError> {
     use axum::{body::to_bytes, response::IntoResponse};
 
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -257,6 +266,7 @@ async fn otp_challenge_json_never_contains_a_code() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
@@ -273,7 +283,7 @@ async fn otp_challenge_json_never_contains_a_code() -> Result<(), AuthError> {
 #[cfg(feature = "email")]
 #[tokio::test]
 async fn otp_delivery_is_application_owned() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(OTP, OtpLogin::new(Accounts).policy(OtpPolicy::numeric(8)));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -282,6 +292,7 @@ async fn otp_delivery_is_application_owned() -> Result<(), AuthError> {
 
     let mut challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
         .begin(PasswordlessAddress::email("user@example.com"), &[REPORTS])
         .await?;
@@ -300,7 +311,7 @@ async fn otp_delivery_is_application_owned() -> Result<(), AuthError> {
 #[tokio::test]
 async fn magic_link_requires_an_explicit_callback_url() -> Result<(), AuthError> {
     const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> = LoginMethod::new("email-link");
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .passwordless_store(ChallengeStore::default())
         .method(EMAIL_LINK, MagicLinkLogin::new(Accounts));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -312,23 +323,64 @@ async fn magic_link_requires_an_explicit_callback_url() -> Result<(), AuthError>
     Ok(())
 }
 
-/// Verifies a stateless magic link needs no challenge store and completes once verified.
+/// Verifies default magic links are stateful and permit exactly one completion.
+#[cfg(feature = "email")]
+#[tokio::test]
+async fn magic_link_is_one_time_by_default() -> Result<(), AuthError> {
+    const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> =
+        LoginMethod::new("email-link-stateful");
+    let auth = AuthConf::development()
+        .passwordless_store(ChallengeStore::default())
+        .method(
+            EMAIL_LINK,
+            MagicLinkLogin::new(Accounts).callback_url("https://example.com/auth/email/callback"),
+        );
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let challenge = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .via(EMAIL_LINK)
+        .begin(EmailAddress::new("user@example.com"), &[REPORTS])
+        .await?;
+    let url = url::Url::parse(
+        challenge
+            .magic_link_url()
+            .ok_or(AuthError::InvalidCredential)?,
+    )
+    .map_err(|_| AuthError::InvalidCredential)?;
+    let token = url
+        .query_pairs()
+        .find(|(name, _)| name == "token")
+        .map(|(_, value)| value.into_owned())
+        .ok_or(AuthError::InvalidCredential)?;
+    let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(EMAIL_LINK);
+    let first = selected.complete(MagicLinkCallback::new(token.clone()));
+    let second = selected.complete(MagicLinkCallback::new(token));
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    Ok(())
+}
+
+/// Verifies explicitly reusable magic links need no durable challenge store.
 #[cfg(feature = "email")]
 #[tokio::test]
 async fn stateless_magic_link_completes_without_a_store() -> Result<(), AuthError> {
     const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> =
         LoginMethod::new("email-link-stateless");
-    let auth = AuthConf::default().method(
+    let auth = AuthConf::development().method(
         EMAIL_LINK,
         MagicLinkLogin::new(Accounts)
             .callback_url("https://example.com/auth/email/callback")
-            .stateless(),
+            .stateless(UnsafeReusableMagicLinks::allow()),
     );
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(EMAIL_LINK)
         .begin(EmailAddress::new("user@example.com"), &[REPORTS])
         .await?;
@@ -345,6 +397,7 @@ async fn stateless_magic_link_completes_without_a_store() -> Result<(), AuthErro
         .ok_or(AuthError::InvalidCredential)?;
     let login = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(EMAIL_LINK)
         .complete(MagicLinkCallback::new(token))
         .await?;

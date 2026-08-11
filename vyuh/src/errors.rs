@@ -891,6 +891,12 @@ impl From<AuthError> for Error {
     }
 }
 
+impl From<crate::auth::PasswordError> for Error {
+    fn from(err: crate::auth::PasswordError) -> Self {
+        Self::other(err)
+    }
+}
+
 impl From<crate::db::sqlx::Error> for Error {
     fn from(err: crate::db::sqlx::Error) -> Self {
         let kind = match &err {

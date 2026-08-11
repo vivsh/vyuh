@@ -437,7 +437,7 @@ impl From<Option<&crate::auth::AuthUser>> for SessionOut {
     fn from(user: Option<&crate::auth::AuthUser>) -> Self {
         match user {
             Some(user) => Self {
-                subject: user.key.to_string(),
+                subject: user.subject().to_owned(),
                 scopes: user.scopes().iter().map(ToString::to_string).collect(),
             },
             None => Self {

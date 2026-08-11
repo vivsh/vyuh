@@ -1,9 +1,8 @@
 //! Huskarl-backed external identity-token runtime.
 
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::{collections::BTreeMap, sync::Arc, time::UNIX_EPOCH};
 
 use axum::http::{HeaderMap, HeaderValue, header, request::Parts};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future::BoxFuture;
 use huskarl_resource_server::{
     DefaultJwsVerifierPlatform,
@@ -21,7 +20,7 @@ use huskarl_resource_server::{
 };
 use serde::Deserialize;
 
-use super::config::{ErasedIdTokenMapper, IdToken, IdTokenClaims};
+use super::config::{ErasedIdTokenMapper, IdToken, IdTokenClaims, IdTokenResource};
 use crate::auth::{
     AudienceId, AuthError, AuthUser, AuthenticationContext, CredentialLocation, ProviderId,
     oauth::http::{AuthHttpClient, validate_remote_url},
@@ -31,7 +30,6 @@ use crate::auth::{
 };
 
 const MAX_CREDENTIAL_BYTES: usize = 16 * 1024;
-const MAX_CLAIMS_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Deserialize)]
 struct ExtraClaims {
@@ -44,15 +42,14 @@ struct ExtraClaims {
 }
 
 struct ResourceRuntime {
-    audience: AudienceId,
-    token_audience: String,
+    authorized_party: String,
     validator: CustomValidator<ExtraClaims>,
 }
 
 pub(crate) struct IdTokenRuntime {
     id: ProviderId,
     mapper: Arc<dyn ErasedIdTokenMapper>,
-    resources: Vec<ResourceRuntime>,
+    resources: BTreeMap<AudienceId, ResourceRuntime>,
     location: CredentialLocation,
     csrf: Option<crate::auth::CsrfConf>,
     audiences: ProviderAudienceSet,
@@ -83,12 +80,7 @@ impl IdTokenRuntime {
             .await
             .map_err(|error| startup_failure(&id, "initial JWKS load", error))?;
         let resources = build_resources(&id, &conf, &metadata, factory).await?;
-        let audiences = ProviderAudienceSet::only(
-            resources
-                .iter()
-                .map(|resource| resource.audience.clone())
-                .collect(),
-        )?;
+        let audiences = ProviderAudienceSet::only(resources.keys().cloned().collect())?;
         let mapper = conf.mapper.ok_or_else(|| {
             AuthError::InvalidProviderConfig(
                 "identity-token providers require an application mapper".into(),
@@ -117,9 +109,9 @@ impl IdTokenRuntime {
         }
         let resource = self.resource(audience)?;
         let validated = validate(resource, raw, parts).await?;
-        validate_authorized_party(&validated, &resource.token_audience)?;
+        validate_authorized_party(&validated, &resource.authorized_party)?;
         let authentication = authentication(&validated)?;
-        let claims = normalize_claims(raw, validated)?;
+        let claims = normalize_claims(validated)?;
         let user = self.mapper.map(&claims).await?;
         user.validate()?;
         Ok(user
@@ -129,8 +121,7 @@ impl IdTokenRuntime {
 
     fn resource(&self, audience: &AudienceId) -> Result<&ResourceRuntime, AuthError> {
         self.resources
-            .iter()
-            .find(|resource| resource.audience == *audience)
+            .get(audience)
             .ok_or(AuthError::AudienceMismatch)
     }
 
@@ -202,19 +193,31 @@ async fn build_resources(
     conf: &IdToken,
     metadata: &AuthorizationServerMetadata,
     factory: Arc<dyn JwsVerifierFactory>,
-) -> Result<Vec<ResourceRuntime>, AuthError> {
-    let mut output = Vec::with_capacity(conf.resources.len());
-    for (audience, token_audience) in &conf.resources {
-        let validator = build_validator(conf, metadata, factory.clone(), token_audience)
+) -> Result<BTreeMap<AudienceId, ResourceRuntime>, AuthError> {
+    let mut output = BTreeMap::new();
+    for (audience, resource) in &conf.resources {
+        let validator = build_validator(conf, metadata, factory.clone(), &resource.token_audience)
             .await
             .map_err(|error| startup_failure(provider, "resource validator construction", error))?;
-        output.push(ResourceRuntime {
-            audience: AudienceId::declared(*audience)?,
-            token_audience: token_audience.clone(),
-            validator,
-        });
+        output.insert(
+            AudienceId::declared(*audience)?,
+            resource_runtime(resource, validator),
+        );
     }
     Ok(output)
+}
+
+fn resource_runtime(
+    resource: &IdTokenResource,
+    validator: CustomValidator<ExtraClaims>,
+) -> ResourceRuntime {
+    ResourceRuntime {
+        authorized_party: resource
+            .authorized_party
+            .clone()
+            .unwrap_or_else(|| resource.token_audience.clone()),
+        validator,
+    }
 }
 
 /// Builds one algorithm-pinned identity-token validator.
@@ -266,7 +269,7 @@ fn validate_encoded(raw: &str) -> Result<(), AuthError> {
 
 fn validate_authorized_party(
     validated: &ValidatedRequest<ExtraClaims>,
-    token_audience: &str,
+    expected: &str,
 ) -> Result<(), AuthError> {
     let Some(authorized) = validated.claims.azp.as_deref() else {
         return if validated.aud.len() > 1 {
@@ -275,7 +278,7 @@ fn validate_authorized_party(
             Ok(())
         };
     };
-    if authorized.is_empty() || authorized.len() > 512 || token_audience.is_empty() {
+    if authorized.is_empty() || authorized.len() > 512 || authorized != expected {
         return Err(AuthError::InvalidCredential);
     }
     Ok(())
@@ -298,32 +301,32 @@ fn authentication(
 }
 
 /// Converts verified protocol claims into the bounded application mapper view.
-fn normalize_claims(
-    raw: &str,
-    validated: ValidatedRequest<ExtraClaims>,
-) -> Result<IdTokenClaims, AuthError> {
-    let issued_at = validated.iat.ok_or(AuthError::InvalidCredential)?;
-    let expires_at = validated.exp.ok_or(AuthError::InvalidCredential)?;
-    Ok(IdTokenClaims {
-        subject: validated.sub.ok_or(AuthError::InvalidCredential)?,
-        issuer: validated.iss.ok_or(AuthError::InvalidCredential)?,
-        audiences: validated.aud,
-        issued_at: system_timestamp(issued_at)?,
-        expires_at: system_timestamp(expires_at)?,
-        token_id: validated.jti,
-        raw: raw_claims(raw)?,
-    })
-}
-
-fn raw_claims(raw: &str) -> Result<serde_json::Map<String, serde_json::Value>, AuthError> {
-    let claims = raw.split('.').nth(1).ok_or(AuthError::InvalidCredential)?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(claims)
-        .map_err(|_| AuthError::InvalidCredential)?;
-    if bytes.len() > MAX_CLAIMS_BYTES {
-        return Err(AuthError::InvalidCredential);
+fn normalize_claims(validated: ValidatedRequest<ExtraClaims>) -> Result<IdTokenClaims, AuthError> {
+    let issued_at = system_timestamp(validated.iat.ok_or(AuthError::InvalidCredential)?)?;
+    let expires_at = system_timestamp(validated.exp.ok_or(AuthError::InvalidCredential)?)?;
+    let subject = validated.sub.ok_or(AuthError::InvalidCredential)?;
+    let issuer = validated.iss.ok_or(AuthError::InvalidCredential)?;
+    let mut raw = validated.claims._other;
+    raw.insert("sub".into(), subject.clone().into());
+    raw.insert("iss".into(), issuer.clone().into());
+    raw.insert("aud".into(), serde_json::json!(&validated.aud));
+    raw.insert("iat".into(), issued_at.timestamp().into());
+    raw.insert("exp".into(), expires_at.timestamp().into());
+    if let Some(value) = validated.claims.azp {
+        raw.insert("azp".into(), value.into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| AuthError::InvalidCredential)
+    if let Some(value) = validated.claims.auth_time {
+        raw.insert("auth_time".into(), value.into());
+    }
+    Ok(IdTokenClaims {
+        subject,
+        issuer,
+        audiences: validated.aud,
+        issued_at,
+        expires_at,
+        token_id: validated.jti,
+        raw,
+    })
 }
 
 fn system_timestamp(
@@ -414,7 +417,6 @@ impl ProviderRuntimeContract for IdTokenRuntime {
         &'a self,
         _: AuthUser,
         _: Vec<AudienceId>,
-        _: Option<String>,
     ) -> BoxFuture<'a, Result<crate::auth::LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -423,7 +425,6 @@ impl ProviderRuntimeContract for IdTokenRuntime {
         &'a self,
         _: &'a str,
         _: &'a Parts,
-        _: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<crate::auth::LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }

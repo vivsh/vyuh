@@ -49,9 +49,11 @@ The `vyuh` crate is organized around these subsystems:
   externally shaped authenticated JSON into that envelope without bypassing the
   provider's common validation. Exact string scopes and `Permit<ScopeRule>`
   provide extractor-driven application authorization
-  after audience validation. Bundles own an explicit `Audience` descriptor or
-  receive the site's bounded default audience during site construction;
-  omission never grants unrestricted access. Provider selector ownership is
+  after audience validation. `BundleConf` contributes an explicit `Audience`
+  descriptor or bundles receive the site's bounded default audience during site
+  construction; omission never grants unrestricted access. Bundle provider
+  contributions are validated then merged into the one central registry, while
+  shared providers and auth lifecycle remain `SiteConf` concerns. Provider selector ownership is
   indexed by local audience, allowing the same Bearer source for disjoint OAuth
   resources without token sniffing or verifier fallthrough.
 - `routes::ClientIp` resolves a single forwarded client address when supplied,
@@ -88,11 +90,11 @@ The `vyuh` crate is organized around these subsystems:
 - `mcp` is an optional, tool-only Streamable HTTP subsystem over explicitly
   registered semantic callables. Bundle-owned `McpToolRegistry` entries retain
   stable schemas, authorization metadata, direct callable targets, and MCP
-  annotations; `McpEngine` separately owns one or more independently configured
-  service endpoints. Tools execute through `McpToolContext`, without a route
-  adapter. The engine owns
-  protocol framing, scope-filtered discovery, protected-resource metadata,
-  authentication through one selected Vyuh provider. Generic optional `auth::oauth`
+  annotations; `McpEngine` separately owns finalized bundle-subtree service
+  endpoints. Tools execute through `McpToolContext`, without a route adapter.
+  The engine owns protocol framing, scope-filtered discovery, and optional
+  protected-resource metadata; it authenticates through the central audience
+  selector just like a normal route. Generic optional `auth::oauth`
   delegates external JWT/JWKS validation and bounded key rotation to a private
   Huskarl runtime built eagerly for the site; MCP only publishes protected-resource
   metadata when that provider exposes it. It never
@@ -213,14 +215,19 @@ the client-facing event type uses the payload schema name.
    proof to the selected credential provider.
    Runtime `.using(...)` and `.via(...)` calls retain descriptors without
    failure; terminal operations resolve them against the immutable registries.
-   Unselected login, refresh, and logout target the default provider, while
-   request extraction alone falls through absent access credentials. Access
+   Credential issuance, method login, refresh, and logout require an explicit
+   `.using(PROVIDER)` selection, while request extraction alone falls through
+   absent access credentials. `AuthConf::default()` installs no provider;
+   `AuthConf::development()` deliberately installs the framework JWT provider.
+   Access
    dispatch first resolves the route audience, then considers only providers
    whose static audience coverage includes it. A selector may repeat across
    disjoint audience sets, while overlapping or unrestricted same-selector
    providers fail site construction. Multiple eligible credentials still fail
-   before cryptographic work. Refresh
-   validates and rotates a credential only inside its selected provider. Cookie
+   before cryptographic work. Refresh preserves the credential's complete
+   audience set and rotates it only inside its selected provider. MFA,
+   federated, OTP, and stateful magic-link continuations require atomic
+   one-time application stores before the site can start. Cookie
    credentials use provider-managed delivery, CSRF validation, and logout
    response attachments. Optional lifecycle storage supplies replay protection
    and revocation without changing handler signatures. Each framework provider
@@ -262,16 +269,17 @@ the client-facing event type uses the payload schema name.
    JSON resources remain direct, paginated queries return Mool's `Page<T>`, and
    framework-generated JSON failures normalize into `ErrorReport`; raw responses
    remain an explicit application escape hatch.
-10. When enabled, each `with_mcp` declaration claims the unclaimed MCP registry
-    entries in its bundle subtree. Site construction finalizes all service paths,
-    rejects unclaimed entries and endpoint/resource collisions, and builds a
+10. When enabled, each `BundleConf::mcp` declaration selects tools in its final
+    bundle subtree, with the nearest nested declaration owning each tool. Site
+    construction finalizes all service paths, rejects unclaimed entries,
+    audience mismatches, and endpoint/resource collisions, and builds a
     deterministic catalog per service. Protected endpoints validate their own
     canonical resource audience and map the subject to `AuthUser`. Discovery
     filters tools using the same normalized scope rules used again at call
     time. Direct targets receive `McpToolContext`; the MCP engine does not
     adapt or dispatch HTTP routes. Tools never receive the external bearer
     credential. Only public
-    OAuth metadata and JWKS remain inside the selected provider's per-site
+    OAuth metadata and JWKS remain inside an eligible provider's per-site
     Huskarl verifier and never cross the application cache boundary.
 11. OpenAPI and schema metadata are produced from registered operations and
     type metadata.

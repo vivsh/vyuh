@@ -51,16 +51,9 @@ impl McpToolRegistry {
         self.claimed.extend(other.claimed);
     }
 
-    /// Claims every registration not already owned by another MCP service.
-    pub(crate) fn claim_unclaimed(&mut self) -> Vec<OperationId> {
-        let ids = self
-            .targets
-            .keys()
-            .filter(|id| !self.claimed.contains(id))
-            .copied()
-            .collect::<Vec<_>>();
-        self.claimed.extend(ids.iter().copied());
-        ids
+    /// Records the finalized service ownership of direct tool registrations.
+    pub(crate) fn claim(&mut self, ids: impl IntoIterator<Item = OperationId>) {
+        self.claimed.extend(ids);
     }
 
     /// Returns the target for a claimed operation.

@@ -219,9 +219,6 @@ fn enabled_features() -> Vec<&'static str> {
     if cfg!(feature = "cors") {
         features.push("cors");
     }
-    if cfg!(feature = "argon2") {
-        features.push("argon2");
-    }
     features
 }
 

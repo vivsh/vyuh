@@ -8,15 +8,14 @@ use futures::future::BoxFuture;
 use super::{
     contract::{ProviderAudienceSet, ProviderCapabilities, ProviderRuntimeContract},
     validation::{
-        clear_locations, delivery, issue_token, validate_binding, validate_common,
-        validate_credential_size, validate_csrf, validate_issued_binding, validate_subject,
-        validate_token,
+        clear_locations, delivery, issue_token, validate_common, validate_credential_size,
+        validate_csrf, validate_subject, validate_token,
     },
 };
 use crate::auth::{
-    AudienceId, AuthError, AuthToken, AuthUser, BindingResolver, CodecRuntime, CredentialLocation,
-    CredentialType, Credentials, CsrfConf, ErasedLifecycle, ErasedTokenVerifier, LoginResponse,
-    ProviderDoc, ProviderId, RefreshMetadata, TokenKind,
+    AudienceId, AuthError, AuthToken, AuthUser, CodecRuntime, CredentialLocation, CredentialType,
+    Credentials, CsrfConf, ErasedLifecycle, ErasedTokenVerifier, LoginResponse, ProviderDoc,
+    ProviderId, RefreshMetadata, TokenKind,
 };
 
 #[derive(Clone)]
@@ -27,7 +26,6 @@ pub(super) struct TokenRuntime {
     pub(super) refresh: Option<KindRuntime>,
     pub(super) verifier: Arc<dyn ErasedTokenVerifier>,
     pub(super) lifecycle: Option<Arc<dyn ErasedLifecycle>>,
-    pub(super) binding: Option<BindingResolver>,
     pub(super) leeway_seconds: i64,
     pub(super) default_audience: Option<AudienceId>,
     pub(super) audiences: ProviderAudienceSet,
@@ -110,18 +108,16 @@ impl ProviderRuntimeContract for TokenRuntime {
         &'a self,
         user: AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
-        Box::pin(TokenRuntime::login(self, user, audiences, binding))
+        Box::pin(TokenRuntime::login(self, user, audiences))
     }
 
     fn refresh<'a>(
         &'a self,
         raw: &'a str,
         parts: &'a Parts,
-        audiences: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
-        Box::pin(TokenRuntime::refresh(self, raw, parts, audiences))
+        Box::pin(TokenRuntime::refresh(self, raw, parts))
     }
 
     fn logout<'a>(
@@ -144,13 +140,8 @@ impl TokenRuntime {
         validate_credential_size(raw, self.access.max_credential_bytes)?;
         let token = self.normalize(self.access.codec.decode(raw).await?)?;
         validate_csrf(self.access.csrf.as_ref(), parts)?;
-        self.accept(
-            &token,
-            TokenKind::Access,
-            parts,
-            std::slice::from_ref(audience),
-        )
-        .await
+        self.accept(&token, TokenKind::Access, std::slice::from_ref(audience))
+            .await
     }
 
     /// Issues this provider's configured access and optional refresh credentials.
@@ -158,21 +149,14 @@ impl TokenRuntime {
         &self,
         user: AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
     ) -> Result<LoginResponse, AuthError> {
         validate_subject(&user)?;
-        validate_issued_binding(self.binding, &binding)?;
-        let pair = self.tokens(&user, audiences, binding, None)?;
+        let pair = self.tokens(&user, audiences, None)?;
         self.response(pair).await.map(|(response, _)| response)
     }
 
     /// Verifies one refresh credential and rotates the complete credential pair.
-    async fn refresh(
-        &self,
-        raw: &str,
-        parts: &Parts,
-        audiences: &[AudienceId],
-    ) -> Result<LoginResponse, AuthError> {
+    async fn refresh(&self, raw: &str, parts: &Parts) -> Result<LoginResponse, AuthError> {
         let refresh = self
             .refresh
             .as_ref()
@@ -180,26 +164,25 @@ impl TokenRuntime {
         validate_credential_size(raw, refresh.max_credential_bytes)?;
         let current = self.normalize(refresh.codec.decode(raw).await?)?;
         validate_csrf(refresh.csrf.as_ref(), parts)?;
+        let audiences = current
+            .audience_ids()
+            .ok_or(AuthError::AudienceMismatch)?
+            .to_vec();
+        self.audiences.validate_requested(&audiences)?;
         let user = self
-            .accept(&current, TokenKind::Refresh, parts, audiences)
+            .accept(&current, TokenKind::Refresh, &audiences)
             .await?;
-        let pair = self.tokens(
-            &user,
-            audiences.to_vec(),
-            current.binding_value().map(str::to_owned),
-            current.family_id().map(str::to_owned),
-        )?;
+        let pair = self.tokens(&user, audiences, current.family_id().map(str::to_owned))?;
         let (response, replacement) = self.response(pair).await?;
         self.rotate(&current, replacement.as_ref()).await?;
         Ok(response)
     }
 
-    /// Applies provider, lifecycle, binding, and application identity validation.
+    /// Applies provider, lifecycle, and application identity validation.
     async fn accept(
         &self,
         token: &AuthToken,
         kind: TokenKind,
-        parts: &Parts,
         audiences: &[AudienceId],
     ) -> Result<AuthUser, AuthError> {
         let expected = self.kind(kind)?;
@@ -217,7 +200,6 @@ impl TokenRuntime {
         if self.lifecycle.is_some() && token.token_id().is_none() {
             return Err(AuthError::InvalidCredential);
         }
-        validate_binding(token.binding_value(), self.binding, parts)?;
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.validate(token).await?;
         }
@@ -244,7 +226,6 @@ impl TokenRuntime {
         &self,
         user: &AuthUser,
         audiences: Vec<AudienceId>,
-        binding: Option<String>,
         family: Option<String>,
     ) -> Result<TokenPair, AuthError> {
         let family = self
@@ -258,22 +239,11 @@ impl TokenRuntime {
             audiences.clone(),
             &self.access,
             family.clone(),
-            binding.clone(),
         )?;
         let refresh = self
             .refresh
             .as_ref()
-            .map(|conf| {
-                issue_token(
-                    &self.id,
-                    TokenKind::Refresh,
-                    user,
-                    audiences,
-                    conf,
-                    family,
-                    binding,
-                )
-            })
+            .map(|conf| issue_token(&self.id, TokenKind::Refresh, user, audiences, conf, family))
             .transpose()?;
         Ok(TokenPair { access, refresh })
     }
@@ -368,7 +338,7 @@ impl TokenRuntime {
             validate_credential_size(&raw, self.access.max_credential_bytes)?;
             let token = self.normalize(self.access.codec.decode(&raw).await?)?;
             validate_csrf(self.access.csrf.as_ref(), parts)?;
-            self.validate_logout_token(&token, parts)?;
+            self.validate_logout_token(&token)?;
             return Ok(Some(token));
         }
         let Some(refresh) = &self.refresh else {
@@ -380,12 +350,12 @@ impl TokenRuntime {
         validate_credential_size(&raw, refresh.max_credential_bytes)?;
         let token = self.normalize(refresh.codec.decode(&raw).await?)?;
         validate_csrf(refresh.csrf.as_ref(), parts)?;
-        self.validate_logout_token(&token, parts)?;
+        self.validate_logout_token(&token)?;
         Ok(Some(token))
     }
 
     /// Validates the authenticated token properties required before revocation.
-    fn validate_logout_token(&self, token: &AuthToken, parts: &Parts) -> Result<(), AuthError> {
+    fn validate_logout_token(&self, token: &AuthToken) -> Result<(), AuthError> {
         validate_common(token, &self.id, self.leeway_seconds)?;
         let conf = self.kind(token.kind())?;
         if conf.issuer.is_some() && token.issuer() != conf.issuer.as_deref() {
@@ -397,7 +367,6 @@ impl TokenRuntime {
         if self.lifecycle.is_some() && token.token_id().is_none() {
             return Err(AuthError::InvalidCredential);
         }
-        validate_binding(token.binding_value(), self.binding, parts)?;
         Ok(())
     }
 }

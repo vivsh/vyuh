@@ -67,7 +67,10 @@ Issue a regular application credential with the console audience whenever the
 authenticated user is allowed to inspect Console:
 
 ```rust
-site.auth().login(user, &[API, CONSOLE_AUDIENCE]).await?;
+site.auth()
+    .using(APP_AUTH)
+    .issue(user, &[API, CONSOLE_AUDIENCE])
+    .await?;
 ```
 
 The configured provider controls delivery, rotation, validation, CSRF, and

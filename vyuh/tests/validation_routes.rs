@@ -125,12 +125,14 @@ async fn validation_site(openapi: bool) -> vyuh::Site {
         valid_schema_rules,
     };
     let bundle = if openapi {
-        bundle.with_openapi(
-            bundles::OpenApiConf::default()
-                .title("Validation API")
-                .version("0.1.0")
-                .spec("/openapi.json")
-                .public(),
+        bundle.with_conf(
+            bundles::conf().openapi(
+                bundles::OpenApiConf::default()
+                    .title("Validation API")
+                    .version("0.1.0")
+                    .spec("/openapi.json")
+                    .public(),
+            ),
         )
     } else {
         bundle

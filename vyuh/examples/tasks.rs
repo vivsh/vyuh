@@ -126,7 +126,7 @@ async fn main() -> Result<(), Error> {
         process_data,
         approve_document,
     }
-    .with_task_lane(TaskLaneConf::new(EMAIL, 2));
+    .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL, 2)));
 
     let task_conf = TaskConf::default()
         .concurrency(4)

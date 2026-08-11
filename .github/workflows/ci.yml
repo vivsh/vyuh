@@ -76,6 +76,8 @@ jobs:
           - oauth
           - federated
           - id-token
+          - email
+          - mcp
           - "oauth,federated"
           - paseto
           - branca

@@ -14,7 +14,7 @@ pub(crate) fn bundle(conf: &ConsoleConf) -> crate::bundles::Bundle {
     parts.extend(inspection_parts(&conf.path));
     parts.extend(api_parts(&conf.path));
     parts.extend(fallback_parts(&conf.path));
-    bundles::bundle(parts).with_audience(CONSOLE_AUDIENCE)
+    bundles::bundle(parts).with_conf(bundles::conf().audience(CONSOLE_AUDIENCE))
 }
 
 /// Returns the site-root console parts, including its public assets.

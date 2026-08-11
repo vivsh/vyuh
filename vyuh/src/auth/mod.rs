@@ -28,11 +28,11 @@ pub use codecs::Branca;
 pub use codecs::Paseto;
 pub use codecs::{DjangoSigning, Jwt, JwtAlgorithm, JwtConf, JwtVerificationKey};
 pub use config::{
-    AuthBinding, AuthConf, AuthKey, AuthProviderSummary, AuthSummary, BindingResolver, KeyRequest,
-    KeySource, KeyVerifier, ProviderDefinition, TokenConf, TokenProvider, TokenVerifier,
+    AuthConf, AuthKey, AuthProviderSummary, AuthSummary, KeyRequest, KeySource, KeyVerifier,
+    ProviderDefinition, TokenConf, TokenProvider, TokenVerifier,
 };
 #[cfg(feature = "id-token")]
-pub use id_token::{IdToken, IdTokenClaims, IdTokenMapper};
+pub use id_token::{IdToken, IdTokenClaims, IdTokenMapper, IdTokenResource};
 pub use identity::{
     Audience, AuthProvider, AuthUser, AuthenticationContext, DEFAULT_AUDIENCE,
     DEFAULT_AUTH_PROVIDER,
@@ -49,7 +49,9 @@ pub use login::{
     PasswordlessStore, PhoneNumber, PresentedSecret,
 };
 #[cfg(feature = "email")]
-pub use login::{EmailAddress, EmailLoginResolver, MagicLinkCallback, MagicLinkLogin};
+pub use login::{
+    EmailAddress, EmailLoginResolver, MagicLinkCallback, MagicLinkLogin, UnsafeReusableMagicLinks,
+};
 #[cfg(feature = "federated")]
 pub use login::{
     FederatedCallback, FederatedIdentity, FederatedLogin, FederatedProvider, FederatedStart,
@@ -60,9 +62,10 @@ pub use oauth::{
     OAuthClaims, OAuthIdentityMapper, OAuthJwtAlgorithm, OAuthResource, OAuthResourceServer,
 };
 pub use password::{
-    PasswordVerification, check_password, check_password_with_upgrade, make_password,
-    make_password_with_iterations, unusable_password,
+    PasswordError, PasswordVerification, check_password, check_password_with_upgrade,
+    make_password, make_password_with_iterations, unusable_password,
 };
+pub use request::AuthRejection;
 pub use response::{Credentials, DefaultLoginData, LoginResponse, LogoutResponse};
 pub use runtime::{Authenticator, ProviderAuth};
 pub use token::{AuthToken, AuthTokenBuilder, EncodedCredential, PresentedCredential, TokenKind};
@@ -97,18 +100,37 @@ pub(crate) struct AuthProtectedResource {
     pub(crate) required_scopes: Vec<String>,
 }
 
-#[cfg(feature = "mcp")]
-/// Provider-owned challenge metadata for protocol adapters.
-#[derive(Clone, Debug)]
-pub(crate) struct AuthChallenge {
-    pub(crate) scheme: &'static str,
-}
-
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use thiserror::Error;
+
+/// Authentication construction failure detected before the site starts serving requests.
+#[derive(Debug, Error)]
+pub enum AuthBuildError {
+    /// The effective authentication registry is invalid.
+    #[error("invalid authentication configuration: {0}")]
+    Configuration(String),
+    /// A configured provider or login method could not initialize.
+    #[error("authentication provider initialization failed: {0}")]
+    ProviderInitialization(String),
+    /// Authentication preparation could not run on the blocking worker pool.
+    #[error("authentication startup worker failed")]
+    WorkerFailure,
+}
+
+impl AuthBuildError {
+    pub(crate) fn from_auth(error: AuthError) -> Self {
+        match error {
+            AuthError::ProviderUnavailable => Self::ProviderInitialization(error.to_string()),
+            AuthError::InvalidProviderConfig(message) if message.contains("failed during") => {
+                Self::ProviderInitialization(message)
+            }
+            _ => Self::Configuration(error.to_string()),
+        }
+    }
+}
 
 /// Structured authentication failures with deliberately safe HTTP rendering.
 #[derive(Debug, Error)]
@@ -131,12 +153,8 @@ pub enum AuthError {
     Forbidden,
     #[error("credential lacks a required provider scope")]
     InsufficientScope,
-    #[error("credential binding does not match this request")]
-    BindingMismatch,
     #[error("credential CSRF validation failed")]
     InvalidCsrfToken,
-    #[error("a binding is required for this provider")]
-    BindingRequired,
     #[error("authenticated operation has no audience context")]
     MissingAudienceContext,
     #[error("provider '{0}' is not configured")]
@@ -179,23 +197,7 @@ pub enum AuthError {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::AudienceMismatch
-            | Self::Forbidden
-            | Self::InsufficientScope
-            | Self::InvalidCsrfToken => StatusCode::FORBIDDEN,
-            Self::NoCredential
-            | Self::MalformedLocation
-            | Self::InvalidCredential
-            | Self::ExpiredCredential
-            | Self::CredentialNotYetValid
-            | Self::WrongTokenKind
-            | Self::InvalidLoginState
-            | Self::ExpiredLoginState
-            | Self::BindingMismatch => StatusCode::UNAUTHORIZED,
-            Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
+        let status = self.status();
         let (code, message) = if status == StatusCode::UNAUTHORIZED {
             ("unauthorized", "Authentication failed.")
         } else if status == StatusCode::FORBIDDEN {
@@ -210,5 +212,26 @@ impl IntoResponse for AuthError {
         };
         crate::errors::ErrorReport::new(status, crate::errors::ErrorSourceKind::Auth, code, message)
             .into_response()
+    }
+}
+
+impl AuthError {
+    pub(crate) const fn status(&self) -> StatusCode {
+        match self {
+            Self::Forbidden | Self::InsufficientScope | Self::InvalidCsrfToken => {
+                StatusCode::FORBIDDEN
+            }
+            Self::NoCredential
+            | Self::MalformedLocation
+            | Self::InvalidCredential
+            | Self::ExpiredCredential
+            | Self::CredentialNotYetValid
+            | Self::WrongTokenKind
+            | Self::AudienceMismatch
+            | Self::InvalidLoginState
+            | Self::ExpiredLoginState => StatusCode::UNAUTHORIZED,
+            Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
     }
 }

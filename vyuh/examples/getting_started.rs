@@ -85,7 +85,12 @@ async fn login(
     Json(input): Json<PasswordInput>,
 ) -> Result<vyuh::auth::LoginResponse, Error> {
     let credentials = PasswordCredentials::new(input.email, input.password);
-    Ok(site.auth().via(PASSWORD).login(credentials, &[WEB]).await?)
+    Ok(site
+        .auth()
+        .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
+        .via(PASSWORD)
+        .login(credentials, &[WEB])
+        .await?)
 }
 
 #[bundles::route(path = "/refresh", method = "POST")]
@@ -94,12 +99,16 @@ async fn refresh(
     request: vyuh::routes::Request,
 ) -> Result<vyuh::auth::LoginResponse, Error> {
     let (parts, _) = request.into_parts();
-    Ok(site.auth().refresh(&parts, &[WEB]).await?)
+    Ok(site
+        .auth()
+        .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
+        .await?)
 }
 
 #[bundles::route(path = "/me", method = "GET")]
 async fn me(user: AuthUser) -> Result<Data<String>, Error> {
-    Ok(Data::new(user.key.to_string()))
+    Ok(Data::new(user.subject().to_owned()))
 }
 // ANCHOR_END: routes
 
@@ -144,16 +153,17 @@ fn api_bundle() -> bundles::Bundle {
         record_tick,
     }
     .merge(command_bundle())
-    .with_openapi(
-        bundles::OpenApiConf::default()
-            .title("Vyuh Getting Started")
-            .version("0.1.0")
-            .description("Routes, auth, tasks, commands, and cron.")
-            .spec("/openapi.json")
-            .viewer("/docs"),
+    .with_conf(
+        bundles::conf().audience(WEB).openapi(
+            bundles::OpenApiConf::default()
+                .title("Vyuh Getting Started")
+                .version("0.1.0")
+                .description("Routes, auth, tasks, commands, and cron.")
+                .spec("/openapi.json")
+                .viewer("/docs"),
+        ),
     )
     .with_prefix("/api")
-    .with_audience(WEB)
 }
 // ANCHOR_END: api_bundle
 
@@ -169,7 +179,7 @@ fn command_bundle() -> bundles::Bundle {
 // ANCHOR: main
 #[tokio::main]
 async fn main() -> Result<(), SiteError> {
-    let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(DemoPasswords));
+    let auth = AuthConf::development().method(PASSWORD, PasswordLogin::new(DemoPasswords));
 
     Site::run(SiteConf::from_env_with_files()?.auth(auth), api_bundle()).await
 }

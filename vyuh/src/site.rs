@@ -61,6 +61,14 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
             .headers_mut()
             .insert(axum::http::header::ALLOW, allow);
     }
+    for challenge in response
+        .headers()
+        .get_all(axum::http::header::WWW_AUTHENTICATE)
+    {
+        rendered
+            .headers_mut()
+            .append(axum::http::header::WWW_AUTHENTICATE, challenge.clone());
+    }
     rendered
 }
 
@@ -116,6 +124,9 @@ pub enum SiteError {
 
     #[error("Configuration error: {0}")]
     ConfError(#[from] conf::ConfError),
+
+    #[error(transparent)]
+    AuthBuildError(#[from] crate::auth::AuthBuildError),
 
     #[error("schema asset error: {0}")]
     SchemaAsset(#[from] crate::schema_assets::SchemaAssetError),
@@ -321,17 +332,13 @@ impl SiteBuilder {
         #[cfg(feature = "email")]
         let mail_reporter = crate::email::reporter(&self.conf.mail, mail_delivery.clone());
 
-        let mut bundle = bundle.into_bundle();
+        let bundle = bundle.into_bundle();
 
         let default_audience = self
             .conf
             .auth
             .default_audience_id()
             .map_err(|error| conf::ConfError::Other(format!("Auth config error: {error}")))?;
-        bundle.apply_default_audience(default_audience.clone());
-
-        bundle.validate()?;
-
         let project_dir = PathBuf::from(&self.conf.project_dir);
 
         let timezone = match &self.conf.tz {
@@ -348,11 +355,29 @@ impl SiteBuilder {
             bundle
         };
 
-        bundle.apply_default_audience(default_audience);
+        bundle.finalize_conf(default_audience)?;
+
+        #[cfg(feature = "mcp")]
+        bundle
+            .mcp_engine
+            .finalize(&bundle.ops, &bundle.topology, &mut bundle.mcp_registry)
+            .map_err(|error| crate::bundles::BundleError::Mcp(error.to_string()))?;
 
         bundle.normalize_authorization()?;
 
         bundle.validate()?;
+
+        let auth_conf = self
+            .conf
+            .auth
+            .clone()
+            .extend_definitions(bundle.auth_definitions()?);
+        auth_conf
+            .validate_provider_names()
+            .map_err(|error| conf::ConfError::Other(format!("Auth config error: {error}")))?;
+        let mut effective_conf = self.conf.clone();
+        effective_conf.auth = auth_conf.clone();
+        effective_conf.validate()?;
 
         let observability = Observability::new(self.conf.observability.clone());
         validate_observability_paths(&bundle, &observability)?;
@@ -393,18 +418,23 @@ impl SiteBuilder {
             CacheRegistry::build(&self.conf.cache)
                 .map_err(|err| conf::ConfError::Other(format!("Cache config error: {err}")))?,
         );
+        let auth_audiences = bundle
+            .ops
+            .values()
+            .filter_map(|operation| operation.audience.clone())
+            .collect();
         let authenticator = Authenticator::new(
-            &self.conf.auth,
+            &auth_conf,
             &self.conf.secret_key,
             &self.conf.secret_key_fallbacks,
             &project_dir,
+            auth_audiences,
         )
-        .await
-        .map_err(|err| conf::ConfError::Other(format!("Auth config error: {err}")))?;
+        .await?;
 
         bundle
             .doc_engine
-            .setup(&mut router, &bundle.ops, &self.conf.auth)?;
+            .setup(&mut router, &bundle.ops, &auth_conf, &bundle.topology)?;
 
         #[cfg(feature = "mcp")]
         bundle.mcp_engine.setup(
@@ -529,11 +559,22 @@ impl SiteBuilder {
             LoggingGuard::noop()
         };
 
+        let operation_audiences = bundle
+            .ops
+            .iter()
+            .filter_map(|(id, operation)| {
+                operation
+                    .audience_id()
+                    .cloned()
+                    .map(|audience| (*id, audience))
+            })
+            .collect();
+
         let mut site = SiteInner {
             _logging_guard: logging_guard,
             project_dir,
             start_time: std::time::Instant::now(),
-            conf: self.conf.clone(),
+            conf: effective_conf,
             observability,
             pool,
             shutdown_notifier: CancellationNotifier::new(),
@@ -541,6 +582,7 @@ impl SiteBuilder {
             runtime: OnceCell::new(),
             timezone,
             authenticator,
+            operation_audiences,
             cache,
             template_engine,
             slash_router,
@@ -572,6 +614,7 @@ struct SiteInner {
     conf: SiteConf,
     observability: Observability,
     authenticator: Authenticator,
+    operation_audiences: std::collections::BTreeMap<crate::OperationId, crate::auth::AudienceId>,
     cache: Arc<CacheRegistry>,
     pool: DbPool,
     channels: LocalChannelBackend,
@@ -969,6 +1012,13 @@ impl Site {
         &self.inner.authenticator
     }
 
+    pub(crate) fn operation_audience(
+        &self,
+        id: crate::OperationId,
+    ) -> Option<&crate::auth::AudienceId> {
+        self.inner.operation_audiences.get(&id)
+    }
+
     /// Returns the default typed cache provider configured for this site.
     pub fn cache(&self) -> crate::cache::Cache {
         self.inner.cache.default_handle()
@@ -1298,7 +1348,7 @@ mod tests {
             count_runtime_task,
             TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
         )])
-        .with_task_lane(TaskLaneConf::new(EMAIL_TASK_LANE, 1));
+        .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL_TASK_LANE, 1)));
         let site = Site::build(crate::SiteConf::default().log_init(false), bundle).await?;
         let receipt = site.tasks().submit(RuntimeTask).await?;
         let task = site.tasks().get(receipt.id()).await?.ok_or_else(|| {

@@ -2,12 +2,10 @@
 
 use axum::http::request::Parts;
 use chrono::Utc;
-use ring::constant_time;
 
 use super::KindRuntime;
 use crate::auth::{
-    AudienceId, AuthError, AuthToken, AuthUser, BindingResolver, CredentialLocation, CsrfConf,
-    ProviderId, TokenKind,
+    AudienceId, AuthError, AuthToken, AuthUser, CredentialLocation, CsrfConf, ProviderId, TokenKind,
 };
 
 type ResponseAttachments = Vec<(axum::http::HeaderName, axum::http::HeaderValue)>;
@@ -24,7 +22,6 @@ pub(super) fn issue_token(
     audiences: Vec<AudienceId>,
     conf: &KindRuntime,
     family: Option<String>,
-    binding: Option<String>,
 ) -> Result<AuthToken, AuthError> {
     let expires_at = Utc::now()
         .timestamp()
@@ -37,7 +34,6 @@ pub(super) fn issue_token(
         audiences,
         expires_at,
         family_id: family,
-        binding,
         issuer: conf.issuer.clone(),
     }))
 }
@@ -113,33 +109,6 @@ pub(super) fn validate_common(
     Ok(())
 }
 
-pub(super) fn validate_binding(
-    expected: Option<&str>,
-    resolver: Option<BindingResolver>,
-    parts: &Parts,
-) -> Result<(), AuthError> {
-    match (expected, resolver) {
-        (None, None) => Ok(()),
-        (Some(expected), Some(resolve)) => validate_resolved_binding(expected, resolve(parts)?),
-        _ => Err(AuthError::BindingMismatch),
-    }
-}
-
-fn validate_resolved_binding(
-    expected: &str,
-    current: Option<crate::auth::AuthBinding>,
-) -> Result<(), AuthError> {
-    let matches = current.as_ref().is_some_and(|current| {
-        let current = current.as_str();
-        constant_time::verify_slices_are_equal(expected.as_bytes(), current.as_bytes()).is_ok()
-    });
-    if matches {
-        Ok(())
-    } else {
-        Err(AuthError::BindingMismatch)
-    }
-}
-
 pub(super) fn validate_csrf(csrf: Option<&CsrfConf>, parts: &Parts) -> Result<(), AuthError> {
     match csrf {
         Some(csrf) => csrf.verify(parts),
@@ -152,17 +121,6 @@ pub(super) fn validate_credential_size(value: &str, limit: usize) -> Result<(), 
         Err(AuthError::InvalidCredential)
     } else {
         Ok(())
-    }
-}
-
-pub(super) fn validate_issued_binding(
-    resolver: Option<BindingResolver>,
-    binding: &Option<String>,
-) -> Result<(), AuthError> {
-    match (resolver, binding) {
-        (None, None) | (Some(_), Some(_)) => Ok(()),
-        (Some(_), None) => Err(AuthError::BindingRequired),
-        (None, Some(_)) => Err(AuthError::UnsupportedProviderCapability),
     }
 }
 

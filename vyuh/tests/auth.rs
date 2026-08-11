@@ -10,6 +10,8 @@ use axum::response::IntoResponse;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use vyuh::auth::KeySource;
+#[cfg(feature = "email")]
+use vyuh::auth::UnsafeReusableMagicLinks;
 #[cfg(feature = "federated")]
 use vyuh::auth::{FederatedIdentity, FederatedLogin, FederatedStart, FederatedUserMapper};
 use vyuh::{
@@ -78,8 +80,8 @@ const PASETO_PROVIDER: AuthProvider = AuthProvider::new("paseto");
 
 #[derive(Serialize, JsonSchema)]
 struct WhoAmI {
-    key: String,
-    provider: String,
+    subject: String,
+    provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,8 +127,8 @@ impl TokenClaims for ExternalJwtClaims {
 
 async fn me(user: AuthUser) -> Json<WhoAmI> {
     Json(WhoAmI {
-        key: user.key.to_string(),
-        provider: user.provider().to_owned(),
+        subject: user.subject().to_owned(),
+        provider: user.provider().map(str::to_owned),
     })
 }
 
@@ -135,7 +137,7 @@ async fn assurance(user: AuthUser) -> Json<Vec<String>> {
 }
 
 async fn scoped_reports(permit: Permit<ReadReports>) -> Json<String> {
-    Json(permit.user().key.to_string())
+    Json(permit.user().subject().to_owned())
 }
 
 async fn optional_reports(permit: Option<Permit<ReadReports>>) -> Json<bool> {
@@ -167,7 +169,7 @@ fn scope_bundle() -> bundles::Bundle {
             },
         ),
     ])
-    .with_audience(REPORTS)
+    .with_conf(bundles::conf().audience(REPORTS))
 }
 
 async fn basic_exchange(
@@ -176,6 +178,7 @@ async fn basic_exchange(
 ) -> Result<LoginResponse, vyuh::Error> {
     Ok(site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC)
         .login(credentials, &[REPORTS])
         .await?)
@@ -185,10 +188,11 @@ fn config() -> SiteConf {
     SiteConf::default()
         .secret_key("auth-test-secret-minimum-32-chars")
         .log_init(false)
+        .auth(AuthConf::development())
 }
 
 fn configured_token_auth(access: TokenConf, refresh: TokenConf) -> AuthConf {
-    AuthConf::empty().provider(
+    AuthConf::default().provider(
         DEFAULT_AUTH_PROVIDER,
         TokenProvider::new(Jwt::hs256_site_secret())
             .access(access)
@@ -206,7 +210,7 @@ fn bundle() -> bundles::Bundle {
             slash: None,
         },
     )])
-    .with_audience(REPORTS)
+    .with_conf(bundles::conf().audience(REPORTS))
 }
 
 fn bundle_without_audience() -> bundles::Bundle {
@@ -231,7 +235,7 @@ fn dual_audience_bundle() -> bundles::Bundle {
             slash: None,
         },
     )])
-    .with_audience(ADMIN);
+    .with_conf(bundles::conf().audience(ADMIN));
     bundle().merge(admin)
 }
 
@@ -388,6 +392,15 @@ impl PasswordVerifier for TestPasswords {
 }
 
 #[derive(Clone, Copy)]
+struct UnavailableVerifier;
+
+impl TokenVerifier for UnavailableVerifier {
+    async fn verify(&self, _token: &AuthToken) -> Result<AuthUser, AuthError> {
+        Err(AuthError::ProviderUnavailable)
+    }
+}
+
+#[derive(Clone, Copy)]
 struct TestFactors;
 
 impl MfaVerifier for TestFactors {
@@ -427,7 +440,8 @@ async fn scope_permits_enforce_exact_grants() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(
             AuthUser::new("scoped-user").with_scope(REPORTS_READ),
             &[REPORTS],
         )
@@ -459,7 +473,8 @@ async fn optional_permits_only_hide_absence() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("unscoped-user"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("unscoped-user"), &[REPORTS])
         .await?;
     let authorization = format!("Bearer {}", login.credentials().access());
     let client = TestSite::new(site);
@@ -482,13 +497,14 @@ async fn optional_permits_only_hide_absence() -> Result<(), AuthError> {
 #[tokio::test]
 async fn conflicting_access_credentials_are_rejected() -> Result<(), AuthError> {
     let auth =
-        AuthConf::default().provider(API_KEY, AuthKey::header("x-api-key", StaticKeyVerifier));
+        AuthConf::development().provider(API_KEY, AuthKey::header("x-api-key", StaticKeyVerifier));
     let site = Site::build(config().auth(auth), bundle())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(AuthUser::new("token-user"), &[REPORTS])
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(AuthUser::new("token-user"), &[REPORTS])
         .await?;
     TestSite::new(site)
         .get("/me")
@@ -515,7 +531,7 @@ async fn invalid_scope_rules_fail_site_build() -> Result<(), AuthError> {
             slash: None,
         },
     )])
-    .with_audience(REPORTS);
+    .with_conf(bundles::conf().audience(REPORTS));
     let error = Site::build(config(), bundle)
         .await
         .err()
@@ -532,7 +548,8 @@ async fn manual_login_rejects_invalid_identity_scopes() -> Result<(), AuthError>
         .map_err(auth_error)?;
     let error = site
         .auth()
-        .login(
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(
             AuthUser::new("invalid-user").with_scope(Scope::of("invalid scope")),
             &[REPORTS],
         )
@@ -550,13 +567,14 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
         .access(TokenConf::bearer())
         .refresh(TokenConf::bearer())
         .verifier(CurrentScopeVerifier);
-    let auth = AuthConf::empty().provider(DEFAULT_AUTH_PROVIDER, provider);
+    let auth = AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider);
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
-        .login(
+        .using(DEFAULT_AUTH_PROVIDER)
+        .issue(
             AuthUser::new("refresh-user").with_scope(REPORTS_READ),
             &[REPORTS],
         )
@@ -566,7 +584,11 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
         .refresh()
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
-    let replacement = site.auth().refresh(&parts, &[REPORTS]).await?;
+    let replacement = site
+        .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
+        .refresh(&parts)
+        .await?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
     let decoded = jsonwebtoken::decode::<AuthToken>(
@@ -583,7 +605,7 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
 /// Verifies authenticated external JWT claims normalize through a provider-bound builder.
 #[tokio::test]
 async fn custom_jwt_claims_authenticate_as_normal_users() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         EXTERNAL,
         TokenProvider::new(Jwt::hs256_site_secret())
             .custom_claims::<ExternalJwtClaims>()
@@ -615,7 +637,7 @@ async fn custom_jwt_claims_authenticate_as_normal_users() -> Result<(), AuthErro
     response
         .assert_json(
             vyuh::routes::StatusCode::OK,
-            &serde_json::json!({ "key": "partner-user", "provider": "external" }),
+            &serde_json::json!({ "subject": "partner-user", "provider": "external" }),
         )
         .await;
     Ok(())
@@ -624,7 +646,7 @@ async fn custom_jwt_claims_authenticate_as_normal_users() -> Result<(), AuthErro
 /// Verifies typed claims cannot use a refresh credential to access a protected operation.
 #[tokio::test]
 async fn custom_jwt_claims_reject_refresh_tokens_for_access() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         EXTERNAL,
         TokenProvider::new(Jwt::hs256_site_secret())
             .custom_claims::<ExternalJwtClaims>()
@@ -660,7 +682,7 @@ async fn custom_jwt_claims_reject_refresh_tokens_for_access() -> Result<(), Auth
 /// Verifies external-claims providers remain verify-only even with an access configuration.
 #[tokio::test]
 async fn custom_jwt_claims_provider_cannot_issue_credentials() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         EXTERNAL,
         TokenProvider::new(Jwt::hs256_site_secret())
             .custom_claims::<ExternalJwtClaims>()
@@ -672,7 +694,7 @@ async fn custom_jwt_claims_provider_cannot_issue_credentials() -> Result<(), Aut
     let error = site
         .auth()
         .using(EXTERNAL)
-        .login(AuthUser::new("partner-user"), &[REPORTS])
+        .issue(AuthUser::new("partner-user"), &[REPORTS])
         .await
         .err()
         .ok_or(AuthError::InvalidCredential)?;
@@ -683,7 +705,7 @@ async fn custom_jwt_claims_provider_cannot_issue_credentials() -> Result<(), Aut
 /// Verifies a custom-claims provider rejects an attempted refresh configuration at build time.
 #[tokio::test]
 async fn custom_jwt_claims_provider_rejects_refresh_configuration() -> Result<(), AuthError> {
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         EXTERNAL,
         TokenProvider::new(Jwt::hs256_site_secret())
             .custom_claims::<ExternalJwtClaims>()
@@ -700,12 +722,13 @@ async fn custom_jwt_claims_provider_rejects_refresh_configuration() -> Result<()
 /// Verifies typed password login delegates successful proof to the default token provider.
 #[tokio::test]
 async fn password_login_issues_default_credentials() -> Result<(), AuthError> {
-    let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(TestPasswords));
+    let auth = AuthConf::development().method(PASSWORD, PasswordLogin::new(TestPasswords));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let login = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD)
         .login(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -722,7 +745,13 @@ async fn password_login_issues_default_credentials() -> Result<(), AuthError> {
 async fn test_site_login_authenticates_a_bearer_request() -> Result<(), AuthError> {
     let site = Site::build(config(), bundle()).await.map_err(auth_error)?;
     let test = TestSite::new(site);
-    let login = test.login(AuthUser::new("test-user"), &[REPORTS]).await?;
+    let login = test
+        .login(
+            DEFAULT_AUTH_PROVIDER,
+            AuthUser::new("test-user"),
+            &[REPORTS],
+        )
+        .await?;
     test.get("/me")
         .with_login(&login)
         .send()
@@ -739,7 +768,13 @@ async fn test_site_login_authenticates_a_cookie_request() -> Result<(), AuthErro
         .await
         .map_err(auth_error)?;
     let test = TestSite::new(site);
-    let login = test.login(AuthUser::new("cookie-user"), &[REPORTS]).await?;
+    let login = test
+        .login(
+            DEFAULT_AUTH_PROVIDER,
+            AuthUser::new("cookie-user"),
+            &[REPORTS],
+        )
+        .await?;
     test.post("/me")
         .with_login(&login)
         .send()
@@ -754,7 +789,7 @@ async fn password_login_uses_explicit_credential_provider() -> Result<(), AuthEr
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
         .access(TokenConf::header("x-login-access"))
         .refresh(TokenConf::header("x-login-refresh"));
-    let auth = AuthConf::empty()
+    let auth = AuthConf::default()
         .provider(ALTERNATE, provider)
         .method(PASSWORD, PasswordLogin::new(TestPasswords));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
@@ -778,12 +813,13 @@ async fn password_login_uses_explicit_credential_provider() -> Result<(), AuthEr
 async fn login_method_type_mismatch_is_rejected() -> Result<(), AuthError> {
     const WRONG_PASSWORD: LoginMethod<BasicCredentials> = LoginMethod::new("password");
 
-    let auth = AuthConf::default().method(PASSWORD, PasswordLogin::new(TestPasswords));
+    let auth = AuthConf::development().method(PASSWORD, PasswordLogin::new(TestPasswords));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let error = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(WRONG_PASSWORD)
         .login(
             BasicCredentials::new("user@example.com", "correct-password"),
@@ -799,13 +835,14 @@ async fn login_method_type_mismatch_is_rejected() -> Result<(), AuthError> {
 /// Verifies duplicate login method names fail during site construction.
 #[tokio::test]
 async fn duplicate_login_methods_are_rejected() -> Result<(), AuthError> {
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .method(PASSWORD, PasswordLogin::new(TestPasswords))
         .method(PASSWORD, PasswordLogin::new(TestPasswords));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("duplicate login method was accepted".into()))?;
+    assert!(matches!(&error, vyuh::SiteError::AuthBuildError(_)));
     assert!(error.to_string().contains("registered more than once"));
     Ok(())
 }
@@ -822,7 +859,7 @@ async fn basic_login_exchanges_header_for_tokens() -> Result<(), AuthError> {
             slash: None,
         },
     );
-    let auth = AuthConf::default().method(BASIC, BasicLogin::new(TestPasswords));
+    let auth = AuthConf::development().method(BASIC, BasicLogin::new(TestPasswords));
     let site = Site::build(config().auth(auth), bundles::bundle([route]))
         .await
         .map_err(auth_error)?;
@@ -845,7 +882,9 @@ async fn basic_login_exchanges_header_for_tokens() -> Result<(), AuthError> {
 async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
     let method =
         PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp().recovery_codes());
-    let auth = AuthConf::default().method(PASSWORD_MFA, method);
+    let auth = AuthConf::development()
+        .method(PASSWORD_MFA, method)
+        .login_state_store(ReplayStore::default());
     let route = bundles::route(
         assurance,
         RouteConf {
@@ -857,11 +896,11 @@ async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
     );
     let site = Site::build(
         config().auth(auth),
-        bundles::bundle([route]).with_audience(REPORTS),
+        bundles::bundle([route]).with_conf(bundles::conf().audience(REPORTS)),
     )
     .await
     .map_err(auth_error)?;
-    let selected = site.auth().via(PASSWORD_MFA);
+    let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(PASSWORD_MFA);
     let challenge = selected
         .begin(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -893,12 +932,15 @@ async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
 #[tokio::test]
 async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
     let method = BasicLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
-    let auth = AuthConf::default().method(BASIC_MFA, method);
+    let auth = AuthConf::development()
+        .method(BASIC_MFA, method)
+        .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC_MFA)
         .begin(
             BasicCredentials::new("user@example.com", "correct-password"),
@@ -908,6 +950,7 @@ async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
     let login = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC_MFA)
         .complete(MfaResponse::totp(token, "123456"))
         .await?;
@@ -915,17 +958,17 @@ async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
     Ok(())
 }
 
-/// Verifies an optional login state store rejects successful challenge replay.
+/// Verifies atomic login-state consumption permits exactly one concurrent MFA completion.
 #[tokio::test]
 async fn mfa_state_store_rejects_replay() -> Result<(), AuthError> {
     let method = PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .method(PASSWORD_MFA, method)
         .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let selected = site.auth().via(PASSWORD_MFA);
+    let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(PASSWORD_MFA);
     let challenge = selected
         .begin(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -933,15 +976,16 @@ async fn mfa_state_store_rejects_replay() -> Result<(), AuthError> {
         )
         .await?;
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
-    selected
-        .complete(MfaResponse::totp(token, "123456"))
-        .await?;
-    let error = selected
-        .complete(MfaResponse::totp(token, "123456"))
-        .await
-        .err()
-        .ok_or_else(|| AuthError::Internal("MFA replay unexpectedly succeeded".into()))?;
-    assert!(matches!(error, AuthError::InvalidLoginState));
+    let first = selected.complete(MfaResponse::totp(token, "123456"));
+    let second = selected.complete(MfaResponse::totp(token, "123456"));
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert!(
+        first
+            .err()
+            .or_else(|| second.err())
+            .is_some_and(|error| matches!(error, AuthError::InvalidLoginState))
+    );
     Ok(())
 }
 
@@ -952,9 +996,10 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
         .access(TokenConf::header("x-mfa-access"))
         .refresh(TokenConf::header("x-mfa-refresh"));
     let method = PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp());
-    let auth = AuthConf::default()
+    let auth = AuthConf::development()
         .provider(ALTERNATE, provider)
-        .method(PASSWORD_MFA, method);
+        .method(PASSWORD_MFA, method)
+        .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
@@ -970,6 +1015,7 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
     let error = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
         .complete(MfaResponse::totp(token, "123456"))
         .await
@@ -982,10 +1028,12 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
 /// Verifies active login challenges survive Django-style site-secret rotation.
 #[tokio::test]
 async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError> {
-    let auth = AuthConf::default().method(
-        PASSWORD_MFA,
-        PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp()),
-    );
+    let auth = AuthConf::development()
+        .method(
+            PASSWORD_MFA,
+            PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp()),
+        )
+        .login_state_store(ReplayStore::default());
     let old = Site::build(
         config()
             .secret_key("old-login-secret-at-least-32-characters")
@@ -996,6 +1044,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
     .map_err(auth_error)?;
     let challenge = old
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
         .begin(
             PasswordCredentials::new("user@example.com", "correct-password"),
@@ -1003,10 +1052,12 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
         )
         .await?;
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
-    let rotated_auth = AuthConf::default().method(
-        PASSWORD_MFA,
-        PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp()),
-    );
+    let rotated_auth = AuthConf::development()
+        .method(
+            PASSWORD_MFA,
+            PasswordLogin::new(TestPasswords).then(MfaLogin::new(TestFactors).totp()),
+        )
+        .login_state_store(ReplayStore::default());
     let rotated = Site::build(
         config()
             .secret_key("new-login-secret-at-least-32-characters")
@@ -1018,6 +1069,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
     .map_err(auth_error)?;
     let login = rotated
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
         .complete(MfaResponse::totp(token, "123456"))
         .await?;
@@ -1045,12 +1097,15 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
         .redirect_uri(format!("{issuer}/callback"))
         .scopes(["email", "profile"])
         .mapper(TestOidcMapper);
-    let auth = AuthConf::default().method(OIDC, login);
+    let auth = AuthConf::development()
+        .method(OIDC, login)
+        .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
     let challenge = site
         .auth()
+        .using(DEFAULT_AUTH_PROVIDER)
         .via(OIDC)
         .begin(FederatedStart::new().return_to("/dashboard"), &[REPORTS])
         .await?;
@@ -1085,11 +1140,13 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         .client_secret(vyuh::auth::KeySource::inline("test-secret"))
         .redirect_uri(format!("{issuer}/callback"))
         .mapper(TestOidcMapper);
-    let auth = AuthConf::default().method(OIDC, login);
+    let auth = AuthConf::development()
+        .method(OIDC, login)
+        .login_state_store(ReplayStore::default());
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
-    let selected = site.auth().via(OIDC);
+    let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(OIDC);
     let challenge = selected.begin(FederatedStart::new(), &[REPORTS]).await?;
     let redirect = url::Url::parse(
         challenge
@@ -1128,7 +1185,9 @@ async fn oidc_rejects_insecure_remote_endpoints() -> Result<(), AuthError> {
         .client_id("test-client")
         .redirect_uri("http://app.example.com/callback")
         .mapper(TestOidcMapper);
-    let auth = AuthConf::default().method(OIDC, login);
+    let auth = AuthConf::development()
+        .method(OIDC, login)
+        .login_state_store(ReplayStore::default());
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
@@ -1150,16 +1209,18 @@ async fn oidc_discovery_outage_is_provider_unavailable() -> Result<(), AuthError
         .client_id("test-client")
         .redirect_uri(format!("{issuer}/callback"))
         .mapper(TestOidcMapper);
-    let auth = AuthConf::default().method(OIDC, login);
+    let auth = AuthConf::development()
+        .method(OIDC, login)
+        .login_state_store(ReplayStore::default());
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("OIDC discovery unexpectedly succeeded".into()))?;
-    assert!(
-        error
-            .to_string()
-            .contains("authentication provider is unavailable")
-    );
+    assert!(matches!(
+        &error,
+        vyuh::SiteError::AuthBuildError(vyuh::auth::AuthBuildError::ProviderInitialization(_))
+    ));
+    assert!(error.to_string().contains("provider initialization failed"));
     Ok(())
 }
 

@@ -14,6 +14,11 @@ use crate::{
     services::{Service, ServiceInstance},
     testing::TestSite,
 };
+
+fn test_conf() -> SiteConf {
+    SiteConf::default().auth(crate::auth::AuthConf::development())
+}
+
 async fn ping() -> Json<&'static str> {
     Json("pong")
 }
@@ -25,7 +30,8 @@ async fn protected_ping(_user: crate::auth::AuthUser) -> Json<&'static str> {
 async fn console_credential(site: &Site) -> Result<String, crate::auth::AuthError> {
     let login = site
         .auth()
-        .login(
+        .using(crate::auth::DEFAULT_AUTH_PROVIDER)
+        .issue(
             crate::auth::AuthUser::new("console-user"),
             &[CONSOLE_AUDIENCE],
         )
@@ -41,7 +47,7 @@ struct AllowConsole;
 
 impl ConsoleAccess for AllowConsole {
     fn allows(&self, _site: &Site, user: Option<&crate::auth::AuthUser>) -> bool {
-        user.is_some_and(|user| user.key.as_ref() == "console-user")
+        user.is_some_and(|user| user.subject() == "console-user")
     }
 }
 
@@ -173,7 +179,7 @@ fn inspection_bundle() -> crate::bundles::Bundle {
 #[tokio::test]
 async fn console_urls_are_site_local() {
     let root = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         app_bundle(),
@@ -181,7 +187,7 @@ async fn console_urls_are_site_local() {
     .await
     .unwrap();
     let nested = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).path("/dynrs/console")),
         app_bundle(),
@@ -218,7 +224,7 @@ async fn console_urls_are_site_local() {
 /// Verifies every rendered console page uses the shared static URL beside a nested mount.
 #[tokio::test]
 async fn nested_console_pages_use_shared_assets() {
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .log_init(false)
         .console(ConsoleConf::default().enabled(true).path("/dynrs/console"));
     let site = Site::build(conf, app_bundle()).await.unwrap();
@@ -250,7 +256,7 @@ async fn nested_console_pages_use_shared_assets() {
 #[tokio::test]
 async fn custom_static_url_serves_nested_console_assets() {
     let root = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .static_url("/public")
             .console(ConsoleConf::default().enabled(true)),
@@ -263,7 +269,7 @@ async fn custom_static_url_serves_nested_console_assets() {
         Some("/public/console/js/console.js")
     );
 
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .log_init(false)
         .static_url("/public")
         .console(ConsoleConf::default().enabled(true).path("/dynrs/console"));
@@ -289,7 +295,7 @@ async fn custom_static_url_serves_nested_console_assets() {
 #[tokio::test]
 async fn cdn_static_url_is_rendered_for_nested_console_assets() {
     let root = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .static_url("https://cdn.example.com/static")
             .console(ConsoleConf::default().enabled(true)),
@@ -302,7 +308,7 @@ async fn cdn_static_url_is_rendered_for_nested_console_assets() {
         Some("https://cdn.example.com/static/console/js/console.js")
     );
 
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .log_init(false)
         .static_url("https://cdn.example.com/static")
         .console(ConsoleConf::default().enabled(true).path("/dynrs/console"));
@@ -347,7 +353,7 @@ async fn invalid_console_paths_fail_site_construction() {
         "/console#top",
     ] {
         let site = Site::build(
-            SiteConf::default()
+            test_conf()
                 .log_init(false)
                 .console(ConsoleConf::default().enabled(true).path(path)),
             app_bundle(),
@@ -369,7 +375,7 @@ fn assert_console_assets(html: &str) {
 #[tokio::test]
 async fn disabled_console_mounts_no_routes() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(false)),
         app_bundle(),
@@ -389,7 +395,7 @@ async fn disabled_console_mounts_no_routes() {
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn console_development_access_is_open_and_warns() {
-    let site = Site::build(SiteConf::default().log_init(false), app_bundle())
+    let site = Site::build(test_conf().log_init(false), app_bundle())
         .await
         .unwrap();
     let client = TestSite::new(site);
@@ -415,7 +421,7 @@ async fn console_development_access_is_open_and_warns() {
 #[tokio::test]
 async fn console_policy_uses_normal_access_credentials() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).access(AllowConsole)),
         app_bundle(),
@@ -437,14 +443,14 @@ async fn console_policy_uses_normal_access_credentials() {
         .header(header::AUTHORIZATION.as_str(), &authorization)
         .send()
         .await
-        .assert_status(StatusCode::FORBIDDEN);
+        .assert_status(StatusCode::UNAUTHORIZED);
 }
 
 /// Verifies ConsoleAccess receives absent credentials but malformed ones remain authentication failures.
 #[tokio::test]
 async fn console_policy_distinguishes_absent_and_invalid_credentials() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).access(DenyConsole)),
         app_bundle(),
@@ -480,7 +486,7 @@ async fn console_policy_distinguishes_absent_and_invalid_credentials() {
 async fn console_rejects_credentials_without_its_audience() {
     const API: crate::auth::Audience = crate::auth::Audience::new("api");
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).access(AllowConsole)),
         app_bundle(),
@@ -489,7 +495,8 @@ async fn console_rejects_credentials_without_its_audience() {
     .unwrap();
     let login = site
         .auth()
-        .login(crate::auth::AuthUser::new("console-user"), &[API])
+        .using(crate::auth::DEFAULT_AUTH_PROVIDER)
+        .issue(crate::auth::AuthUser::new("console-user"), &[API])
         .await
         .unwrap();
     let authorization = format!("Bearer {}", login.credentials().access());
@@ -507,7 +514,7 @@ async fn console_rejects_credentials_without_its_audience() {
 #[tokio::test]
 async fn console_policy_may_allow_anonymous_access() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).access(AllowAnonymous)),
         app_bundle(),
@@ -528,7 +535,7 @@ async fn console_policy_may_allow_anonymous_access() {
 #[tokio::test]
 async fn release_console_requires_access_policy() {
     let result = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         app_bundle(),
@@ -546,7 +553,7 @@ async fn release_console_requires_access_policy() {
 #[tokio::test]
 async fn console_logs_require_file_sink() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         app_bundle(),
@@ -587,7 +594,7 @@ async fn console_logs_require_file_sink() {
 #[tokio::test]
 async fn console_inspection_pages_show_their_own_runtime_concepts() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         inspection_bundle(),
@@ -639,7 +646,7 @@ async fn console_log_details_are_inspectable_after_file_rotation() -> Result<(),
         "{\"timestamp\":\"2026-08-10T12:00:00Z\",\"level\":\"ERROR\",\"target\":\"app::worker\",\"fields\":{\"message\":\"test failure\",\"job\":\"sync\"}}\n",
     )
     .map_err(|error| error.to_string())?;
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .project_dir(root.to_string_lossy())
         .log_init(false)
         .logging(LoggingConf {
@@ -731,7 +738,7 @@ mod web;
 /// Verifies console task inspection exposes lifecycle data without task values.
 #[tokio::test]
 async fn console_task_pages_show_submitted_tasks() {
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .log_init(false)
         .console(ConsoleConf::default().enabled(true));
     let site = Site::build(conf, task_app_bundle()).await.unwrap();
@@ -791,7 +798,7 @@ async fn console_task_pages_show_submitted_tasks() {
 #[tokio::test]
 async fn console_schedule_pages_show_task_schedules() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         scheduled_task_bundle(),
@@ -828,7 +835,7 @@ async fn console_schedule_pages_show_task_schedules() {
 
 #[tokio::test]
 async fn console_status_is_cached_within_ttl() {
-    let conf = SiteConf::default()
+    let conf = test_conf()
         .log_init(false)
         .console(ConsoleConf::default().enabled(true));
     let site = Site::build(conf, app_bundle()).await.unwrap();
@@ -843,7 +850,7 @@ async fn console_status_is_cached_within_ttl() {
 #[tokio::test]
 async fn console_routes_share_origin_bundle() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true)),
         app_bundle(),
@@ -871,7 +878,7 @@ async fn console_routes_share_origin_bundle() {
 #[tokio::test]
 async fn console_does_not_add_private_auth_components() {
     let site = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .console(ConsoleConf::default().enabled(true).access(AllowConsole)),
         app_bundle(),
@@ -902,14 +909,14 @@ async fn console_does_not_add_private_auth_components() {
 async fn framework_provider_prefix_is_reserved() {
     use crate::auth::{AuthConf, AuthProvider, Jwt, TokenConf, TokenProvider};
 
-    let auth = AuthConf::empty().provider(
+    let auth = AuthConf::default().provider(
         AuthProvider::new("vyuh-example"),
         TokenProvider::new(Jwt::hs256_site_secret())
             .without_refresh()
             .access(TokenConf::bearer()),
     );
     let error = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .auth(auth)
             .console(ConsoleConf::default().enabled(false)),
@@ -925,14 +932,14 @@ async fn framework_provider_prefix_is_reserved() {
             .is_some_and(|message| message.contains("reserved 'vyuh-' prefix"))
     );
 
-    let valid_auth = AuthConf::empty().provider(
+    let valid_auth = AuthConf::default().provider(
         AuthProvider::new("app-example"),
         TokenProvider::new(Jwt::hs256_site_secret())
             .without_refresh()
             .access(TokenConf::bearer()),
     );
     let valid = Site::build(
-        SiteConf::default()
+        test_conf()
             .log_init(false)
             .auth(valid_auth)
             .console(ConsoleConf::default().enabled(false)),

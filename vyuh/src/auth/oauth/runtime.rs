@@ -3,10 +3,13 @@
 #[cfg(test)]
 mod tests;
 
-use std::{collections::BTreeSet, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::UNIX_EPOCH,
+};
 
 use axum::http::request::Parts;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future::BoxFuture;
 use huskarl_resource_server::{
     DefaultJwsVerifierPlatform,
@@ -28,14 +31,14 @@ use super::{
     config::{OAuthClaims, OAuthResource, OAuthResourceServer, parse_scopes},
     http::{AuthHttpClient, unsupported_discovery, validate_remote_url},
 };
+#[cfg(feature = "mcp")]
+use crate::auth::AuthProtectedResource;
 use crate::auth::{
     AudienceId, AuthError, AuthUser, AuthenticationContext, CredentialLocation, ProviderId,
     runtime::contract::{
         ProviderAudienceSet, ProviderCapabilities, ProviderRuntimeContract, ResponseHeaders,
     },
 };
-#[cfg(feature = "mcp")]
-use crate::auth::{AuthChallenge, AuthProtectedResource};
 
 const MAX_OAUTH_CREDENTIAL_BYTES: usize = 16 * 1024;
 
@@ -48,7 +51,6 @@ struct ExtraClaims {
 }
 
 struct ResourceRuntime {
-    audience: AudienceId,
     policy: OAuthResource,
     validator: CustomValidator<ExtraClaims>,
 }
@@ -58,7 +60,7 @@ pub(crate) struct OAuthRuntime {
     #[cfg(feature = "mcp")]
     issuer: String,
     mapper: Arc<dyn super::config::ErasedOAuthIdentityMapper>,
-    resources: Vec<ResourceRuntime>,
+    resources: BTreeMap<AudienceId, ResourceRuntime>,
     location: CredentialLocation,
     audiences: ProviderAudienceSet,
 }
@@ -89,12 +91,7 @@ impl OAuthRuntime {
             .await
             .map_err(|error| startup_failure(&id, "initial JWKS load", error))?;
         let resources = build_resources(&id, &conf, &metadata, factory).await?;
-        let audiences = ProviderAudienceSet::only(
-            resources
-                .iter()
-                .map(|resource| resource.audience.clone())
-                .collect(),
-        )?;
+        let audiences = ProviderAudienceSet::only(resources.keys().cloned().collect())?;
         Ok(Self {
             id,
             #[cfg(feature = "mcp")]
@@ -108,8 +105,7 @@ impl OAuthRuntime {
 
     fn resource(&self, audience: &AudienceId) -> Result<&ResourceRuntime, AuthError> {
         self.resources
-            .iter()
-            .find(|resource| resource.audience == *audience)
+            .get(audience)
             .ok_or(AuthError::AudienceMismatch)
     }
 
@@ -126,7 +122,7 @@ impl OAuthRuntime {
         let resource = self.resource(audience)?;
         let validated = validate(resource, parts).await?;
         let auth_time = validated.iat.map(unix_timestamp).transpose()?;
-        let claims = normalize_claims(raw, validated)?;
+        let claims = normalize_claims(validated)?;
         require_scopes(&claims.scopes, &resource.policy.required)?;
         let user = self.mapper.map(&claims).await?;
         user.validate()?;
@@ -197,13 +193,13 @@ async fn build_resources(
     conf: &OAuthResourceServer,
     metadata: &AuthorizationServerMetadata,
     factory: Arc<dyn JwsVerifierFactory>,
-) -> Result<Vec<ResourceRuntime>, AuthError> {
+) -> Result<BTreeMap<AudienceId, ResourceRuntime>, AuthError> {
     let algorithms = conf
         .algorithms
         .iter()
         .map(|algorithm| algorithm.name().to_owned())
         .collect::<Vec<_>>();
-    let mut result = Vec::with_capacity(conf.resources.len());
+    let mut result = BTreeMap::new();
     for (audience, policy) in &conf.resources {
         let id = AudienceId::declared(*audience)?;
         let validator = build_validator(
@@ -215,11 +211,13 @@ async fn build_resources(
         )
         .await
         .map_err(|error| startup_failure(provider, "resource validator construction", error))?;
-        result.push(ResourceRuntime {
-            audience: id,
-            policy: policy.clone(),
-            validator,
-        });
+        result.insert(
+            id,
+            ResourceRuntime {
+                policy: policy.clone(),
+                validator,
+            },
+        );
     }
     Ok(result)
 }
@@ -258,31 +256,22 @@ async fn validate(
         .ok_or_else(|| AuthError::Internal("OAuth credential disappeared during validation".into()))
 }
 
-fn normalize_claims(
-    token: &str,
-    validated: ValidatedRequest<ExtraClaims>,
-) -> Result<OAuthClaims, AuthError> {
+fn normalize_claims(validated: ValidatedRequest<ExtraClaims>) -> Result<OAuthClaims, AuthError> {
     let subject = validated.sub.ok_or(AuthError::InvalidCredential)?;
     let issuer = validated.iss.ok_or(AuthError::InvalidCredential)?;
     let scopes = parse_scopes(&validated.claims.scope)?;
-    let raw = raw_claims(token)?;
+    let mut raw = validated.claims._other;
+    raw.insert("sub".into(), subject.clone().into());
+    raw.insert("iss".into(), issuer.clone().into());
+    raw.insert("aud".into(), serde_json::json!(&validated.aud));
+    raw.insert("scope".into(), validated.claims.scope.into());
     Ok(OAuthClaims {
         subject,
         issuer,
         audiences: validated.aud,
         scopes,
-        raw,
+        raw: serde_json::Value::Object(raw),
     })
-}
-
-fn raw_claims(token: &str) -> Result<serde_json::Value, AuthError> {
-    let mut segments = token.split('.');
-    let _header = segments.next().ok_or(AuthError::InvalidCredential)?;
-    let claims = segments.next().ok_or(AuthError::InvalidCredential)?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(claims)
-        .map_err(|_| AuthError::InvalidCredential)?;
-    serde_json::from_slice(&bytes).map_err(|_| AuthError::InvalidCredential)
 }
 
 fn require_scopes(actual: &BTreeSet<String>, required: &BTreeSet<String>) -> Result<(), AuthError> {
@@ -378,11 +367,6 @@ impl ProviderRuntimeContract for OAuthRuntime {
             })
     }
 
-    #[cfg(feature = "mcp")]
-    fn challenge(&self, _error: &AuthError) -> Option<AuthChallenge> {
-        Some(AuthChallenge { scheme: "Bearer" })
-    }
-
     fn authenticate<'a>(
         &'a self,
         raw: &'a str,
@@ -396,7 +380,6 @@ impl ProviderRuntimeContract for OAuthRuntime {
         &'a self,
         _: AuthUser,
         _: Vec<AudienceId>,
-        _: Option<String>,
     ) -> BoxFuture<'a, Result<crate::auth::LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
@@ -405,7 +388,6 @@ impl ProviderRuntimeContract for OAuthRuntime {
         &'a self,
         _: &'a str,
         _: &'a Parts,
-        _: &'a [AudienceId],
     ) -> BoxFuture<'a, Result<crate::auth::LoginResponse, AuthError>> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
