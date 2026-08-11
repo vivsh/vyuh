@@ -1,30 +1,21 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, sync::Mutex};
 
 use super::*;
 #[cfg(feature = "email")]
 use vyuh::auth::{
-    EmailAddress, EmailLogin, EmailLoginResolver, EmailOtp, EmailOtpMessage, EmailOtpSender,
-    LoginChallengeKind, MagicLinkCallback,
+    EmailAddress, EmailLoginResolver, LoginChallengeKind, MagicLinkCallback, MagicLinkLogin,
 };
 use vyuh::auth::{
-    PasswordlessAttempt, PasswordlessChallenge, PasswordlessStart, PasswordlessStore, PhoneLogin,
-    PhoneLoginResolver, PhoneNumber, PhoneOtp, PhoneOtpMessage, PhoneOtpSender,
+    Otp, OtpLogin, OtpLoginResolver, OtpPolicy, PasswordlessAddress, PasswordlessAttempt,
+    PasswordlessChallenge, PasswordlessStart, PasswordlessStore,
 };
 
-const PHONE_OTP: LoginMethod<PhoneNumber, PhoneOtp> = LoginMethod::new("phone-otp");
-#[cfg(feature = "email")]
-const EMAIL_OTP: LoginMethod<EmailAddress, EmailOtp> = LoginMethod::new("email-otp");
+const OTP: LoginMethod<PasswordlessAddress, Otp> = LoginMethod::new("otp");
 
-struct PhoneAccounts;
+struct Accounts;
 
 #[cfg(feature = "email")]
-struct EmailAccounts;
-
-#[cfg(feature = "email")]
-impl EmailLoginResolver for EmailAccounts {
+impl EmailLoginResolver for Accounts {
     fn resolve(
         &self,
         email: &EmailAddress,
@@ -34,47 +25,18 @@ impl EmailLoginResolver for EmailAccounts {
     }
 }
 
-#[cfg(feature = "email")]
-struct EmailSender;
-
-#[cfg(feature = "email")]
-impl EmailOtpSender for EmailSender {
-    fn send(
-        &self,
-        _email: &EmailAddress,
-        _message: &EmailOtpMessage,
-    ) -> impl std::future::Future<Output = Result<(), AuthError>> + Send + '_ {
-        async { Ok(()) }
-    }
-}
-
-impl PhoneLoginResolver for PhoneAccounts {
+impl OtpLoginResolver for Accounts {
     fn resolve(
         &self,
-        phone: &PhoneNumber,
+        address: &PasswordlessAddress,
     ) -> impl std::future::Future<Output = Result<Option<AuthUser>, AuthError>> + Send + '_ {
-        let known = phone.as_str() == "+15551234567";
-        async move { Ok(known.then(|| AuthUser::new("phone-user"))) }
-    }
-}
-
-#[derive(Clone, Default)]
-struct CapturedPhoneSender(Arc<Mutex<Option<String>>>);
-
-impl PhoneOtpSender for CapturedPhoneSender {
-    fn send(
-        &self,
-        _phone: &PhoneNumber,
-        message: &PhoneOtpMessage,
-    ) -> impl std::future::Future<Output = Result<(), AuthError>> + Send + '_ {
-        let slot = self.0.clone();
-        let code = message.code().to_owned();
-        async move {
-            *slot
-                .lock()
-                .map_err(|_| AuthError::Internal("test sender lock failed".into()))? = Some(code);
-            Ok(())
-        }
+        let user = match address.as_str() {
+            "+15551234567" => Some(AuthUser::new("phone-user")),
+            #[cfg(feature = "email")]
+            "user@example.com" => Some(AuthUser::new("email-user")),
+            _ => None,
+        };
+        async move { Ok(user) }
     }
 }
 
@@ -106,7 +68,7 @@ impl PasswordlessStore for ChallengeStore {
                         state: challenge.state().to_owned(),
                     },
                 );
-                PasswordlessStart::new(id, challenge.expires_at(), challenge.resend_at(), true)
+                PasswordlessStart::new(id, challenge.expires_at(), challenge.next_issue_at(), true)
             });
         async move { result }
     }
@@ -137,105 +99,76 @@ impl PasswordlessStore for ChallengeStore {
             });
         async move { result? }
     }
-
-    fn discard(
-        &self,
-        challenge_id: &str,
-    ) -> impl std::future::Future<Output = Result<(), AuthError>> + Send + '_ {
-        let result = self
-            .values
-            .lock()
-            .map_err(|_| AuthError::Internal("test store lock failed".into()))
-            .map(|mut values| {
-                values.remove(challenge_id);
-            });
-        async move { result }
-    }
 }
 
-/// Verifies phone OTP uses durable one-time state and issues normal credentials after completion.
+/// Verifies one OTP method handles a phone address and issues normal credentials.
 #[tokio::test]
-async fn phone_otp_completes_through_the_selected_provider() -> Result<(), AuthError> {
-    let sender = CapturedPhoneSender::default();
+async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> {
     let auth = AuthConf::default()
         .passwordless_store(ChallengeStore::default())
-        .method(PHONE_OTP, PhoneLogin::otp(PhoneAccounts, sender.clone()));
+        .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
 
-    let challenge = site
+    let mut challenge = site
         .auth()
-        .via(PHONE_OTP)
-        .begin(PhoneNumber::new("+15551234567"), &[REPORTS])
+        .via(OTP)
+        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
     let token = challenge
         .token()
         .ok_or(AuthError::InvalidLoginState)?
         .to_owned();
-    let code = sender
-        .0
-        .lock()
-        .map_err(|_| AuthError::Internal("test sender lock failed".into()))?
-        .clone()
-        .ok_or(AuthError::InvalidCredential)?;
-    let login = site
-        .auth()
-        .via(PHONE_OTP)
-        .complete(PhoneOtp::new(token, code))
-        .await?;
+    let code = challenge
+        .take_otp_delivery()
+        .ok_or(AuthError::InvalidCredential)?
+        .code()
+        .to_owned();
+    let login = site.auth().via(OTP).complete(Otp::new(token, code)).await?;
 
     assert!(!login.credentials().access().is_empty());
     Ok(())
 }
 
-/// Verifies replaying a consumed phone challenge fails without issuing another credential.
+/// Verifies replaying a consumed OTP challenge fails without issuing another credential.
 #[tokio::test]
-async fn phone_otp_challenge_is_consumed_once() -> Result<(), AuthError> {
-    let sender = CapturedPhoneSender::default();
+async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
     let auth = AuthConf::default()
         .passwordless_store(ChallengeStore::default())
-        .method(PHONE_OTP, PhoneLogin::otp(PhoneAccounts, sender.clone()));
+        .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
 
-    let challenge = site
+    let mut challenge = site
         .auth()
-        .via(PHONE_OTP)
-        .begin(PhoneNumber::new("+15551234567"), &[REPORTS])
+        .via(OTP)
+        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
         .await?;
     let token = challenge
         .token()
         .ok_or(AuthError::InvalidLoginState)?
         .to_owned();
-    let code = sender
-        .0
-        .lock()
-        .map_err(|_| AuthError::Internal("test sender lock failed".into()))?
-        .clone()
-        .ok_or(AuthError::InvalidCredential)?;
+    let code = challenge
+        .take_otp_delivery()
+        .ok_or(AuthError::InvalidCredential)?
+        .code()
+        .to_owned();
 
     site.auth()
-        .via(PHONE_OTP)
-        .complete(PhoneOtp::new(token.clone(), code.clone()))
+        .via(OTP)
+        .complete(Otp::new(token.clone(), code.clone()))
         .await?;
-    let replay = site
-        .auth()
-        .via(PHONE_OTP)
-        .complete(PhoneOtp::new(token, code))
-        .await;
+    let replay = site.auth().via(OTP).complete(Otp::new(token, code)).await;
     assert!(matches!(replay, Err(AuthError::InvalidCredential)));
     Ok(())
 }
 
-/// Verifies passwordless methods cannot build without durable challenge storage.
+/// Verifies OTP methods cannot build without durable challenge storage.
 #[tokio::test]
-async fn phone_otp_requires_a_durable_challenge_store() -> Result<(), AuthError> {
-    let auth = AuthConf::default().method(
-        PHONE_OTP,
-        PhoneLogin::otp(PhoneAccounts, CapturedPhoneSender::default()),
-    );
+async fn otp_requires_a_durable_challenge_store() -> Result<(), AuthError> {
+    let auth = AuthConf::default().method(OTP, OtpLogin::new(Accounts));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
@@ -245,25 +178,120 @@ async fn phone_otp_requires_a_durable_challenge_store() -> Result<(), AuthError>
     Ok(())
 }
 
-/// Verifies email OTP gives its code only to an application-owned sender.
-#[cfg(feature = "email")]
+/// Verifies invalid OTP policies are rejected when the site builds.
 #[tokio::test]
-async fn email_otp_uses_an_application_sender() -> Result<(), AuthError> {
+async fn invalid_otp_policy_fails_site_construction() -> Result<(), AuthError> {
+    let auth =
+        AuthConf::default().method(OTP, OtpLogin::new(Accounts).policy(OtpPolicy::numeric(3)));
+    let error = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .err()
+        .ok_or(AuthError::InvalidCredential)?;
+
+    assert!(error.to_string().contains("OTP policy"));
+    Ok(())
+}
+
+/// Verifies unresolved principals never receive a proof delivery value.
+#[tokio::test]
+async fn unknown_otp_address_has_no_delivery_value() -> Result<(), AuthError> {
     let auth = AuthConf::default()
         .passwordless_store(ChallengeStore::default())
-        .method(EMAIL_OTP, EmailLogin::otp(EmailAccounts, EmailSender));
+        .method(OTP, OtpLogin::new(Accounts));
     let site = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .map_err(auth_error)?;
 
+    let mut challenge = site
+        .auth()
+        .via(OTP)
+        .begin(PasswordlessAddress::phone("+15550000000"), &[REPORTS])
+        .await?;
+
+    assert!(challenge.token().is_some());
+    assert!(challenge.take_otp_delivery().is_none());
+    Ok(())
+}
+
+/// Verifies the Base32 policy generates the requested unambiguous code shape.
+#[tokio::test]
+async fn base32_otp_policy_generates_a_bounded_code() -> Result<(), AuthError> {
+    let auth = AuthConf::default()
+        .passwordless_store(ChallengeStore::default())
+        .method(
+            OTP,
+            OtpLogin::new(Accounts).policy(OtpPolicy::crockford_base32(8)),
+        );
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+    let mut challenge = site
+        .auth()
+        .via(OTP)
+        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .await?;
+    let delivery = challenge
+        .take_otp_delivery()
+        .ok_or(AuthError::InvalidCredential)?;
+
+    assert_eq!(delivery.code().len(), 8);
+    assert!(
+        delivery
+            .code()
+            .bytes()
+            .all(|value| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&value))
+    );
+    Ok(())
+}
+
+/// Verifies passwordless challenge JSON contains only the opaque challenge protocol fields.
+#[tokio::test]
+async fn otp_challenge_json_never_contains_a_code() -> Result<(), AuthError> {
+    use axum::{body::to_bytes, response::IntoResponse};
+
+    let auth = AuthConf::default()
+        .passwordless_store(ChallengeStore::default())
+        .method(OTP, OtpLogin::new(Accounts));
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
     let challenge = site
         .auth()
-        .via(EMAIL_OTP)
-        .begin(EmailAddress::new("user@example.com"), &[REPORTS])
+        .via(OTP)
+        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .await?;
+    let body = to_bytes(challenge.into_response().into_body(), 1024)
+        .await
+        .map_err(|_| AuthError::Internal("challenge response was too large".into()))?;
+    let json = std::str::from_utf8(&body).map_err(|_| AuthError::InvalidCredential)?;
+
+    assert!(!json.contains("\"code\""));
+    Ok(())
+}
+
+/// Verifies an application handler receives but cannot serialize an issued email OTP.
+#[cfg(feature = "email")]
+#[tokio::test]
+async fn otp_delivery_is_application_owned() -> Result<(), AuthError> {
+    let auth = AuthConf::default()
+        .passwordless_store(ChallengeStore::default())
+        .method(OTP, OtpLogin::new(Accounts).policy(OtpPolicy::numeric(8)));
+    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+        .await
+        .map_err(auth_error)?;
+
+    let mut challenge = site
+        .auth()
+        .via(OTP)
+        .begin(PasswordlessAddress::email("user@example.com"), &[REPORTS])
         .await?;
 
     assert_eq!(challenge.kind(), LoginChallengeKind::Code);
     assert!(challenge.token().is_some());
+    let delivery = challenge
+        .take_otp_delivery()
+        .ok_or(AuthError::InvalidCredential)?;
+    assert_eq!(delivery.code().len(), 8);
     Ok(())
 }
 
@@ -274,7 +302,7 @@ async fn magic_link_requires_an_explicit_callback_url() -> Result<(), AuthError>
     const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> = LoginMethod::new("email-link");
     let auth = AuthConf::default()
         .passwordless_store(ChallengeStore::default())
-        .method(EMAIL_LINK, EmailLogin::magic_link(EmailAccounts));
+        .method(EMAIL_LINK, MagicLinkLogin::new(Accounts));
     let error = Site::build(config().auth(auth), bundles::Bundle::default())
         .await
         .err()
@@ -292,7 +320,7 @@ async fn stateless_magic_link_completes_without_a_store() -> Result<(), AuthErro
         LoginMethod::new("email-link-stateless");
     let auth = AuthConf::default().method(
         EMAIL_LINK,
-        EmailLogin::magic_link(EmailAccounts)
+        MagicLinkLogin::new(Accounts)
             .callback_url("https://example.com/auth/email/callback")
             .stateless(),
     );

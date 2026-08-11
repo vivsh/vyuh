@@ -43,6 +43,34 @@ pub struct LoginChallenge {
     attachments: Vec<(HeaderName, HeaderValue)>,
 }
 
+/// A generated one-time password available only to the handler that starts a flow.
+pub struct OtpDelivery {
+    code: String,
+    expires_in: i64,
+}
+
+impl OtpDelivery {
+    pub(crate) fn new(code: String, expires_in: i64) -> Self {
+        Self { code, expires_in }
+    }
+
+    /// Returns the generated code for application-owned delivery.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the number of seconds before the code expires.
+    pub const fn expires_in(&self) -> i64 {
+        self.expires_in
+    }
+}
+
+impl fmt::Debug for OtpDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OtpDelivery(<redacted>)")
+    }
+}
+
 enum Challenge {
     #[cfg(feature = "federated")]
     Redirect { url: String, expires_in: i64 },
@@ -61,6 +89,7 @@ enum Challenge {
         channel: &'static str,
         expires_in: i64,
         resend_in: i64,
+        delivery: Option<OtpDelivery>,
     },
 }
 
@@ -125,6 +154,16 @@ impl LoginChallenge {
         }
     }
 
+    /// Takes the generated OTP so the initiating handler can deliver it.
+    ///
+    /// The code is never included in the response returned by this challenge.
+    pub fn take_otp_delivery(&mut self) -> Option<OtpDelivery> {
+        match &mut self.challenge {
+            Challenge::Code { delivery, .. } => delivery.take(),
+            _ => None,
+        }
+    }
+
     /// Applies challenge-managed cookies or headers to an existing response.
     pub fn write(&self, response: &mut Response) {
         for (name, value) in &self.attachments {
@@ -165,6 +204,7 @@ impl LoginChallenge {
         channel: &'static str,
         expires_in: i64,
         resend_in: i64,
+        delivery: Option<OtpDelivery>,
     ) -> Self {
         Self {
             challenge: Challenge::Code {
@@ -172,6 +212,7 @@ impl LoginChallenge {
                 channel,
                 expires_in,
                 resend_in,
+                delivery,
             },
             attachments: Vec::new(),
         }
@@ -233,6 +274,7 @@ impl IntoResponse for LoginChallenge {
                 channel,
                 expires_in,
                 resend_in,
+                ..
             } => Json(PasswordlessChallengeSchema {
                 challenge_token: Some(token),
                 channel: channel.into(),

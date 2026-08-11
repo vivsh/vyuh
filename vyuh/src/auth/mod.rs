@@ -43,15 +43,13 @@ pub use location::{CookieConf, CookieSameSite, CsrfConf, UnsafeQueryCredentials}
 pub use login::ComposedMfaLogin;
 pub use login::{
     BasicCredentials, BasicLogin, LoginAuth, LoginChallenge, LoginChallengeKind, LoginMethod,
-    LoginStateStore, MfaLogin, MfaMethod, MfaResponse, MfaVerifier, PasswordCredentials,
-    PasswordLogin, PasswordVerifier, PasswordlessAttempt, PasswordlessChallenge, PasswordlessStart,
-    PasswordlessStore, PhoneLogin, PhoneLoginResolver, PhoneNumber, PhoneOtp, PhoneOtpMessage,
-    PhoneOtpSender, PresentedSecret,
+    LoginStateStore, MfaLogin, MfaMethod, MfaResponse, MfaVerifier, Otp, OtpDelivery, OtpLogin,
+    OtpLoginResolver, OtpPolicy, PasswordCredentials, PasswordLogin, PasswordVerifier,
+    PasswordlessAddress, PasswordlessAttempt, PasswordlessChallenge, PasswordlessStart,
+    PasswordlessStore, PhoneNumber, PresentedSecret,
 };
 #[cfg(feature = "email")]
-pub use login::{EmailAddress, EmailLogin, EmailLoginResolver, EmailOtp, MagicLinkCallback};
-#[cfg(feature = "email")]
-pub use login::{EmailOtpMessage, EmailOtpSender};
+pub use login::{EmailAddress, EmailLoginResolver, MagicLinkCallback, MagicLinkLogin};
 #[cfg(feature = "federated")]
 pub use login::{
     FederatedCallback, FederatedIdentity, FederatedLogin, FederatedProvider, FederatedStart,

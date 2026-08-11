@@ -264,27 +264,51 @@ resolvers return `Option<AuthUser>`, so account creation and account linking
 remain application-owned.
 
 ```rust
-const EMAIL_OTP: LoginMethod<EmailAddress, EmailOtp> =
-    LoginMethod::new("email-otp");
-const PHONE_OTP: LoginMethod<PhoneNumber, PhoneOtp> =
-    LoginMethod::new("phone-otp");
+const OTP: LoginMethod<PasswordlessAddress, Otp> =
+    LoginMethod::new("otp");
 
 let auth = AuthConf::default()
     .passwordless_store(LoginChallenges)
-    .method(EMAIL_OTP, EmailLogin::otp(AccountEmails, AccountEmailSender))
-    .method(PHONE_OTP, PhoneLogin::otp(AccountPhones, SmsGateway));
+    .method(
+        OTP,
+        OtpLogin::new(AccountResolver)
+            .policy(OtpPolicy::numeric(8)),
+    );
 ```
 
-Email methods require the `email` feature. Vyuh never composes passwordless
-mail content: applications own email and SMS delivery. Magic links require an
-explicit absolute HTTPS callback URL and expose the generated URL only to the
-handler that began the flow:
+The same OTP method accepts `PasswordlessAddress::email(...)` and
+`PasswordlessAddress::phone(...)`. Email input requires the `email` feature;
+phone input must already be canonical E.164. Vyuh never delivers an OTP.
+Instead, the initiating handler deliberately takes its redacted delivery value,
+adds any application context, and sends it through the application's own mail,
+SMS, or other channel:
+
+```rust
+let mut challenge = site.auth()
+    .via(OTP)
+    .begin(PasswordlessAddress::email(input.email), &[API])
+    .await?;
+
+if let Some(otp) = challenge.take_otp_delivery() {
+    send_login_email(input.email, otp.code(), otp.expires_in()).await?;
+}
+
+Ok(challenge)
+```
+
+`OtpPolicy::numeric(6)` is the default. Vyuh also supports bounded numeric and
+Crockford Base32 policies, while retaining cryptographically secure code
+generation. OTP values are never included in challenge JSON, logs, errors,
+Console, OpenAPI, or metrics.
+
+Magic links require an explicit absolute HTTPS callback URL and expose the
+generated URL only to the handler that began the flow:
 
 ```rust
 const EMAIL_LINK: LoginMethod<EmailAddress, MagicLinkCallback> =
     LoginMethod::new("email-link");
 
-let link = EmailLogin::magic_link(AccountEmails)
+let link = MagicLinkLogin::new(AccountEmails)
     .callback_url("https://app.example.com/auth/email/callback")
     .stateful();
 ```
@@ -293,24 +317,24 @@ Applications own routes and delivery. A magic-link start exposes
 `challenge.magic_link_url()` only to the initiating handler, which may render
 any branded email with arbitrary application context. Stateless links are the
 default and remain reusable until expiry; `.stateful()` requires the durable
-store and consumes a link once. OTP senders receive a redacted code message;
-the code is never returned in the HTTP challenge. Unknown and known identifiers
-receive the same acknowledgement.
+store and consumes a link once. OTP delivery values are redacted and never
+returned in HTTP challenge JSON. Unknown and known identifiers receive the
+same acknowledgement.
 
-`PasswordlessStore` is mandatory. It is application-provided durable storage
-that atomically creates/suppresses challenges, limits proof attempts, consumes a
-successful proof exactly once, and discards undeliverable challenges. Vyuh
-passes only opaque IDs, keyed proof digests, sealed state, and delivery limits
-to that store; it never persists raw OTPs, links, or identity details. The
-fixed defaults are a 15-minute magic link, a 10-minute six-digit OTP, five
-verification attempts, 60-second resend delay, and five deliveries per
-principal per hour.
+`PasswordlessStore` is mandatory for OTP and stateful magic-link flows. It
+atomically creates/suppresses challenges, limits proof attempts, and consumes a
+successful proof exactly once. Vyuh passes only opaque IDs, keyed proof digests,
+sealed state, and issue limits to that store; it never persists raw OTPs, links,
+or identity details. The fixed defaults are a 15-minute magic link, a 10-minute
+OTP, five verification attempts, 60-second resend delay, and five proof issues
+per principal per hour.
 
-Phone input must already be canonical E.164. `EmailOtpSender` and
-`PhoneOtpSender` are the delivery integration points; each receives a redacted
-message and may expose its code only to the delivery adapter. Vyuh intentionally
-includes no provider-specific email/SMS integration, background delivery
-retries, passwordless signup, or passwordless MFA composition.
+Unknown and known addresses receive the same challenge response. An OTP
+delivery value is available only for a resolved account; handlers must preserve
+the generic response rather than turning that difference into account
+enumeration. Vyuh intentionally includes no provider-specific email/SMS
+integration, background delivery retries, passwordless signup, or passwordless
+MFA composition.
 
 ## Default JWT login
 

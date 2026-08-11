@@ -6,16 +6,26 @@ use std::{fmt, future::Future, sync::Arc};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures::future::BoxFuture;
-use ring::{hmac, rand::SecureRandom};
+use ring::hmac;
+#[cfg(feature = "email")]
+use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 
 use super::{
     BoxLoginInput, ChallengeCodec, ErasedLoginRuntime, LoginChallenge, LoginCompletion,
-    LoginMethodId, LoginProviderDefinition, LoginRuntimeDefinition, LoginTarget, SealedLoginState,
-    VerifiedLogin,
+    LoginMethodId, LoginProviderDefinition, LoginRuntimeDefinition, LoginTarget, OtpDelivery,
+    SealedLoginState, VerifiedLogin,
     runtime::{CompletedLogin, LoginFuture, completion_sealed},
 };
 use crate::auth::{AuthError, AuthUser, KeySource, SecretRing};
+
+mod policy;
+mod store;
+
+pub use policy::OtpPolicy;
+use policy::{MAX_OTP_LENGTH, random_code};
+pub use store::{PasswordlessAttempt, PasswordlessChallenge, PasswordlessStart, PasswordlessStore};
+pub(crate) use store::{PasswordlessChallengeParts, PasswordlessStoreRuntime};
 
 const PROOF_CONTEXT: &[u8] = b"passwordless-proof-v1";
 const PRINCIPAL_CONTEXT: &[u8] = b"passwordless-principal-v1";
@@ -134,46 +144,22 @@ impl completion_sealed::Sealed for MagicLinkCallback {}
 #[cfg(feature = "email")]
 impl LoginCompletion for MagicLinkCallback {}
 
-/// A redacted email one-time-password completion response.
-#[cfg(feature = "email")]
-pub struct EmailOtp(OtpResponse);
+/// A redacted passwordless one-time-password completion response.
+pub struct Otp(OtpResponse);
 
-#[cfg(feature = "email")]
-impl EmailOtp {
-    /// Creates email OTP completion input from the opaque challenge and delivered code.
+impl Otp {
+    /// Creates OTP completion input from an opaque challenge and delivered code.
     pub fn new(challenge_token: impl Into<String>, code: impl Into<String>) -> Self {
         Self(OtpResponse::new(challenge_token, code))
     }
 }
 
-#[cfg(feature = "email")]
-impl completion_sealed::Sealed for EmailOtp {}
-#[cfg(feature = "email")]
-impl LoginCompletion for EmailOtp {}
+impl completion_sealed::Sealed for Otp {}
+impl LoginCompletion for Otp {}
 
-#[cfg(feature = "email")]
-impl fmt::Debug for EmailOtp {
+impl fmt::Debug for Otp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EmailOtp(<redacted>)")
-    }
-}
-
-/// A redacted phone one-time-password completion response.
-pub struct PhoneOtp(OtpResponse);
-
-impl PhoneOtp {
-    /// Creates phone OTP completion input from the opaque challenge and delivered code.
-    pub fn new(challenge_token: impl Into<String>, code: impl Into<String>) -> Self {
-        Self(OtpResponse::new(challenge_token, code))
-    }
-}
-
-impl completion_sealed::Sealed for PhoneOtp {}
-impl LoginCompletion for PhoneOtp {}
-
-impl fmt::Debug for PhoneOtp {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PhoneOtp(<redacted>)")
+        formatter.write_str("Otp(<redacted>)")
     }
 }
 
@@ -192,9 +178,11 @@ impl OtpResponse {
 
     fn validate(&self) -> Result<(), AuthError> {
         valid_id(&self.challenge_token)?;
-        (self.code.len() == 6 && self.code.bytes().all(|value| value.is_ascii_digit()))
-            .then_some(())
-            .ok_or(AuthError::InvalidCredential)
+        (!self.code.is_empty()
+            && self.code.len() <= usize::from(MAX_OTP_LENGTH)
+            && self.code.bytes().all(|value| value.is_ascii_alphanumeric()))
+        .then_some(())
+        .ok_or(AuthError::InvalidCredential)
     }
 }
 
@@ -214,296 +202,76 @@ pub trait EmailLoginResolver: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<AuthUser>, AuthError>> + Send + 'a;
 }
 
-/// Resolves an existing application identity from a canonical phone number.
-pub trait PhoneLoginResolver: Send + Sync + 'static {
+/// A validated principal supported by the passwordless OTP login method.
+#[derive(Clone, PartialEq, Eq)]
+pub enum PasswordlessAddress {
+    /// An email address, available with Vyuh's `email` feature.
+    #[cfg(feature = "email")]
+    Email(EmailAddress),
+    /// A canonical E.164 phone number.
+    Phone(PhoneNumber),
+}
+
+impl PasswordlessAddress {
+    /// Retains an email address until the selected OTP method validates it.
+    #[cfg(feature = "email")]
+    pub fn email(value: impl Into<String>) -> Self {
+        Self::Email(EmailAddress::new(value))
+    }
+
+    /// Retains a phone number until the selected OTP method validates it.
+    pub fn phone(value: impl Into<String>) -> Self {
+        Self::Phone(PhoneNumber::new(value))
+    }
+
+    /// Returns the address only to an application-owned resolver or delivery handler.
+    pub fn as_str(&self) -> &str {
+        match self {
+            #[cfg(feature = "email")]
+            Self::Email(value) => value.as_str(),
+            Self::Phone(value) => value.as_str(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), AuthError> {
+        match self {
+            #[cfg(feature = "email")]
+            Self::Email(value) => value.validate(),
+            Self::Phone(value) => value.validate(),
+        }
+    }
+
+    fn channel(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "email")]
+            Self::Email(_) => "email",
+            Self::Phone(_) => "phone",
+        }
+    }
+
+    fn from_parts(channel: &str, value: String) -> Result<Self, AuthError> {
+        match channel {
+            #[cfg(feature = "email")]
+            "email" => Ok(Self::Email(EmailAddress::new(value))),
+            "phone" => Ok(Self::Phone(PhoneNumber::new(value))),
+            _ => Err(AuthError::InvalidLoginState),
+        }
+    }
+}
+
+impl fmt::Debug for PasswordlessAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PasswordlessAddress(<redacted>)")
+    }
+}
+
+/// Resolves an existing application identity from a passwordless address.
+pub trait OtpLoginResolver: Send + Sync + 'static {
     /// Returns the current account identity, or `None` when no account is linked.
     fn resolve<'a>(
         &'a self,
-        phone: &'a PhoneNumber,
+        address: &'a PasswordlessAddress,
     ) -> impl Future<Output = Result<Option<AuthUser>, AuthError>> + Send + 'a;
-}
-
-/// Delivers a phone one-time password through an application-selected channel.
-pub trait PhoneOtpSender: Send + Sync + 'static {
-    /// Sends one code without logging or retaining its secret value.
-    fn send<'a>(
-        &'a self,
-        phone: &'a PhoneNumber,
-        message: &'a PhoneOtpMessage,
-    ) -> impl Future<Output = Result<(), AuthError>> + Send + 'a;
-}
-
-/// Delivers an email one-time password through an application-selected channel.
-#[cfg(feature = "email")]
-pub trait EmailOtpSender: Send + Sync + 'static {
-    /// Sends one code without logging or retaining its secret value.
-    fn send<'a>(
-        &'a self,
-        email: &'a EmailAddress,
-        message: &'a EmailOtpMessage,
-    ) -> impl Future<Output = Result<(), AuthError>> + Send + 'a;
-}
-
-/// A redacted email OTP delivery message.
-#[cfg(feature = "email")]
-pub struct EmailOtpMessage {
-    code: String,
-    expires_in: i64,
-}
-
-#[cfg(feature = "email")]
-impl EmailOtpMessage {
-    /// Exposes the OTP only to the configured delivery adapter.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// Returns the number of seconds before the code expires.
-    pub const fn expires_in(&self) -> i64 {
-        self.expires_in
-    }
-}
-
-#[cfg(feature = "email")]
-impl fmt::Debug for EmailOtpMessage {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EmailOtpMessage(<redacted>)")
-    }
-}
-
-/// A redacted phone OTP delivery message.
-pub struct PhoneOtpMessage {
-    code: String,
-    expires_in: i64,
-}
-
-impl PhoneOtpMessage {
-    /// Exposes the OTP only to the configured delivery adapter.
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    /// Returns the number of seconds before the code expires.
-    pub const fn expires_in(&self) -> i64 {
-        self.expires_in
-    }
-}
-
-impl fmt::Debug for PhoneOtpMessage {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PhoneOtpMessage(<redacted>)")
-    }
-}
-
-/// Opaque challenge state persisted by a durable passwordless store.
-pub struct PasswordlessChallenge {
-    id: String,
-    principal: Vec<u8>,
-    proofs: Vec<Vec<u8>>,
-    state: String,
-    expires_at: i64,
-    attempts: u8,
-    resend_at: i64,
-    delivery_window_ends_at: i64,
-    delivery_limit: u8,
-}
-
-impl PasswordlessChallenge {
-    /// Returns the opaque challenge identifier.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    /// Returns a keyed principal digest suitable only for store indexing.
-    pub fn principal(&self) -> &[u8] {
-        &self.principal
-    }
-    /// Returns active and fallback keyed proof digests for atomic verification.
-    pub fn proofs(&self) -> &[Vec<u8>] {
-        &self.proofs
-    }
-    /// Returns encrypted completion state without exposing identity fields.
-    pub fn state(&self) -> &str {
-        &self.state
-    }
-    /// Returns the absolute UTC expiry timestamp.
-    pub const fn expires_at(&self) -> i64 {
-        self.expires_at
-    }
-    /// Returns the maximum invalid proof attempts.
-    pub const fn attempts(&self) -> u8 {
-        self.attempts
-    }
-    /// Returns the earliest UTC timestamp for another delivery.
-    pub const fn resend_at(&self) -> i64 {
-        self.resend_at
-    }
-    /// Returns the end of the delivery-rate window.
-    pub const fn delivery_window_ends_at(&self) -> i64 {
-        self.delivery_window_ends_at
-    }
-    /// Returns the maximum deliveries within one window.
-    pub const fn delivery_limit(&self) -> u8 {
-        self.delivery_limit
-    }
-}
-
-impl fmt::Debug for PasswordlessChallenge {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PasswordlessChallenge(<redacted>)")
-    }
-}
-
-/// The durable store's atomic result for challenge creation or resend suppression.
-pub struct PasswordlessStart {
-    challenge_id: String,
-    expires_at: i64,
-    resend_at: i64,
-    deliver: bool,
-}
-
-impl PasswordlessStart {
-    /// Creates a store result for one active passwordless challenge.
-    pub fn new(
-        challenge_id: impl Into<String>,
-        expires_at: i64,
-        resend_at: i64,
-        deliver: bool,
-    ) -> Self {
-        Self {
-            challenge_id: challenge_id.into(),
-            expires_at,
-            resend_at,
-            deliver,
-        }
-    }
-    /// Returns the opaque challenge identifier used by OTP completion.
-    pub fn challenge_id(&self) -> &str {
-        &self.challenge_id
-    }
-    /// Returns the challenge expiry timestamp.
-    pub const fn expires_at(&self) -> i64 {
-        self.expires_at
-    }
-    /// Returns the next permitted delivery timestamp.
-    pub const fn resend_at(&self) -> i64 {
-        self.resend_at
-    }
-    /// Returns whether this request should deliver a fresh message.
-    pub const fn should_deliver(&self) -> bool {
-        self.deliver
-    }
-}
-
-impl fmt::Debug for PasswordlessStart {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PasswordlessStart(<redacted>)")
-    }
-}
-
-/// The atomic result of one passwordless proof attempt.
-pub enum PasswordlessAttempt {
-    /// The proof matched and the store consumed the challenge exactly once.
-    Accepted { state: String },
-    /// The proof was invalid, expired, exhausted, or already consumed.
-    Rejected,
-}
-
-impl PasswordlessAttempt {
-    /// Creates an accepted store result with opaque sealed state.
-    pub fn accepted(state: impl Into<String>) -> Self {
-        Self::Accepted {
-            state: state.into(),
-        }
-    }
-}
-
-impl fmt::Debug for PasswordlessAttempt {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PasswordlessAttempt(<redacted>)")
-    }
-}
-
-/// Durable, atomic storage for passwordless challenges.
-pub trait PasswordlessStore: Send + Sync + 'static {
-    /// Starts or suppresses delivery for one principal without exposing that principal.
-    fn begin<'a>(
-        &'a self,
-        challenge: PasswordlessChallenge,
-    ) -> impl Future<Output = Result<PasswordlessStart, AuthError>> + Send + 'a;
-    /// Verifies one proof, decrements attempts on failure, and consumes success atomically.
-    fn attempt<'a>(
-        &'a self,
-        challenge_id: &'a str,
-        proofs: &'a [Vec<u8>],
-    ) -> impl Future<Output = Result<PasswordlessAttempt, AuthError>> + Send + 'a;
-    /// Removes a challenge that could not be delivered.
-    fn discard<'a>(
-        &'a self,
-        challenge_id: &'a str,
-    ) -> impl Future<Output = Result<(), AuthError>> + Send + 'a;
-}
-
-trait ErasedPasswordlessStore: Send + Sync {
-    fn begin<'a>(
-        &'a self,
-        challenge: PasswordlessChallenge,
-    ) -> BoxFuture<'a, Result<PasswordlessStart, AuthError>>;
-    fn attempt<'a>(
-        &'a self,
-        id: &'a str,
-        proofs: &'a [Vec<u8>],
-    ) -> BoxFuture<'a, Result<PasswordlessAttempt, AuthError>>;
-    fn discard<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), AuthError>>;
-}
-
-impl<T: PasswordlessStore> ErasedPasswordlessStore for T {
-    fn begin<'a>(
-        &'a self,
-        challenge: PasswordlessChallenge,
-    ) -> BoxFuture<'a, Result<PasswordlessStart, AuthError>> {
-        Box::pin(PasswordlessStore::begin(self, challenge))
-    }
-    fn attempt<'a>(
-        &'a self,
-        id: &'a str,
-        proofs: &'a [Vec<u8>],
-    ) -> BoxFuture<'a, Result<PasswordlessAttempt, AuthError>> {
-        Box::pin(PasswordlessStore::attempt(self, id, proofs))
-    }
-    fn discard<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), AuthError>> {
-        Box::pin(PasswordlessStore::discard(self, id))
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct PasswordlessStoreRuntime(Arc<dyn ErasedPasswordlessStore>);
-
-impl fmt::Debug for PasswordlessStoreRuntime {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PasswordlessStore(<redacted>)")
-    }
-}
-
-impl PasswordlessStoreRuntime {
-    pub(crate) fn new(value: impl PasswordlessStore) -> Self {
-        Self(Arc::new(value))
-    }
-    pub(crate) async fn begin(
-        &self,
-        challenge: PasswordlessChallenge,
-    ) -> Result<PasswordlessStart, AuthError> {
-        self.0.begin(challenge).await
-    }
-    pub(crate) async fn attempt(
-        &self,
-        id: &str,
-        proofs: &[Vec<u8>],
-    ) -> Result<PasswordlessAttempt, AuthError> {
-        self.0.attempt(id, proofs).await
-    }
-    pub(crate) async fn discard(&self, id: &str) -> Result<(), AuthError> {
-        self.0.discard(id).await
-    }
 }
 
 #[cfg(feature = "email")]
@@ -524,152 +292,80 @@ impl<T: EmailLoginResolver> ErasedEmailResolver for T {
     }
 }
 
-trait ErasedPhoneResolver: Send + Sync {
+trait ErasedOtpResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
-        phone: &'a PhoneNumber,
+        address: &'a PasswordlessAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>>;
 }
 
-impl<T: PhoneLoginResolver> ErasedPhoneResolver for T {
+impl<T: OtpLoginResolver> ErasedOtpResolver for T {
     fn resolve<'a>(
         &'a self,
-        phone: &'a PhoneNumber,
+        address: &'a PasswordlessAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>> {
-        Box::pin(PhoneLoginResolver::resolve(self, phone))
+        Box::pin(OtpLoginResolver::resolve(self, address))
     }
 }
 
-trait ErasedPhoneSender: Send + Sync {
-    fn send<'a>(
-        &'a self,
-        phone: &'a PhoneNumber,
-        message: &'a PhoneOtpMessage,
-    ) -> BoxFuture<'a, Result<(), AuthError>>;
-}
-
-impl<T: PhoneOtpSender> ErasedPhoneSender for T {
-    fn send<'a>(
-        &'a self,
-        phone: &'a PhoneNumber,
-        message: &'a PhoneOtpMessage,
-    ) -> BoxFuture<'a, Result<(), AuthError>> {
-        Box::pin(PhoneOtpSender::send(self, phone, message))
-    }
-}
-
-#[cfg(feature = "email")]
-trait ErasedEmailSender: Send + Sync {
-    fn send<'a>(
-        &'a self,
-        email: &'a EmailAddress,
-        message: &'a EmailOtpMessage,
-    ) -> BoxFuture<'a, Result<(), AuthError>>;
-}
-
-#[cfg(feature = "email")]
-impl<T: EmailOtpSender> ErasedEmailSender for T {
-    fn send<'a>(
-        &'a self,
-        email: &'a EmailAddress,
-        message: &'a EmailOtpMessage,
-    ) -> BoxFuture<'a, Result<(), AuthError>> {
-        Box::pin(EmailOtpSender::send(self, email, message))
-    }
-}
-
-/// Configures passwordless email magic-link or OTP login.
+/// Configures passwordless email magic-link login.
 #[cfg(feature = "email")]
 #[derive(Clone)]
-pub struct EmailLogin {
+pub struct MagicLinkLogin {
     resolver: Arc<dyn ErasedEmailResolver>,
-    kind: EmailKind,
+    callback_url: Option<String>,
+    stateful: bool,
 }
 
 #[cfg(feature = "email")]
-#[derive(Clone)]
-enum EmailKind {
-    MagicLink {
-        callback_url: Option<String>,
-        stateful: bool,
-    },
-    Otp {
-        sender: Arc<dyn ErasedEmailSender>,
-    },
-}
-
-#[cfg(feature = "email")]
-impl EmailLogin {
+impl MagicLinkLogin {
     /// Creates a delivery-agnostic magic-link method with stateless verification.
-    pub fn magic_link(resolver: impl EmailLoginResolver) -> Self {
+    pub fn new(resolver: impl EmailLoginResolver) -> Self {
         Self {
             resolver: Arc::new(resolver),
-            kind: EmailKind::MagicLink {
-                callback_url: None,
-                stateful: false,
-            },
-        }
-    }
-    /// Creates an email OTP method with application-owned delivery.
-    pub fn otp(resolver: impl EmailLoginResolver, sender: impl EmailOtpSender) -> Self {
-        Self {
-            resolver: Arc::new(resolver),
-            kind: EmailKind::Otp {
-                sender: Arc::new(sender),
-            },
+            callback_url: None,
+            stateful: false,
         }
     }
     /// Sets the absolute callback URL used only for generated magic links.
     pub fn callback_url(mut self, value: impl Into<String>) -> Self {
-        self.kind = match self.kind {
-            EmailKind::MagicLink { stateful, .. } => EmailKind::MagicLink {
-                callback_url: Some(value.into()),
-                stateful,
-            },
-            EmailKind::Otp { sender } => EmailKind::Otp { sender },
-        };
+        self.callback_url = Some(value.into());
         self
     }
 
     /// Requires durable one-time verification for generated magic links.
     pub fn stateful(mut self) -> Self {
-        self.kind = match self.kind {
-            EmailKind::MagicLink { callback_url, .. } => EmailKind::MagicLink {
-                callback_url,
-                stateful: true,
-            },
-            EmailKind::Otp { sender } => EmailKind::Otp { sender },
-        };
+        self.stateful = true;
         self
     }
 
     /// Uses a sealed link that remains reusable until expiry.
     pub fn stateless(mut self) -> Self {
-        self.kind = match self.kind {
-            EmailKind::MagicLink { callback_url, .. } => EmailKind::MagicLink {
-                callback_url,
-                stateful: false,
-            },
-            EmailKind::Otp { sender } => EmailKind::Otp { sender },
-        };
+        self.stateful = false;
         self
     }
 }
 
-/// Configures passwordless phone OTP login through an application-owned sender.
+/// Configures passwordless OTP login with application-owned delivery.
 #[derive(Clone)]
-pub struct PhoneLogin {
-    resolver: Arc<dyn ErasedPhoneResolver>,
-    sender: Arc<dyn ErasedPhoneSender>,
+pub struct OtpLogin {
+    resolver: Arc<dyn ErasedOtpResolver>,
+    policy: OtpPolicy,
 }
 
-impl PhoneLogin {
-    /// Creates a phone OTP login method with application-owned identity lookup and delivery.
-    pub fn otp(resolver: impl PhoneLoginResolver, sender: impl PhoneOtpSender) -> Self {
+impl OtpLogin {
+    /// Creates an OTP method with the default six-digit numeric policy.
+    pub fn new(resolver: impl OtpLoginResolver) -> Self {
         Self {
             resolver: Arc::new(resolver),
-            sender: Arc::new(sender),
+            policy: OtpPolicy::numeric(6),
         }
+    }
+
+    /// Configures the generated code policy.
+    pub fn policy(mut self, value: OtpPolicy) -> Self {
+        self.policy = value;
+        self
     }
 }
 
@@ -678,6 +374,7 @@ struct PendingPasswordless {
     identifier: String,
     subject: Option<String>,
     method: String,
+    channel: String,
 }
 
 struct ProofInput {
@@ -695,30 +392,24 @@ impl ProofInput {
 }
 
 #[cfg(feature = "email")]
-struct EmailRuntime {
-    conf: EmailLogin,
+struct MagicLinkRuntime {
+    conf: MagicLinkLogin,
 }
 
-struct PhoneRuntime {
-    conf: PhoneLogin,
+struct OtpRuntime {
+    conf: OtpLogin,
 }
 
 #[cfg(feature = "email")]
-impl ErasedLoginRuntime for EmailRuntime {
+impl ErasedLoginRuntime for MagicLinkRuntime {
     fn is_flow(&self) -> bool {
         true
     }
     fn validate(&self) -> Result<(), AuthError> {
-        validate_email_conf(&self.conf)
+        validate_magic_link_conf(&self.conf)
     }
     fn requires_passwordless_store(&self) -> bool {
-        !matches!(
-            self.conf.kind,
-            EmailKind::MagicLink {
-                stateful: false,
-                ..
-            }
-        )
+        self.conf.stateful
     }
     fn begin<'a>(
         &'a self,
@@ -750,9 +441,12 @@ impl ErasedLoginRuntime for EmailRuntime {
     }
 }
 
-impl ErasedLoginRuntime for PhoneRuntime {
+impl ErasedLoginRuntime for OtpRuntime {
     fn is_flow(&self) -> bool {
         true
+    }
+    fn validate(&self) -> Result<(), AuthError> {
+        self.conf.policy.validate()
     }
     fn requires_passwordless_store(&self) -> bool {
         true
@@ -788,7 +482,7 @@ impl ErasedLoginRuntime for PhoneRuntime {
 }
 
 #[cfg(feature = "email")]
-impl EmailRuntime {
+impl MagicLinkRuntime {
     async fn begin_inner(
         &self,
         method: &LoginMethodId,
@@ -803,7 +497,7 @@ impl EmailRuntime {
             .map_err(|_| AuthError::InvalidCredential)?;
         email.validate()?;
         let user = self.conf.resolver.resolve(&email).await?;
-        if !self.is_stateful() {
+        if !self.conf.stateful {
             let url = user
                 .as_ref()
                 .map(|user| self.stateless_link(method, target, &email, user, codec))
@@ -826,10 +520,7 @@ impl EmailRuntime {
         let challenge = prepared.take_challenge()?;
         let start = store.begin(challenge).await?;
         validate_start(&prepared, &start)?;
-        if start.should_deliver() && user.is_some() {
-            self.deliver(&email, &prepared, store).await?;
-        }
-        Ok(prepared.challenge_response(start))
+        Ok(prepared.challenge_response(start, false))
     }
 
     async fn complete_inner(
@@ -840,7 +531,7 @@ impl EmailRuntime {
         secrets: &SecretRing,
         store: Option<&PasswordlessStoreRuntime>,
     ) -> Result<CompletedLogin, AuthError> {
-        let state = if self.is_stateful() {
+        let state = if self.conf.stateful {
             let store = store.ok_or(AuthError::InvalidLoginState)?;
             let proof = self.proof(input)?;
             consume(store, &proof, secrets).await?
@@ -862,26 +553,15 @@ impl EmailRuntime {
     }
 
     fn kind(&self) -> Result<ChallengeKind, AuthError> {
-        match &self.conf.kind {
-            EmailKind::MagicLink { callback_url, .. } => callback_url
-                .as_ref()
-                .map(|value| ChallengeKind::MagicLink {
-                    callback_url: value.clone(),
-                })
-                .ok_or_else(|| {
-                    AuthError::InvalidProviderConfig(
-                        "magic-link login requires callback_url".into(),
-                    )
-                }),
-            EmailKind::Otp { .. } => Ok(ChallengeKind::Otp { channel: "email" }),
-        }
-    }
-
-    fn is_stateful(&self) -> bool {
-        matches!(
-            self.conf.kind,
-            EmailKind::MagicLink { stateful: true, .. } | EmailKind::Otp { .. }
-        )
+        self.conf
+            .callback_url
+            .as_ref()
+            .map(|value| ChallengeKind::MagicLink {
+                callback_url: value.clone(),
+            })
+            .ok_or_else(|| {
+                AuthError::InvalidProviderConfig("magic-link login requires callback_url".into())
+            })
     }
 
     fn stateless_link(
@@ -897,6 +577,7 @@ impl EmailRuntime {
             identifier: email.as_str().into(),
             subject: Some(user.key.to_string()),
             method: method.as_str().into(),
+            channel: "email".into(),
         };
         let state = SealedLoginState {
             version: 3,
@@ -910,58 +591,21 @@ impl EmailRuntime {
     }
 
     fn callback_url(&self) -> Result<String, AuthError> {
-        match &self.conf.kind {
-            EmailKind::MagicLink {
-                callback_url: Some(value),
-                ..
-            } => Ok(value.clone()),
-            _ => Err(AuthError::InvalidLoginState),
-        }
+        self.conf
+            .callback_url
+            .clone()
+            .ok_or(AuthError::InvalidLoginState)
     }
     fn proof(&self, input: BoxLoginInput) -> Result<ProofInput, AuthError> {
-        match &self.conf.kind {
-            EmailKind::MagicLink { .. } => {
-                let callback = input
-                    .downcast::<MagicLinkCallback>()
-                    .map_err(|_| AuthError::InvalidCredential)?;
-                let (id, proof) = callback.parts()?;
-                Ok(ProofInput::new(id, proof.as_bytes()))
-            }
-            EmailKind::Otp { .. } => {
-                let response = input
-                    .downcast::<EmailOtp>()
-                    .map_err(|_| AuthError::InvalidCredential)?;
-                response.0.validate()?;
-                Ok(ProofInput::new(
-                    response.0.challenge_token.clone(),
-                    response.0.code.as_bytes(),
-                ))
-            }
-        }
-    }
-
-    async fn deliver(
-        &self,
-        email: &EmailAddress,
-        prepared: &PreparedChallenge,
-        store: &PasswordlessStoreRuntime,
-    ) -> Result<(), AuthError> {
-        let EmailKind::Otp { sender } = &self.conf.kind else {
-            return Ok(());
-        };
-        let message = EmailOtpMessage {
-            code: prepared.code.clone().ok_or(AuthError::InvalidCredential)?,
-            expires_in: OTP_TTL,
-        };
-        if sender.send(email, &message).await.is_err() {
-            tracing::warn!(method = %prepared.method, "passwordless email delivery failed");
-            store.discard(prepared.id()).await?;
-        }
-        Ok(())
+        let callback = input
+            .downcast::<MagicLinkCallback>()
+            .map_err(|_| AuthError::InvalidCredential)?;
+        let (id, proof) = callback.parts()?;
+        Ok(ProofInput::new(id, proof.as_bytes()))
     }
 }
 
-impl PhoneRuntime {
+impl OtpRuntime {
     async fn begin_inner(
         &self,
         method: &LoginMethodId,
@@ -971,30 +615,30 @@ impl PhoneRuntime {
         secrets: &SecretRing,
         store: Option<&PasswordlessStoreRuntime>,
     ) -> Result<LoginChallenge, AuthError> {
-        let phone = *input
-            .downcast::<PhoneNumber>()
+        let address = *input
+            .downcast::<PasswordlessAddress>()
             .map_err(|_| AuthError::InvalidCredential)?;
-        phone.validate()?;
+        address.validate()?;
         let store = store.ok_or(AuthError::InvalidProviderConfig(
             "passwordless login requires AuthConf::passwordless_store".into(),
         ))?;
-        let user = self.conf.resolver.resolve(&phone).await?;
+        let user = self.conf.resolver.resolve(&address).await?;
         let mut prepared = PreparedChallenge::new(
             method,
             target,
-            phone.as_str(),
+            address.as_str(),
             user.as_ref(),
-            ChallengeKind::Otp { channel: "phone" },
+            ChallengeKind::Otp {
+                channel: address.channel(),
+                policy: self.conf.policy,
+            },
             codec,
             secrets,
         )?;
         let challenge = prepared.take_challenge()?;
         let start = store.begin(challenge).await?;
         validate_start(&prepared, &start)?;
-        if start.should_deliver() && user.is_some() {
-            self.deliver(&phone, &prepared, store).await?;
-        }
-        Ok(prepared.challenge_response(start))
+        Ok(prepared.challenge_response(start, user.is_some()))
     }
 
     async fn complete_inner(
@@ -1007,7 +651,7 @@ impl PhoneRuntime {
     ) -> Result<CompletedLogin, AuthError> {
         let store = store.ok_or(AuthError::InvalidLoginState)?;
         let response = input
-            .downcast::<PhoneOtp>()
+            .downcast::<Otp>()
             .map_err(|_| AuthError::InvalidCredential)?;
         response.0.validate()?;
         let proof = ProofInput::new(
@@ -1016,34 +660,15 @@ impl PhoneRuntime {
         );
         let state = consume(store, &proof, secrets).await?;
         let (pending, target) = open_pending(codec, method, &state)?;
-        let phone = PhoneNumber::new(pending.identifier.clone());
+        let address =
+            PasswordlessAddress::from_parts(&pending.channel, pending.identifier.clone())?;
         let user = self
             .conf
             .resolver
-            .resolve(&phone)
+            .resolve(&address)
             .await?
             .ok_or(AuthError::InvalidCredential)?;
-        complete_user(user, pending, target, "phone").await
-    }
-
-    async fn deliver(
-        &self,
-        phone: &PhoneNumber,
-        prepared: &PreparedChallenge,
-        store: &PasswordlessStoreRuntime,
-    ) -> Result<(), AuthError> {
-        let message = PhoneOtpMessage {
-            code: prepared
-                .code
-                .clone()
-                .ok_or_else(|| AuthError::Internal("phone OTP missing code".into()))?,
-            expires_in: OTP_TTL,
-        };
-        if self.conf.sender.send(phone, &message).await.is_err() {
-            tracing::warn!(method = %prepared.method, "passwordless phone delivery failed");
-            store.discard(prepared.id()).await?;
-        }
-        Ok(())
+        complete_user(user, pending, target, "otp").await
     }
 }
 
@@ -1081,9 +706,9 @@ fn validate_start(
     prepared: &PreparedChallenge,
     start: &PasswordlessStart,
 ) -> Result<(), AuthError> {
-    if start.should_deliver() && start.challenge_id() != prepared.id() {
+    if start.should_issue() && start.challenge_id() != prepared.id() {
         return Err(AuthError::Internal(
-            "passwordless store returned a mismatched delivery challenge".into(),
+            "passwordless store returned a mismatched proof challenge".into(),
         ));
     }
     Ok(())
@@ -1105,18 +730,26 @@ fn open_pending(
 
 enum ChallengeKind {
     #[cfg(feature = "email")]
-    MagicLink {
-        callback_url: String,
-    },
+    MagicLink { callback_url: String },
     Otp {
         channel: &'static str,
+        policy: OtpPolicy,
     },
+}
+
+impl ChallengeKind {
+    fn channel(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "email")]
+            Self::MagicLink { .. } => "email",
+            Self::Otp { channel, .. } => channel,
+        }
+    }
 }
 
 struct PreparedChallenge {
     id: String,
     challenge: Option<PasswordlessChallenge>,
-    method: String,
     kind: ChallengeKind,
     code: Option<String>,
     #[cfg(feature = "email")]
@@ -1140,6 +773,7 @@ impl PreparedChallenge {
             identifier: identifier.into(),
             subject: user.map(|value| value.key.to_string()),
             method: method.as_str().into(),
+            channel: kind.channel().into(),
         };
         let state = SealedLoginState {
             version: 3,
@@ -1150,21 +784,20 @@ impl PreparedChallenge {
             payload: serde_json::to_value(pending).map_err(|_| AuthError::InvalidLoginState)?,
         };
         let sealed = codec.seal(&state)?;
-        let challenge = PasswordlessChallenge {
+        let challenge = PasswordlessChallenge::new(PasswordlessChallengeParts {
             id: id.clone(),
             principal: principal_digest(secrets, method.as_str(), identifier)?,
             proofs: proof_digests(secrets, &id, proof.as_bytes())?,
             state: sealed,
             expires_at: now + ttl,
             attempts: OTP_ATTEMPTS,
-            resend_at: now + RESEND_DELAY,
-            delivery_window_ends_at: now + DELIVERY_WINDOW,
-            delivery_limit: DELIVERY_LIMIT,
-        };
+            next_issue_at: now + RESEND_DELAY,
+            issue_window_ends_at: now + DELIVERY_WINDOW,
+            issue_limit: DELIVERY_LIMIT,
+        });
         Ok(Self {
             id,
             challenge: Some(challenge),
-            method: method.as_str().into(),
             kind,
             code,
             #[cfg(feature = "email")]
@@ -1178,14 +811,23 @@ impl PreparedChallenge {
     fn take_challenge(&mut self) -> Result<PasswordlessChallenge, AuthError> {
         self.challenge.take().ok_or(AuthError::InvalidLoginState)
     }
-    fn challenge_response(self, start: PasswordlessStart) -> LoginChallenge {
+    fn challenge_response(self, start: PasswordlessStart, expose_code: bool) -> LoginChallenge {
         let expires = start.expires_at().saturating_sub(Utc::now().timestamp());
-        let resend = start.resend_at().saturating_sub(Utc::now().timestamp());
+        let resend = start.next_issue_at().saturating_sub(Utc::now().timestamp());
         match self.kind {
             #[cfg(feature = "email")]
             ChallengeKind::MagicLink { .. } => LoginChallenge::magic_link(self.link, expires),
-            ChallengeKind::Otp { channel } => {
-                LoginChallenge::code(start.challenge_id().into(), channel, expires, resend)
+            ChallengeKind::Otp { channel, .. } => {
+                let delivery = (start.should_issue() && expose_code)
+                    .then(|| self.code.map(|code| OtpDelivery::new(code, expires)))
+                    .flatten();
+                LoginChallenge::code(
+                    start.challenge_id().into(),
+                    channel,
+                    expires,
+                    resend,
+                    delivery,
+                )
             }
         }
     }
@@ -1202,8 +844,8 @@ fn proof_for(
             let link = append_token(callback_url, _id, &proof)?;
             Ok((proof, None, Some(link), MAGIC_LINK_TTL))
         }
-        ChallengeKind::Otp { .. } => {
-            let code = random_code()?;
+        ChallengeKind::Otp { policy, .. } => {
+            let code = random_code(*policy)?;
             Ok((code.clone(), Some(code), None, OTP_TTL))
         }
     }
@@ -1233,15 +875,6 @@ fn random_secret(length: usize) -> Result<String, AuthError> {
         .fill(&mut bytes)
         .map_err(|_| AuthError::Internal("passwordless randomness failed".into()))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn random_code() -> Result<String, AuthError> {
-    let mut bytes = [0_u8; 4];
-    ring::rand::SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| AuthError::Internal("passwordless randomness failed".into()))?;
-    let value = u32::from_be_bytes(bytes) % 1_000_000;
-    Ok(format!("{value:06}"))
 }
 
 fn principal_digest(
@@ -1280,11 +913,8 @@ fn valid_id(value: &str) -> Result<(), AuthError> {
 }
 
 #[cfg(feature = "email")]
-fn validate_email_conf(value: &EmailLogin) -> Result<(), AuthError> {
-    match &value.kind {
-        EmailKind::MagicLink { callback_url, .. } => validate_callback(callback_url.as_deref()),
-        EmailKind::Otp { .. } => Ok(()),
-    }
+fn validate_magic_link_conf(value: &MagicLinkLogin) -> Result<(), AuthError> {
+    validate_callback(value.callback_url.as_deref())
 }
 
 #[cfg(feature = "email")]
@@ -1315,29 +945,21 @@ fn validate_callback(value: Option<&str>) -> Result<(), AuthError> {
 }
 
 #[cfg(feature = "email")]
-impl LoginProviderDefinition<EmailAddress, MagicLinkCallback> for EmailLogin {
+impl LoginProviderDefinition<EmailAddress, MagicLinkCallback> for MagicLinkLogin {
     fn define(self) -> LoginRuntimeDefinition {
         LoginRuntimeDefinition {
-            runtime: Arc::new(EmailRuntime { conf: self }),
+            runtime: Arc::new(MagicLinkRuntime { conf: self }),
         }
     }
 }
 #[cfg(feature = "email")]
-impl LoginProviderDefinition<EmailAddress, EmailOtp> for EmailLogin {
-    fn define(self) -> LoginRuntimeDefinition {
-        LoginRuntimeDefinition {
-            runtime: Arc::new(EmailRuntime { conf: self }),
-        }
-    }
-}
-#[cfg(feature = "email")]
-impl super::model::definition_sealed::Sealed for EmailLogin {}
+impl super::model::definition_sealed::Sealed for MagicLinkLogin {}
 
-impl LoginProviderDefinition<PhoneNumber, PhoneOtp> for PhoneLogin {
+impl LoginProviderDefinition<PasswordlessAddress, Otp> for OtpLogin {
     fn define(self) -> LoginRuntimeDefinition {
         LoginRuntimeDefinition {
-            runtime: Arc::new(PhoneRuntime { conf: self }),
+            runtime: Arc::new(OtpRuntime { conf: self }),
         }
     }
 }
-impl super::model::definition_sealed::Sealed for PhoneLogin {}
+impl super::model::definition_sealed::Sealed for OtpLogin {}
