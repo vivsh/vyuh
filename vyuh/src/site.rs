@@ -48,7 +48,6 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     else {
         return response;
     };
-    let allow = method_error_allow(&response, &report);
     let ctx = crate::errors::ErrorContext {
         method,
         uri,
@@ -56,11 +55,6 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
         headers,
     };
     let mut rendered = site.inner.conf.errors.render(ctx, report).await;
-    if let Some(allow) = allow {
-        rendered
-            .headers_mut()
-            .insert(axum::http::header::ALLOW, allow);
-    }
     for challenge in response
         .headers()
         .get_all(axum::http::header::WWW_AUTHENTICATE)
@@ -72,13 +66,9 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     rendered
 }
 
-fn method_error_allow(
-    response: &Response,
-    report: &crate::errors::ErrorReport,
-) -> Option<axum::http::HeaderValue> {
-    (report.code == "method_not_allowed")
-        .then(|| response.headers().get(axum::http::header::ALLOW).cloned())
-        .flatten()
+/// Renders Vyuh's 405 response after Axum has matched a route path but no method handler.
+async fn method_not_allowed() -> crate::ErrorReport {
+    crate::ErrorReport::method_not_allowed()
 }
 
 fn console_runtime(
@@ -444,7 +434,9 @@ impl SiteBuilder {
             &authenticator,
         )?;
 
-        router = router.fallback(route_not_found);
+        router = router
+            .fallback(route_not_found)
+            .method_not_allowed_fallback(method_not_allowed);
 
         let slash_router = Arc::new(
             crate::middlewares::SlashRouter::from_operations(
@@ -1304,7 +1296,7 @@ mod tests {
         tasks::{TaskDefinition, TaskLane, TaskLaneConf, TaskLanePolicy},
         testing::TestSite,
     };
-    use axum::http::StatusCode;
+    use axum::http::{Method, StatusCode};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::{
@@ -1406,6 +1398,18 @@ mod tests {
         Json("ok")
     }
 
+    async fn created_response_probe() -> StatusCode {
+        StatusCode::CREATED
+    }
+
+    async fn accepted_response_probe() -> StatusCode {
+        StatusCode::ACCEPTED
+    }
+
+    async fn deleted_response_probe() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+
     async fn raw_not_found() -> StatusCode {
         StatusCode::NOT_FOUND
     }
@@ -1431,6 +1435,177 @@ mod tests {
                 },
             ),
         ])
+    }
+
+    /// Registers distinct GET and POST handlers at one path for routing regression coverage.
+    fn get_post_bundle() -> crate::bundles::Bundle {
+        bundles::bundle([
+            bundles::route(
+                response_probe,
+                RouteConf {
+                    name: "read_shared".into(),
+                    methods: Methods::GET,
+                    path: "/shared".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                created_response_probe,
+                RouteConf {
+                    name: "create_shared".into(),
+                    methods: Methods::POST,
+                    path: "/shared".into(),
+                    slash: None,
+                },
+            ),
+        ])
+    }
+
+    /// Registers three disjoint method handlers at one path for routing regression coverage.
+    fn get_patch_delete_bundle() -> crate::bundles::Bundle {
+        bundles::bundle([
+            bundles::route(
+                response_probe,
+                RouteConf {
+                    name: "read_many".into(),
+                    methods: Methods::GET,
+                    path: "/many".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                accepted_response_probe,
+                RouteConf {
+                    name: "patch_many".into(),
+                    methods: Methods::PATCH,
+                    path: "/many".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                deleted_response_probe,
+                RouteConf {
+                    name: "delete_many".into(),
+                    methods: Methods::DELETE,
+                    path: "/many".into(),
+                    slash: None,
+                },
+            ),
+        ])
+    }
+
+    /// Verifies GET and POST handlers registered at one path build and dispatch independently.
+    #[tokio::test]
+    async fn shared_path_get_and_post_routes_build_and_dispatch() -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            get_post_bundle(),
+        )
+        .await?;
+        let client = TestSite::new(site);
+
+        assert_eq!(client.get("/shared").send().await.status(), StatusCode::OK);
+        assert_eq!(
+            client.post("/shared").send().await.status(),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            client
+                .request(Method::HEAD, "/shared")
+                .send()
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        Ok(())
+    }
+
+    /// Verifies GET, PATCH, and DELETE handlers at one path build and dispatch independently.
+    #[tokio::test]
+    async fn shared_path_get_patch_delete_routes_build_and_dispatch() -> Result<(), crate::SiteError>
+    {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            get_patch_delete_bundle(),
+        )
+        .await?;
+        let client = TestSite::new(site);
+
+        assert_eq!(client.get("/many").send().await.status(), StatusCode::OK);
+        assert_eq!(
+            client.patch("/many").send().await.status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            client.delete("/many").send().await.status(),
+            StatusCode::NO_CONTENT
+        );
+        Ok(())
+    }
+
+    /// Verifies the site-level fallback returns a structured 405 with Axum's `Allow` header.
+    #[tokio::test]
+    async fn shared_path_method_error_is_structured_with_axum_allow_header()
+    -> Result<(), crate::SiteError> {
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            get_post_bundle(),
+        )
+        .await?;
+        let response = TestSite::new(site)
+            .put("/shared")
+            .header("accept", "application/json")
+            .send()
+            .await;
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response
+                .header(axum::http::header::ALLOW.as_str())
+                .and_then(|value| value.to_str().ok()),
+            Some("GET,HEAD,POST")
+        );
+        let body: serde_json::Value = response.json().await;
+        assert_eq!(
+            body.get("code"),
+            Some(&serde_json::json!("method_not_allowed"))
+        );
+        Ok(())
+    }
+
+    /// Verifies duplicate path and method registration returns a bundle error instead of panicking.
+    #[tokio::test]
+    async fn duplicate_path_method_returns_bundle_validation_error() {
+        let bundle = bundles::bundle([
+            bundles::route(
+                response_probe,
+                RouteConf {
+                    name: "first_duplicate".into(),
+                    methods: Methods::GET,
+                    path: "/duplicate".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                created_response_probe,
+                RouteConf {
+                    name: "second_duplicate".into(),
+                    methods: Methods::GET,
+                    path: "/duplicate".into(),
+                    slash: None,
+                },
+            ),
+        ]);
+
+        assert!(matches!(
+            Site::build(crate::SiteConf::default().log_init(false), bundle).await,
+            Err(crate::SiteError::BundleError(
+                crate::bundles::BundleError::ErrorList(errors)
+            )) if matches!(
+                errors.as_slice(),
+                [crate::bundles::BundleError::DuplicateRoutePathMethod { .. }]
+            )
+        ));
     }
 
     /// Verifies unmatched paths and unsupported methods use the ErrorReport JSON contract.
@@ -1463,7 +1638,7 @@ mod tests {
             method
                 .header(axum::http::header::ALLOW.as_str())
                 .and_then(|value| value.to_str().ok()),
-            Some("GET, HEAD")
+            Some("GET,HEAD")
         );
         let method: serde_json::Value = method.json().await;
         assert_eq!(

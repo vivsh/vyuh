@@ -168,6 +168,10 @@ Parse failures return `400` through `ErrorReport`. Validation failures return
 entries. Framework route misses and unsupported methods return `404` and `405`
 through the same JSON envelope when JSON rendering is selected.
 
+Axum automatically supplies the HTTP `Allow` header for a structured `405`,
+including its implicit `HEAD` support for `GET`. Vyuh does not compute or
+override this header.
+
 For the full request API, see [Request](request.md). For
 validation rules, nested validation, runtime-only rules, and OpenAPI behavior,
 see [Validation](validation.md). For application errors and HTTP rendering, see

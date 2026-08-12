@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::{Bundle, BundleError};
 use crate::{
     Error, Site,
     callables::{self},
@@ -9,12 +10,6 @@ use crate::{
     signals::{self, SignalConf},
     tasks::TaskDefinition,
 };
-use axum::{
-    http::{HeaderValue, header},
-    response::IntoResponse,
-};
-
-use super::{Bundle, BundleError};
 
 pub(super) enum BundlePartInner {
     Route(
@@ -150,36 +145,13 @@ impl Bundle {
             return self;
         }
         let id = op.id;
-        let allow = allow_header(&op.methods);
-        let router = router
-            .fallback(move || method_not_allowed(allow.clone()))
-            .layer(axum::Extension(id));
+        let router = router.layer(axum::Extension(id));
         self.inner_router = self.inner_router.route(op.path.as_ref(), router);
         let name = op.name.clone();
         self.ops.insert(id, op);
         self.name_index.insert(name, id);
         self
     }
-}
-
-/// Builds the HTTP `Allow` header, including Axum's implicit `HEAD` support for `GET`.
-fn allow_header(methods: &crate::routes::Methods) -> Option<HeaderValue> {
-    let mut names = methods.to_vec();
-    if methods.contains(crate::routes::Methods::GET)
-        && !methods.contains(crate::routes::Methods::HEAD)
-    {
-        names.push("HEAD");
-    }
-    HeaderValue::from_str(&names.join(", ")).ok()
-}
-
-/// Returns Vyuh's canonical framework error for a route with an unsupported method.
-async fn method_not_allowed(allow: Option<HeaderValue>) -> axum::response::Response {
-    let mut response = crate::ErrorReport::method_not_allowed().into_response();
-    if let Some(allow) = allow {
-        response.headers_mut().insert(header::ALLOW, allow);
-    }
-    response
 }
 
 // ---------------------------------------------------------------------------
