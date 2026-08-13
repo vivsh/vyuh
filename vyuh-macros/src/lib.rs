@@ -213,6 +213,11 @@ pub fn derive_filterable(input: TokenStream) -> TokenStream {
     mool_macros_impl::filterable::derive_filterable(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
+#[proc_macro_derive(SortKey, attributes(sort, db))]
+pub fn derive_sort_key(input: TokenStream) -> TokenStream {
+    mool_macros_impl::sort_key::derive_sort_key(input.into(), quote::quote!(::vyuh::db)).into()
+}
+
 /// Registers a cron emitter.
 ///
 /// This macro is sugar over `vyuh::bundles::cron(handler, CronConf)`.

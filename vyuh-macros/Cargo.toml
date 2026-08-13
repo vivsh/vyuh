@@ -21,7 +21,7 @@ syn = { version = "2", features = ["full"] }
 darling = "0.20"
 heck = "0.4"
 cron = "0.12"
-mool-macros-impl = "0.1.4"
+mool-macros-impl = { version = "0.1.6", path = "../../mool/mool-macros-impl" }
 rust-silos-macros-impl = "0.1.0"
 
 tokio = {workspace = true}

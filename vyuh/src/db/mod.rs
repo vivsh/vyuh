@@ -15,6 +15,8 @@ pub use vyuh_macros::Filterable;
 pub use vyuh_macros::Model;
 /// Derives Mool's [`Record`] trait through Vyuh's database facade.
 pub use vyuh_macros::Record;
+/// Derives Mool's request-sort vocabulary through Vyuh's database facade.
+pub use vyuh_macros::SortKey;
 /// Embeds crate-owned migrations through Vyuh's database facade.
 #[cfg(feature = "migrations")]
 pub use vyuh_macros::embed_migrations;

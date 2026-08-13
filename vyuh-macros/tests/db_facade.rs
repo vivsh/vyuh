@@ -26,6 +26,12 @@ struct NoteFilter {
     title: Option<String>,
 }
 
+#[derive(Debug, Clone, db::SortKey)]
+#[sort(model = Note)]
+enum NoteSort {
+    Title,
+}
+
 #[derive(JsonSchema)]
 struct CreateNote {
     title: String,
@@ -37,6 +43,7 @@ fn facade_derives_compile_without_mool() {
     assert_model::<Note>();
     assert_record::<NoteRow>();
     assert_filterable::<NoteFilter>();
+    assert_sort_key::<NoteSort>();
     assert_schema::<CreateNote>();
     let root = db::root_migration(&ROOT_MIGRATIONS);
     let child = db::crate_migration("notes", &CRATE_MIGRATIONS);
@@ -56,5 +63,7 @@ fn assert_model<T: db::Model>() {}
 fn assert_record<T: db::Record>() {}
 
 fn assert_filterable<T: db::Filterable>() {}
+
+fn assert_sort_key<T: db::SortKey>() {}
 
 fn assert_schema<T: JsonSchema>() {}
