@@ -3,7 +3,11 @@ mod error;
 mod openapi;
 mod part;
 
-use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::middlewares::SlashPolicy;
 use crate::{
@@ -35,8 +39,8 @@ pub use openapi::{OpenApiConf, OpenApiViewerConf};
 #[cfg(feature = "mcp")]
 pub use part::mcp_tool;
 pub use part::{
-    BundlePart, asset_dir, bundle, command, cron, periodic, pgnotify, route, service, signal, task,
-    url_info,
+    BundlePart, asset_dir, beacon, bundle, command, cron, periodic, pgnotify, route, service,
+    signal, task, url_info,
 };
 #[cfg(feature = "migrations")]
 pub use part::{migrations, schema};
@@ -44,7 +48,7 @@ pub use part::{migrations, schema};
 #[cfg(feature = "mcp")]
 pub use vyuh_macros::mcp_tool;
 pub use vyuh_macros::{
-    asset_dir, bundle, cron, periodic, pgnotify, route, service, signal, task, url_info,
+    asset_dir, beacon, bundle, cron, periodic, pgnotify, route, service, signal, task, url_info,
 };
 #[cfg(feature = "migrations")]
 pub use vyuh_macros::{migrations, schema};
@@ -142,6 +146,8 @@ pub struct Bundle {
     /// Secondary index: route name → UUID. Populated only for HTTP routes so that
     /// `Routes::reverse_url()` can look up a path by the human-readable name.
     pub(crate) name_index: BTreeMap<String, crate::OperationId>,
+    /// Exact operation markers for declarative Beacon endpoints.
+    pub(crate) beacons: BTreeSet<crate::OperationId>,
     pub(super) id: uuid::Uuid,
     configs: BTreeMap<uuid::Uuid, BundleConf>,
     pub(crate) topology: BundleTopology,
@@ -177,6 +183,7 @@ impl Bundle {
             inner_router: routes::AxumRouter::new(),
             ops: BTreeMap::new(),
             name_index: BTreeMap::new(),
+            beacons: BTreeSet::new(),
             signals: SignalRegistry::new(),
             emitters: emitters::EmitterRegistry::new(),
             errors: Vec::new(),
@@ -427,6 +434,7 @@ impl Bundle {
         }
         self.ops.extend(other.ops);
         self.name_index.extend(other.name_index);
+        self.beacons.extend(other.beacons);
         self.topology.absorb(other.id, other.topology, self.id);
         for (id, conf) in other.configs {
             self.configs
@@ -881,6 +889,73 @@ mod tests {
             .ok_or_else(|| "route did not document 405".to_string())?;
 
         assert_eq!(response.schema_name.as_deref(), Some("ErrorReport"));
+        Ok(())
+    }
+
+    /// Verifies a Beacon is registered as an authenticated GET route with ordinary route metadata.
+    #[test]
+    fn beacon_registers_as_an_authenticated_get_route() -> Result<(), String> {
+        #[derive(Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+        struct Notice;
+
+        let beacon = crate::channels::Beacon::builder()
+            .rule::<Notice>(["notices:read"])
+            .build();
+        let bundle = crate::bundles::bundle([crate::bundles::beacon(
+            beacon,
+            crate::channels::BeaconConf::new("live", "/live"),
+        )]);
+        let operation = bundle
+            .ops
+            .values()
+            .next()
+            .ok_or_else(|| "Beacon route was not registered".to_string())?;
+
+        assert_eq!(operation.kind, OperationKind::Route);
+        assert_eq!(operation.methods, routes::Methods::GET);
+        assert_eq!(operation.path, "/live");
+        assert!(
+            operation
+                .returns
+                .iter()
+                .any(|response| response.status_code == Some(200))
+        );
+        assert!(
+            operation
+                .returns
+                .iter()
+                .any(|response| response.status_code == Some(405))
+        );
+        assert!(bundle.beacons.contains(&operation.id));
+        Ok(())
+    }
+
+    /// Verifies only explicit Beacon markers survive merge and use the final prefixed route path.
+    #[test]
+    fn beacon_marker_survives_merge_and_prefix() -> Result<(), String> {
+        #[derive(Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+        struct Notice;
+
+        let child = crate::bundles::bundle([crate::bundles::beacon(
+            crate::channels::Beacon::builder()
+                .rule::<Notice>([])
+                .build(),
+            crate::channels::BeaconConf::new("live", "/live"),
+        )])
+        .with_prefix("/api");
+        let bundle = Bundle::new().merge(child);
+        let id = bundle
+            .beacons
+            .first()
+            .copied()
+            .ok_or_else(|| "Beacon marker was not merged".to_string())?;
+        let keys = crate::channels::beacon_keys(&bundle.ops, &bundle.beacons);
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys.get(&id),
+            Some(&crate::channels::ChannelKey::beacon("live", "/api/live"))
+        );
         Ok(())
     }
 

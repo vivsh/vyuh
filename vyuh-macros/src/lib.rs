@@ -1,4 +1,5 @@
 mod assets;
+mod beacon;
 mod bundle;
 mod bundlepart;
 mod cron;
@@ -98,6 +99,24 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
     route::parse_route(attr, item)
+}
+
+/// Defines one declarative authenticated Beacon route.
+///
+/// This is sugar over `vyuh::bundles::beacon(factory(), BeaconConf::new(...))`.
+/// The factory returns a [`vyuh::channels::Beacon`] whose typed rules consume
+/// emitted signals. `path` is required; `modes = [ws, sse, poll]`, `name`, and
+/// `slash` are optional.
+///
+/// ```ignore
+/// #[bundles::beacon(path = "/live", modes = [ws, sse])]
+/// fn live() -> Beacon {
+///     Beacon::builder().rule::<NoteChanged>(["notes:read"]).build()
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn beacon(attr: TokenStream, item: TokenStream) -> TokenStream {
+    beacon::parse_beacon(attr, item)
 }
 
 /// Defines a semantic MCP-only tool backed by a typed Vyuh callable.

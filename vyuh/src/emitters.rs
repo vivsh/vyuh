@@ -7,10 +7,13 @@ use std::{
     time::Duration,
 };
 
+use crate::utils::debounce::{DebounceQueue, Debouncer};
 use crate::{
     Data, Error, Site,
     callables::{self, CallError, Callable, DataBox, DataValue, HasSite, IntoArgPart, IntoDataBox},
 };
+
+pub use crate::utils::debounce::{DebounceConf, DebounceMode};
 
 mod scheduled;
 
@@ -423,23 +426,6 @@ impl PeriodicConf {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum DebounceMode {
-    Leading,
-    Trailing,
-    LeadingAndTrailing,
-}
-
-impl DebounceMode {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            DebounceMode::Leading => "leading",
-            DebounceMode::Trailing => "trailing",
-            DebounceMode::LeadingAndTrailing => "leading_trailing",
-        }
-    }
-}
-
 impl std::str::FromStr for DebounceMode {
     type Err = EmitterError;
 
@@ -458,21 +444,14 @@ impl std::str::FromStr for DebounceMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DebounceConf {
-    pub window: tokio::time::Duration,
-    pub mode: DebounceMode,
-}
-
-impl DebounceConf {
-    fn validate(&self) -> Result<(), EmitterError> {
-        if self.window.is_zero() {
-            return Err(EmitterError::InvalidDebounce(
-                "window must be greater than zero".to_string(),
-            ));
-        }
-        Ok(())
+/// Validates one public debounce configuration before it starts an emitter.
+fn validate_debounce(conf: &DebounceConf) -> Result<(), EmitterError> {
+    if conf.is_valid() {
+        return Ok(());
     }
+    Err(EmitterError::InvalidDebounce(
+        "window must be greater than zero".to_string(),
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -546,7 +525,7 @@ where
     Args: callables::FromContext<EmitterContext> + callables::IntoArgSpecs,
 {
     if let Some(debounce) = &options.debounce {
-        debounce.validate()?;
+        validate_debounce(debounce)?;
     }
     let wrapper = Callable::new(handler);
     Ok(Emitter {
@@ -726,7 +705,7 @@ impl EmitterEngine {
 
     pub async fn run(self, site: Site) -> Result<(), EmitterError> {
         let mut timer_tasks = TimerQueue::new();
-        let mut debounce_tasks = DebounceQueue::new();
+        let mut debounce_tasks = DebounceQueue::<usize>::new();
         let shutdown = site.shutdown_notifier();
         let handler_limit = Arc::new(tokio::sync::Semaphore::new(
             self.conf.max_in_flight_handlers(),
@@ -826,8 +805,8 @@ impl EmitterEngine {
                 }
                 Some(deadline) = debounce_tasks.pop() => {
                     let call = notify_works
-                        .get_mut(deadline.work_id)
-                        .and_then(|work| work.on_debounce_deadline(deadline));
+                        .get_mut(deadline.key)
+                        .and_then(|work| work.on_debounce_deadline(deadline.deadline.generation()));
                     if let Some(call) = call {
                         self.spawn_notify_call(&site, &handler_limit, &completion_tx, call);
                     }
@@ -988,7 +967,7 @@ struct NotifyWork {
     handler: EmitterHandler,
     iter_count: usize,
     last_time: Option<tokio::time::Instant>,
-    debounce: Option<DebounceState>,
+    debounce: Option<Debouncer<String>>,
 }
 
 impl NotifyWork {
@@ -1006,7 +985,7 @@ impl NotifyWork {
             handler,
             iter_count: 0,
             last_time: None,
-            debounce: debounce.map(DebounceState::new),
+            debounce: debounce.map(Debouncer::new),
         }
     }
 
@@ -1014,7 +993,7 @@ impl NotifyWork {
         NotifyCall {
             type_id: self.type_id,
             channel: self.channel.clone(),
-            debounce: self.debounce.as_ref().map(|state| state.conf.clone()),
+            debounce: self.debounce.as_ref().map(|state| state.conf().clone()),
             handler: self.handler.clone(),
             iter_count: self.iter_count,
             last_time: self.last_time,
@@ -1022,32 +1001,38 @@ impl NotifyWork {
         }
     }
 
-    fn on_notify(&mut self, payload: String, queue: &mut DebounceQueue) -> Option<NotifyCall> {
-        let Some(mut debounce) = self.debounce.take() else {
+    fn on_notify(
+        &mut self,
+        payload: String,
+        queue: &mut DebounceQueue<usize>,
+    ) -> Option<NotifyCall> {
+        let Some(debounce) = self.debounce.as_mut() else {
             let call = self.call(payload);
             self.update();
             return Some(call);
         };
-        let debounce_conf = debounce.conf.clone();
-        let mut call = debounce.on_notify(self, payload, queue);
+        let debounce_conf = debounce.conf().clone();
+        let result = debounce.push(payload);
+        if let Some(deadline) = result.deadline {
+            queue.push(self.id, deadline);
+        }
+        let mut call = result.emission.map(|payload| self.call(payload));
         if let Some(call) = &mut call {
             call.debounce = Some(debounce_conf);
         }
-        self.debounce = Some(debounce);
         if call.is_some() {
             self.update();
         }
         call
     }
 
-    fn on_debounce_deadline(&mut self, deadline: DebounceDeadline) -> Option<NotifyCall> {
-        let mut debounce = self.debounce.take()?;
-        let debounce_conf = debounce.conf.clone();
-        let mut call = debounce.on_deadline(self, deadline);
+    fn on_debounce_deadline(&mut self, generation: u64) -> Option<NotifyCall> {
+        let debounce = self.debounce.as_mut()?;
+        let debounce_conf = debounce.conf().clone();
+        let mut call = debounce.due(generation).map(|payload| self.call(payload));
         if let Some(call) = &mut call {
             call.debounce = Some(debounce_conf);
         }
-        self.debounce = Some(debounce);
         if call.is_some() {
             self.update();
         }
@@ -1068,181 +1053,6 @@ struct NotifyCall {
     iter_count: usize,
     last_time: Option<tokio::time::Instant>,
     payload: String,
-}
-
-struct DebounceState {
-    conf: DebounceConf,
-    active: bool,
-    generation: u64,
-    pending_payload: Option<String>,
-    saw_extra: bool,
-}
-
-impl DebounceState {
-    fn new(conf: DebounceConf) -> Self {
-        Self {
-            conf,
-            active: false,
-            generation: 0,
-            pending_payload: None,
-            saw_extra: false,
-        }
-    }
-
-    fn on_notify(
-        &mut self,
-        work: &NotifyWork,
-        payload: String,
-        queue: &mut DebounceQueue,
-    ) -> Option<NotifyCall> {
-        match self.conf.mode {
-            DebounceMode::Leading => {
-                if self.active {
-                    return None;
-                }
-                self.start_window(work.id, queue);
-                Some(work.call(payload))
-            }
-            DebounceMode::Trailing => {
-                self.active = true;
-                self.pending_payload = Some(payload);
-                self.push_deadline(work.id, queue);
-                None
-            }
-            DebounceMode::LeadingAndTrailing => {
-                if self.active {
-                    self.saw_extra = true;
-                    self.pending_payload = Some(payload);
-                    self.push_deadline(work.id, queue);
-                    None
-                } else {
-                    self.start_window(work.id, queue);
-                    Some(work.call(payload))
-                }
-            }
-        }
-    }
-
-    fn on_deadline(&mut self, work: &NotifyWork, deadline: DebounceDeadline) -> Option<NotifyCall> {
-        if deadline.generation != self.generation {
-            return None;
-        }
-
-        match self.conf.mode {
-            DebounceMode::Leading => {
-                self.reset();
-                None
-            }
-            DebounceMode::Trailing => {
-                self.active = false;
-                self.pending_payload
-                    .take()
-                    .map(|payload| work.call(payload))
-            }
-            DebounceMode::LeadingAndTrailing => {
-                let should_emit = self.saw_extra;
-                self.active = false;
-                self.saw_extra = false;
-                if should_emit {
-                    self.pending_payload
-                        .take()
-                        .map(|payload| work.call(payload))
-                } else {
-                    self.pending_payload = None;
-                    None
-                }
-            }
-        }
-    }
-
-    fn start_window(&mut self, work_id: usize, queue: &mut DebounceQueue) {
-        self.active = true;
-        self.pending_payload = None;
-        self.saw_extra = false;
-        self.push_deadline(work_id, queue);
-    }
-
-    fn push_deadline(&mut self, work_id: usize, queue: &mut DebounceQueue) {
-        self.generation = self.generation.wrapping_add(1);
-        queue.push(DebounceDeadline {
-            work_id,
-            generation: self.generation,
-            deadline: tokio::time::Instant::now() + self.conf.window,
-        });
-    }
-
-    fn reset(&mut self) {
-        self.active = false;
-        self.pending_payload = None;
-        self.saw_extra = false;
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DebounceDeadline {
-    work_id: usize,
-    generation: u64,
-    deadline: tokio::time::Instant,
-}
-
-impl Eq for DebounceDeadline {}
-
-impl PartialEq for DebounceDeadline {
-    fn eq(&self, other: &Self) -> bool {
-        self.deadline == other.deadline
-            && self.work_id == other.work_id
-            && self.generation == other.generation
-    }
-}
-
-impl Ord for DebounceDeadline {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.deadline.cmp(&self.deadline)
-    }
-}
-
-impl PartialOrd for DebounceDeadline {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-struct DebounceQueue {
-    heap: BinaryHeap<DebounceDeadline>,
-    notifier: tokio::sync::Notify,
-}
-
-impl DebounceQueue {
-    fn new() -> Self {
-        Self {
-            heap: BinaryHeap::new(),
-            notifier: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn push(&mut self, deadline: DebounceDeadline) {
-        self.heap.push(deadline);
-        self.notifier.notify_one();
-    }
-
-    async fn pop(&mut self) -> Option<DebounceDeadline> {
-        loop {
-            if let Some(deadline) = self.heap.peek() {
-                let now = tokio::time::Instant::now();
-                if deadline.deadline <= now {
-                    return self.heap.pop();
-                }
-
-                let wait = deadline.deadline - now;
-                tokio::select! {
-                    _ = tokio::time::sleep(wait) => {},
-                    _ = self.notifier.notified() => {},
-                }
-            } else {
-                self.notifier.notified().await;
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -1542,7 +1352,7 @@ mod tests {
         Ok(())
     }
 
-    fn debounce_work(mode: DebounceMode) -> (NotifyWork, DebounceQueue) {
+    fn debounce_work(mode: DebounceMode) -> (NotifyWork, DebounceQueue<usize>) {
         (
             NotifyWork::new(
                 0,
@@ -1558,6 +1368,7 @@ mod tests {
         )
     }
 
+    /// Verifies leading debounce suppresses additional notifications until its deadline.
     #[test]
     fn leading_debounce_emits_first_only_inside_window() {
         let (mut work, mut queue) = debounce_work(DebounceMode::Leading);
@@ -1569,15 +1380,12 @@ mod tests {
         );
         assert!(work.on_notify("second".to_string(), &mut queue).is_none());
 
-        let generation = work.debounce.as_ref().unwrap().generation;
-        assert!(
-            work.on_debounce_deadline(DebounceDeadline {
-                work_id: 0,
-                generation,
-                deadline: tokio::time::Instant::now(),
-            })
-            .is_none()
-        );
+        let generation = work
+            .debounce
+            .as_ref()
+            .map(Debouncer::generation)
+            .unwrap_or_default();
+        assert!(work.on_debounce_deadline(generation).is_none());
 
         assert_eq!(
             work.on_notify("third".to_string(), &mut queue)
@@ -1586,35 +1394,34 @@ mod tests {
         );
     }
 
+    /// Verifies trailing debounce emits only the latest payload at its current deadline.
     #[test]
     fn trailing_debounce_emits_latest_payload_on_matching_deadline() {
         let (mut work, mut queue) = debounce_work(DebounceMode::Trailing);
 
         assert!(work.on_notify("first".to_string(), &mut queue).is_none());
-        let stale_generation = work.debounce.as_ref().unwrap().generation;
+        let stale_generation = work
+            .debounce
+            .as_ref()
+            .map(Debouncer::generation)
+            .unwrap_or_default();
         assert!(work.on_notify("last".to_string(), &mut queue).is_none());
 
-        assert!(
-            work.on_debounce_deadline(DebounceDeadline {
-                work_id: 0,
-                generation: stale_generation,
-                deadline: tokio::time::Instant::now(),
-            })
-            .is_none()
-        );
+        assert!(work.on_debounce_deadline(stale_generation).is_none());
 
-        let generation = work.debounce.as_ref().unwrap().generation;
+        let generation = work
+            .debounce
+            .as_ref()
+            .map(Debouncer::generation)
+            .unwrap_or_default();
         assert_eq!(
-            work.on_debounce_deadline(DebounceDeadline {
-                work_id: 0,
-                generation,
-                deadline: tokio::time::Instant::now(),
-            })
-            .map(|call| call.payload),
+            work.on_debounce_deadline(generation)
+                .map(|call| call.payload),
             Some("last".to_string())
         );
     }
 
+    /// Verifies combined debounce emits a trailing value only after an additional notification.
     #[test]
     fn leading_and_trailing_emits_trailing_only_after_extra_payload() {
         let (mut single, mut queue) = debounce_work(DebounceMode::LeadingAndTrailing);
@@ -1624,16 +1431,12 @@ mod tests {
                 .map(|call| call.payload),
             Some("only".to_string())
         );
-        let generation = single.debounce.as_ref().unwrap().generation;
-        assert!(
-            single
-                .on_debounce_deadline(DebounceDeadline {
-                    work_id: 0,
-                    generation,
-                    deadline: tokio::time::Instant::now(),
-                })
-                .is_none()
-        );
+        let generation = single
+            .debounce
+            .as_ref()
+            .map(Debouncer::generation)
+            .unwrap_or_default();
+        assert!(single.on_debounce_deadline(generation).is_none());
 
         let (mut burst, mut queue) = debounce_work(DebounceMode::LeadingAndTrailing);
         assert_eq!(
@@ -1645,14 +1448,14 @@ mod tests {
         assert!(burst.on_notify("middle".to_string(), &mut queue).is_none());
         assert!(burst.on_notify("last".to_string(), &mut queue).is_none());
 
-        let generation = burst.debounce.as_ref().unwrap().generation;
+        let generation = burst
+            .debounce
+            .as_ref()
+            .map(Debouncer::generation)
+            .unwrap_or_default();
         assert_eq!(
             burst
-                .on_debounce_deadline(DebounceDeadline {
-                    work_id: 0,
-                    generation,
-                    deadline: tokio::time::Instant::now(),
-                })
+                .on_debounce_deadline(generation)
                 .map(|call| call.payload),
             Some("last".to_string())
         );

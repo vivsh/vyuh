@@ -5,9 +5,12 @@ They are fire-and-forget: Vyuh does not guarantee delivery, ordering,
 durability, retries, or handler completion. Use tasks when work must be durable
 or observable as a unit of background execution.
 
-Use signals for lightweight local fanout after application events. Channels can
-also consume emitted signal payloads for client-facing live delivery over
-WebSocket, SSE, or long polling. Do not use signals for durable queues,
+Use signals for lightweight local fanout after application events. Channels and
+authenticated [Beacon](channels.md#beacon-endpoints) endpoints can also consume
+emitted signal payloads for client-facing live delivery over WebSocket, SSE, or
+long polling. Channel payloads should be authorization-safe refresh hints, such
+as entity IDs and version markers; clients refetch authoritative state. Do not
+use signals for durable queues,
 scheduled polling, or work that must be retried.
 
 ## Overview
@@ -162,7 +165,8 @@ multiple handlers for a payload, and emitters feeding the same signal path.
 
 ## Current Limitations
 
-- Signals are in-process only.
+- Signals are in-process only. Future channel fanout can replicate a raw
+  notification to active remote sessions, but never re-runs signal handlers.
 - Dispatch is type-based, not name-based or topic-based.
 - There is no delivery acknowledgement.
 - There is no ordering guarantee across handlers or submissions.

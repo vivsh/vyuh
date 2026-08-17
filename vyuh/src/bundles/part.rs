@@ -11,10 +11,17 @@ use crate::{
     tasks::TaskDefinition,
 };
 
+/// Exact registration class for one HTTP operation during bundle assembly.
+pub(super) enum RouteMarker {
+    Route,
+    Beacon,
+}
+
 pub(super) enum BundlePartInner {
     Route(
         axum::routing::MethodRouter<Site>,
         crate::callables::Operation,
+        RouteMarker,
     ),
     Emitter(emitters::Emitter),
     #[allow(dead_code)]
@@ -49,7 +56,7 @@ impl BundlePart {
             f.apply(op);
         } else {
             match &mut self.part {
-                BundlePartInner::Route(_, operation) => f.apply(operation),
+                BundlePartInner::Route(_, operation, _) => f.apply(operation),
                 #[cfg(feature = "mcp")]
                 BundlePartInner::McpTool(registration) => f.apply(&mut registration.operation),
                 _ => {}
@@ -74,9 +81,9 @@ impl Bundle {
             self.ops.insert(op.id, op);
         }
         match part.part {
-            BundlePartInner::Route(router, mut op) => {
+            BundlePartInner::Route(router, mut op, marker) => {
                 op.assign_bundle_id(self.id);
-                self = self.register_route(router, op);
+                self = self.register_route(router, op, marker);
             }
             BundlePartInner::Emitter(em) => {
                 if let Err(e) = self.emitters.register(em) {
@@ -139,6 +146,7 @@ impl Bundle {
         mut self,
         router: axum::routing::MethodRouter<Site>,
         op: crate::callables::Operation,
+        marker: RouteMarker,
     ) -> Self {
         if let Err(e) = self.validate_route_operation(&op) {
             self.errors.push(e);
@@ -150,6 +158,9 @@ impl Bundle {
         let name = op.name.clone();
         self.ops.insert(id, op);
         self.name_index.insert(name, id);
+        if matches!(marker, RouteMarker::Beacon) {
+            self.beacons.insert(id);
+        }
         self
     }
 }
@@ -179,7 +190,63 @@ where
     let router = axum::routing::on(meta.methods.into(), handler);
     BundlePart {
         operation: None,
-        part: BundlePartInner::Route(router, op),
+        part: BundlePartInner::Route(router, op, RouteMarker::Route),
+    }
+}
+
+/// Creates an authenticated declarative Beacon route.
+pub fn beacon(beacon: crate::channels::Beacon, conf: crate::channels::BeaconConf) -> BundlePart {
+    if let Err(error) = beacon.validate(&conf) {
+        return BundlePart {
+            operation: None,
+            part: BundlePartInner::Error(BundleError::Config(error.to_string())),
+        };
+    }
+    let mut operation = crate::callables::Operation::from_api_doc(conf.name, conf.path);
+    operation.kind = crate::callables::OperationKind::Route;
+    operation.hidden = false;
+    operation.openapi_id = Some(conf.name.to_string());
+    operation.slash_policy = conf.slash;
+    operation.args.push(
+        crate::callables::ArgSpec::from_type::<crate::auth::AuthUser>(
+            0,
+            "user",
+            "Authenticated Beacon subscriber.",
+        ),
+    );
+    operation
+        .returns
+        .push(crate::callables::ReturnSpec::from_type::<
+            crate::channels::ChannelResponse,
+        >(
+            Some("Negotiated WebSocket, SSE, or long-poll subscription.".into()),
+            Some(200),
+        ));
+    operation.returns.push(crate::callables::ReturnSpec::error(
+        403,
+        "No Beacon rule is eligible for this identity.",
+    ));
+    operation.returns.push(crate::callables::ReturnSpec::error(
+        405,
+        "Method not allowed.",
+    ));
+    let operation_id = operation.id;
+    let beacon = std::sync::Arc::new(beacon);
+    let modes = conf.modes;
+    let handler = move |user: crate::auth::AuthUser,
+                        subscriber: crate::routes::Subscriber,
+                        axum::extract::State(site): axum::extract::State<Site>| {
+        let beacon = std::sync::Arc::clone(&beacon);
+        async move {
+            beacon
+                .open(site, operation_id, user, subscriber, modes)
+                .await
+        }
+    };
+    let router = axum::routing::on(crate::routes::Methods::GET.into(), handler);
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::Route(router, operation, RouteMarker::Beacon),
     }
 }
 

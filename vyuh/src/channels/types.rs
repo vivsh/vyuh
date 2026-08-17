@@ -1,7 +1,15 @@
-use std::{any::TypeId, fmt, str::FromStr, sync::Arc, time::SystemTime};
+use std::{
+    any::TypeId,
+    fmt,
+    str::FromStr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use super::fanout::SignalKey;
 
 /// Runtime configuration for signal-backed channel delivery.
 ///
@@ -13,6 +21,11 @@ pub struct ChannelConf {
     pub subscriber_queue: usize,
     pub replay_limit: usize,
     pub retention_events: usize,
+    /// Maximum independent logical channels one user may open locally.
+    ///
+    /// Direct channel keys are application-owned. This conservative bound
+    /// prevents request-derived keys from retaining unbounded user state.
+    pub max_channels_per_user: usize,
     pub max_message_bytes: usize,
     pub long_poll_timeout_ms: u64,
     pub sse_keepalive_ms: u64,
@@ -26,6 +39,7 @@ impl Default for ChannelConf {
             subscriber_queue: 256,
             replay_limit: 256,
             retention_events: 10_000,
+            max_channels_per_user: 64,
             max_message_bytes: 1024 * 1024,
             long_poll_timeout_ms: 25_000,
             sse_keepalive_ms: 15_000,
@@ -72,15 +86,17 @@ impl fmt::Display for UserKey {
     }
 }
 
-/// Stable identity for one attached channel session.
+/// Stable application-owned identity for one logical channel.
 ///
-/// Channel keys identify cursors/sessions only. They do not filter messages;
-/// delivery is controlled by the user-scoped policy.
+/// A logical channel owns its delivery policy, bounded reconnect replay, and
+/// debounce state for one [`UserKey`]. Multiple physical attachments to the
+/// same `(UserKey, ChannelKey)` deliberately share that state. Use stable
+/// application constants, not request-derived values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct ChannelKey(String);
 
 impl ChannelKey {
-    /// Creates a channel session key.
+    /// Creates a logical channel key.
     ///
     /// Keys must be non-empty, no longer than 512 bytes, and free of control
     /// characters.
@@ -90,11 +106,7 @@ impl ChannelKey {
         Ok(Self(key))
     }
 
-    pub(crate) fn generated() -> Self {
-        Self(uuid::Uuid::now_v7().to_string())
-    }
-
-    /// Returns the raw channel session key.
+    /// Returns the raw logical channel key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -123,10 +135,10 @@ fn validate_key(name: &str, key: &str) -> Result<(), ChannelError> {
     Ok(())
 }
 
-/// Monotonic event id assigned by the channel backend.
+/// Monotonic event id assigned by the local subscription runtime.
 ///
-/// The local backend uses process-local ids. External backends may map this to
-/// their retained log sequence.
+/// Event ids and cursors are process-local reconnect hints. They are not a
+/// durable or cross-node ordering contract.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -210,8 +222,8 @@ impl ChannelEvent {
     }
 }
 
-fn unix_now() -> u64 {
-    match SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+pub(crate) fn unix_now() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
         Err(_) => 0,
     }
@@ -229,24 +241,47 @@ pub const POLL: ChannelTransport = 0b100;
 /// Default transport mask accepted by `Subscriber::attach(...).await`.
 pub const ALL_TRANSPORTS: ChannelTransport = WS | SSE | POLL;
 
+impl ChannelKey {
+    /// Derives the private logical key used by a finalized Beacon endpoint.
+    pub(crate) fn beacon(name: &str, path: &str) -> Self {
+        let path = normalize_path(path);
+        let material = format!("vyuh.channel.beacon.v1\0GET\0{name}\0{path}");
+        Self(blake3::hash(material.as_bytes()).to_hex().to_string())
+    }
+}
+
+fn normalize_path(path: &str) -> &str {
+    if path == "/" {
+        path
+    } else {
+        path.trim_end_matches('/')
+    }
+}
+
 /// Type-erased predicate used by user-scoped delivery policy.
 pub type DeliveryPredicate = Arc<dyn Fn(&dyn std::any::Any) -> bool + Send + Sync>;
 
+/// Decodes a raw fanout payload into the matching local Rust value.
+pub(crate) type SignalDecoder =
+    fn(&serde_json::Value) -> Result<Arc<dyn std::any::Any + Send + Sync>, ChannelError>;
+
 /// Delivery rule registered for a user and one signal payload type.
 ///
-/// This type is public because backend implementations receive it through the
-/// backend trait, but applications normally create it through `UserStream`.
+/// Application code creates delivery rules through `UserStream` and Beacon.
 #[derive(Clone)]
-pub struct DeliverySpec {
-    pub type_id: TypeId,
-    pub type_key: String,
-    pub event_type: String,
-    pub predicate: DeliveryPredicate,
+pub(crate) struct DeliverySpec {
+    pub(crate) type_id: TypeId,
+    pub(crate) signal_key: SignalKey,
+    pub(crate) predicate: DeliveryPredicate,
+    pub(crate) decoder: SignalDecoder,
+    /// Optional trailing-edge debounce window for this delivery rule.
+    pub(crate) debounce: Option<std::time::Duration>,
 }
 
 #[derive(Clone)]
 pub(crate) struct DeliveryRule {
     pub(crate) predicate: DeliveryPredicate,
+    pub(crate) debounce: Option<std::time::Duration>,
 }
 
 /// Errors returned by channel registration, replay, transport negotiation, and
@@ -265,6 +300,9 @@ pub enum ChannelError {
     #[error("channel backend unavailable")]
     BackendUnavailable,
 
+    #[error("channel debounce scheduler is saturated")]
+    DebounceQueueFull,
+
     #[error("channel serialization failed: {0}")]
     Serialization(String),
 
@@ -273,4 +311,29 @@ pub enum ChannelError {
 
     #[error("channel transport is not allowed")]
     TransportNotAllowed,
+
+    #[error("channel subscription is unavailable")]
+    SubscriptionUnavailable,
+
+    #[error("a logical channel key is required before attaching")]
+    MissingChannelKey,
+
+    #[error("channel limit exceeded: at most {max} logical channels per user")]
+    ChannelLimitExceeded { max: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChannelKey;
+
+    /// Verifies final route identity is deterministic and path-normalized.
+    #[test]
+    fn beacon_channel_key_is_stable_after_path_normalization() {
+        let first = ChannelKey::beacon("live", "/api/live/");
+        let second = ChannelKey::beacon("live", "/api/live");
+        let different_name = ChannelKey::beacon("updates", "/api/live");
+
+        assert_eq!(first, second);
+        assert_ne!(first, different_name);
+    }
 }

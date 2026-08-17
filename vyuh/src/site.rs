@@ -2,7 +2,7 @@ use crate::auth::Authenticator;
 use crate::bundles::{Bundle, IntoBundle};
 use crate::cache::CacheRegistry;
 use crate::callables::{self, DataBox};
-use crate::channels::{Channels, LocalChannelBackend};
+use crate::channels::{Channels, SubscriptionRuntime};
 use crate::commands::CommandRegistry;
 use crate::conf::{self, SiteConf};
 use crate::db::{DbError, DbPool, Notify, PgNotifyDbExt, Pool};
@@ -186,6 +186,12 @@ impl SiteBuilder {
 
     /// Starts all site-owned background engines exactly once per site runtime.
     async fn start_runtime(site: &Site) -> Result<(), SiteError> {
+        let channels = site.inner.channels.clone();
+        let channel_shutdown = site.shutdown_notifier();
+        site.inner.joinset.lock().spawn(async move {
+            channels.run_debounce(channel_shutdown).await;
+        });
+
         {
             let mut joinset = site.inner.joinset.lock();
             site.inner
@@ -580,7 +586,10 @@ impl SiteBuilder {
             slash_router,
             route_registry,
             joinset: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
-            channels: LocalChannelBackend::new(self.conf.channels.clone()),
+            channels: SubscriptionRuntime::new(
+                self.conf.channels.clone(),
+                crate::channels::beacon_keys(&bundle.ops, &bundle.beacons),
+            ),
             console_runtime,
             asset_urls,
             bundle,
@@ -609,7 +618,7 @@ struct SiteInner {
     operation_audiences: std::collections::BTreeMap<crate::OperationId, crate::auth::AudienceId>,
     cache: Arc<CacheRegistry>,
     pool: DbPool,
-    channels: LocalChannelBackend,
+    channels: SubscriptionRuntime,
     console_runtime: Option<crate::console::ConsoleRuntime>,
     asset_urls: crate::assets::AssetUrls,
     template_engine: TemplateEngine,

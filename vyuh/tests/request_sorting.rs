@@ -3,8 +3,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vyuh::{SiteConf, bundles, db, routes::{Json, Query, StatusCode}, testing::TestSite};
 use vyuh::db::Model;
+use vyuh::{
+    SiteConf, bundles, db,
+    routes::{Json, Query, StatusCode},
+    testing::TestSite,
+};
 
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "notes")]
@@ -37,7 +41,11 @@ struct SortOut {
 
 #[bundles::route(path = "/notes")]
 async fn list_notes(Query(params): Query<ListNotes>) -> Json<SortOut> {
-    let ListNotes { sort, page: _, q: _ } = params;
+    let ListNotes {
+        sort,
+        page: _,
+        q: _,
+    } = params;
     let notes = Note::table();
     let query = db::from(&notes);
     let query = match sort.as_ref() {
@@ -63,9 +71,15 @@ async fn request_sorting_uses_vyuh_db_facade() {
                 .public(),
         ),
     );
-    let site = vyuh::Site::build(SiteConf { log_init: false, ..SiteConf::default() }, bundle)
-        .await
-        .expect("site");
+    let site = vyuh::Site::build(
+        SiteConf {
+            log_init: false,
+            ..SiteConf::default()
+        },
+        bundle,
+    )
+    .await
+    .expect("site");
     let client = TestSite::new(site.clone());
 
     let sorted: Value = client
@@ -96,7 +110,11 @@ async fn request_sorting_uses_vyuh_db_facade() {
         .assert_status(StatusCode::OK)
         .json()
         .await;
-    assert!(!unordered["sql"].as_str().is_some_and(|sql| sql.contains(" ORDER BY ")));
+    assert!(
+        !unordered["sql"]
+            .as_str()
+            .is_some_and(|sql| sql.contains(" ORDER BY "))
+    );
 
     let spec: Value = client
         .get("/openapi.json")
@@ -106,6 +124,10 @@ async fn request_sorting_uses_vyuh_db_facade() {
         .json()
         .await;
     assert!(spec["paths"]["/notes"]["get"].to_string().contains("sort"));
-    assert!(spec["paths"]["/notes"]["get"].to_string().contains("newest"));
+    assert!(
+        spec["paths"]["/notes"]["get"]
+            .to_string()
+            .contains("newest")
+    );
     site.shutdown_and_wait().await;
 }

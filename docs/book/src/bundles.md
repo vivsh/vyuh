@@ -1,6 +1,7 @@
 # Bundles
 
-Bundles are Vyuh's composition API. A `Bundle` collects routes, signals,
+Bundles are Vyuh's composition API. A `Bundle` collects routes, Beacon live
+subscriptions, signals,
 emitters, tasks, services, commands, asset directories, URL info providers,
 migrations, schema contributors, and OpenAPI configuration into one value that can be mounted,
 merged, prefixed, layered, validated, and passed to site startup.

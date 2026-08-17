@@ -182,18 +182,38 @@ signal client; scheduled sources belong in emitters, and durable delayed work
 belongs in tasks.
 
 Channels are consumers of typed signal payloads, not a separate topic bus.
-Routes attach a `Subscriber` to a `Channels::user(UserKey)` stream and declare
-accepted payload types with `deliver::<T>()` or `deliver_if::<T>(...)`.
-Delivery policy is user-scoped: re-registering a `UserKey` replaces that user's
-older rules, while multiple channel sessions for the user share one retained
-queue and hold independent cursors.
+Routes attach a `Subscriber` to a `Channels::user(UserKey).channel(ChannelKey)`
+stream and declare accepted payload types with `deliver::<T>()` or
+`deliver_if::<T>(...)`. `(UserKey, ChannelKey)` is the sole logical identity:
+it owns policy, bounded process-local replay, and debounce. Re-registering a
+logical channel replaces only its policy; its active sessions continue using
+the replacement. Physical session IDs are runtime-private and receiver drop
+removes only that session. `Beacon` is the declarative authenticated route
+form: site construction derives its private `ChannelKey` from the final route
+name, normalized path, and `GET`, and only explicit Beacon operation markers
+receive such keys. Endpoints neither replace each other nor share retention.
+Its optional trailing debounce is likewise user-, channel-, and signal-type-
+scoped. Direct keys are application-owned stable names and are bounded per user
+to prevent unbounded request-derived channel state.
 
-The channel backend owns per-user policies, fixed-length per-user retained
-queues, per-channel cursor/session state, atomic attach with replay, live
-wakeup, and close/find operations. Predicates run before serialization; accepted
-payloads are serialized once and delivered through a shared envelope across
-WebSocket, SSE, and polling. Internal indexing uses Rust type identity, while
-the client-facing event type uses the payload schema name.
+`SubscriptionRuntime` owns logical-channel policies, type indexes, predicates,
+debounce, local replay logs, and session wakeup. It has no public session
+close/find APIs; transport response lifetime owns physical cleanup.
+`SubscriptionLog` is a bounded process-local reconnect convenience, not a
+durable event history. Predicates run before serialization; accepted payloads
+are serialized once and delivered through a shared envelope across WebSocket,
+SSE, and polling. One site-owned scheduler handles bounded,
+generation-guarded trailing Beacon deadlines without request-time locks.
+
+`ChannelFanout` is a crate-private future boundary for ephemeral shared-node
+delivery. Its raw envelope uses a UUIDv7 delivery id and a deterministic signal
+key derived from the complete Rust type identity. Incoming envelopes are decoded
+and evaluated only by the receiving node's active `SubscriptionRuntime`; they
+never enter `SignalEngine`, so domain handlers cannot be duplicated. There is
+no shared backend or cross-node replay today. A future shared mode is live-only:
+local replay and debounce remain node-local, duplicate delivery across attached
+nodes is possible, and an explicit application namespace is required at site
+build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
 
 ## Request Flow
 

@@ -268,7 +268,7 @@ mod tests {
 
     fn test_receiver() -> (mpsc::Sender<Arc<ChannelEvent>>, ChannelReceiver) {
         let (tx, rx) = mpsc::channel(1);
-        (tx, ChannelReceiver { inner: rx })
+        (tx, ChannelReceiver::detached(rx))
     }
 
     #[tokio::test]

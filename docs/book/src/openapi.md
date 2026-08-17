@@ -22,6 +22,10 @@ OpenAPI generation uses these inputs:
   error response metadata.
 - `OpenApiConf` controls the generated spec endpoint and API metadata.
 
+`Beacon` endpoints are ordinary authenticated `GET` operations in the spec.
+They document the negotiated live-subscription response and their `403` no-rule
+response; transport-specific streaming bodies remain intentionally untyped.
+
 Vyuh emits OpenAPI 3.0.3 by default for broad tooling compatibility. Use
 `.openapi_version(bundles::OpenApiVersion::V31)` when a project wants an
 OpenAPI 3.1 document and its client/documentation tooling supports it.

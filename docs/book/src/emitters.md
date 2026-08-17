@@ -230,6 +230,14 @@ If `debounce_millis` or `debounce_secs` is set without `debounce`, the mode
 defaults to `trailing`. Debounce is scoped to one PgNotify emitter
 registration, not shared globally by channel name.
 
+PgNotify and Beacon endpoints share Vyuh's internal generation-guarded
+deadline mechanics, but retain their own delivery semantics: PgNotify supports
+all three modes above; Beacon uses trailing mode only.
+
+When an emitter targets a signal consumed by channels or Beacon, that client
+delivery remains an authorization-safe, best-effort refresh hint. It is not a
+durable event log or a substitute for clients refetching authoritative state.
+
 When a PgNotify emitter produces the same `Data<T>` as a cron or periodic
 emitter, every raw notification still postpones that timer fallback. This means
 periodic or cron fallback runs when no notifications arrive, but is pushed back

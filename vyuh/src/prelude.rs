@@ -50,7 +50,7 @@ pub use crate::services::ServiceRef;
 
 // ── Channels ─────────────────────────────────────────────────────────────────
 
-pub use crate::channels::{ChannelResponse, Channels, UserKey};
+pub use crate::channels::{Beacon, BeaconConf, ChannelKey, ChannelResponse, Channels, UserKey};
 
 // ── Cache ───────────────────────────────────────────────────────────────────
 

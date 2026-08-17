@@ -1,13 +1,20 @@
-mod backend;
+mod beacon;
+#[allow(dead_code)]
+mod fanout;
+mod log;
+mod runtime;
 mod transports;
 mod types;
 
-pub use backend::{ChannelBackend, ChannelReceiver, LocalChannelBackend};
+pub use beacon::{Beacon, BeaconBuilder, BeaconConf, BeaconError};
 pub use transports::{ChannelLongPoll, ChannelResponse, ChannelSse, ChannelWebSocket};
 pub use types::{
     ALL_TRANSPORTS, ChannelConf, ChannelCursor, ChannelError, ChannelEvent, ChannelEventId,
     ChannelKey, ChannelTransport, POLL, SSE, SlowSubscriberPolicy, UserKey, WS,
 };
+
+use runtime::ChannelReceiver;
+pub(crate) use runtime::SubscriptionRuntime;
 
 use axum::extract::ws::WebSocketUpgrade;
 
@@ -17,21 +24,34 @@ use crate::{
     notifiers::CancellationNotifier,
 };
 
-/// Site-scoped entry point for signal-backed channel delivery.
-///
-/// `Channels` does not publish messages directly. Applications emit typed
-/// signals through `site.signals().emit(T)`, and channels deliver accepted
-/// signal payloads to attached users.
-#[derive(Clone)]
-pub struct Channels {
-    backend: LocalChannelBackend,
+/// Builds private Beacon channel keys after bundle path composition completes.
+pub(crate) fn beacon_keys(
+    operations: &std::collections::BTreeMap<crate::OperationId, crate::callables::Operation>,
+    beacon_operations: &std::collections::BTreeSet<crate::OperationId>,
+) -> std::collections::BTreeMap<crate::OperationId, ChannelKey> {
+    operations
+        .iter()
+        .filter(|(id, operation)| {
+            beacon_operations.contains(id)
+                && matches!(operation.kind, crate::callables::OperationKind::Route)
+                && operation.methods == crate::routes::Methods::GET
+        })
+        .map(|(id, operation)| (*id, ChannelKey::beacon(&operation.name, &operation.path)))
+        .collect()
 }
 
-/// Builder for one user's channel delivery policy.
+/// Site-scoped entry point for signal-backed channel delivery.
 ///
-/// The stream describes which signal payload types a user should receive.
-/// Attaching a stream replaces the user's previous delivery policy; multiple
-/// channel sessions for the same user share that policy and retained queue.
+/// Applications publish typed signals through `site.signals().emit(T)`; channels
+/// deliver accepted signal payloads to attached users.
+#[derive(Clone)]
+pub struct Channels {
+    runtime: SubscriptionRuntime,
+}
+
+/// Builder for one logical channel's delivery policy.
+///
+/// Attaching replaces policy only for the selected `(UserKey, ChannelKey)`.
 #[derive(Clone)]
 pub struct UserStream {
     channels: Channels,
@@ -48,13 +68,13 @@ pub(crate) struct OpenStream {
 }
 
 impl Channels {
-    pub(crate) fn new(backend: LocalChannelBackend) -> Self {
-        Self { backend }
+    pub(crate) fn new(runtime: SubscriptionRuntime) -> Self {
+        Self { runtime }
     }
 
-    /// Starts a user-scoped delivery policy builder.
+    /// Starts a logical delivery-policy builder for one authenticated user.
     ///
-    /// The returned stream is inert until attached by `Subscriber::attach`.
+    /// The stream is inert until attached by `Subscriber::attach`.
     pub fn user(&self, user_key: UserKey) -> UserStream {
         UserStream {
             channels: self.clone(),
@@ -64,38 +84,27 @@ impl Channels {
         }
     }
 
-    /// Closes a channel session for a user.
-    ///
-    /// Returns `true` when a matching live session existed.
-    pub async fn close(
-        &self,
-        user_key: &UserKey,
-        channel_key: &ChannelKey,
-    ) -> Result<bool, ChannelError> {
-        self.backend.close(user_key, channel_key).await
-    }
-
-    /// Checks whether a channel session exists for a user.
-    pub async fn find(
-        &self,
-        user_key: &UserKey,
-        channel_key: &ChannelKey,
-    ) -> Result<bool, ChannelError> {
-        self.backend.find(user_key, channel_key).await
-    }
-
     pub(crate) async fn publish_signal<T>(&self, data: &T) -> Result<(), ChannelError>
     where
         T: DataValue,
     {
-        self.backend.publish_signal(data).await
+        self.runtime.publish_signal(data).await
     }
 
     pub(crate) async fn publish_box(
         &self,
         payload: &crate::callables::DataBox,
     ) -> Result<(), ChannelError> {
-        self.backend.publish_box(payload).await
+        self.runtime.publish_box(payload).await
+    }
+
+    /// Delivers an inbound best-effort fanout envelope to local sessions.
+    #[allow(dead_code)]
+    pub(crate) async fn ingest_fanout(
+        &self,
+        envelope: fanout::FanoutEnvelope,
+    ) -> Result<(), ChannelError> {
+        self.runtime.ingest_fanout(envelope).await
     }
 
     pub(crate) async fn open_stream(
@@ -103,35 +112,40 @@ impl Channels {
         stream: UserStream,
         after: Option<ChannelCursor>,
     ) -> Result<OpenStream, ChannelError> {
-        let channel_key = stream.channel_key.unwrap_or_else(ChannelKey::generated);
+        let channel_key = stream.channel_key.ok_or(ChannelError::MissingChannelKey)?;
         let open = self
-            .backend
+            .runtime
             .open_user(stream.user_key, channel_key, stream.deliveries, after)
             .await?;
         Ok(OpenStream {
             replay: open.replay,
             receiver: open.receiver,
-            keepalive: std::time::Duration::from_millis(self.backend.conf().sse_keepalive_ms),
+            keepalive: std::time::Duration::from_millis(self.runtime.conf().sse_keepalive_ms),
             poll_timeout: std::time::Duration::from_millis(
-                self.backend.conf().long_poll_timeout_ms,
+                self.runtime.conf().long_poll_timeout_ms,
             ),
         })
+    }
+
+    /// Resolves the private logical channel owned by one Beacon operation.
+    pub(crate) fn beacon_channel(&self, operation: crate::OperationId) -> Option<ChannelKey> {
+        self.runtime.beacon_channel(operation)
     }
 }
 
 impl UserStream {
-    /// Assigns an application-owned key to the channel session.
+    /// Assigns the stable application-owned logical channel identity.
     ///
-    /// The key identifies the session/cursor only. It does not filter messages.
-    /// If omitted, Vyuh generates a session key for the attachment.
+    /// Sessions with the same key deliberately share policy and replay. An
+    /// attachment without a key returns [`ChannelError::MissingChannelKey`].
     pub fn channel(mut self, channel_key: ChannelKey) -> Self {
         self.channel_key = Some(channel_key);
         self
     }
 
-    /// Delivers every emitted signal payload of type `T` to this user.
+    /// Delivers every emitted signal payload of type `T` to this logical channel.
     ///
-    /// The payload is retained only after it is accepted by the user policy.
+    /// The payload is retained only after it is accepted by the policy.
     pub fn deliver<T>(mut self) -> Self
     where
         T: DataValue,
@@ -140,7 +154,7 @@ impl UserStream {
         self
     }
 
-    /// Delivers emitted signal payloads of type `T` accepted by `predicate`.
+    /// Delivers signal payloads of type `T` accepted by `predicate`.
     ///
     /// The predicate runs before serialization and retention. It should be
     /// deterministic and should not perform blocking work.
@@ -150,6 +164,12 @@ impl UserStream {
         F: Fn(&T) -> bool + Send + Sync + 'static,
     {
         self.deliveries.push(delivery::<T, _>(predicate));
+        self
+    }
+
+    /// Adds one internally constructed typed delivery rule.
+    pub(crate) fn deliver_spec(mut self, delivery: types::DeliverySpec) -> Self {
+        self.deliveries.push(delivery);
         self
     }
 
@@ -190,25 +210,22 @@ where
     );
     types::DeliverySpec {
         type_id: std::any::TypeId::of::<T>(),
-        type_key: short_hash(std::any::type_name::<T>()),
-        event_type: event_type::<T>(),
+        signal_key: fanout::SignalKey::from_type_name(std::any::type_name::<T>()),
         predicate,
+        decoder: decode_signal::<T>,
+        debounce: None,
     }
 }
 
-fn event_type<T>() -> String
+fn decode_signal<T>(
+    value: &serde_json::Value,
+) -> Result<std::sync::Arc<dyn std::any::Any + Send + Sync>, ChannelError>
 where
     T: DataValue,
 {
-    <T as schemars::JsonSchema>::schema_name().into_owned()
-}
-
-fn short_hash(value: &str) -> String {
-    blake3::hash(value.as_bytes())
-        .to_hex()
-        .chars()
-        .take(16)
-        .collect()
+    serde_json::from_value::<T>(value.clone())
+        .map(|value| std::sync::Arc::new(value) as std::sync::Arc<dyn std::any::Any + Send + Sync>)
+        .map_err(|error| ChannelError::Serialization(error.to_string()))
 }
 
 impl callables::FromSite for Channels {
@@ -240,161 +257,23 @@ impl callables::IntoArgPart for WebSocketUpgrade {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 impl From<ChannelError> for Error {
     fn from(err: ChannelError) -> Self {
         match err {
             ChannelError::InvalidKey(_)
             | ChannelError::InvalidCursor(_)
-            | ChannelError::TransportNotAllowed => Error::bad_request(err.to_string()),
-            ChannelError::MessageTooLarge { .. } => Error::bad_request(err.to_string()),
-            ChannelError::BackendUnavailable => Error::unavailable(err.to_string()),
+            | ChannelError::TransportNotAllowed
+            | ChannelError::MissingChannelKey
+            | ChannelError::ChannelLimitExceeded { .. }
+            | ChannelError::MessageTooLarge { .. } => Error::bad_request(err.to_string()),
+            ChannelError::BackendUnavailable | ChannelError::DebounceQueueFull => {
+                Error::unavailable(err.to_string())
+            }
+            ChannelError::SubscriptionUnavailable => Error::other(err),
             ChannelError::Serialization(_) | ChannelError::Transport(_) => Error::other(err),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-    struct TestNotice {
-        user_id: i64,
-        text: String,
-    }
-
-    #[tokio::test]
-    async fn user_stream_receives_matching_signal() -> Result<(), Box<dyn std::error::Error>> {
-        let channels = Channels::new(LocalChannelBackend::default());
-        let stream = channels
-            .user(UserKey::new("42")?)
-            .deliver_if::<TestNotice, _>(|notice| notice.user_id == 42);
-        let mut open = channels.open_stream(stream, None).await?;
-
-        channels
-            .publish_signal(&TestNotice {
-                user_id: 42,
-                text: "ready".to_string(),
-            })
-            .await?;
-
-        let event =
-            match tokio::time::timeout(std::time::Duration::from_millis(100), open.receiver.recv())
-                .await?
-            {
-                Some(event) => event,
-                None => return Err("channel closed before event arrived".into()),
-            };
-        assert_eq!(event.event_type, "TestNotice");
-        assert_eq!(event.data["text"], serde_json::json!("ready"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn user_stream_filters_rejected_signal() -> Result<(), Box<dyn std::error::Error>> {
-        let channels = Channels::new(LocalChannelBackend::default());
-        let stream = channels
-            .user(UserKey::new("42")?)
-            .deliver_if::<TestNotice, _>(|notice| notice.user_id == 42);
-        let mut open = channels.open_stream(stream, None).await?;
-
-        channels
-            .publish_signal(&TestNotice {
-                user_id: 7,
-                text: "hidden".to_string(),
-            })
-            .await?;
-
-        let event =
-            tokio::time::timeout(std::time::Duration::from_millis(25), open.receiver.recv()).await;
-        assert!(event.is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn repeated_user_policy_replaces_old_rules() -> Result<(), Box<dyn std::error::Error>> {
-        let channels = Channels::new(LocalChannelBackend::default());
-        let first = channels.user(UserKey::new("42")?).deliver::<TestNotice>();
-        let _first_open = channels.open_stream(first, None).await?;
-
-        let second = channels
-            .user(UserKey::new("42")?)
-            .deliver_if::<TestNotice, _>(|notice| notice.user_id == 7);
-        let mut second_open = channels.open_stream(second, None).await?;
-
-        channels
-            .publish_signal(&TestNotice {
-                user_id: 42,
-                text: "old".to_string(),
-            })
-            .await?;
-
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(25),
-            second_open.receiver.recv(),
-        )
-        .await;
-        assert!(event.is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn retained_queue_is_per_user() -> Result<(), Box<dyn std::error::Error>> {
-        let channels = Channels::new(LocalChannelBackend::default());
-        let stream = channels.user(UserKey::new("42")?).deliver::<TestNotice>();
-        let mut first = channels.open_stream(stream, None).await?;
-
-        channels
-            .publish_signal(&TestNotice {
-                user_id: 42,
-                text: "one".to_string(),
-            })
-            .await?;
-        let event = match tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            first.receiver.recv(),
-        )
-        .await?
-        {
-            Some(event) => event,
-            None => return Err("channel closed before event arrived".into()),
-        };
-
-        let stream = channels.user(UserKey::new("42")?).deliver::<TestNotice>();
-        let second = channels
-            .open_stream(stream, Some(ChannelCursor::new(event.id)))
-            .await?;
-
-        assert!(second.replay.is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn circular_retention_drops_old_messages() -> Result<(), Box<dyn std::error::Error>> {
-        let conf = ChannelConf {
-            retention_events: 2,
-            ..ChannelConf::default()
-        };
-        let channels = Channels::new(LocalChannelBackend::new(conf));
-        let stream = channels.user(UserKey::new("42")?).deliver::<TestNotice>();
-        let _open = channels.open_stream(stream, None).await?;
-
-        for text in ["one", "two", "three"] {
-            channels
-                .publish_signal(&TestNotice {
-                    user_id: 42,
-                    text: text.to_string(),
-                })
-                .await?;
-        }
-
-        let stream = channels.user(UserKey::new("42")?).deliver::<TestNotice>();
-        let open = channels.open_stream(stream, None).await?;
-        assert_eq!(open.replay.len(), 2);
-        assert_eq!(
-            open.replay.first().map(|event| &event.data["text"]),
-            Some(&serde_json::json!("two"))
-        );
-        Ok(())
     }
 }

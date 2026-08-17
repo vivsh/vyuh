@@ -61,6 +61,7 @@ async fn subscribe(
     let room = query.room.clone();
     let stream = channels
         .user(UserKey::new(query.room)?)
+        .channel(ChannelKey::new("chatroom")?)
         .deliver_if::<ChatMessage, _>(move |msg| msg.room == room);
     sub.attach(stream).allow(WS | SSE | POLL).await
 }

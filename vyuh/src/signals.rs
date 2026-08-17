@@ -399,6 +399,7 @@ mod tests {
         let stream = site
             .channels()
             .user(crate::channels::UserKey::new("42")?)
+            .channel(crate::channels::ChannelKey::new("test-events")?)
             .deliver_if::<TestChannelSignal, _>(|event| event.user_id == 42);
         let mut open = site.channels().open_stream(stream, None).await?;
 

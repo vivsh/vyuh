@@ -4,8 +4,10 @@ Vyuh channels deliver signal payloads to clients over WebSocket, SSE, or long
 polling. Use them when browser or machine clients need live updates from the
 same typed events that already drive in-process signal handlers.
 
-Channels are not durable work queues. Use [Tasks](tasks.md) for durable
-background work and [Signals](signals.md) for in-process handler fanout.
+Channels are best-effort refresh notifications, not durable work queues. Use
+[Tasks](tasks.md) for durable background work and [Signals](signals.md) for
+in-process handler fanout. Prefer event payloads with an entity ID and version
+hint; clients should refetch authoritative state after receiving an event.
 
 ## Mental Model
 
@@ -48,9 +50,10 @@ async fn subscribe(
     channels: Channels,
 ) -> Result<ChannelResponse, Error> {
     let stream = channels
-        .user(UserKey::new(user.key.clone())?)
+        .user(UserKey::new(user.subject())?)
+        .channel(ChannelKey::new("events")?)
         .deliver::<TaskUpdated>()
-        .deliver_if::<NotificationCreated>(move |msg| msg.user_key == user.key);
+        .deliver_if::<NotificationCreated>(move |msg| msg.user_key == user.subject());
 
     sub.attach(stream).allow(WS | SSE | POLL).await
 }
@@ -64,6 +67,57 @@ If `allow(...)` is omitted, all transports are allowed:
 ```rust
 sub.attach(stream).await
 ```
+
+## Beacon Endpoints
+
+Use `Beacon` when a live endpoint is entirely a policy over typed signals. A
+Beacon is an authenticated `GET` route: it inherits its bundle audience, tags,
+prefix, and slash policy, then negotiates WebSocket, SSE, or polling exactly as
+`Subscriber` does. Signals remain the only publish path.
+
+```rust
+use std::time::Duration;
+use schemars::JsonSchema;
+use vyuh::auth::Audience;
+use vyuh::prelude::*;
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct NoteChanged {
+    owner: String,
+    note_id: i64,
+}
+
+#[bundles::beacon(path = "/live", modes = [ws, sse, poll])]
+fn live() -> Beacon {
+    Beacon::builder()
+        .rule::<NoteChanged>(["notes:read"])
+        .debounce::<NoteChanged>(Duration::from_millis(150))
+        .build()
+}
+
+let bundle = bundles::bundle! { live }
+    .with_conf(bundles::conf().audience(Audience::new("notes")));
+```
+
+`rule::<T>(scopes)` requires every listed scope. `rule_with::<T>(scopes,
+predicate)` adds a typed `Fn(&AuthUser, &T) -> bool` check; it runs before
+serialization. A user without an eligible rule receives `403`.
+
+`debounce::<T>(duration)` is trailing-edge and keeps the latest accepted `T`
+after each quiet window. Its pending state and local replay queue are shared by
+sessions for the same user and Beacon endpoint, never with another endpoint or
+with direct `Channels::user(...)` subscriptions.
+
+`#[bundles::beacon]` is sugar over:
+
+```rust
+bundles::beacon(
+    live(),
+    BeaconConf::new("live", "/live").modes(WS | SSE | POLL),
+)
+```
+
+Use the direct constructor for generated or conditional Beacon registration.
 
 ## Publishing
 
@@ -79,13 +133,20 @@ subscribers whose user stream accepts that payload type.
 
 ## Delivery Rules
 
-Delivery rules are user-scoped:
+Direct `Channels::user(...)` delivery rules are scoped by `(UserKey, ChannelKey)`:
 
-- `deliver::<T>()` sends every emitted `T` to that user stream.
+- `ChannelKey` is an application-owned stable logical name, not a connection or cursor id.
+- `deliver::<T>()` sends every emitted `T` to that logical channel.
 - `deliver_if::<T>(predicate)` sends only payloads accepted by the predicate.
-- Multiple client connections for the same user share delivery rules.
-- Re-registering a `UserKey` replaces that user's older delivery rules.
+- Multiple connections for the same user and key share delivery rules and replay.
+- Re-registering one `(UserKey, ChannelKey)` replaces only that key's older rules.
+- Omitting `.channel(...)` fails when the stream is attached; there is no implicit default channel.
 - Predicates run on the server before the message is sent or retained.
+
+Beacon derives this logical key from its finalized route name, path, and GET
+method. Two Beacon routes therefore neither replace each other’s policy nor
+share retained replay events. Physical sessions are internal and close
+automatically when their response or receiver is dropped.
 
 Authorization belongs in the route before attaching the stream. Do not rely on
 client-side filtering for private data.
@@ -249,8 +310,9 @@ function handleTaskUpdated(task) {
 Channels provide live delivery with bounded replay. `ChannelCursor` is opaque;
 clients should pass it back unchanged as `after` or `cursor`.
 
-The local backend keeps recent events in memory. It is fast and single-process.
-It is not durable and does not deliver across multiple server processes.
+The local subscription runtime keeps recent accepted events in memory. This is
+a short, process-local reconnect convenience, not a delivery guarantee. It is
+not durable and does not deliver across multiple server processes.
 
 Subscribers have bounded queues. Slow clients are disconnected, so signal
 emission does not wait indefinitely on client consumption.
@@ -264,34 +326,39 @@ use vyuh::channels::ChannelConf;
 let conf = SiteConf::default().channels(ChannelConf {
     retention_events: 20_000,
     subscriber_queue: 512,
+    max_channels_per_user: 128,
     ..ChannelConf::default()
 });
 ```
 
 Important limits include `retention_events`, `max_message_bytes`,
-`replay_limit`, `subscriber_queue`, and `long_poll_timeout_ms`.
+`replay_limit`, `subscriber_queue`, `max_channels_per_user`, and
+`long_poll_timeout_ms`.
 
-## Custom Backends
+## Future Shared Fanout
 
-`LocalChannelBackend` is the default implementation. The public backend trait is
-still shaped around bounded replay, opaque cursors, non-blocking publish, and
-explicit validation so Redis-like backends can later provide cross-process
-delivery and replay storage.
+Vyuh has no shared channel backend or configuration in this release. Its
+internal fanout boundary is intentionally ephemeral: a future Redis adapter
+will use Pub/Sub, not Streams. An incoming event will be decoded and evaluated
+against subscriptions currently attached to that node, then use that node's
+ordinary debounce, retention, and transport delivery.
 
-Predicate closures are process-local. External stores should retain accepted
-messages and cursors, not predicate code.
+That mode will not provide cross-node replay, global debounce, exactly-once
+delivery, or durable notification. A client connected to more than one node can
+receive more than one refresh hint. Shared mode will require an explicit
+application namespace at site construction.
 
 ## Failure Modes
 
 - invalid cursor or user key: `400`
 - disallowed transport: `400`
 - oversized messages: `413`
-- unavailable backend: `503`
+- unavailable local scheduler: `503`
 - serialization or transport failure: application error
 
 ## Current Limitations
 
-- `LocalChannelBackend` is process-local and in-memory.
-- Channels provide bounded replay, not durable delivery.
+- Local replay is process-local and bounded; it is never cross-node replay.
+- Channels provide best-effort refresh hints, not durable delivery.
 - Authorization is application-owned and belongs in route handlers.
 - Predicate rules are registered by active subscriptions, not persistent config.
