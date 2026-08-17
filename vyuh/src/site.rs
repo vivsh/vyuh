@@ -54,6 +54,7 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
         path,
         headers,
     };
+    log_server_error(&report, &ctx);
     let mut rendered = site.inner.conf.errors.render(ctx, report).await;
     for challenge in response
         .headers()
@@ -64,6 +65,21 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
             .append(axum::http::header::WWW_AUTHENTICATE, challenge.clone());
     }
     rendered
+}
+
+/// Records the safe request and error classification for an attached server error.
+fn log_server_error(report: &crate::ErrorReport, context: &crate::ErrorContext) {
+    if !report.status.is_server_error() {
+        return;
+    }
+    tracing::error!(
+        status = report.status.as_u16(),
+        source = ?report.source,
+        code = %report.code,
+        method = %context.method,
+        path = %context.path,
+        "request failed with server error"
+    );
 }
 
 /// Renders Vyuh's 405 response after Axum has matched a route path but no method handler.
@@ -1293,30 +1309,78 @@ impl axum::extract::FromRequestParts<Site> for SiteConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::Site;
+    use super::{Site, log_server_error};
     use crate::{
-        Error, SiteError, bundles,
+        Error, ErrorReport, ErrorSourceKind, SiteError, bundles,
         callables::Data,
         commands::CommandConf,
         emitters::PeriodicConf,
+        errors::ErrorDebug,
         observability::ObservabilityConf,
         routes::{Json, Methods, RouteConf},
         signals::SignalConf,
         tasks::{TaskDefinition, TaskLane, TaskLaneConf, TaskLanePolicy},
         testing::TestSite,
     };
-    use axum::http::{Method, StatusCode};
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
     use std::{
+        collections::BTreeMap,
+        fmt,
         path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
+    use tracing::{
+        Event, Subscriber,
+        field::{Field, Visit},
+    };
+    use tracing_subscriber::{Layer, layer::Context, layer::SubscriberExt};
 
     static RUNTIME_SIGNALS: AtomicUsize = AtomicUsize::new(0);
     static RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(0);
     const EMAIL_TASK_LANE: TaskLane = TaskLane::new("email");
+
+    #[derive(Clone, Default)]
+    struct ErrorEventCapture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+    impl<S> Layer<S> for ErrorEventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::ERROR {
+                return;
+            }
+            let mut fields = FieldCapture::default();
+            event.record(&mut fields);
+            if let Ok(mut events) = self.0.lock() {
+                events.push(fields.0);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldCapture(BTreeMap<String, String>);
+
+    impl Visit for FieldCapture {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
 
     #[derive(Clone, Deserialize, JsonSchema, Serialize)]
     struct RuntimeSignal;
@@ -1329,6 +1393,97 @@ mod tests {
 
     #[derive(Clone, Deserialize, JsonSchema, Serialize)]
     struct FailingArgs {}
+
+    /// Verifies attached 5xx reports emit one structured event without diagnostic or header data.
+    #[test]
+    fn server_error_logging_is_structured_and_redacted() -> Result<(), String> {
+        let capture = ErrorEventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let mut report = ErrorReport::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorSourceKind::Application,
+            "login_failed",
+            "secret response detail",
+        );
+        report.debug = Some(ErrorDebug {
+            details: Some("secret diagnostic".into()),
+            context: vec!["secret context".into()],
+            causes: vec!["secret cause".into()],
+            backtrace: Some("secret backtrace".into()),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer secret-token"),
+        );
+        let context = crate::ErrorContext {
+            method: Method::POST,
+            uri: Uri::from_static("/login?token=secret-query"),
+            path: "/login".into(),
+            headers,
+        };
+
+        tracing::subscriber::with_default(subscriber, || log_server_error(&report, &context));
+
+        let events = capture.0.lock().map_err(|error| error.to_string())?;
+        assert_eq!(events.len(), 1);
+        let event = events
+            .first()
+            .ok_or_else(|| "missing error event".to_string())?;
+        assert_eq!(event.get("status"), Some(&"500".to_string()));
+        assert!(
+            event
+                .get("code")
+                .is_some_and(|value| value.contains("login_failed"))
+        );
+        assert!(
+            event
+                .get("method")
+                .is_some_and(|value| value.contains("POST"))
+        );
+        assert_eq!(event.get("path"), Some(&"/login".to_string()));
+        let fields = format!("{event:?}");
+        assert!(!fields.contains("secret"));
+        assert!(!event.contains_key("detail"));
+        assert!(!event.contains_key("headers"));
+        assert!(!event.contains_key("debug"));
+        Ok(())
+    }
+
+    /// Verifies the final error middleware logs an attached 5xx report exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn error_middleware_logs_attached_server_error() -> Result<(), String> {
+        let capture = ErrorEventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let site = Site::build(
+            crate::SiteConf::default().log_init(false),
+            response_bundle(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let response = TestSite::new(site)
+            .get("/internal-error")
+            .header("accept", "application/json")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        drop(guard);
+
+        let events = capture.0.lock().map_err(|error| error.to_string())?;
+        assert_eq!(events.len(), 1);
+        let event = events
+            .first()
+            .ok_or_else(|| "missing error event".to_string())?;
+        assert_eq!(event.get("status"), Some(&"500".to_string()));
+        assert!(
+            event
+                .get("code")
+                .is_some_and(|value| value.contains("internal_error"))
+        );
+        assert_eq!(event.get("path"), Some(&"/internal-error".to_string()));
+        Ok(())
+    }
 
     async fn emit_runtime_signal() -> Data<RuntimeSignal> {
         Data::new(RuntimeSignal)
@@ -1423,6 +1578,10 @@ mod tests {
         StatusCode::NOT_FOUND
     }
 
+    async fn internal_error_probe() -> Result<(), Error> {
+        Err(Error::new(crate::ErrorKind::Other))
+    }
+
     fn response_bundle() -> crate::bundles::Bundle {
         bundles::bundle([
             bundles::route(
@@ -1440,6 +1599,15 @@ mod tests {
                     name: "raw_not_found".into(),
                     methods: Methods::GET,
                     path: "/raw-not-found".into(),
+                    slash: None,
+                },
+            ),
+            bundles::route(
+                internal_error_probe,
+                RouteConf {
+                    name: "internal_error_probe".into(),
+                    methods: Methods::GET,
+                    path: "/internal-error".into(),
                     slash: None,
                 },
             ),

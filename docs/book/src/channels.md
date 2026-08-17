@@ -148,7 +148,9 @@ method. Two Beacon routes therefore neither replace each other’s policy nor
 share retained replay events. Physical sessions are internal and close
 automatically when their response or receiver is dropped.
 
-Authorization belongs in the route before attaching the stream. Do not rely on
+Direct-channel authorization belongs in the route before attaching the stream.
+Beacon authenticates its route through the bundle audience and applies each
+rule's declared scopes and optional predicate before delivery. Do not rely on
 client-side filtering for private data.
 
 ## Transport Negotiation
@@ -350,9 +352,10 @@ application namespace at site construction.
 
 ## Failure Modes
 
-- invalid cursor or user key: `400`
+- invalid cursor, user key, or channel key: `400`
+- missing logical channel key or exceeding the per-user channel limit: `400`
 - disallowed transport: `400`
-- oversized messages: `413`
+- oversized messages: `400`
 - unavailable local scheduler: `503`
 - serialization or transport failure: application error
 
@@ -360,5 +363,8 @@ application namespace at site construction.
 
 - Local replay is process-local and bounded; it is never cross-node replay.
 - Channels provide best-effort refresh hints, not durable delivery.
-- Authorization is application-owned and belongs in route handlers.
-- Predicate rules are registered by active subscriptions, not persistent config.
+- Direct-channel authorization is application-owned and belongs in route
+  handlers; Beacon applies its declared scopes and predicates after route
+  authentication.
+- Direct-channel predicate rules are registered by active subscriptions, not
+  persistent configuration.
