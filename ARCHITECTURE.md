@@ -148,8 +148,11 @@ compact while feeding metadata into the runtime:
   generate bundle parts.
 - `embed_asset!` delegates directory discovery and force-mode expansion to Rust
   Silos' shared macro implementation while emitting Vyuh's asset facade types.
-- `Record`, `Filterable`, `Validate`, and schema macros
-  generate database, validation, schema, and auth integration code.
+- `Record`, `ManagedRecord`, `Model`, `Filterable`, `SortKey`, `SqlEnum`, and
+  `embed_migrations!` delegate Mool macro expansion through `vyuh::db`, keeping
+  Vyuh applications on one database runtime identity without a direct Mool
+  dependency. Validation and schema macros generate their corresponding
+  integration code.
 - Macro implementation should keep parsing, validation, diagnostics, and code
   generation separated.
 

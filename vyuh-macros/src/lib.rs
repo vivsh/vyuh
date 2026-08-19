@@ -222,6 +222,15 @@ pub fn derive_record(input: TokenStream) -> TokenStream {
     mool_macros_impl::record::derive_record(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
+/// Derives physical-column mapping for migration-managed record values.
+///
+/// Generated implementations resolve through Vyuh's database facade, so an
+/// application does not need a direct Mool dependency.
+#[proc_macro_derive(ManagedRecord, attributes(column, table, db))]
+pub fn derive_managed_record(input: TokenStream) -> TokenStream {
+    mool_macros_impl::record::derive_managed_record(input.into(), quote::quote!(::vyuh::db)).into()
+}
+
 #[proc_macro_derive(Model, attributes(field, column, table, db))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     mool_macros_impl::model::derive_model(input.into(), quote::quote!(::vyuh::db)).into()
@@ -235,6 +244,15 @@ pub fn derive_filterable(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(SortKey, attributes(sort, db))]
 pub fn derive_sort_key(input: TokenStream) -> TokenStream {
     mool_macros_impl::sort_key::derive_sort_key(input.into(), quote::quote!(::vyuh::db)).into()
+}
+
+/// Derives a SQL-backed enum mapping through Vyuh's database facade.
+///
+/// Generated implementations resolve through `vyuh::db`, so an application
+/// does not need a direct Mool dependency.
+#[proc_macro_derive(SqlEnum, attributes(sql_enum, db))]
+pub fn derive_sql_enum(input: TokenStream) -> TokenStream {
+    mool_macros_impl::sql_enum::derive_sql_enum(input.into(), quote::quote!(::vyuh::db)).into()
 }
 
 /// Registers a cron emitter.

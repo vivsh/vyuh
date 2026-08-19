@@ -9,9 +9,11 @@ toolkit lives in the standalone Mool crate, but Vyuh applications should keep
 using the framework facade unless they are intentionally depending on Mool
 outside a Vyuh app.
 
-`db::Record`, `db::Model`, and `db::Filterable` are Vyuh facade derives. They
-generate implementations against `vyuh::db`, so ordinary Vyuh applications do
-not need a direct Mool dependency.
+`db::Record`, `db::ManagedRecord`, `db::Model`, `db::Filterable`,
+`db::SortKey`, `db::SqlEnum`, and `db::embed_migrations!` are Vyuh facade
+macros. They generate implementations against `vyuh::db`, so ordinary Vyuh
+applications do not need a direct Mool dependency. Do not combine these with
+direct Mool macros in one application: they must resolve to one runtime facade.
 
 Vyuh has no default database backend feature. In this backendless mode it has
 no live SQL dialect or pool and tasks use `MemoryTaskStore`. This is useful for

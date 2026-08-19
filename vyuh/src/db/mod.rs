@@ -11,12 +11,16 @@ pub use db_core::migrations::*;
 pub use db_core::*;
 /// Derives Mool's [`Filterable`] trait through Vyuh's database facade.
 pub use vyuh_macros::Filterable;
+/// Derives Mool's [`ManagedRecord`] trait through Vyuh's database facade.
+pub use vyuh_macros::ManagedRecord;
 /// Derives Mool's [`Model`] trait through Vyuh's database facade.
 pub use vyuh_macros::Model;
 /// Derives Mool's [`Record`] trait through Vyuh's database facade.
 pub use vyuh_macros::Record;
 /// Derives Mool's request-sort vocabulary through Vyuh's database facade.
 pub use vyuh_macros::SortKey;
+/// Derives Mool's [`SqlEnum`] trait through Vyuh's database facade.
+pub use vyuh_macros::SqlEnum;
 /// Embeds crate-owned migrations through Vyuh's database facade.
 #[cfg(feature = "migrations")]
 pub use vyuh_macros::embed_migrations;

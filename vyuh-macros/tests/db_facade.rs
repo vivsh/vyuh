@@ -14,10 +14,17 @@ struct Note {
     title: String,
 }
 
-#[derive(Debug, Clone, db::Record)]
+#[derive(Debug, Clone, db::Record, db::ManagedRecord)]
 struct NoteRow {
     id: i64,
     title: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, db::SqlEnum)]
+#[sql_enum(rename_all = "snake_case")]
+enum NoteStatus {
+    Draft,
+    Published,
 }
 
 #[derive(Debug, Clone, db::Filterable)]
@@ -37,13 +44,15 @@ struct CreateNote {
     title: String,
 }
 
-/// Verifies Vyuh's database derives and migration macro require only the Vyuh facade.
+/// Verifies every supported Mool macro resolves through Vyuh without a direct Mool dependency.
 #[test]
 fn facade_derives_compile_without_mool() {
     assert_model::<Note>();
     assert_record::<NoteRow>();
+    assert_managed_record::<NoteRow>();
     assert_filterable::<NoteFilter>();
     assert_sort_key::<NoteSort>();
+    assert_sql_enum::<NoteStatus>();
     assert_schema::<CreateNote>();
     let root = db::root_migration(&ROOT_MIGRATIONS);
     let child = db::crate_migration("notes", &CRATE_MIGRATIONS);
@@ -62,8 +71,12 @@ fn assert_model<T: db::Model>() {}
 
 fn assert_record<T: db::Record>() {}
 
+fn assert_managed_record<T: db::ManagedRecord>() {}
+
 fn assert_filterable<T: db::Filterable>() {}
 
 fn assert_sort_key<T: db::SortKey>() {}
+
+fn assert_sql_enum<T: db::SqlEnum>() {}
 
 fn assert_schema<T: JsonSchema>() {}
