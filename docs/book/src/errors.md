@@ -70,6 +70,12 @@ configuration/builds. That object is for development diagnostics such as
 context, causes, details, or backtrace text. Production error responses should
 leave it absent.
 
+For an attached `5xx` report, Vyuh also emits one structured server-error log
+event. Debug builds include `debug_details`, `debug_context`, `debug_causes`,
+and `debug_backtrace`, so they are visible in the console log inspector.
+Request headers and query parameters are never added to that event. Release
+builds omit every `debug_*` field.
+
 ## Application Errors
 
 Use `vyuh::Error` for ordinary handler failures:

@@ -783,6 +783,7 @@ impl From<Error> for ErrorReport {
     }
 }
 
+/// Captures developer diagnostics for debug HTTP responses and console error events.
 fn debug_error_payload(err: &Error) -> Option<ErrorDebug> {
     if !cfg!(debug_assertions) {
         return None;
@@ -798,15 +799,11 @@ fn debug_error_payload(err: &Error) -> Option<ErrorDebug> {
         collect_error_source_chain(source, &mut causes);
     }
 
-    if context.is_empty() && causes.is_empty() {
-        return None;
-    }
-
     Some(ErrorDebug {
         details: None,
         context,
         causes,
-        backtrace: None,
+        backtrace: Some(std::backtrace::Backtrace::force_capture().to_string()),
     })
 }
 
@@ -955,7 +952,7 @@ impl From<CallError> for Error {
 mod tests {
     use axum::http::StatusCode;
 
-    use super::{ErrorReport, ErrorSourceKind};
+    use super::{Error, ErrorReport, ErrorSourceKind};
 
     /// Verifies framework fallback reports use stable safe transport metadata.
     #[test]
@@ -979,6 +976,23 @@ mod tests {
             assert_eq!(report.source, ErrorSourceKind::Framework);
             assert_eq!(report.code, code);
             assert!(report.errors.is_none());
+        }
+    }
+
+    /// Verifies debug reports retain a captured backtrace while release reports omit diagnostics.
+    #[test]
+    fn error_reports_capture_debug_backtraces() {
+        let report = ErrorReport::from(Error::other(std::io::Error::other("database unavailable")));
+        if cfg!(debug_assertions) {
+            assert!(
+                report
+                    .debug
+                    .as_ref()
+                    .and_then(|debug| debug.backtrace.as_deref())
+                    .is_some_and(|backtrace| !backtrace.is_empty())
+            );
+        } else {
+            assert!(report.debug.is_none());
         }
     }
 }

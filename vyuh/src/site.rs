@@ -67,11 +67,40 @@ async fn error_report_middleware(State(site): State<Site>, req: Request, next: N
     rendered
 }
 
-/// Records the safe request and error classification for an attached server error.
+/// Records a structured attached server error without request secrets.
 fn log_server_error(report: &crate::ErrorReport, context: &crate::ErrorContext) {
     if !report.status.is_server_error() {
         return;
     }
+    if cfg!(debug_assertions) {
+        log_debug_server_error(report, context);
+        return;
+    }
+    log_release_server_error(report, context);
+}
+
+/// Records debug-only diagnostics for a server error in the privileged console log stream.
+fn log_debug_server_error(report: &crate::ErrorReport, context: &crate::ErrorContext) {
+    let Some(diagnostics) = report.debug.as_ref() else {
+        log_release_server_error(report, context);
+        return;
+    };
+    tracing::error!(
+        status = report.status.as_u16(),
+        source = ?report.source,
+        code = %report.code,
+        method = %context.method,
+        path = %context.path,
+        debug_details = %diagnostics.details.as_deref().unwrap_or_default(),
+        debug_context = ?diagnostics.context.as_slice(),
+        debug_causes = ?diagnostics.causes.as_slice(),
+        debug_backtrace = %diagnostics.backtrace.as_deref().unwrap_or_default(),
+        "request failed with server error"
+    );
+}
+
+/// Records the release-safe classification for a server error.
+fn log_release_server_error(report: &crate::ErrorReport, context: &crate::ErrorContext) {
     tracing::error!(
         status = report.status.as_u16(),
         source = ?report.source,
@@ -1394,11 +1423,8 @@ mod tests {
     #[derive(Clone, Deserialize, JsonSchema, Serialize)]
     struct FailingArgs {}
 
-    /// Verifies attached 5xx reports emit one structured event without diagnostic or header data.
-    #[test]
-    fn server_error_logging_is_structured_and_redacted() -> Result<(), String> {
-        let capture = ErrorEventCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
+    /// Builds an error report containing every debug diagnostic category.
+    fn debug_report() -> ErrorReport {
         let mut report = ErrorReport::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorSourceKind::Application,
@@ -1411,17 +1437,31 @@ mod tests {
             causes: vec!["secret cause".into()],
             backtrace: Some("secret backtrace".into()),
         });
+        report
+    }
+
+    /// Builds a request context containing values that must never reach error logs.
+    fn secret_context() -> crate::ErrorContext {
         let mut headers = HeaderMap::new();
         headers.insert(
             "authorization",
             axum::http::HeaderValue::from_static("Bearer secret-token"),
         );
-        let context = crate::ErrorContext {
+        crate::ErrorContext {
             method: Method::POST,
             uri: Uri::from_static("/login?token=secret-query"),
             path: "/login".into(),
             headers,
-        };
+        }
+    }
+
+    /// Verifies attached 5xx reports expose complete diagnostics only in debug builds.
+    #[test]
+    fn server_error_logging_is_structured_and_redacted() -> Result<(), String> {
+        let capture = ErrorEventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let report = debug_report();
+        let context = secret_context();
 
         tracing::subscriber::with_default(subscriber, || log_server_error(&report, &context));
 
@@ -1443,7 +1483,20 @@ mod tests {
         );
         assert_eq!(event.get("path"), Some(&"/login".to_string()));
         let fields = format!("{event:?}");
-        assert!(!fields.contains("secret"));
+        assert!(!fields.contains("secret-token"));
+        assert!(!fields.contains("secret-query"));
+        if cfg!(debug_assertions) {
+            for (key, value) in [
+                ("debug_details", "secret diagnostic"),
+                ("debug_context", "secret context"),
+                ("debug_causes", "secret cause"),
+                ("debug_backtrace", "secret backtrace"),
+            ] {
+                assert!(event.get(key).is_some_and(|field| field.contains(value)));
+            }
+        } else {
+            assert!(!event.keys().any(|key| key.starts_with("debug_")));
+        }
         assert!(!event.contains_key("detail"));
         assert!(!event.contains_key("headers"));
         assert!(!event.contains_key("debug"));

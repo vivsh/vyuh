@@ -26,9 +26,10 @@ const MAX_FILES: usize = 64;
 const MAX_LINE_BYTES: usize = 256 * 1024;
 const MAX_CURSOR_BYTES: usize = 16 * 1024;
 const NONCE_BYTES: usize = 12;
-const FIELD_LIMIT: usize = 8;
+const FIELD_LIMIT: usize = 12;
 const SPAN_LIMIT: usize = 4;
 const VALUE_LIMIT: usize = 128;
+const DEBUG_VALUE_LIMIT: usize = 16 * 1024;
 const KEY_CONTEXT: &[u8] = b"console-log-cursor-v1";
 
 /// One safe console representation of a structured tracing event.
@@ -752,8 +753,8 @@ fn normalize_entry(
 fn fields_out(value: &serde_json::Map<String, serde_json::Value>) -> BTreeMap<String, String> {
     value
         .iter()
+        .filter_map(|(key, value)| scalar(key, value).map(|value| (key.clone(), value)))
         .take(FIELD_LIMIT)
-        .filter_map(|(key, value)| scalar(value).map(|value| (key.clone(), value)))
         .collect()
 }
 
@@ -776,14 +777,22 @@ fn span_out(value: &serde_json::Value) -> Option<LogSpan> {
     Some(LogSpan { name, fields })
 }
 
-fn scalar(value: &serde_json::Value) -> Option<String> {
+fn scalar(key: &str, value: &serde_json::Value) -> Option<String> {
     let value = match value {
         serde_json::Value::String(value) => value.clone(),
         serde_json::Value::Number(value) => value.to_string(),
         serde_json::Value::Bool(value) => value.to_string(),
         _ => return None,
     };
-    Some(truncate(value, VALUE_LIMIT))
+    Some(truncate(value, value_limit(key)))
+}
+
+/// Selects a bounded console field length while preserving debug diagnostics for inspection.
+fn value_limit(key: &str) -> usize {
+    if key.starts_with("debug_") {
+        return DEBUG_VALUE_LIMIT;
+    }
+    VALUE_LIMIT
 }
 
 fn truncate(mut value: String, max: usize) -> String {
@@ -1050,6 +1059,44 @@ mod tests {
             Some("one")
         );
         remove_directory(&directory);
+        Ok(())
+    }
+
+    /// Preserves all debug diagnostics and their larger bounded values for console inspection.
+    #[test]
+    fn debug_fields_remain_visible() -> Result<(), String> {
+        let backtrace = "frame\n".repeat(512);
+        let value = serde_json::json!({
+            "code": "internal_error",
+            "message": "request failed with server error",
+            "method": "POST",
+            "path": "/login",
+            "source": "application",
+            "status": 500,
+            "debug_details": "database login failed",
+            "debug_context": "[\"login\"]",
+            "debug_causes": "[\"connection refused\"]",
+            "debug_backtrace": backtrace,
+        });
+        let values = value
+            .as_object()
+            .ok_or_else(|| "debug fields must be an object".to_string())?;
+        let fields = fields_out(values);
+
+        assert_eq!(fields.len(), 10);
+        assert_eq!(
+            fields.get("debug_details"),
+            Some(&"database login failed".to_string())
+        );
+        assert_eq!(
+            fields.get("debug_context"),
+            Some(&"[\"login\"]".to_string())
+        );
+        assert_eq!(
+            fields.get("debug_causes"),
+            Some(&"[\"connection refused\"]".to_string())
+        );
+        assert_eq!(fields.get("debug_backtrace"), Some(&backtrace));
         Ok(())
     }
 
