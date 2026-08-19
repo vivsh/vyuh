@@ -8,6 +8,7 @@ use crate::bundlepart::{self, FnSpec};
 
 #[derive(Debug, Default, FromMeta)]
 struct McpToolMeta {
+    ui_resource_uri: Option<String>,
     read_only: Option<bool>,
     destructive: Option<bool>,
     idempotent: Option<bool>,
@@ -20,6 +21,7 @@ pub(crate) fn parse_mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStrea
 
 fn build_conf(conf: &McpToolMeta, _spec: &FnSpec) -> Result<proc_macro2::TokenStream, syn::Error> {
     let annotations = annotation_calls(
+        conf.ui_resource_uri.as_deref(),
         conf.read_only,
         conf.destructive,
         conf.idempotent,
@@ -31,16 +33,18 @@ fn build_conf(conf: &McpToolMeta, _spec: &FnSpec) -> Result<proc_macro2::TokenSt
 }
 
 fn annotation_calls(
+    ui_resource_uri: Option<&str>,
     read_only: Option<bool>,
     destructive: Option<bool>,
     idempotent: Option<bool>,
     open_world: Option<bool>,
 ) -> proc_macro2::TokenStream {
+    let ui_resource_uri = ui_resource_uri.map(|value| quote! { .ui_resource_uri(#value) });
     let read_only = read_only.map(|value| quote! { .read_only(#value) });
     let destructive = destructive.map(|value| quote! { .destructive(#value) });
     let idempotent = idempotent.map(|value| quote! { .idempotent(#value) });
     let open_world = open_world.map(|value| quote! { .open_world(#value) });
-    quote! { #read_only #destructive #idempotent #open_world }
+    quote! { #ui_resource_uri #read_only #destructive #idempotent #open_world }
 }
 
 #[cfg(test)]
@@ -57,9 +61,10 @@ mod tests {
             idempotent = true,
             open_world = false
         })
-        .unwrap_or_default();
-        let meta = McpToolMeta::from_list(&items).unwrap_or_default();
+        .expect("valid test metadata");
+        let meta = McpToolMeta::from_list(&items).expect("supported test metadata");
         let output = annotation_calls(
+            meta.ui_resource_uri.as_deref(),
             meta.read_only,
             meta.destructive,
             meta.idempotent,
@@ -72,11 +77,24 @@ mod tests {
         assert!(output.contains("open_world"));
     }
 
+    /// Verifies UI resource annotations use the typed tool configuration builder.
+    #[test]
+    fn emits_ui_resource_uri() {
+        let items = darling::ast::NestedMeta::parse_meta_list(quote! {
+            ui_resource_uri = "ui://widget/member-card.html"
+        })
+        .expect("valid test metadata");
+        let meta = McpToolMeta::from_list(&items).expect("supported test metadata");
+        let output =
+            annotation_calls(meta.ui_resource_uri.as_deref(), None, None, None, None).to_string();
+        assert!(output.contains("ui_resource_uri"));
+    }
+
     /// Verifies unknown tool annotations fail macro metadata parsing.
     #[test]
     fn rejects_unknown_annotation() {
         let items = darling::ast::NestedMeta::parse_meta_list(quote! { role = "admin" })
-            .unwrap_or_default();
+            .expect("valid test metadata");
         assert!(McpToolMeta::from_list(&items).is_err());
     }
 }

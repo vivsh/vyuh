@@ -401,7 +401,12 @@ impl SiteBuilder {
         #[cfg(feature = "mcp")]
         bundle
             .mcp_engine
-            .finalize(&bundle.ops, &bundle.topology, &mut bundle.mcp_registry)
+            .finalize(
+                &bundle.ops,
+                &bundle.topology,
+                &mut bundle.mcp_registry,
+                &mut bundle.mcp_resources,
+            )
             .map_err(|error| crate::bundles::BundleError::Mcp(error.to_string()))?;
 
         bundle.normalize_authorization()?;
@@ -482,6 +487,7 @@ impl SiteBuilder {
             &mut router,
             &bundle.ops,
             &bundle.mcp_registry,
+            &bundle.mcp_resources,
             &authenticator,
         )?;
 

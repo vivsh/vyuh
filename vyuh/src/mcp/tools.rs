@@ -10,7 +10,10 @@ use crate::{
     callables::{ArgPart, Operation, OperationKind, ReturnPart, TypeSchema},
 };
 
-use super::{McpError, McpToolConf, McpToolRegistry, McpToolTarget};
+use super::{
+    McpError, McpToolConf, McpToolRegistry, McpToolTarget,
+    resources::{ResourceDefinition, validate_ui_uri},
+};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,12 +74,25 @@ pub(crate) struct ToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     output_schema: Option<Value>,
     annotations: ToolAnnotations,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    metadata: Option<ToolMetadata>,
     #[serde(skip)]
     pub(crate) authorization: ToolAuthorization,
     #[serde(skip)]
     pub(crate) target: McpToolTarget,
     #[serde(skip)]
     pub(crate) validator: jsonschema::Validator,
+}
+
+#[derive(Clone, Serialize)]
+struct ToolMetadata {
+    ui: ToolUiMetadata,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolUiMetadata {
+    resource_uri: String,
 }
 
 impl std::fmt::Debug for ToolDefinition {
@@ -94,6 +110,7 @@ pub(crate) fn definitions(
     operation_ids: &[OperationId],
     operations: &BTreeMap<OperationId, Operation>,
     registry: &McpToolRegistry,
+    resources: &BTreeMap<String, ResourceDefinition>,
 ) -> Result<BTreeMap<String, ToolDefinition>, McpError> {
     let mut output = BTreeMap::new();
     for id in operation_ids {
@@ -104,7 +121,7 @@ pub(crate) fn definitions(
             .target(*id)
             .cloned()
             .ok_or_else(|| McpError::Config(format!("MCP target {id} is missing")))?;
-        let tool = definition(operation, target)?;
+        let tool = definition(operation, target, resources)?;
         if output.insert(tool.name.clone(), tool).is_some() {
             return Err(McpError::InvalidTool(operation.name.clone()));
         }
@@ -117,7 +134,11 @@ pub(crate) fn definitions(
     Ok(output)
 }
 
-fn definition(operation: &Operation, target: McpToolTarget) -> Result<ToolDefinition, McpError> {
+fn definition(
+    operation: &Operation,
+    target: McpToolTarget,
+    resources: &BTreeMap<String, ResourceDefinition>,
+) -> Result<ToolDefinition, McpError> {
     validate_name(&operation.name)?;
     validate_target(operation)?;
     let (input_schema, authorization) = input_contract(operation)?;
@@ -130,10 +151,40 @@ fn definition(operation: &Operation, target: McpToolTarget) -> Result<ToolDefini
         input_schema,
         output_schema,
         annotations: annotations(&target.conf),
+        metadata: tool_metadata(operation, &target.conf, resources)?,
         authorization,
         target,
         validator,
     })
+}
+
+/// Resolves one optional MCP Apps UI resource attachment for a tool definition.
+fn tool_metadata(
+    operation: &Operation,
+    conf: &McpToolConf,
+    resources: &BTreeMap<String, ResourceDefinition>,
+) -> Result<Option<ToolMetadata>, McpError> {
+    let Some(uri) = conf.ui_resource_uri.as_deref() else {
+        return Ok(None);
+    };
+    validate_ui_uri(uri)?;
+    let resource = resources.get(uri).ok_or_else(|| {
+        McpError::Config(format!(
+            "MCP tool '{}' references an unknown UI resource '{uri}'",
+            operation.name
+        ))
+    })?;
+    if !resource.is_mcp_app_html() {
+        return Err(McpError::Config(format!(
+            "MCP tool '{}' UI resource '{uri}' must use text/html;profile=mcp-app",
+            operation.name
+        )));
+    }
+    Ok(Some(ToolMetadata {
+        ui: ToolUiMetadata {
+            resource_uri: uri.to_string(),
+        },
+    }))
 }
 
 fn validate_target(operation: &Operation) -> Result<(), McpError> {

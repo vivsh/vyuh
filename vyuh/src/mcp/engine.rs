@@ -17,7 +17,10 @@ use crate::{
     routes::AxumRouter,
 };
 
-use super::{McpConf, McpError, McpToolRegistry, protocol, tools, tools::ToolDefinition};
+use super::{
+    McpConf, McpError, McpResourceRegistry, McpToolRegistry, protocol,
+    resources::ResourceDefinition, tools, tools::ToolDefinition,
+};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -25,6 +28,7 @@ struct McpNode {
     marker_id: OperationId,
     anchor_id: uuid::Uuid,
     operation_ids: Vec<OperationId>,
+    resource_uris: Vec<String>,
     conf: McpConf,
 }
 
@@ -47,9 +51,13 @@ impl McpEngine {
         operations: &BTreeMap<OperationId, Operation>,
         topology: &crate::bundles::BundleTopology,
         registry: &mut McpToolRegistry,
+        resources: &mut McpResourceRegistry,
     ) -> Result<(), McpError> {
+        registry.clear_claims();
+        resources.clear_claims();
         for node in &mut self.nodes {
             node.operation_ids.clear();
+            node.resource_uris.clear();
         }
         for operation in operations
             .values()
@@ -77,7 +85,31 @@ impl McpEngine {
             .iter()
             .flat_map(|node| node.operation_ids.iter().copied());
         registry.claim(claimed);
+        self.assign_resources(topology, resources);
         Ok(())
+    }
+
+    /// Assigns static resources to their nearest enclosing MCP service.
+    fn assign_resources(
+        &mut self,
+        topology: &crate::bundles::BundleTopology,
+        resources: &mut McpResourceRegistry,
+    ) {
+        let registrations = resources
+            .owners()
+            .map(|(uri, owner)| (uri.to_string(), owner))
+            .collect::<Vec<_>>();
+        for (uri, owner) in registrations {
+            let Some(index) = self.nearest_node(topology, owner) else {
+                continue;
+            };
+            self.nodes[index].resource_uris.push(uri);
+        }
+        let claimed = self
+            .nodes
+            .iter()
+            .flat_map(|node| node.resource_uris.iter().cloned());
+        resources.claim(claimed);
     }
 
     fn nearest_node(
@@ -102,12 +134,13 @@ impl McpEngine {
         router: &mut AxumRouter<Site>,
         operations: &BTreeMap<OperationId, Operation>,
         registry: &McpToolRegistry,
+        resources: &McpResourceRegistry,
         auth: &Authenticator,
     ) -> Result<(), crate::bundles::BundleError> {
         self.validate_nodes(operations)
             .map_err(|error| crate::bundles::BundleError::Mcp(error.to_string()))?;
         for node in &self.nodes {
-            self.setup_node(router, operations, registry, auth, node)
+            self.setup_node(router, operations, registry, resources, auth, node)
                 .map_err(|error| crate::bundles::BundleError::Mcp(error.to_string()))?;
         }
         Ok(())
@@ -118,6 +151,7 @@ impl McpEngine {
         router: &mut AxumRouter<Site>,
         operations: &BTreeMap<OperationId, Operation>,
         registry: &McpToolRegistry,
+        resources: &McpResourceRegistry,
         auth: &Authenticator,
         node: &McpNode,
     ) -> Result<(), McpError> {
@@ -126,7 +160,13 @@ impl McpEngine {
             .map(|operation| operation.path.clone())
             .ok_or_else(|| McpError::Config("MCP endpoint marker is missing".to_string()))?;
         validate_collisions(operations, &endpoint, node.marker_id)?;
-        let definitions = tools::definitions(&node.operation_ids, operations, registry)?;
+        let resource_definitions = resources.definitions(&node.resource_uris)?;
+        let definitions = tools::definitions(
+            &node.operation_ids,
+            operations,
+            registry,
+            &resource_definitions,
+        )?;
         if node.conf.auth.is_none()
             && definitions
                 .values()
@@ -150,6 +190,7 @@ impl McpEngine {
             node.conf.clone(),
             audience,
             definitions,
+            resource_definitions,
             protected,
         )?);
         let endpoint_runtime = Arc::clone(&runtime);
@@ -212,6 +253,7 @@ impl crate::bundles::Bundle {
             marker_id,
             anchor_id: self.id,
             operation_ids: Vec::new(),
+            resource_uris: Vec::new(),
             conf,
         });
     }
@@ -221,6 +263,7 @@ struct McpRuntime {
     conf: McpConf,
     audience: Option<AudienceId>,
     tools: BTreeMap<String, ToolDefinition>,
+    resources: BTreeMap<String, ResourceDefinition>,
     resource_metadata_url: Option<String>,
     metadata: Option<Json<Value>>,
     required_scopes: Vec<String>,
@@ -231,6 +274,7 @@ impl McpRuntime {
         conf: McpConf,
         audience: Option<AudienceId>,
         tools: BTreeMap<String, ToolDefinition>,
+        resources: BTreeMap<String, ResourceDefinition>,
         protected: Option<AuthProtectedResource>,
     ) -> Result<Self, McpError> {
         let resource_metadata_url = protected
@@ -258,6 +302,7 @@ impl McpRuntime {
             conf,
             audience,
             tools,
+            resources,
             resource_metadata_url,
             metadata,
             required_scopes,
@@ -305,6 +350,11 @@ impl McpRuntime {
                     .filter(|tool| tool.authorization.allows(user.as_ref()));
                 RpcReply::result(request.id, protocol::tool_list(tools, revision))
             }
+            "resources/list" => RpcReply::result(
+                request.id,
+                protocol::resource_list(self.resources.values(), revision),
+            ),
+            "resources/read" => self.read_resource(request, revision),
             "tools/call" => self.call(site, request, user, revision.modern()).await,
             _ if revision.modern() => RpcReply::status(
                 StatusCode::NOT_FOUND,
@@ -316,6 +366,22 @@ impl McpRuntime {
                 "method not found",
             )),
         }
+    }
+
+    /// Reads one static resource after the endpoint authentication boundary.
+    fn read_resource(
+        &self,
+        request: protocol::RpcRequest,
+        revision: protocol::Revision,
+    ) -> RpcReply {
+        let read: protocol::ResourceRead = match serde_json::from_value(request.params) {
+            Ok(value) => value,
+            Err(_) => return RpcReply::invalid_params(request.id),
+        };
+        let Some(resource) = self.resources.get(&read.uri) else {
+            return RpcReply::response(protocol::resource_not_found(request.id, read.uri));
+        };
+        RpcReply::result(request.id, protocol::resource_read(resource, revision))
     }
 
     async fn call(

@@ -87,12 +87,14 @@ The `vyuh` crate is organized around these subsystems:
   built `Site`.
 - `apidocs` and `schema` generate OpenAPI and schema output from registered
   operations and types.
-- `mcp` is an optional, tool-only Streamable HTTP subsystem over explicitly
-  registered semantic callables. Bundle-owned `McpToolRegistry` entries retain
-  stable schemas, authorization metadata, direct callable targets, and MCP
-  annotations; `McpEngine` separately owns finalized bundle-subtree service
-  endpoints. Tools execute through `McpToolContext`, without a route adapter.
-  The engine owns protocol framing, scope-filtered discovery, and optional
+- `mcp` is an optional Streamable HTTP subsystem over explicitly registered
+  semantic callables and static resources. Bundle-owned `McpToolRegistry` and
+  `McpResourceRegistry` entries retain stable schemas, direct callable targets,
+  MCP annotations, and immutable registered text content; `McpEngine`
+  separately owns finalized bundle-subtree service endpoints. Tools execute
+  through `McpToolContext`, without a route adapter, while resources are served
+  only by the MCP protocol. The engine owns protocol framing, scope-filtered
+  discovery, resource listing and reads, and optional
   protected-resource metadata; it authenticates through the central audience
   selector just like a normal route. Generic optional `auth::oauth`
   delegates external JWT/JWKS validation and bounded key rotation to a private
@@ -292,15 +294,17 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
    JSON resources remain direct, paginated queries return Mool's `Page<T>`, and
    framework-generated JSON failures normalize into `ErrorReport`; raw responses
    remain an explicit application escape hatch.
-10. When enabled, each `BundleConf::mcp` declaration selects tools in its final
-    bundle subtree, with the nearest nested declaration owning each tool. Site
-    construction finalizes all service paths, rejects unclaimed entries,
-    audience mismatches, and endpoint/resource collisions, and builds a
-    deterministic catalog per service. Protected endpoints validate their own
-    canonical resource audience and map the subject to `AuthUser`. Discovery
-    filters tools using the same normalized scope rules used again at call
-    time. Direct targets receive `McpToolContext`; the MCP engine does not
-    adapt or dispatch HTTP routes. Tools never receive the external bearer
+10. When enabled, each `BundleConf::mcp` declaration selects tools and static
+    resources in its final bundle subtree, with the nearest nested declaration
+    owning each registration. Site construction finalizes all service paths,
+    rejects unclaimed entries, audience mismatches, duplicate resource URIs,
+    cross-service UI attachments, and endpoint/resource collisions, then builds
+    deterministic tool and resource catalogs per service. Protected endpoints
+    validate their configured audience and map the subject to `AuthUser`.
+    Discovery filters tools using the same normalized scope rules used again at
+    call time; resources remain protected by that same endpoint boundary.
+    Direct targets receive `McpToolContext`; the MCP engine does not adapt or
+    dispatch HTTP routes. Tools and resources never receive the external bearer
     credential. Only public
     OAuth metadata and JWKS remain inside an eligible provider's per-site
     Huskarl verifier and never cross the application cache boundary.

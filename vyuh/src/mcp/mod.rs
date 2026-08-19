@@ -10,6 +10,7 @@ mod error;
 mod future;
 mod protocol;
 mod registry;
+mod resources;
 mod tools;
 
 #[cfg(test)]
@@ -19,6 +20,9 @@ pub use config::{McpConf, McpToolConf};
 pub use context::McpToolContext;
 pub use error::McpError;
 pub use future::McpFuture;
+pub use resources::{McpResource, McpUiResourceMeta};
 
 pub(crate) use engine::McpEngine;
-pub(crate) use registry::{McpDirectRegistration, McpToolRegistry, McpToolTarget};
+pub(crate) use registry::{
+    McpDirectRegistration, McpResourceRegistry, McpToolRegistry, McpToolTarget,
+};

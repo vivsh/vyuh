@@ -38,6 +38,11 @@ pub(super) enum BundlePartInner {
     Schema(crate::db::SchemaSource),
     #[cfg(feature = "mcp")]
     McpTool(crate::mcp::McpDirectRegistration),
+    #[cfg(feature = "mcp")]
+    McpResource {
+        name: String,
+        resource: crate::mcp::McpResource,
+    },
 }
 
 /// A single registerable piece of a bundle: a route, emitter, signal, service, etc.
@@ -136,6 +141,12 @@ impl Bundle {
                 self.ops.insert(id, registration.operation);
                 self.mcp_registry
                     .register_direct(id, registration.callable, registration.conf);
+            }
+            #[cfg(feature = "mcp")]
+            BundlePartInner::McpResource { name, resource } => {
+                if let Err(error) = self.mcp_resources.register(name, resource, self.id) {
+                    self.errors.push(BundleError::Mcp(error.to_string()));
+                }
             }
         }
         self
@@ -280,6 +291,18 @@ where
             callable,
             conf,
         }),
+    }
+}
+
+/// Creates one immutable static MCP resource from a factory result.
+#[cfg(feature = "mcp")]
+pub fn mcp_resource(name: impl Into<String>, resource: crate::mcp::McpResource) -> BundlePart {
+    BundlePart {
+        operation: None,
+        part: BundlePartInner::McpResource {
+            name: name.into(),
+            resource,
+        },
     }
 }
 

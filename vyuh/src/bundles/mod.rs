@@ -27,29 +27,29 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "mcp")]
-use crate::mcp::{McpEngine, McpToolRegistry};
+use crate::mcp::{McpEngine, McpResourceRegistry, McpToolRegistry};
 use openapi::DocEngine;
 
 pub use crate::apidocs::{DocViewer, OpenApiVersion};
 #[cfg(feature = "mcp")]
-pub use crate::mcp::{McpConf, McpToolConf};
+pub use crate::mcp::{McpConf, McpResource, McpToolConf, McpUiResourceMeta};
 pub use config::{BundleConf, conf};
 pub use error::BundleError;
 pub use openapi::{OpenApiConf, OpenApiViewerConf};
-#[cfg(feature = "mcp")]
-pub use part::mcp_tool;
 pub use part::{
     BundlePart, asset_dir, beacon, bundle, command, cron, periodic, pgnotify, route, service,
     signal, task, url_info,
 };
+#[cfg(feature = "mcp")]
+pub use part::{mcp_resource, mcp_tool};
 #[cfg(feature = "migrations")]
 pub use part::{migrations, schema};
 
-#[cfg(feature = "mcp")]
-pub use vyuh_macros::mcp_tool;
 pub use vyuh_macros::{
     asset_dir, beacon, bundle, cron, periodic, pgnotify, route, service, signal, task, url_info,
 };
+#[cfg(feature = "mcp")]
+pub use vyuh_macros::{mcp_resource, mcp_tool};
 #[cfg(feature = "migrations")]
 pub use vyuh_macros::{migrations, schema};
 
@@ -165,6 +165,8 @@ pub struct Bundle {
     pub(crate) mcp_engine: McpEngine,
     #[cfg(feature = "mcp")]
     pub(crate) mcp_registry: McpToolRegistry,
+    #[cfg(feature = "mcp")]
+    pub(crate) mcp_resources: McpResourceRegistry,
     #[cfg(feature = "migrations")]
     pub(crate) migrations: crate::db::MigrationRegistry,
 }
@@ -197,6 +199,8 @@ impl Bundle {
             mcp_engine: McpEngine::new(),
             #[cfg(feature = "mcp")]
             mcp_registry: McpToolRegistry::new(),
+            #[cfg(feature = "mcp")]
+            mcp_resources: McpResourceRegistry::new(),
             #[cfg(feature = "migrations")]
             migrations: crate::db::MigrationRegistry::new(),
         }
@@ -293,15 +297,18 @@ impl Bundle {
         }
         #[cfg(feature = "mcp")]
         {
-            let unclaimed = self
+            let tools = self
                 .mcp_registry
                 .unclaimed()
                 .filter_map(|id| self.ops.get(&id).map(|operation| operation.name.as_str()))
                 .collect::<Vec<_>>();
-            if !unclaimed.is_empty() {
+            let resources = self.mcp_resources.unclaimed().collect::<Vec<_>>();
+            if !tools.is_empty() || !resources.is_empty() {
+                let mut registrations = tools;
+                registrations.extend(resources);
                 return Err(BundleError::Mcp(format!(
                     "MCP registrations are not claimed by a service: {}",
-                    unclaimed.join(", ")
+                    registrations.join(", ")
                 )));
             }
         }
@@ -466,6 +473,10 @@ impl Bundle {
         self.mcp_engine.merge(other.mcp_engine);
         #[cfg(feature = "mcp")]
         self.mcp_registry.merge(other.mcp_registry);
+        #[cfg(feature = "mcp")]
+        self.mcp_resources
+            .merge(other.mcp_resources)
+            .map_err(|error| BundleError::Mcp(error.to_string()))?;
         Ok(other.inner_router)
     }
 

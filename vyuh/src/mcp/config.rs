@@ -11,20 +11,34 @@ pub struct McpToolConf {
     pub(crate) destructive: Option<bool>,
     pub(crate) idempotent: Option<bool>,
     pub(crate) open_world: Option<bool>,
+    pub(crate) ui_resource_uri: Option<String>,
 }
 impl McpToolConf {
+    /// Declares the MCP Apps UI resource rendered for this tool.
+    pub fn ui_resource_uri(mut self, value: impl Into<String>) -> Self {
+        self.ui_resource_uri = Some(value.into());
+        self
+    }
+
+    /// Sets the MCP read-only annotation for this tool.
     pub fn read_only(mut self, value: bool) -> Self {
         self.read_only = Some(value);
         self
     }
+
+    /// Sets the MCP destructive annotation for this tool.
     pub fn destructive(mut self, value: bool) -> Self {
         self.destructive = Some(value);
         self
     }
+
+    /// Sets the MCP idempotent annotation for this tool.
     pub fn idempotent(mut self, value: bool) -> Self {
         self.idempotent = Some(value);
         self
     }
+
+    /// Sets the MCP open-world annotation for this tool.
     pub fn open_world(mut self, value: bool) -> Self {
         self.open_world = Some(value);
         self

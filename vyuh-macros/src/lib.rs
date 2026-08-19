@@ -3,6 +3,7 @@ mod beacon;
 mod bundle;
 mod bundlepart;
 mod cron;
+mod mcp_resource;
 mod mcp_tool;
 mod migrations;
 mod multipart;
@@ -123,7 +124,8 @@ pub fn beacon(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// This macro is sugar over `vyuh::bundles::mcp_tool`. The handler must end in
 /// one `Data<T>` or `Valid<Data<T>>` object payload. Supported annotations are
-/// `read_only`, `destructive`, `idempotent`, and `open_world`.
+/// `read_only`, `destructive`, `idempotent`, `open_world`, and
+/// `ui_resource_uri = "ui://..."`.
 ///
 /// ```ignore
 /// #[mcp_tool(read_only = true, idempotent = true)]
@@ -137,6 +139,15 @@ pub fn beacon(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     mcp_tool::parse_mcp_tool(attr, item)
+}
+
+/// Defines one static MCP resource factory.
+///
+/// This macro is sugar over `vyuh::bundles::mcp_resource("factory_name", factory())`.
+/// The factory name becomes the standard MCP resource name in `resources/list`.
+#[proc_macro_attribute]
+pub fn mcp_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    mcp_resource::parse_mcp_resource(attr, item)
 }
 
 /// Collects bundle parts (routes, tasks, signals) into a Bundle for composition and registration.

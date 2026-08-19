@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::tools::ToolDefinition;
+use super::{resources::ResourceDefinition, tools::ToolDefinition};
 
 pub(crate) const CURRENT_VERSION: &str = "2026-07-28";
 pub(crate) const PREVIOUS_VERSION: &str = "2025-11-25";
@@ -62,6 +62,11 @@ pub(crate) struct ToolCall {
     pub(crate) arguments: Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResourceRead {
+    pub(crate) uri: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct RpcResponse {
     jsonrpc: &'static str,
@@ -95,7 +100,7 @@ impl RpcResponse {
         Self::error_with_data(id, code, message, None)
     }
 
-    fn error_with_data(
+    pub(crate) fn error_with_data(
         id: Option<Value>,
         code: i32,
         message: impl Into<String>,
@@ -248,13 +253,13 @@ pub(crate) fn discovery(method: &str, revision: Revision) -> Option<Value> {
     match (method, revision) {
         ("initialize", Revision::Legacy(version)) => Some(json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": false}},
+            "capabilities": {"tools": {"listChanged": false}, "resources": {}},
             "serverInfo": {"name": "vyuh", "version": env!("CARGO_PKG_VERSION")}
         })),
         ("server/discover", Revision::Modern) => Some(json!({
             "resultType": "complete",
             "supportedVersions": SUPPORTED_VERSIONS,
-            "capabilities": {"tools": {"listChanged": false}},
+            "capabilities": {"tools": {"listChanged": false}, "resources": {}},
             "_meta": {"io.modelcontextprotocol/serverInfo": {
                 "name": "vyuh", "version": env!("CARGO_PKG_VERSION")
             }},
@@ -262,6 +267,34 @@ pub(crate) fn discovery(method: &str, revision: Revision) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// Builds the deterministic static resource catalog response.
+pub(crate) fn resource_list<'a>(
+    resources: impl Iterator<Item = &'a ResourceDefinition>,
+    revision: Revision,
+) -> Value {
+    let mut result =
+        json!({"resources": resources.map(ResourceDefinition::list_value).collect::<Vec<_>>()});
+    if revision.modern() {
+        result["resultType"] = Value::String("complete".to_string());
+        result["cacheScope"] = Value::String("private".to_string());
+    }
+    result
+}
+
+/// Builds a static resource contents response.
+pub(crate) fn resource_read(resource: &ResourceDefinition, revision: Revision) -> Value {
+    let mut result = json!({"contents": [resource.content_value()]});
+    if revision.modern() {
+        result["resultType"] = Value::String("complete".to_string());
+    }
+    result
+}
+
+/// Builds the MCP-standard resource-not-found response with its requested URI.
+pub(crate) fn resource_not_found(id: Option<Value>, uri: String) -> RpcResponse {
+    RpcResponse::error_with_data(id, -32002, "resource not found", Some(json!({"uri": uri})))
 }
 
 pub(crate) fn tool_list<'a>(
@@ -352,6 +385,16 @@ mod tests {
             revision(&HeaderMap::new(), &request),
             Ok(Revision::Legacy(PREVIOUS_VERSION))
         ));
+    }
+
+    /// Verifies modern discovery advertises the standard static resources capability.
+    #[test]
+    fn discovery_advertises_resources() {
+        let response = discovery("server/discover", Revision::Modern);
+        assert_eq!(
+            response.and_then(|value| value.pointer("/capabilities/resources").cloned()),
+            Some(json!({}))
+        );
     }
 
     /// Verifies modern header/body disagreements fail with the allocated MCP error.
