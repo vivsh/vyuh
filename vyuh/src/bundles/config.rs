@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 use crate::{
     auth::{Audience, AuthProvider, ProviderDefinition, ProviderDefinitionInner},
-    middlewares::SlashPolicy,
     tasks::TaskLaneConf,
 };
 
@@ -22,7 +21,6 @@ pub fn conf() -> BundleConf {
 pub struct BundleConf {
     pub(crate) audience: Option<Audience>,
     pub(crate) tags: Vec<Cow<'static, str>>,
-    pub(crate) slash_policy: Option<SlashPolicy>,
     pub(crate) task_lanes: Vec<TaskLaneConf>,
     pub(crate) providers: Vec<ProviderDefinitionInner>,
     pub(crate) openapi: Vec<OpenApiConf>,
@@ -44,15 +42,6 @@ impl BundleConf {
     /// Adds documentation tags to operations in this bundle tree.
     pub fn tags(mut self, tags: impl IntoIterator<Item = impl Into<Cow<'static, str>>>) -> Self {
         self.tags.extend(tags.into_iter().map(Into::into));
-        self
-    }
-
-    /// Declares slash handling for HTTP operations in this bundle tree.
-    pub fn slash_policy(mut self, policy: SlashPolicy) -> Self {
-        if self.slash_policy.replace(policy).is_some() {
-            self.errors
-                .push("a bundle configuration may declare one slash policy".into());
-        }
         self
     }
 
@@ -94,12 +83,6 @@ impl BundleConf {
                 .push("a bundle configuration may declare one audience".into());
         }
         self.tags.append(&mut other.tags);
-        if let Some(policy) = other.slash_policy.take()
-            && self.slash_policy.replace(policy).is_some()
-        {
-            self.errors
-                .push("a bundle configuration may declare one slash policy".into());
-        }
         self.task_lanes.append(&mut other.task_lanes);
         self.providers.append(&mut other.providers);
         self.openapi.append(&mut other.openapi);

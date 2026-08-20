@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap, fmt, str::FromStr};
 
 use crate::auth::AudienceId;
-use crate::middlewares::SlashPolicy;
 use crate::routes::Methods;
 
 use super::{ArgPart, ArgSpec, CallSpec, Callable, IntoArgPart, LayerSpec, ReturnSpec};
@@ -99,7 +98,8 @@ pub struct Operation {
     /// Effective audience inherited from the owning bundle tree.
     pub(crate) audience: Option<AudienceId>,
     pub(crate) bundle_id: Option<uuid::Uuid>,
-    pub(crate) slash_policy: Option<SlashPolicy>,
+    /// Whether a slashful alternate may be normalized to this operation.
+    pub(crate) trim: bool,
 }
 
 impl Operation {
@@ -208,7 +208,7 @@ impl Operation {
             hidden: true,
             audience: None,
             bundle_id: None,
-            slash_policy: None,
+            trim: true,
         }
     }
 
@@ -234,7 +234,7 @@ impl Operation {
             hidden: false,
             audience: None,
             bundle_id: None,
-            slash_policy: None,
+            trim: true,
         }
     }
 

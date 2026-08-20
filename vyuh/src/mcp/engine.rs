@@ -200,14 +200,14 @@ impl McpEngine {
                 async move { handle_mcp(runtime, site, request).await }
             })
             .get(|| async { StatusCode::METHOD_NOT_ALLOWED });
-        *router = std::mem::take(router).route(&endpoint, endpoint_route);
+        *router = crate::slash::route(std::mem::take(router), &endpoint, endpoint_route);
         if let Some(metadata) = runtime.metadata() {
             let well_known = protected_resource_path(&endpoint);
             let metadata_route = axum::routing::get(move || {
                 let metadata = metadata.clone();
                 async move { metadata }
             });
-            *router = std::mem::take(router).route(&well_known, metadata_route);
+            *router = crate::slash::route(std::mem::take(router), &well_known, metadata_route);
         }
         Ok(())
     }
@@ -588,10 +588,11 @@ fn validate_node_collisions(
         validate_collisions(operations, &endpoint, node.marker_id),
         errors,
     );
-    if !endpoints.insert(endpoint.clone()) {
+    let internal_endpoint = crate::slash::internal_path(&endpoint).to_owned();
+    if !endpoints.insert(internal_endpoint.clone()) {
         errors.push(format!("duplicate MCP endpoint '{endpoint}'"));
     }
-    if !resources.insert(endpoint.clone()) {
+    if !resources.insert(internal_endpoint) {
         errors.push(format!("duplicate MCP resource URL '{endpoint}'"));
     }
 }
@@ -609,7 +610,7 @@ fn validate_collisions(
 ) -> Result<(), McpError> {
     let collision = operations.values().any(|operation| {
         operation.id != marker
-            && operation.path == endpoint
+            && crate::slash::internal_path(&operation.path) == crate::slash::internal_path(endpoint)
             && (operation.methods.contains(crate::routes::Methods::POST)
                 || operation.methods.contains(crate::routes::Methods::GET))
     });
@@ -626,7 +627,8 @@ fn validate_well_known(
     path: &str,
 ) -> Result<(), McpError> {
     let collision = operations.values().any(|operation| {
-        operation.path == path && operation.methods.contains(crate::routes::Methods::GET)
+        crate::slash::internal_path(&operation.path) == crate::slash::internal_path(path)
+            && operation.methods.contains(crate::routes::Methods::GET)
     });
     if collision {
         return Err(McpError::Config(format!(

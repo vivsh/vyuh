@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::{
     Operation, OperationKind, Site,
     callables::{ArgPart, LayerSpec},
-    middlewares::{HttpConf, SlashPolicy},
+    middlewares::HttpConf,
 };
 
 #[derive(Debug, Clone)]
@@ -61,12 +61,7 @@ fn layer_part(layer: &LayerSpec, part: &ArgPart) -> MiddlewarePart {
 }
 
 fn site_policies(http: &HttpConf) -> Vec<MiddlewareInfo> {
-    let mut policies = Vec::with_capacity(9);
-    policies.push(site_policy(
-        "slash",
-        "Trailing slash routing policy.",
-        [setting("policy", slash_policy(http.slash.policy))],
-    ));
+    let mut policies = Vec::with_capacity(8);
     if http.catch_panic.enabled {
         policies.push(site_policy(
             "catch_panic",
@@ -165,16 +160,6 @@ fn setting(key: &str, value: impl Into<String>) -> MiddlewareSetting {
     MiddlewareSetting {
         key: key.to_string(),
         value: value.into(),
-    }
-}
-
-fn slash_policy(policy: SlashPolicy) -> &'static str {
-    match policy {
-        SlashPolicy::Exact => "exact",
-        SlashPolicy::Trim => "trim",
-        SlashPolicy::RedirectAppend => "redirect_append",
-        SlashPolicy::RedirectRemove => "redirect_remove",
-        SlashPolicy::Auto => "auto",
     }
 }
 

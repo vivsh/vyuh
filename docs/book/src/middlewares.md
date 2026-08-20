@@ -15,10 +15,9 @@ without treating those policies as handler inputs.
 The main public pieces are:
 
 - `SiteConf::http(HttpConf)` for global middleware configuration.
-- `SlashPolicy` for deterministic trailing-slash behavior.
-- `Bundle::with_conf(bundles::conf().slash_policy(...))` for bundle-level slash policy.
-- `RouteConf { slash: Some(...), .. }` and `#[bundles::route(..., slash = "...")]`
-  for route-level slash policy.
+- Declared route paths for canonical trailing-slash behavior.
+- `RouteConf::trim` and `#[bundles::route(..., trim = false)]` for the
+  route-only strict opt-out.
 - `routes::Middleware` and `routes::layer_from(...)` for route or bundle
   middleware.
 
@@ -55,7 +54,6 @@ Default behavior:
 | --- | --- |
 | panic catching | enabled |
 | request id | enabled, `x-request-id` |
-| slash policy | `Auto` |
 | trace | disabled |
 | compression | disabled |
 | CORS | disabled |
@@ -152,90 +150,49 @@ let conf = SiteConf::default().http(HttpConf {
 The default header policy includes `x-content-type-options: nosniff`,
 `x-frame-options: DENY`, and `referrer-policy: same-origin`.
 
-## Slash Policy
+## Canonical Trailing Slashes
 
-Vyuh does not silently hard-code one trailing-slash rule for the whole server.
-Slash behavior is route metadata:
+The declared path is the canonical public URL. There is no site or bundle slash
+policy:
 
-| Policy | Behavior |
-| --- | --- |
-| `Exact` | only the declared path matches |
-| `Trim` | alternate trailing slash rewrites internally |
-| `RedirectAppend` | missing slash redirects to slash form with `308` |
-| `RedirectRemove` | trailing slash redirects to non-slash form with `308` |
-| `Auto` | HTML routes redirect to the declared path shape; API/unknown routes trim |
-
-Site default:
+- Declared `/items` serves both `/items` and `/items/` without redirecting.
+- Declared `/docs/` serves `/docs/`; `/docs` redirects permanently to `/docs/`.
+- A slashless route with `trim = false` rejects `/route/` with Vyuh's structured
+  `404`. Use this for file-like resources where the alternate form is invalid.
 
 ```rust
-use vyuh::prelude::*;
-use vyuh::middlewares::{HttpConf, SlashConf, SlashPolicy};
-
-let conf = SiteConf::default().http(HttpConf {
-    slash: SlashConf {
-        policy: SlashPolicy::Auto,
-    },
-    ..HttpConf::default()
-});
-```
-
-Bundle override:
-
-```rust
-use vyuh::prelude::*;
-use vyuh::middlewares::SlashPolicy;
-
-let bundle = app_bundle().with_conf(
-    bundles::conf().slash_policy(SlashPolicy::RedirectAppend),
-);
-```
-
-Route override with the macro:
-
-```rust
-use vyuh::prelude::*;
-use vyuh::routes::Html;
-
-#[bundles::route(path = "/docs/", slash = "redirect_append")]
-async fn docs() -> Html<&'static str> {
-    Html("docs")
+#[bundles::route(path = "/files/{*path}", trim = false)]
+async fn file(Path(path): Path<String>) -> FileResponse {
+    // ...
 }
 ```
 
-Route override with direct registration:
+The direct API sets the same route-local flag:
 
 ```rust
-use std::borrow::Cow;
-use vyuh::prelude::*;
-use vyuh::bundles;
-use vyuh::middlewares::SlashPolicy;
-use vyuh::routes::{Methods, RouteConf};
-
 let route = bundles::route(
-    docs,
+    file,
     RouteConf {
-        name: Cow::Borrowed("docs"),
-        path: Cow::Borrowed("/docs/"),
+        name: "file".into(),
+        path: "/files/{*path}".into(),
         methods: Methods::GET,
-        slash: Some(SlashPolicy::RedirectAppend),
+        trim: false,
     },
 );
 ```
 
-Slash aliases and redirects are validated at site build. Conflicting generated
-rules fail build instead of producing ambiguous runtime behavior.
+`trim = false` cannot be combined with a path ending in `/`. Vyuh validates
+direct registrations during bundle construction, while the macro rejects the
+contradictory declaration at compile time.
 
-## API And HTML Defaults
+Vyuh stores each framework operation once at a slashless internal path. A small
+service removes one terminal slash before Axum matches the request, preserving
+`OriginalUri`, and dispatches exactly once. Only slashful declarations and
+strict routes receive a static route guard. There are no slash aliases, route
+indexes, route scans, fallback re-entry, or request-time locks.
 
-`Auto` is designed for mixed applications:
-
-- API and unknown-response routes trim, so `/api/items/` can serve `/api/items`.
-- HTML routes canonicalize to the declared path shape. A declared `/docs/`
-  redirects `/docs` to `/docs/`; a declared `/about` redirects `/about/` to
-  `/about`.
-
-HTML detection uses route return metadata with `text/html`. Vyuh does not infer
-slash policy from request `Accept` headers.
+Raw `axum::Router` bundles must use slashless physical paths. They receive the
+global internal trim but cannot declare Vyuh's redirect or strict behavior.
 
 ## Route And Bundle Middleware
 
@@ -296,12 +253,12 @@ Handler arguments remain handler inputs. Middleware metadata is separate.
 ## Examples
 
 The snippets in this chapter cover site-wide HTTP middleware configuration,
-slash policy behavior, bundle middleware, and direct Tower layer escape
-hatches.
+canonical paths, bundle middleware, and direct Tower layer escape hatches.
 
 ## Failure Modes
 
-- Invalid slash policies or generated slash aliases fail during site build.
+- Contradictory strict slash declarations and normalized route collisions fail
+  during bundle construction.
 - Timeout and body-limit failures are rendered through the normal error
   pipeline.
 - Panics are converted to framework errors when panic catching is enabled.
@@ -312,4 +269,4 @@ hatches.
   Tower layer.
 - Direct Tower layers remain available, but they do not automatically provide
   Vyuh OpenAPI metadata.
-- Slash policy is based on route metadata, not request `Accept` headers.
+- Strict slash handling is route-only; raw Axum routes cannot opt into it.

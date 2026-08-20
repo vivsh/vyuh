@@ -164,8 +164,16 @@ impl Bundle {
             return self;
         }
         let id = op.id;
+        let router = if op.path != "/" && op.path.ends_with('/') {
+            router.route_layer(crate::slash::RouteSlashLayer::redirect())
+        } else if !op.trim {
+            router.route_layer(crate::slash::RouteSlashLayer::reject())
+        } else {
+            router
+        };
         let router = router.layer(axum::Extension(id));
-        self.inner_router = self.inner_router.route(op.path.as_ref(), router);
+        let path = crate::slash::internal_path(&op.path);
+        self.inner_router = self.inner_router.route(path, router);
         let name = op.name.clone();
         self.ops.insert(id, op);
         self.name_index.insert(name, id);
@@ -193,7 +201,7 @@ where
     op.path = meta.path.clone().into();
     op.name = meta.name.clone().into();
     op.methods = meta.methods;
-    op.slash_policy = meta.slash;
+    op.trim = meta.trim;
     op = op.with_conf(&meta);
     op.returns
         .push(callables::ReturnSpec::error(405, "Method not allowed."));
@@ -217,7 +225,7 @@ pub fn beacon(beacon: crate::channels::Beacon, conf: crate::channels::BeaconConf
     operation.kind = crate::callables::OperationKind::Route;
     operation.hidden = false;
     operation.openapi_id = Some(conf.name.to_string());
-    operation.slash_policy = conf.slash;
+    operation.trim = conf.trim;
     operation.args.push(
         crate::callables::ArgSpec::from_type::<crate::auth::AuthUser>(
             0,

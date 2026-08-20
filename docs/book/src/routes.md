@@ -16,8 +16,8 @@ workers; use commands, tasks, or services for those.
 The route pipeline has three parts:
 
 - A handler function defines runtime behavior and typed input/output metadata.
-- `RouteConf` defines the route name, path, accepted methods, and optional
-  slash behavior.
+- `RouteConf` defines the route name, canonical path, accepted methods, and
+  optional strict trimming behavior.
 - A `Bundle` collects routes and composes them with prefixes, middleware, tags,
   and other subsystem registrations.
 
@@ -53,7 +53,7 @@ let bundle = bundles::bundle([bundles::route(
         name: Cow::Borrowed("list_notes"),
         path: Cow::Borrowed("/notes"),
         methods: Methods::GET,
-        slash: None,
+        trim: true,
     },
 )]);
 ```
@@ -69,7 +69,8 @@ generated, feature-gated, or assembled conditionally.
   metadata. Macro routes default to the function name.
 - `path`: Axum-style absolute path, such as `/notes` or `/notes/{id}`.
 - `methods`: a `Methods` filter. Macro routes default to `GET`.
-- `slash`: optional route-level trailing-slash behavior.
+- `trim`: whether a slashless declaration accepts one alternate terminal slash;
+  defaults to `true`.
 
 Paths must start with `/`, must not be empty, and must not contain `//`. Bundle
 prefixes follow the same rule and also must not end in `/`.
@@ -77,18 +78,20 @@ prefixes follow the same rule and also must not end in `/`.
 Multiple HTTP methods can be registered on one handler by repeating
 `method = "..."`.
 
-Trailing-slash behavior defaults to the site's `HttpConf`. Override it on a
-route when a specific page or API endpoint needs canonical behavior:
+The declared path controls canonical trailing-slash behavior:
 
 ```rust
-#[bundles::route(path = "/docs/", slash = "redirect_append")]
-async fn docs() -> Html<&'static str> {
-    Html("docs")
+#[bundles::route(path = "/docs/")]
+async fn docs() -> Html<String> {
+    Html("docs".to_owned())
 }
 ```
 
-See [Middlewares](middlewares.md) for `SlashPolicy`, site defaults, bundle
-overrides, and API vs HTML behavior.
+Here `/docs/` dispatches and `/docs` redirects with `308`. A slashless `/items`
+serves both `/items` and `/items/` without redirecting. Use `trim = false` only
+when the alternate trailing slash must be rejected, such as a file resource.
+See [Middlewares](middlewares.md#canonical-trailing-slashes) for the runtime
+model and raw Axum limitation.
 
 `Methods` supports `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE`, and `CONNECT`. `CONNECT` routes can be served, but OpenAPI 3 does not
@@ -198,8 +201,9 @@ let operation_id = site.routes().resolve_url(HttpMethod::GET, "/notes/42");
 ```
 
 `resolve_url` is method-aware, ignores query strings and fragments, and returns
-the canonical `OperationId`. Registered slash aliases resolve to the same
-operation. It is intended for application/runtime lookup and diagnostics;
+the canonical `OperationId`. Both path shapes resolve for ordinary and
+slashful declarations; the alternate form does not resolve when `trim = false`.
+It is intended for application/runtime lookup and diagnostics;
 Vyuh route handlers already receive their own canonical ID directly.
 
 Every Vyuh route may extract its own ID directly or through Axum's extension:
@@ -221,7 +225,7 @@ wrapped with `routes::layer_from(layer)` when they should not affect OpenAPI
 metadata.
 
 Site-wide transport middleware such as request IDs, panic catching, tracing,
-compression, CORS, timeouts, body limits, security headers, and slash policy is
+compression, CORS, timeouts, body limits, and security headers is
 configured through `SiteConf::http(...)`; see [Middlewares](middlewares.md).
 
 ## Examples

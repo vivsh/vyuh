@@ -67,6 +67,8 @@ pub fn derive_multipart_data(input: TokenStream) -> TokenStream {
 /// - `method` - HTTP method. Defaults to `"GET"` and can be repeated for
 ///   multi-method routes.
 /// - `name` - Route name for reverse routing (defaults to function name)
+/// - `trim` - Whether a slashless route accepts one trailing slash. Defaults to
+///   `true`; `false` is invalid when the declared path already ends in `/`.
 /// - `description` - Detailed description for OpenAPI. Defaults to doc comments.
 /// - `arg(...)` - Override OpenAPI argument metadata by position/name.
 /// - `returns(...)` - Override or append OpenAPI response metadata.
@@ -107,7 +109,7 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is sugar over `vyuh::bundles::beacon(factory(), BeaconConf::new(...))`.
 /// The factory returns a [`vyuh::channels::Beacon`] whose typed rules consume
 /// emitted signals. `path` is required; `modes = [ws, sse, poll]`, `name`, and
-/// `slash` are optional.
+/// `trim` are optional.
 ///
 /// ```ignore
 /// #[bundles::beacon(path = "/live", modes = [ws, sse])]

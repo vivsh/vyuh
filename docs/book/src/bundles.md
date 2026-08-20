@@ -38,7 +38,7 @@ let bundle = bundles::bundle([
             name: Cow::Borrowed("list_notes"),
             path: Cow::Borrowed("/notes"),
             methods: Methods::GET,
-            slash: None,
+            trim: true,
         },
     ),
     bundles::signal::<NoteChanged, _, _>(
@@ -218,8 +218,8 @@ let api = notes::bundle()
 with `/`, must not be `/`, and must not end with `/`.
 
 `BundleConf` declares bundle policy and contributions. Tags accumulate from
-ancestor bundles, while a child audience or slash policy overrides an inherited
-value. `layer` applies middleware to all routes in the bundle; middleware that
+ancestor bundles, while a child audience overrides an inherited value. `layer`
+applies middleware to all routes in the bundle; middleware that
 exposes metadata also updates operations for documentation.
 
 After `Site::build`, route reversal and resolution use `site.routes()`, while
@@ -232,8 +232,8 @@ never rewrites an operation's origin.
 
 ## Bundle Configuration and Final Aggregates
 
-Use `bundles::conf()` with `Bundle::with_conf` for audience, tags, slash policy,
-task-lane defaults, OpenAPI declarations, MCP declarations, and narrowly scoped
+Use `bundles::conf()` with `Bundle::with_conf` for audience, tags, task-lane
+defaults, OpenAPI declarations, MCP declarations, and narrowly scoped
 central-auth provider contributions. It intentionally does not contain site
 secrets, server/database settings, auth lifecycle configuration, or global task
 runtime policy.
@@ -287,7 +287,7 @@ cargo run -p vyuh --features sqlite --example tasks
 
 ## Failure Modes
 
-- Invalid route paths, prefixes, slash rules, and operation metadata are
+- Invalid route paths, prefixes, strict slash declarations, and operation metadata are
   collected on the bundle and reported during validation or site build.
 - Duplicate route names or method/path pairs fail site build.
 - Duplicate subsystem registrations, such as services or commands with the same

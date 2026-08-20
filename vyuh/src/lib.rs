@@ -43,6 +43,7 @@ mod watch;
 
 pub mod routes;
 mod schema_assets;
+mod slash;
 pub use callables::{Data, DataValue, Operation, OperationId, OperationKind, Operations};
 pub use commands::CommandError;
 pub use conf::{DeploymentMode, SiteConf};
@@ -56,6 +57,7 @@ pub use file_storage::{
 };
 pub use serde;
 pub use site::{Site, SiteConfig, SiteError};
+pub use slash::SiteService;
 pub use validation::{
     Valid, ValidRejection, Validate, ValidationError, ValidationReport, ValidationSchema,
 };

@@ -11,7 +11,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ErrorReport;
-use crate::middlewares::SlashPolicy;
 
 use super::methods::Methods;
 
@@ -491,8 +490,13 @@ pub struct RouteConf {
     pub methods: Methods,
     /// Full path, including base path if any (e.g. "/api/users/{id}").
     pub path: Cow<'static, str>,
-    /// Optional route-level slash behavior.
-    pub slash: Option<SlashPolicy>,
+    /// Whether an alternate trailing slash is normalized before dispatch.
+    #[serde(default = "default_route_trim")]
+    pub trim: bool,
+}
+
+const fn default_route_trim() -> bool {
+    true
 }
 
 impl Default for RouteConf {
@@ -501,7 +505,7 @@ impl Default for RouteConf {
             name: Cow::Borrowed(""),
             methods: Methods::GET,
             path: Cow::Borrowed("/"),
-            slash: None,
+            trim: true,
         }
     }
 }

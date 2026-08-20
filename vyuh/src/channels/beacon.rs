@@ -27,8 +27,8 @@ pub struct BeaconConf {
     pub path: &'static str,
     /// Transports the endpoint accepts.
     pub modes: ChannelTransport,
-    /// Optional route-level slash behavior.
-    pub slash: Option<crate::middlewares::SlashPolicy>,
+    /// Whether an alternate trailing slash is normalized before dispatch.
+    pub trim: bool,
 }
 
 impl BeaconConf {
@@ -38,7 +38,7 @@ impl BeaconConf {
             name,
             path,
             modes: ALL_TRANSPORTS,
-            slash: None,
+            trim: true,
         }
     }
 
@@ -48,9 +48,9 @@ impl BeaconConf {
         self
     }
 
-    /// Selects the route-level slash behavior for this endpoint.
-    pub const fn slash(mut self, slash: crate::middlewares::SlashPolicy) -> Self {
-        self.slash = Some(slash);
+    /// Rejects the alternate trailing-slash form when disabled.
+    pub const fn trim(mut self, enabled: bool) -> Self {
+        self.trim = enabled;
         self
     }
 }

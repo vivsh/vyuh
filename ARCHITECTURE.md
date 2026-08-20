@@ -286,6 +286,11 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
    the short poll interval; future readiness, lease, and rate deadlines use
    database time; otherwise the runner uses the bounded fallback interval.
 8. Axum routes receive `Site` as state and handlers use typed extractors.
+   Every Vyuh HTTP operation is registered once at a slashless internal path.
+   The outer `SiteService` removes one terminal slash before Axum matching,
+   preserves `OriginalUri`, and dispatches once. Static per-route guards redirect
+   slashful declarations or reject the alternate form for `trim = false`; no
+   route-aware slash index, alias, scan, fallback re-entry, or lock exists.
    Vyuh-registered routes also receive their `OperationId` as a request
    extension; task, signal, and command invocation contexts carry the same
    identity for their own operation. Operation bundle origin is assigned once at

@@ -232,7 +232,7 @@ where
             name: name.to_owned().into(),
             methods,
             path: path.into(),
-            slash: None,
+            trim: true,
         },
     )
 }

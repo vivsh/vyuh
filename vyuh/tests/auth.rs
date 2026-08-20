@@ -156,7 +156,7 @@ fn scope_bundle() -> bundles::Bundle {
                 name: "scoped_reports".into(),
                 methods: Methods::GET,
                 path: "/scoped-reports".into(),
-                slash: None,
+                trim: true,
             },
         ),
         bundles::route(
@@ -165,7 +165,7 @@ fn scope_bundle() -> bundles::Bundle {
                 name: "optional_reports".into(),
                 methods: Methods::GET,
                 path: "/optional-reports".into(),
-                slash: None,
+                trim: true,
             },
         ),
     ])
@@ -207,7 +207,7 @@ fn bundle() -> bundles::Bundle {
             name: "me".into(),
             methods: Methods::GET | Methods::POST,
             path: "/me".into(),
-            slash: None,
+            trim: true,
         },
     )])
     .with_conf(bundles::conf().audience(REPORTS))
@@ -220,7 +220,7 @@ fn bundle_without_audience() -> bundles::Bundle {
             name: "me_default".into(),
             methods: Methods::GET,
             path: "/me-default".into(),
-            slash: None,
+            trim: true,
         },
     )])
 }
@@ -232,7 +232,7 @@ fn dual_audience_bundle() -> bundles::Bundle {
             name: "admin_me".into(),
             methods: Methods::GET,
             path: "/admin-me".into(),
-            slash: None,
+            trim: true,
         },
     )])
     .with_conf(bundles::conf().audience(ADMIN));
@@ -528,7 +528,7 @@ async fn invalid_scope_rules_fail_site_build() -> Result<(), AuthError> {
             name: "invalid_scope_rule".into(),
             methods: Methods::GET,
             path: "/invalid-scope-rule".into(),
-            slash: None,
+            trim: true,
         },
     )])
     .with_conf(bundles::conf().audience(REPORTS));
@@ -856,7 +856,7 @@ async fn basic_login_exchanges_header_for_tokens() -> Result<(), AuthError> {
             name: "basic-login".into(),
             methods: Methods::POST,
             path: "/basic-login".into(),
-            slash: None,
+            trim: true,
         },
     );
     let auth = AuthConf::development().method(BASIC, BasicLogin::new(TestPasswords));
@@ -891,7 +891,7 @@ async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
             name: "assurance".into(),
             methods: Methods::GET,
             path: "/assurance".into(),
-            slash: None,
+            trim: true,
         },
     );
     let site = Site::build(

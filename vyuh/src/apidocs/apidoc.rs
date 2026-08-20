@@ -1690,7 +1690,7 @@ mod tests {
             hidden: false,
             audience: None,
             bundle_id: None,
-            slash_policy: None,
+            trim: true,
         }
     }
 

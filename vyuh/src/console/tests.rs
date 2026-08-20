@@ -124,7 +124,7 @@ fn app_bundle() -> crate::bundles::Bundle {
                 name: "ping".into(),
                 methods: Methods::GET,
                 path: "/ping".into(),
-                slash: None,
+                trim: true,
             },
         ),
         bundles::route(
@@ -133,7 +133,7 @@ fn app_bundle() -> crate::bundles::Bundle {
                 name: "invoice_signal".into(),
                 methods: Methods::GET,
                 path: "/invoice-signal".into(),
-                slash: None,
+                trim: true,
             },
         ),
         bundles::route(
@@ -142,7 +142,7 @@ fn app_bundle() -> crate::bundles::Bundle {
                 name: "protected_ping".into(),
                 methods: Methods::GET,
                 path: "/protected-ping".into(),
-                slash: None,
+                trim: true,
             },
         ),
     ])

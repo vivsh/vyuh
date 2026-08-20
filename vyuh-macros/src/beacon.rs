@@ -32,7 +32,8 @@ fn expand(
     let path = conf.path;
     let name = conf.name.unwrap_or_else(|| function.sig.ident.to_string());
     let modes = modes_tokens(conf.modes)?;
-    let slash = slash_tokens(conf.slash.as_deref())?;
+    let trim = conf.trim.unwrap_or(true);
+    validate_trim(&path, trim)?;
     let function_name = &function.sig.ident;
     let wrapper = syn::Ident::new(
         &format!("__bundle_part_{}", function_name),
@@ -47,17 +48,27 @@ fn expand(
                 #function_name(),
                 ::vyuh::channels::BeaconConf::new(#name, #path)
                     .modes(#modes)
-                    #slash,
+                    .trim(#trim),
             )
         }
     })
+}
+
+fn validate_trim(path: &str, trim: bool) -> Result<(), syn::Error> {
+    if trim || !path.ends_with('/') {
+        return Ok(());
+    }
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "trim = false requires a slashless Beacon path",
+    ))
 }
 
 struct BeaconMeta {
     path: String,
     name: Option<String>,
     modes: Vec<String>,
-    slash: Option<String>,
+    trim: Option<bool>,
 }
 
 impl BeaconMeta {
@@ -66,7 +77,7 @@ impl BeaconMeta {
         let mut path = None;
         let mut name = None;
         let mut modes = Vec::new();
-        let mut slash = None;
+        let mut trim = None;
         for value in values {
             let Meta::NameValue(value) = value else {
                 return Err(syn::Error::new_spanned(
@@ -80,8 +91,8 @@ impl BeaconMeta {
                 name = Some(string_value(&value.value, "name")?);
             } else if value.path.is_ident("modes") {
                 modes = mode_values(&value.value)?;
-            } else if value.path.is_ident("slash") {
-                slash = Some(string_value(&value.value, "slash")?);
+            } else if value.path.is_ident("trim") {
+                trim = Some(bool_value(&value.value, "trim")?);
             } else {
                 return Err(syn::Error::new_spanned(
                     value.path,
@@ -99,7 +110,7 @@ impl BeaconMeta {
             path,
             name,
             modes,
-            slash,
+            trim,
         })
     }
 }
@@ -113,6 +124,19 @@ fn string_value(value: &Expr, name: &str) -> Result<String, syn::Error> {
         _ => Err(syn::Error::new_spanned(
             value,
             format!("Beacon {name} must be a string"),
+        )),
+    }
+}
+
+fn bool_value(value: &Expr, name: &str) -> Result<bool, syn::Error> {
+    match value {
+        Expr::Lit(ExprLit {
+            lit: Lit::Bool(value),
+            ..
+        }) => Ok(value.value),
+        _ => Err(syn::Error::new_spanned(
+            value,
+            format!("Beacon {name} must be a boolean"),
         )),
     }
 }
@@ -166,22 +190,26 @@ fn modes_tokens(values: Vec<String>) -> Result<proc_macro2::TokenStream, syn::Er
     Ok(output)
 }
 
-fn slash_tokens(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let Some(value) = value else {
-        return Ok(quote!());
-    };
-    let policy = match value {
-        "exact" => quote!(::vyuh::middlewares::SlashPolicy::Exact),
-        "trim" => quote!(::vyuh::middlewares::SlashPolicy::Trim),
-        "redirect_append" => quote!(::vyuh::middlewares::SlashPolicy::RedirectAppend),
-        "redirect_remove" => quote!(::vyuh::middlewares::SlashPolicy::RedirectRemove),
-        "auto" => quote!(::vyuh::middlewares::SlashPolicy::Auto),
-        _ => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "invalid Beacon slash policy",
-            ));
-        }
-    };
-    Ok(quote!(.slash(#policy)))
+#[cfg(test)]
+mod tests {
+    use super::validate_trim;
+    use quote::quote;
+
+    /// Verifies the removed Beacon slash-policy annotation is not accepted as an alias.
+    #[test]
+    fn rejects_removed_slash_annotation() {
+        let result = super::BeaconMeta::parse(quote!(path = "/live", slash = "exact"));
+        assert!(result.is_err());
+    }
+
+    /// Verifies Beacon macro configuration rejects strict trimming on a slashful declaration.
+    #[test]
+    fn validate_trim_rejects_slashful_paths() {
+        let error = validate_trim("/live/", false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a slashless Beacon path")
+        );
+    }
 }

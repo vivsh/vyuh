@@ -70,6 +70,7 @@ pub struct OperationOut {
     pub description: Option<String>,
     pub path: String,
     pub methods: Vec<&'static str>,
+    pub trim: bool,
     pub tags: Vec<String>,
     pub owner: Option<String>,
     pub hidden: bool,
@@ -90,6 +91,7 @@ impl OperationOut {
             description: op.description.clone(),
             path: op.path.clone(),
             methods: op.http_methods(),
+            trim: op.trim,
             tags: op.tags.iter().map(|tag| tag.to_string()).collect(),
             owner: op.owner.clone(),
             hidden: op.hidden,
@@ -546,7 +548,6 @@ impl ConfigOut {
                 slow_subscriber_policy: format!("{:?}", conf.channels.slow_subscriber_policy),
             },
             http: HttpConfigOut {
-                slash_policy: format!("{:?}", conf.http.slash.policy),
                 catch_panic_enabled: conf.http.catch_panic.enabled,
                 request_id_enabled: conf.http.request_id.enabled,
                 request_id_header: conf.http.request_id.header.clone(),
@@ -707,7 +708,6 @@ pub struct ChannelConfigOut {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct HttpConfigOut {
-    pub slash_policy: String,
     pub catch_panic_enabled: bool,
     pub request_id_enabled: bool,
     pub request_id_header: String,

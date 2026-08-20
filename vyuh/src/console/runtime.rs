@@ -128,9 +128,7 @@ fn read_stylesheet_name() -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use crate::{
-        auth::SecretRing, logging::LoggingConf, middlewares::SlashPolicy, routes::RouteRegistry,
-    };
+    use crate::{auth::SecretRing, logging::LoggingConf, routes::RouteRegistry};
 
     use super::ConsoleRuntime;
 
@@ -144,8 +142,7 @@ mod tests {
             16,
         )
         .map_err(|error| error.to_string());
-        let registry = RouteRegistry::build(std::iter::empty(), SlashPolicy::Exact)
-            .map_err(|error| error.to_string());
+        let registry = RouteRegistry::build(std::iter::empty()).map_err(|error| error.to_string());
         let error = registry
             .and_then(|registry| {
                 secrets.and_then(|secrets| {

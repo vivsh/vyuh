@@ -24,7 +24,7 @@ The main public pieces are:
 - `Site` accessors such as `db()`, `cache()`, `tasks()`, `templates()`, `service()`,
   `auth()`, `signals()`, `routes()`, and `operations()`.
 - `vyuh::testing::router(&site)` for tests or Axum interop.
-- `SiteConf::http(...)` for global HTTP middleware and slash behavior.
+- `SiteConf::http(...)` for global HTTP middleware.
 - `SiteConf::templates(...)` for Minijinja environment behavior.
 
 `Site` is cheap to clone. Clones share the same underlying application state.

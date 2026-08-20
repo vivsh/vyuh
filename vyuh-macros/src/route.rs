@@ -21,9 +21,8 @@ struct RouteConfMeta {
     /// URL path.
     #[darling(rename = "path")]
     path: String,
-
-    /// Optional slash policy: exact, trim, redirect_append, redirect_remove, auto.
-    slash: Option<String>,
+    /// Rejects the alternate trailing-slash form when false.
+    trim: Option<bool>,
 }
 
 /// Entry point for #[route] macro.
@@ -50,36 +49,26 @@ fn build_route_conf(
 
     let method_filter = build_method_filter(&methods);
     let name = &conf.name.as_deref().unwrap_or(&spec.name);
-    let slash = build_slash_policy(conf.slash.as_deref())?;
-
+    let trim = conf.trim.unwrap_or(true);
+    validate_trim(path, trim)?;
     Ok(quote! {
         ::vyuh::routes::RouteConf {
             name: ::std::borrow::Cow::Borrowed(#name),
             methods: #method_filter,
             path: ::std::borrow::Cow::Borrowed(#path),
-            slash: #slash,
+            trim: #trim,
         }
     })
 }
 
-fn build_slash_policy(value: Option<&str>) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let Some(value) = value else {
-        return Ok(quote! { None });
-    };
-    match value {
-        "exact" => Ok(quote! { Some(::vyuh::middlewares::SlashPolicy::Exact) }),
-        "trim" => Ok(quote! { Some(::vyuh::middlewares::SlashPolicy::Trim) }),
-        "redirect_append" => Ok(quote! { Some(::vyuh::middlewares::SlashPolicy::RedirectAppend) }),
-        "redirect_remove" => Ok(quote! { Some(::vyuh::middlewares::SlashPolicy::RedirectRemove) }),
-        "auto" => Ok(quote! { Some(::vyuh::middlewares::SlashPolicy::Auto) }),
-        other => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "Invalid slash policy '{}'. Supported: exact, trim, redirect_append, redirect_remove, auto",
-                other
-            ),
-        )),
+fn validate_trim(path: &str, trim: bool) -> Result<(), syn::Error> {
+    if trim || !path.ends_with('/') {
+        return Ok(());
     }
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "trim = false requires a slashless route path",
+    ))
 }
 
 /// Normalize method list (uppercase, default to GET).
@@ -186,6 +175,18 @@ mod tests {
         ));
     }
 
+    /// Verifies the removed slash-policy annotation is not accepted as an alias.
+    #[test]
+    fn rejects_removed_slash_annotation() {
+        let result = darling::ast::NestedMeta::parse_meta_list(quote! {
+            path = "/notes", slash = "exact"
+        });
+        assert!(matches!(
+            &result,
+            Ok(items) if RouteConfMeta::from_list(items).is_err()
+        ));
+    }
+
     #[test]
     fn normalize_methods_defaults_to_get() {
         assert_eq!(normalize_methods(&[]), vec!["GET"]);
@@ -222,5 +223,16 @@ mod tests {
     fn validate_path_rejects_double_slashes() {
         let err = validate_path("/api//notes").unwrap_err();
         assert!(err.to_string().contains("double slashes"));
+    }
+
+    /// Verifies macro configuration rejects strict trimming on a slashful declaration.
+    #[test]
+    fn validate_trim_rejects_slashful_paths() {
+        let error = validate_trim("/files/", false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a slashless route path")
+        );
     }
 }

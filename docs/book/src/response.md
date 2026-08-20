@@ -147,8 +147,8 @@ async fn dashboard(templates: Templates) -> Result<Html<String>, TemplateError> 
 }
 ```
 
-HTML return metadata is also used by slash policy `Auto` to distinguish page
-routes from API routes.
+Trailing-slash behavior is determined by the route's declared path, independent
+of its response type.
 
 ## Status And Empty Responses
 

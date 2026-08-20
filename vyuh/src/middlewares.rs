@@ -1,22 +1,17 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::time::Duration;
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderName, HeaderValue, Method, StatusCode, header},
+    http::{HeaderName, HeaderValue, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    callables::{Operation, OperationKind, ReturnPart},
-    errors::{ErrorReport, ErrorSourceKind},
-    routes::Methods,
-};
+use crate::errors::{ErrorReport, ErrorSourceKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConf {
-    pub slash: SlashConf,
     pub catch_panic: CatchPanicConf,
     pub request_id: RequestIdConf,
     pub trace: TraceConf,
@@ -32,7 +27,6 @@ pub struct HttpConf {
 impl Default for HttpConf {
     fn default() -> Self {
         Self {
-            slash: SlashConf::default(),
             catch_panic: CatchPanicConf::default(),
             request_id: RequestIdConf::default(),
             trace: TraceConf::default(),
@@ -69,29 +63,6 @@ impl HttpConf {
             ..Self::default()
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlashConf {
-    pub policy: SlashPolicy,
-}
-
-impl Default for SlashConf {
-    fn default() -> Self {
-        Self {
-            policy: SlashPolicy::Auto,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlashPolicy {
-    Exact,
-    Trim,
-    RedirectAppend,
-    RedirectRemove,
-    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,184 +193,6 @@ impl Default for ShutdownConf {
 
 fn default_shutdown_grace_period_ms() -> u64 {
     10_000
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum SlashAction {
-    Rewrite(String),
-    Redirect(String),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SlashRule {
-    methods: Methods,
-    from_path: String,
-    action: SlashAction,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SlashRouter {
-    rules: Vec<SlashRule>,
-}
-
-impl SlashRouter {
-    pub(crate) fn from_operations(
-        ops: impl Iterator<Item = Operation>,
-        default_policy: SlashPolicy,
-    ) -> Result<Self, String> {
-        let mut rules = Vec::new();
-        let mut seen: BTreeMap<(String, &'static str), String> = BTreeMap::new();
-
-        for op in ops.filter(|op| op.kind == OperationKind::Route && !op.hidden) {
-            if op.path == "/" {
-                continue;
-            }
-
-            let policy = effective_slash(op.slash_policy.unwrap_or(default_policy), &op);
-            let path = op.path.as_str();
-            let methods = op.methods;
-            let mut add_rule = |from_path: String, action: SlashAction| -> Result<(), String> {
-                for (method_name, _) in methods.iter() {
-                    let key = (from_path.clone(), method_name);
-                    let value = describe_action(&action);
-                    if let Some(existing) = seen.get(&key) {
-                        if existing != &value {
-                            return Err(format!(
-                                "conflicting slash rule for {} {}: {} vs {}",
-                                method_name, from_path, existing, value
-                            ));
-                        }
-                    }
-                    seen.insert(key, value.clone());
-                }
-                rules.push(SlashRule {
-                    methods,
-                    from_path,
-                    action,
-                });
-                Ok(())
-            };
-
-            match policy {
-                SlashPolicy::Exact => {}
-                SlashPolicy::Trim => {
-                    if let Some(trimmed) = path.strip_suffix('/') {
-                        add_rule(trimmed.to_string(), SlashAction::Rewrite(path.to_string()))?;
-                    } else {
-                        add_rule(format!("{}/", path), SlashAction::Rewrite(path.to_string()))?;
-                    }
-                }
-                SlashPolicy::RedirectAppend => {
-                    if let Some(trimmed) = path.strip_suffix('/') {
-                        add_rule(trimmed.to_string(), SlashAction::Redirect(path.to_string()))?;
-                    } else {
-                        let canonical = format!("{}/", path);
-                        add_rule(path.to_string(), SlashAction::Redirect(canonical.clone()))?;
-                        add_rule(canonical, SlashAction::Rewrite(path.to_string()))?;
-                    }
-                }
-                SlashPolicy::RedirectRemove => {
-                    if let Some(trimmed) = path.strip_suffix('/') {
-                        add_rule(path.to_string(), SlashAction::Redirect(trimmed.to_string()))?;
-                        add_rule(trimmed.to_string(), SlashAction::Rewrite(path.to_string()))?;
-                    } else {
-                        add_rule(
-                            format!("{}/", path),
-                            SlashAction::Redirect(path.to_string()),
-                        )?;
-                    }
-                }
-                SlashPolicy::Auto => unreachable!("effective_policy resolves Auto"),
-            }
-        }
-
-        Ok(Self { rules })
-    }
-
-    fn action_for(&self, method: &Method, path: &str) -> Option<&SlashAction> {
-        let method = Methods::from_str(method.as_str())?;
-        self.rules
-            .iter()
-            .find(|rule| rule.from_path == path && rule.methods.contains(method))
-            .map(|rule| &rule.action)
-    }
-}
-
-pub(crate) fn effective_slash(policy: SlashPolicy, op: &Operation) -> SlashPolicy {
-    match policy {
-        SlashPolicy::Auto => {
-            if is_html_operation(op) {
-                if op.path.ends_with('/') {
-                    SlashPolicy::RedirectAppend
-                } else {
-                    SlashPolicy::RedirectRemove
-                }
-            } else {
-                SlashPolicy::Trim
-            }
-        }
-        policy => policy,
-    }
-}
-
-fn is_html_operation(op: &Operation) -> bool {
-    op.returns.iter().any(|ret| match &ret.part {
-        ReturnPart::Body(_, content_type) => content_type.as_ref().starts_with("text/html"),
-        ReturnPart::Created(_, content_type) => content_type.as_ref().starts_with("text/html"),
-        ReturnPart::Accepted(_, content_type) => content_type.as_ref().starts_with("text/html"),
-        _ => false,
-    })
-}
-
-fn describe_action(action: &SlashAction) -> String {
-    match action {
-        SlashAction::Rewrite(path) => format!("rewrite:{}", path),
-        SlashAction::Redirect(path) => format!("redirect:{}", path),
-    }
-}
-
-pub(crate) async fn slash_middleware(
-    State(slash): State<Arc<SlashRouter>>,
-    mut req: Request,
-    next: Next,
-) -> Response {
-    let path = req.uri().path().to_string();
-    let Some(action) = slash.action_for(req.method(), &path).cloned() else {
-        return next.run(req).await;
-    };
-
-    match action {
-        SlashAction::Redirect(target) => {
-            let location = with_query(&target, req.uri().query());
-            Redirect::permanent(&location).into_response()
-        }
-        SlashAction::Rewrite(target) => match rewrite_uri(req.uri(), &target) {
-            Some(uri) => {
-                *req.uri_mut() = uri;
-                next.run(req).await
-            }
-            None => ErrorReport::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorSourceKind::Framework,
-                "invalid_slash_rewrite",
-                "Invalid slash rewrite target.",
-            )
-            .into_response(),
-        },
-    }
-}
-
-fn with_query(path: &str, query: Option<&str>) -> String {
-    match query {
-        Some(query) => format!("{}?{}", path, query),
-        None => path.to_string(),
-    }
-}
-
-fn rewrite_uri(uri: &axum::http::Uri, target_path: &str) -> Option<axum::http::Uri> {
-    let mut parts = uri.clone().into_parts();
-    parts.path_and_query = with_query(target_path, uri.query()).parse().ok();
-    axum::http::Uri::from_parts(parts).ok()
 }
 
 pub(crate) async fn request_id_middleware(

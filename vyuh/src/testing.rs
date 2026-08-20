@@ -9,8 +9,7 @@ use crate::bundles::Bundle;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 use crate::bundles::IntoBundle;
 use crate::db::DbConf;
-use crate::{Site, SiteConf, SiteError};
-use axum::Router;
+use crate::{Site, SiteConf, SiteError, SiteService};
 use axum::body::{self, Body, Bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, Response};
@@ -25,7 +24,7 @@ pub use crate::db::sqlx::test_block_on;
 pub use tokio;
 
 /// Returns the router of an already-built site for direct Axum-level tests.
-pub fn router(site: &Site) -> Router {
+pub fn router(site: &Site) -> SiteService {
     site.router()
 }
 
@@ -44,7 +43,7 @@ pub struct TestSite {
 }
 
 struct TestSiteInner {
-    app: Router,
+    app: SiteService,
     site: Site,
 }
 
@@ -431,7 +430,7 @@ pub async fn test_site(conf: SiteConf, bundle: impl IntoBundle) -> Result<TestSi
 }
 
 pub struct TestRequestBuilder {
-    app: Router,
+    app: SiteService,
     method: Method,
     path: String,
     headers: Vec<(String, String)>,
@@ -440,7 +439,7 @@ pub struct TestRequestBuilder {
 }
 
 impl TestRequestBuilder {
-    pub fn new(app: Router, method: Method, path: &str) -> Self {
+    pub fn new(app: SiteService, method: Method, path: &str) -> Self {
         Self {
             app,
             method,

@@ -72,8 +72,8 @@ sub.attach(stream).await
 
 Use `Beacon` when a live endpoint is entirely a policy over typed signals. A
 Beacon is an authenticated `GET` route: it inherits its bundle audience, tags,
-prefix, and slash policy, then negotiates WebSocket, SSE, or polling exactly as
-`Subscriber` does. Signals remain the only publish path.
+and prefix, then negotiates WebSocket, SSE, or polling exactly as `Subscriber`
+does. Signals remain the only publish path.
 
 ```rust
 use std::time::Duration;
@@ -118,6 +118,11 @@ bundles::beacon(
 ```
 
 Use the direct constructor for generated or conditional Beacon registration.
+
+Like a normal route, a slashless Beacon accepts one alternate terminal slash.
+Use `trim = false` in the macro or `BeaconConf::trim(false)` to reject it. A
+Beacon path declared with `/` redirects its slashless alternate to the declared
+canonical path.
 
 ## Publishing
 

@@ -145,7 +145,7 @@ mod tests {
                 name: Cow::Borrowed(name),
                 path: Cow::Borrowed(path),
                 methods: Methods::GET,
-                slash: None,
+                trim: true,
             },
         )
     }
@@ -299,7 +299,7 @@ mod tests {
                     name: Cow::Borrowed("missing"),
                     path: Cow::Borrowed("/missing"),
                     methods: Methods::GET,
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::url_info(urls),
@@ -477,7 +477,7 @@ mod tests {
                     name: Cow::Borrowed("css_page"),
                     path: Cow::Borrowed("/static/css/app.css"),
                     methods: Methods::GET,
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::url_info(urls),

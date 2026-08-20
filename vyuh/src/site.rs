@@ -432,10 +432,11 @@ impl SiteBuilder {
 
         if observability.enabled() {
             let [liveness_path, readiness_path, metrics_path] = observability.paths();
-            router = router
-                .route(liveness_path, get(crate::observability::liveness))
-                .route(readiness_path, get(crate::observability::readiness))
-                .route(metrics_path, get(crate::observability::metrics));
+            router =
+                crate::slash::route(router, liveness_path, get(crate::observability::liveness));
+            router =
+                crate::slash::route(router, readiness_path, get(crate::observability::readiness));
+            router = crate::slash::route(router, metrics_path, get(crate::observability::metrics));
         }
 
         if !bundle.asset_dirs.is_empty() {
@@ -495,16 +496,8 @@ impl SiteBuilder {
             .fallback(route_not_found)
             .method_not_allowed_fallback(method_not_allowed);
 
-        let slash_router = Arc::new(
-            crate::middlewares::SlashRouter::from_operations(
-                bundle.ops.values().cloned(),
-                self.conf.http.slash.policy,
-            )
-            .map_err(crate::bundles::BundleError::DocGen)?,
-        );
-        let route_registry =
-            crate::routes::RouteRegistry::build(bundle.ops.values(), self.conf.http.slash.policy)
-                .map_err(crate::bundles::BundleError::RouteRegistry)?;
+        let route_registry = crate::routes::RouteRegistry::build(bundle.ops.values())
+            .map_err(crate::bundles::BundleError::RouteRegistry)?;
         let console_runtime = console_runtime(
             &self.conf.console,
             &route_registry,
@@ -634,7 +627,6 @@ impl SiteBuilder {
             operation_audiences,
             cache,
             template_engine,
-            slash_router,
             route_registry,
             joinset: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
             channels: SubscriptionRuntime::new(
@@ -673,7 +665,6 @@ struct SiteInner {
     console_runtime: Option<crate::console::ConsoleRuntime>,
     asset_urls: crate::assets::AssetUrls,
     template_engine: TemplateEngine,
-    slash_router: Arc<crate::middlewares::SlashRouter>,
     route_registry: crate::routes::RouteRegistry,
     timezone: Tz,
     bundle: Bundle,
@@ -1158,14 +1149,9 @@ impl Site {
 
     /// Mainly needed for testing purposes.
     /// and before running the server.
-    pub(crate) fn router(&self) -> axum::Router {
+    pub(crate) fn router(&self) -> crate::SiteService {
         let http = &self.inner.conf.http;
         let mut router = self.inner.bundle.to_router();
-
-        router = router.layer(axum::middleware::from_fn_with_state(
-            self.inner.slash_router.clone(),
-            crate::middlewares::slash_middleware,
-        ));
 
         if http.security_headers.enabled {
             router = router.layer(axum::middleware::from_fn_with_state(
@@ -1227,7 +1213,7 @@ impl Site {
             error_report_middleware,
         ));
 
-        router.with_state(self.clone())
+        crate::SiteService::new(router.with_state(self.clone()))
     }
 
     /// Return the task client for submitting durable background work.
@@ -1306,7 +1292,9 @@ fn validate_observability_paths(
         return Ok(());
     }
     for path in observability.paths() {
-        if bundle.ops.values().any(|operation| operation.path == path) {
+        if bundle.ops.values().any(|operation| {
+            crate::slash::internal_path(&operation.path) == crate::slash::internal_path(path)
+        }) {
             return Err(conf::ConfError::InvalidValue {
                 field: "observability".into(),
                 reason: format!("path {path} conflicts with an application route"),
@@ -1649,7 +1637,7 @@ mod tests {
                     name: "response_probe".into(),
                     methods: Methods::GET,
                     path: "/response-probe".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1658,7 +1646,7 @@ mod tests {
                     name: "raw_not_found".into(),
                     methods: Methods::GET,
                     path: "/raw-not-found".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1667,7 +1655,7 @@ mod tests {
                     name: "internal_error_probe".into(),
                     methods: Methods::GET,
                     path: "/internal-error".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
         ])
@@ -1682,7 +1670,7 @@ mod tests {
                     name: "read_shared".into(),
                     methods: Methods::GET,
                     path: "/shared".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1691,7 +1679,7 @@ mod tests {
                     name: "create_shared".into(),
                     methods: Methods::POST,
                     path: "/shared".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
         ])
@@ -1706,7 +1694,7 @@ mod tests {
                     name: "read_many".into(),
                     methods: Methods::GET,
                     path: "/many".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1715,7 +1703,7 @@ mod tests {
                     name: "patch_many".into(),
                     methods: Methods::PATCH,
                     path: "/many".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1724,7 +1712,7 @@ mod tests {
                     name: "delete_many".into(),
                     methods: Methods::DELETE,
                     path: "/many".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
         ])
@@ -1819,7 +1807,7 @@ mod tests {
                     name: "first_duplicate".into(),
                     methods: Methods::GET,
                     path: "/duplicate".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
             bundles::route(
@@ -1828,7 +1816,7 @@ mod tests {
                     name: "second_duplicate".into(),
                     methods: Methods::GET,
                     path: "/duplicate".into(),
-                    slash: None,
+                    trim: true,
                 },
             ),
         ]);

@@ -9,7 +9,6 @@ use std::{
     sync::Arc,
 };
 
-use crate::middlewares::SlashPolicy;
 use crate::{
     Site,
     auth::{AudienceId, ProviderDefinitionInner},
@@ -242,15 +241,12 @@ impl Bundle {
         self.validate_configurations()?;
         self.register_task_lanes()?;
         let updates = self.operation_updates(default_audience)?;
-        for (id, audience, tags, slash_policy) in updates {
+        for (id, audience, tags) in updates {
             let Some(operation) = self.ops.get_mut(&id) else {
                 continue;
             };
             operation.audience = audience;
             append_tags(&mut operation.tags, tags);
-            if matches!(operation.kind, OperationKind::Route | OperationKind::ApiDoc) {
-                operation.slash_policy = slash_policy;
-            }
         }
         Ok(())
     }
@@ -521,12 +517,7 @@ impl Bundle {
         default_audience: Option<AudienceId>,
     ) -> Result<OperationUpdate, BundleError> {
         let Some(bundle_id) = operation.bundle_id else {
-            return Ok((
-                operation.id,
-                operation.audience.clone(),
-                Vec::new(),
-                operation.slash_policy,
-            ));
+            return Ok((operation.id, operation.audience.clone(), Vec::new()));
         };
         let configs = self.configs_for(bundle_id);
         let audience = configs
@@ -547,12 +538,7 @@ impl Bundle {
             .iter()
             .flat_map(|conf| conf.tags.iter().cloned())
             .collect();
-        let slash_policy = configs
-            .iter()
-            .filter_map(|conf| conf.slash_policy)
-            .next_back()
-            .or(operation.slash_policy);
-        Ok((operation.id, audience, tags, slash_policy))
+        Ok((operation.id, audience, tags))
     }
 
     fn configs_for(&self, id: uuid::Uuid) -> Vec<&BundleConf> {
@@ -590,6 +576,13 @@ impl Bundle {
                 reason,
             });
         }
+        if !op.trim && op.path.ends_with('/') {
+            return Err(BundleError::InvalidRoutePath {
+                name: op.name.clone(),
+                path: op.path.clone(),
+                reason: "trim = false requires a slashless route path".to_string(),
+            });
+        }
         if self.name_index.contains_key(&op.name) {
             return Err(BundleError::DuplicateRouteName {
                 name: op.name.clone(),
@@ -605,7 +598,10 @@ impl Bundle {
         self.ops
             .values()
             .filter(|existing| existing.kind == OperationKind::Route)
-            .find(|existing| existing.path == op.path && existing.methods.intersects(op.methods))
+            .find(|existing| {
+                crate::slash::internal_path(&existing.path) == crate::slash::internal_path(&op.path)
+                    && existing.methods.intersects(op.methods)
+            })
             .map(|existing| {
                 let methods = existing
                     .methods
@@ -623,7 +619,6 @@ type OperationUpdate = (
     crate::OperationId,
     Option<AudienceId>,
     Vec<Cow<'static, str>>,
-    Option<SlashPolicy>,
 );
 
 fn append_tags(target: &mut Vec<Cow<'static, str>>, additions: Vec<Cow<'static, str>>) {
@@ -738,7 +733,7 @@ mod tests {
             hidden: false,
             audience: None,
             bundle_id: None,
-            slash_policy: None,
+            trim: true,
         }
     }
 
@@ -767,7 +762,7 @@ mod tests {
                 name: "ping".into(),
                 methods: routes::Methods::GET,
                 path: "/ping".into(),
-                slash: None,
+                trim: true,
             },
         )]);
         let route_id = *bundle.name_index.get("ping").unwrap();
@@ -797,7 +792,7 @@ mod tests {
                 name: "ping".into(),
                 methods: routes::Methods::GET,
                 path: "/ping".into(),
-                slash: None,
+                trim: true,
             },
         )]);
         let child_id = child.id;
@@ -882,7 +877,7 @@ mod tests {
                 name: "ping".into(),
                 methods: routes::Methods::GET,
                 path: "/ping".into(),
-                slash: None,
+                trim: true,
             },
         )]);
         let id = bundle

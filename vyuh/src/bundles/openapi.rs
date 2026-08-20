@@ -191,6 +191,7 @@ impl DocEngine {
         auth: &AuthConf,
         topology: &BundleTopology,
     ) -> Result<(), BundleError> {
+        validate_endpoint_collisions(&self.nodes, ops)?;
         for node in &self.nodes {
             let spec_path = ops
                 .get(&node.spec_op_id)
@@ -240,7 +241,7 @@ impl DocEngine {
                 )
             };
 
-            *router = std::mem::take(router).route(&spec_path, spec_route);
+            *router = crate::slash::route(std::mem::take(router), &spec_path, spec_route);
 
             if let Some(doc_op_id) = node.doc_op_id {
                 let doc_path = ops
@@ -275,11 +276,40 @@ impl DocEngine {
                         },
                     )
                 };
-                *router = std::mem::take(router).route(&doc_path, viewer_route);
+                *router = crate::slash::route(std::mem::take(router), &doc_path, viewer_route);
             }
         }
         Ok(())
     }
+}
+
+/// Rejects normalized OpenAPI endpoint collisions before Axum registration.
+fn validate_endpoint_collisions(
+    nodes: &[DocNode],
+    operations: &BTreeMap<OperationId, Operation>,
+) -> Result<(), BundleError> {
+    for marker in nodes
+        .iter()
+        .flat_map(|node| [Some(node.spec_op_id), node.doc_op_id])
+        .flatten()
+    {
+        let Some(endpoint) = operations.get(&marker) else {
+            continue;
+        };
+        let collision = operations.values().any(|operation| {
+            operation.id != marker
+                && operation.methods.contains(crate::routes::Methods::GET)
+                && crate::slash::internal_path(&operation.path)
+                    == crate::slash::internal_path(&endpoint.path)
+        });
+        if collision {
+            return Err(BundleError::DocGen(format!(
+                "OpenAPI endpoint conflicts with GET {}",
+                endpoint.path
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn authenticated(_: &AuthUser) -> bool {
@@ -409,7 +439,7 @@ mod tests {
             hidden: false,
             audience: None,
             bundle_id: None,
-            slash_policy: None,
+            trim: true,
         }
     }
 
@@ -454,6 +484,19 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].id, route_id);
+    }
+
+    /// Verifies slash variants of one OpenAPI endpoint fail before Axum registration.
+    #[test]
+    fn normalized_openapi_endpoint_collision_is_rejected() {
+        let mut route = operation(OperationKind::Route, "application_spec", "/openapi.json/");
+        let route_id = route.id;
+        let mut bundle = Bundle::new();
+        route.assign_bundle_id(bundle.id);
+        bundle.ops.insert(route_id, route);
+        let bundle = bundle.with_conf(super::super::conf().openapi(OpenApiConf::default()));
+
+        assert!(validate_endpoint_collisions(&bundle.doc_engine.nodes, &bundle.ops).is_err());
     }
 
     #[test]
