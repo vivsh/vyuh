@@ -37,6 +37,88 @@ pub struct LaneClaim {
     pub lane: TaskLane,
     /// Maximum candidate rows requested for this lane.
     pub limit: usize,
+    /// Current durable owner token and local lifecycle evidence for locked lanes.
+    pub owner: Option<LaneOwnerRequest>,
+}
+
+/// Runner evidence supplied while coordinating one locked lane.
+#[derive(Debug, Clone)]
+pub struct LaneOwnerRequest {
+    /// Token currently held by this runner, when any.
+    pub token: Option<String>,
+    /// Whether the runner has no queued, running, or uncommitted lane work.
+    pub quiescent: bool,
+    /// Whether this scheduler turn has global batch budget to claim a cohort.
+    pub allow_claim: bool,
+    /// Whether handler work completed since the last acknowledged owner turn.
+    pub completed_work: bool,
+    /// Completed lifecycle hook waiting for a fenced durable transition.
+    pub hook: Option<LaneHookResult>,
+}
+
+/// Result returned by one non-blocking lane lifecycle hook.
+#[derive(Debug, Clone)]
+pub struct LaneHookResult {
+    /// Lifecycle generation passed to the hook.
+    pub generation: i64,
+    /// Hook edge that completed.
+    pub action: LaneHookAction,
+    /// Success or one bounded diagnostic failure.
+    pub result: Result<(), String>,
+}
+
+/// Lifecycle hook requested for one durably owned lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneHookAction {
+    /// Reconcile the lane's external capacity to stopped.
+    Idle,
+    /// Reconcile the lane's external capacity to running.
+    Busy,
+}
+
+/// Durable phase of one locked lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i16)]
+pub enum LaneOwnerPhase {
+    Active = 0,
+    Idling = 1,
+    Idle = 2,
+    Busying = 3,
+    IdleFailed = 4,
+    BusyFailed = 5,
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+impl LaneOwnerPhase {
+    /// Converts one stable persisted phase value.
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+        match value {
+            0 => Ok(Self::Active),
+            1 => Ok(Self::Idling),
+            2 => Ok(Self::Idle),
+            3 => Ok(Self::Busying),
+            4 => Ok(Self::IdleFailed),
+            5 => Ok(Self::BusyFailed),
+            _ => Err(TaskError::TaskExecutionError(format!(
+                "invalid task lane owner phase {value}"
+            ))),
+        }
+    }
+}
+
+/// Store response for one locked lane owner turn.
+#[derive(Debug, Clone)]
+pub struct LaneOwnerPoll {
+    /// Current owner token, omitted when this runner no longer owns the lane.
+    pub token: Option<String>,
+    /// Current lifecycle generation.
+    pub generation: i64,
+    /// Current durable lifecycle phase.
+    pub phase: LaneOwnerPhase,
+    /// Hook the runner must spawn without blocking its scheduler.
+    pub action: Option<LaneHookAction>,
+    /// Whether this turn replaced an expired prior owner token.
+    pub takeover: bool,
 }
 
 /// Claimed work and saturation evidence for one lane.
@@ -52,6 +134,8 @@ pub struct LanePoll {
     pub saturated: bool,
     /// This lane's next effective store-relative readiness deadline.
     pub next_wake_in: Option<Duration>,
+    /// Durable ownership result for a locked lane.
+    pub owner: Option<LaneOwnerPoll>,
 }
 
 /// One per-lane store poll and its earliest useful future wake.
@@ -89,6 +173,20 @@ pub struct TaskCommit {
     pub lane: TaskLane,
     /// Payload-free handler lifecycle outcome.
     pub outcome: TaskOutcome,
+    /// Fencing token required when the task belongs to a locked lane.
+    pub owner_token: Option<String>,
+}
+
+/// One task lease renewal fenced by its optional durable lane owner.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct TaskLease {
+    /// Persisted task whose execution lease must be extended.
+    pub task_id: TaskId,
+    /// Lane used to select the ordinary or fenced renewal path.
+    pub lane: TaskLane,
+    /// Fencing token required when the task belongs to a locked lane.
+    pub owner_token: Option<String>,
 }
 
 /// Runtime policy resolved before a task store starts serving workers.
@@ -103,6 +201,8 @@ pub struct TaskStoreConf {
     pub idempotency: Vec<TaskIdempotencyConf>,
     /// Normalized durable emitter schedules accepted by this worker deployment.
     pub schedules: Vec<TaskScheduleConf>,
+    /// Shared polling cadence used to throttle failed lifecycle hooks.
+    pub poll_interval: Duration,
 }
 
 /// Store-visible identity for one durable task-targeted emitter schedule.
@@ -194,7 +294,7 @@ pub(crate) trait AbstractTaskStore {
     fn renew_leases<'a>(
         &'a self,
         runner_id: &'a str,
-        task_ids: &'a [TaskId],
+        leases: &'a [TaskLease],
     ) -> impl Future<Output = Result<Vec<TaskId>, TaskError>> + Send + 'a;
 
     /// Runs one atomic scheduler turn for one runner.
@@ -203,7 +303,7 @@ pub(crate) trait AbstractTaskStore {
         runner_id: &'a str,
         claims: &'a [LaneClaim],
         commits: &'a [TaskCommit],
-        renewals: &'a [TaskId],
+        renewals: &'a [TaskLease],
     ) -> impl Future<Output = Result<TaskTick, TaskError>> + Send + 'a;
 
     /// Stores a batch of task intents and resolves idempotency receipts.
@@ -275,9 +375,9 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
     async fn renew_leases(
         &self,
         runner_id: &str,
-        task_ids: &[TaskId],
+        leases: &[TaskLease],
     ) -> Result<Vec<TaskId>, TaskError> {
-        (**self).renew_leases(runner_id, task_ids).await
+        (**self).renew_leases(runner_id, leases).await
     }
 
     async fn tick(
@@ -285,7 +385,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         runner_id: &str,
         claims: &[LaneClaim],
         commits: &[TaskCommit],
-        renewals: &[TaskId],
+        renewals: &[TaskLease],
     ) -> Result<TaskTick, TaskError> {
         (**self).tick(runner_id, claims, commits, renewals).await
     }
@@ -339,9 +439,16 @@ pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
     }
     let mut lanes = conf.lanes.iter().collect::<Vec<_>>();
     lanes.sort_unstable_by_key(|lane| lane.lane().as_str());
+    if lanes.iter().any(|lane| lane.lane_lock().is_some()) {
+        hasher.update(b"lane-lock-v1\0");
+        hasher.update(&conf.poll_interval.as_nanos().to_le_bytes());
+    }
     for lane in lanes {
         hasher.update(b"lane\0");
         hasher.update(lane.lane().as_str().as_bytes());
+        if let Some(lane_lock) = lane.lane_lock() {
+            fingerprint_lock(&mut hasher, lane_lock);
+        }
         if let Some(rate) = lane.global_rate() {
             hasher.update(&rate.permits().to_le_bytes());
             hasher.update(&rate.period().as_nanos().to_le_bytes());
@@ -354,6 +461,22 @@ pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
         hasher.update(&[0xff]);
     }
     hasher.finalize().to_hex().to_string()
+}
+
+/// Adds one optional lane-owner policy to the shared deployment identity.
+fn fingerprint_lock(hasher: &mut blake3::Hasher, lane_lock: &super::TaskLaneLock) {
+    hasher.update(b"locked\0");
+    hasher.update(&lane_lock.batch_size().to_le_bytes());
+    hasher.update(&lane_lock.idle_duration().as_nanos().to_le_bytes());
+    if let Some(deadline) = lane_lock.batch_deadline() {
+        hasher.update(&deadline.as_nanos().to_le_bytes());
+    }
+    for hook in [lane_lock.idle_hook(), lane_lock.busy_hook()] {
+        if let Some(hook) = hook {
+            hasher.update(hook.identity().as_bytes());
+        }
+        hasher.update(&[0]);
+    }
 }
 
 fn fingerprint_schedules(hasher: &mut blake3::Hasher, schedules: &[TaskScheduleConf]) {
@@ -422,7 +545,7 @@ pub(crate) fn normalize_outcome(
     }
 }
 
-fn truncate_utf8(mut value: String, limit: usize) -> String {
+pub(crate) fn truncate_utf8(mut value: String, limit: usize) -> String {
     if value.len() <= limit {
         return value;
     }

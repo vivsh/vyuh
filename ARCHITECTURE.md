@@ -67,11 +67,25 @@ The `vyuh` crate is organized around these subsystems:
   enqueue path, not a second scheduler or workflow runtime.
 - `tasks` provides typed input, value-less durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
-  and commits, lane-owned retry/backoff and idempotency-retention policy, local
+  and commits, optional process-local `Data<Batch<T>>` handler invocation,
+  storage-only workflow lineage/kind metadata, lane-owned retry/backoff and
+  idempotency-retention policy, local
   runner and store-wide database rate limits, adaptive polling, lease renewal,
-  and explicit continuation lifecycle control. Tasks statically declare their
+  opt-in durable lane ownership, and explicit continuation lifecycle control.
+  Ordinary lanes retain the direct task claim path. An owned lane coordinates
+  through a separate primary-key lease row, keeps one fenced owner across task
+  execution, and runs lifecycle hooks as independent async futures outside task
+  concurrency. Its lease renewal joins the same centrally paced store turn and
+  wakes only for normal polling, useful work, or the half-lease safety deadline;
+  it does not create a per-lane renewal loop. Tasks statically declare their
   lane and optional key rule; reusable bundles may contribute complete lane
-  defaults, while site configuration resolves or strictly rejects missing lanes.
+  defaults, while site configuration resolves or strictly rejects missing
+  lanes.
+  Local handler batching groups matching rows already held by a lane queue and
+  never adds a store query or waiting policy. It is independent of durable lane
+  ownership: each row retains its own attempt, rate permit, lease, fenced
+  commit, and inspection history while one batch future consumes one local
+  handler-concurrency slot.
 - `cache` provides an immutable per-site registry of asynchronous named cache
   providers. Its typed handles own JSON serialization, canonical provider and
   namespace key scoping, and bounded metrics; providers own byte storage, TTL,
@@ -177,6 +191,13 @@ Production applications should enable exactly one database backend feature:
 
 Backend aliases and migration/query types are re-exported from Mool through
 `vyuh::db`; Vyuh does not own a second database abstraction.
+
+Task lane ownership uses leased rows on every backend. PostgreSQL advisory
+locks are deliberately excluded: session locks would pin pool connections and
+transaction locks would require a database transaction across handler or hook
+execution. Owner tokens fence renewals, commits, lifecycle transitions, and
+release after lease takeover; no transaction remains open during application
+execution.
 
 ## Signal And Channel Model
 

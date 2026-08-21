@@ -9,7 +9,7 @@ use crate::{
 
 use super::{
     common::DbTaskStore,
-    model::{RuntimePolicyPatch, TaskRateRow, TaskRow, TaskRuntimeRow},
+    model::{RuntimePolicyPatch, TaskLaneLockRow, TaskRateRow, TaskRow, TaskRuntimeRow},
     writes::{batch_update_rows, finish, update_idempotency_batch},
 };
 
@@ -27,10 +27,38 @@ impl DbTaskStore {
         reject_orphaned_tasks(&mut transaction, &conf).await?;
         ensure_runtime_policy(&mut transaction, &fingerprint, now).await?;
         initialize_rate_rows(&mut transaction, &conf, &fingerprint, now).await?;
+        initialize_lock_rows(&mut transaction, &conf, now).await?;
         transaction.commit().await?;
         *self.runtime_conf.write().await = Some(conf);
         Ok(())
     }
+}
+
+/// Inserts missing opt-in lane rows without disturbing active ownership.
+async fn initialize_lock_rows(
+    transaction: &mut db::DbTransaction<'_>,
+    conf: &TaskStoreConf,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), TaskError> {
+    let table = DbTaskStore::lane_lock_table();
+    for lane in conf.lanes.iter().filter(|lane| lane.lane_lock().is_some()) {
+        let row = TaskLaneLockRow {
+            lane_name: lane.lane().to_string(),
+            owner_id: None,
+            owner_token: None,
+            leased_until: None,
+            phase: crate::tasks::LaneOwnerPhase::Active as i16,
+            flushing: false,
+            empty_since: None,
+            generation: 0,
+            hook_retry_at: None,
+            last_hook_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_lock_if_missing(transaction, &table, &row).await?;
+    }
+    Ok(())
 }
 
 /// Terminates legacy running rows that have no deadline for safe lease recovery.
@@ -204,6 +232,11 @@ async fn replace_runtime_policy(
             "task lane or global rate policy cannot change while tasks are running".into(),
         ));
     }
+    if live_lane_owner(transaction, now).await? {
+        return Err(TaskError::InvalidConfig(
+            "task lane policy cannot change while a lane owner is active".into(),
+        ));
+    }
     let runtime = DbTaskStore::runtime_table();
     let patch = RuntimePolicyPatch {
         policy_fingerprint: fingerprint.into(),
@@ -221,6 +254,20 @@ async fn replace_runtime_policy(
         .exec(transaction)
         .await?;
     Ok(())
+}
+
+/// Detects live lane ownership before a deployment policy is replaced.
+async fn live_lane_owner(
+    transaction: &mut db::DbTransaction<'_>,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool, TaskError> {
+    let locks = DbTaskStore::lane_lock_table();
+    Ok(db::from(&locks)
+        .filter(locks.owner_token.is_not_null())
+        .filter(locks.leased_until.gt(db::val(Some(now))))
+        .exists()
+        .exec(transaction)
+        .await?)
 }
 
 #[cfg(feature = "sqlite")]
@@ -342,6 +389,33 @@ async fn insert_rate_if_missing(
     Ok(())
 }
 
+/// Creates one lane-lock row while preserving any current owner and phase.
+async fn insert_lock_if_missing(
+    transaction: &mut db::DbTransaction<'_>,
+    table: &db::queries::ModelTable<TaskLaneLockRow>,
+    row: &TaskLaneLockRow,
+) -> Result<(), TaskError> {
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        use crate::db::backend::IgnoreConflictsExt as _;
+        db::from(table)
+            .insert_many(std::slice::from_ref(row))
+            .ignore_conflicts_on(&table.lane_name)
+            .exec(transaction)
+            .await?;
+    }
+    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
+    {
+        use crate::db::backend::IgnoreErrorsExt as _;
+        db::from(table)
+            .insert_many(std::slice::from_ref(row))
+            .ignore_errors()
+            .exec(transaction)
+            .await?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, any(feature = "postgres", feature = "sqlite")))]
 mod tests {
     use super::*;
@@ -349,22 +423,32 @@ mod tests {
     /// Verifies singleton and lane initialization use conflict-ignore inserts, never no-op upserts.
     #[test]
     fn initialization_inserts_ignore_conflicts() -> Result<(), String> {
-        use crate::db::backend::IgnoreConflictsExt as _;
-
         let now = Utc::now();
+        assert_ignore_plan(&runtime_plan(now)?, "id")?;
+        assert_ignore_plan(&rate_plan(now)?, "lane_name")?;
+        assert_ignore_plan(&lock_plan(now)?, "lane_name")
+    }
+
+    /// Builds the singleton runtime insert-if-missing statement.
+    fn runtime_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
+        use crate::db::backend::IgnoreConflictsExt as _;
         let runtime = DbTaskStore::runtime_table();
         let runtime_row = TaskRuntimeRow {
             id: RUNTIME_ID,
             policy_fingerprint: "policy".into(),
             updated_at: now,
         };
-        let runtime_plan = db::from(&runtime)
+        Ok(db::from(&runtime)
             .insert_many(&[runtime_row])
             .ignore_conflicts_on(&runtime.id)
             .plan()
-            .map_err(|error| error.to_string())?;
-        assert_ignore_plan(&runtime_plan.sql, "id")?;
+            .map_err(|error| error.to_string())?
+            .sql)
+    }
 
+    /// Builds one global-rate insert-if-missing statement.
+    fn rate_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
+        use crate::db::backend::IgnoreConflictsExt as _;
         let rates = DbTaskStore::rate_table();
         let rate_row = TaskRateRow {
             id: uuid::Uuid::now_v7(),
@@ -373,12 +457,38 @@ mod tests {
             tokens_micros: TOKEN_SCALE,
             updated_at: now,
         };
-        let rate_plan = db::from(&rates)
+        Ok(db::from(&rates)
             .insert_many(&[rate_row])
             .ignore_conflicts_on(&rates.lane_name)
             .plan()
-            .map_err(|error| error.to_string())?;
-        assert_ignore_plan(&rate_plan.sql, "lane_name")
+            .map_err(|error| error.to_string())?
+            .sql)
+    }
+
+    /// Builds one lane-owner insert-if-missing statement.
+    fn lock_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
+        use crate::db::backend::IgnoreConflictsExt as _;
+        let locks = DbTaskStore::lane_lock_table();
+        let lock_row = TaskLaneLockRow {
+            lane_name: "gpu".into(),
+            owner_id: None,
+            owner_token: None,
+            leased_until: None,
+            phase: crate::tasks::LaneOwnerPhase::Active as i16,
+            flushing: false,
+            empty_since: None,
+            generation: 0,
+            hook_retry_at: None,
+            last_hook_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        Ok(db::from(&locks)
+            .insert_many(&[lock_row])
+            .ignore_conflicts_on(&locks.lane_name)
+            .plan()
+            .map_err(|error| error.to_string())?
+            .sql)
     }
 
     /// Confirms an insert-if-missing plan leaves the existing row unchanged.

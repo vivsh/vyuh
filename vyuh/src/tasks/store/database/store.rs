@@ -1,8 +1,10 @@
 //! `AbstractTaskStore` adapter over Mool-native persistence modules.
 
+use std::collections::BTreeSet;
+
 use crate::tasks::{
     AbstractTaskStore, LaneClaim, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter, TaskId,
-    TaskPoll, TaskReceipt, TaskRecord, TaskStoreConf, TaskTick, TaskWrite,
+    TaskLease, TaskPoll, TaskReceipt, TaskRecord, TaskStoreConf, TaskTick, TaskWrite,
 };
 
 use super::common::DbTaskStore;
@@ -14,7 +16,7 @@ impl DbTaskStore {
         runner_id: &str,
         claims: &[LaneClaim],
         commits: &[TaskCommit],
-        renewals: &[TaskId],
+        renewals: &[TaskLease],
     ) -> Result<TaskTick, TaskError> {
         let conf =
             self.runtime_conf.read().await.clone().ok_or_else(|| {
@@ -23,10 +25,12 @@ impl DbTaskStore {
         let mut transaction = self.pool.begin().await?;
         super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
         let now = statement_now(&mut transaction).await?;
+        let lanes = locked_turn_lanes(&conf, claims, commits, renewals);
+        super::writes::lock_lane_rows(&mut transaction, lanes).await?;
         self.commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
             .await?;
         let lost = self
-            .renew_leases_tx(&mut transaction, runner_id, renewals, now)
+            .renew_leases_tx(&mut transaction, runner_id, renewals, &conf, now)
             .await?;
         let poll = self
             .claim_tasks_tx(&mut transaction, runner_id, claims, &conf, now)
@@ -36,6 +40,28 @@ impl DbTaskStore {
     }
 }
 
+/// Collects opt-in lane rows so one central turn always locks them in name order.
+fn locked_turn_lanes(
+    conf: &TaskStoreConf,
+    claims: &[LaneClaim],
+    commits: &[TaskCommit],
+    renewals: &[TaskLease],
+) -> BTreeSet<crate::tasks::TaskLane> {
+    let configured = |lane: crate::tasks::TaskLane| {
+        conf.lanes
+            .iter()
+            .find(|entry| entry.lane() == lane)
+            .is_some_and(|entry| entry.lane_lock().is_some())
+    };
+    claims
+        .iter()
+        .map(|claim| claim.lane)
+        .chain(commits.iter().map(|commit| commit.lane))
+        .chain(renewals.iter().map(|lease| lease.lane))
+        .filter(|lane| configured(*lane))
+        .collect()
+}
+
 async fn statement_now(
     transaction: &mut crate::db::DbTransaction<'_>,
 ) -> Result<chrono::DateTime<chrono::Utc>, TaskError> {
@@ -43,6 +69,48 @@ async fn statement_now(
     Ok(transaction
         .fetch_scalar(crate::db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
         .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    use crate::tasks::{TaskLaneConf, TaskLaneLock};
+
+    const ORDINARY: crate::tasks::TaskLane = crate::tasks::TaskLane::new("ordinary");
+    const LOCKED: crate::tasks::TaskLane = crate::tasks::TaskLane::new("locked");
+
+    /// Verifies ordinary task lanes never enter the database lane-row coordination set.
+    #[test]
+    fn only_opted_in_lanes_lock_durable_owner_rows() {
+        let conf = TaskStoreConf {
+            handlers: Vec::new(),
+            lanes: vec![
+                TaskLaneConf::new(ORDINARY, 1),
+                TaskLaneConf::new(LOCKED, 1).lock(TaskLaneLock::new(1)),
+            ],
+            idempotency: Vec::new(),
+            schedules: Vec::new(),
+            poll_interval: Duration::from_secs(1),
+        };
+        let claims = [
+            LaneClaim {
+                lane: ORDINARY,
+                limit: 1,
+                owner: None,
+            },
+            LaneClaim {
+                lane: LOCKED,
+                limit: 1,
+                owner: None,
+            },
+        ];
+        let locked = locked_turn_lanes(&conf, &claims, &[], &[]);
+        assert_eq!(locked.len(), 1);
+        assert!(locked.contains(&LOCKED));
+        assert!(!locked.contains(&ORDINARY));
+    }
 }
 
 impl AbstractTaskStore for DbTaskStore {
@@ -69,9 +137,9 @@ impl AbstractTaskStore for DbTaskStore {
     async fn renew_leases(
         &self,
         runner_id: &str,
-        task_ids: &[TaskId],
+        leases: &[TaskLease],
     ) -> Result<Vec<TaskId>, TaskError> {
-        self.renew_leases_impl(runner_id, task_ids).await
+        self.renew_leases_impl(runner_id, leases).await
     }
 
     async fn tick(
@@ -79,7 +147,7 @@ impl AbstractTaskStore for DbTaskStore {
         runner_id: &str,
         claims: &[LaneClaim],
         commits: &[TaskCommit],
-        renewals: &[TaskId],
+        renewals: &[TaskLease],
     ) -> Result<TaskTick, TaskError> {
         self.tick_impl(runner_id, claims, commits, renewals).await
     }

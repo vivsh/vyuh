@@ -6,7 +6,7 @@ use crate::{
     callables::{ArgPart, ArgSpec, ReturnPart, ReturnSpec, TypeSchema},
     console::middleware::{MiddlewareInfo, operation_middleware},
     logging::LogSink,
-    tasks::{TaskInfo, TaskStatus},
+    tasks::{TaskInfo, TaskKind, TaskStatus},
 };
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -377,6 +377,9 @@ fn schema_json(schema: &TypeSchema) -> Option<String> {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TaskOut {
     pub id: String,
+    pub parent_id: Option<String>,
+    pub root_id: Option<String>,
+    pub kind: TaskKind,
     pub name: String,
     pub status: TaskStatus,
     pub attempts: i32,
@@ -396,6 +399,9 @@ impl From<&TaskInfo> for TaskOut {
     fn from(record: &TaskInfo) -> Self {
         Self {
             id: record.id.to_string(),
+            parent_id: record.parent_id.map(|value| value.to_string()),
+            root_id: record.root_id.map(|value| value.to_string()),
+            kind: record.kind,
             name: record.name.clone(),
             status: record.status,
             attempts: record.attempts,

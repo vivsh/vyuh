@@ -6,7 +6,8 @@ use vyuh::tasks::{
     TaskRetry, TaskStatus,
     store::{
         AbstractTaskStore, LaneClaim, MemoryTaskStore, ScheduledTaskWrite, TaskCommit,
-        TaskIdempotencyConf, TaskOutcome, TaskRecord, TaskScheduleConf, TaskStoreConf, TaskWrite,
+        TaskIdempotencyConf, TaskLease, TaskOutcome, TaskRecord, TaskScheduleConf, TaskStoreConf,
+        TaskWrite,
     },
 };
 
@@ -32,6 +33,9 @@ fn task_record(name: &str, lane: TaskLane) -> TaskRecord {
             .to_string()
             .parse()
             .expect("generated UUID is a valid task ID"),
+        parent_id: None,
+        root_id: None,
+        kind: vyuh::tasks::TaskKind::Work,
         name: name.into(),
         input: r#"{"id":1}"#.into(),
         state: None,
@@ -96,6 +100,7 @@ fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
             })
             .collect(),
         schedules: Vec::new(),
+        poll_interval: Duration::from_secs(1),
     }
 }
 
@@ -205,7 +210,14 @@ async fn claim(
     limit: usize,
 ) -> Result<vyuh::tasks::store::TaskPoll, vyuh::tasks::TaskError> {
     store
-        .claim_tasks(runner, &[LaneClaim { lane, limit }])
+        .claim_tasks(
+            runner,
+            &[LaneClaim {
+                lane,
+                limit,
+                owner: None,
+            }],
+        )
         .await
 }
 
@@ -241,6 +253,7 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
             task_id: task.id,
             lane: EMAIL,
             outcome: TaskOutcome::complete(),
+            owner_token: None,
         })
         .collect::<Vec<_>>();
     store.commit_outcomes("runner-a", &commits).await?;
@@ -250,6 +263,21 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
         remaining.lanes.first().map_or(0, |lane| lane.tasks.len()),
         1
     );
+    Ok(())
+}
+
+/// Verifies ordinary submissions and claims never enter lane-owner coordination.
+#[tokio::test]
+async fn ordinary_work_avoids_lane_lock_storage() -> Result<(), vyuh::tasks::TaskError> {
+    let store = MemoryTaskStore::new(8);
+    store
+        .initialize(store_conf(TestRetention::ACTIVE_ONLY))
+        .await?;
+    store
+        .store_tasks(vec![write(task_record("email", EMAIL))])
+        .await?;
+    claim(&store, "runner-a", EMAIL, 1).await?;
+    assert_eq!(store.lane_lock_turns().await, 0);
     Ok(())
 }
 
@@ -425,6 +453,7 @@ async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
                 task_id: first_id,
                 lane: EMAIL,
                 outcome: TaskOutcome::complete(),
+                owner_token: None,
             }],
         )
         .await?;
@@ -459,6 +488,7 @@ async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
                 task_id: archived_id,
                 lane: EMAIL,
                 outcome: TaskOutcome::complete(),
+                owner_token: None,
             }],
         )
         .await?;
@@ -595,6 +625,7 @@ async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::
                 task_id,
                 lane: EMAIL,
                 outcome: TaskOutcome::sleep(&"later", Duration::from_secs(1))?,
+                owner_token: None,
             }],
         )
         .await?;
@@ -634,6 +665,7 @@ async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh:
         .await?;
 
     let mut local_only = store_conf(TestRetention::ACTIVE_ONLY);
+    local_only.poll_interval = Duration::from_secs(2);
     local_only.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
         TaskLaneConf::new(EMAIL, 2).rate_limit(TaskRate::per_second(1)),
@@ -702,6 +734,7 @@ async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::Task
                 task_id,
                 lane: EMAIL,
                 outcome: TaskOutcome::retry("temporary failure"),
+                owner_token: None,
             }],
         )
         .await?;
@@ -778,7 +811,17 @@ async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::Task
         .await?;
     let id = receipt[0].id();
     claim(&store, "runner-a", EMAIL, 1).await?;
-    assert!(store.renew_leases("runner-a", &[id]).await?.is_empty());
+    let lease = TaskLease {
+        task_id: id,
+        lane: EMAIL,
+        owner_token: None,
+    };
+    assert!(
+        store
+            .renew_leases("runner-a", std::slice::from_ref(&lease))
+            .await?
+            .is_empty()
+    );
     store
         .commit_outcomes(
             "runner-a",
@@ -786,10 +829,11 @@ async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::Task
                 task_id: id,
                 lane: EMAIL,
                 outcome: TaskOutcome::complete(),
+                owner_token: None,
             }],
         )
         .await?;
-    assert_eq!(store.renew_leases("runner-a", &[id]).await?, vec![id]);
+    assert_eq!(store.renew_leases("runner-a", &[lease]).await?, vec![id]);
     Ok(())
 }
 

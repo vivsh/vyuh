@@ -9,7 +9,7 @@ use crate::{
     db,
     tasks::{
         IdempotencyRetention, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter, TaskId,
-        TaskOutcome, TaskReceipt, TaskRecord, TaskRetry, TaskStatus, TaskWrite,
+        TaskLease, TaskOutcome, TaskReceipt, TaskRecord, TaskRetry, TaskStatus, TaskWrite,
     },
 };
 
@@ -150,7 +150,7 @@ impl DbTaskStore {
     /// Commits owned outcomes inside an already-authorized scheduler transaction.
     pub(super) async fn commit_outcomes_tx(
         &self,
-        mut transaction: &mut db::DbTransaction<'_>,
+        transaction: &mut db::DbTransaction<'_>,
         runner_id: &str,
         commits: &[TaskCommit],
         conf: &crate::tasks::TaskStoreConf,
@@ -160,12 +160,14 @@ impl DbTaskStore {
             return Ok(());
         }
         let mut outcomes = collect_outcomes(commits)?;
+        let allowed = fenced_commits(transaction, runner_id, commits, conf, now).await?;
         let ids = outcomes.keys().map(|id| id.into_uuid()).collect::<Vec<_>>();
-        let mut rows = load_owned_batch(&mut transaction, ids, runner_id).await?;
+        let mut rows = load_owned_batch(transaction, ids, runner_id).await?;
+        rows.retain(|row| allowed.contains(&TaskId::new(row.id)));
         apply_owned_outcomes(&mut rows, &mut outcomes, &conf.lanes, now)?;
         warn_unowned_outcomes(&outcomes, runner_id);
-        update_idempotency_batch(&mut transaction, &mut rows, conf, now).await?;
-        batch_update_rows(&mut transaction, &rows, self.batch_size).await?;
+        update_idempotency_batch(transaction, &mut rows, conf, now).await?;
+        batch_update_rows(transaction, &rows, self.batch_size).await?;
         Ok(())
     }
 
@@ -196,16 +198,20 @@ impl DbTaskStore {
     pub(super) async fn renew_leases_impl(
         &self,
         runner_id: &str,
-        task_ids: &[TaskId],
+        leases: &[TaskLease],
     ) -> Result<Vec<TaskId>, TaskError> {
-        if task_ids.is_empty() {
+        if leases.is_empty() {
             return Ok(Vec::new());
         }
         let mut transaction = self.pool.begin().await?;
         verify_policy(self, &mut transaction).await?;
         let now = statement_now(&mut transaction).await?;
+        let conf =
+            self.runtime_conf.read().await.clone().ok_or_else(|| {
+                TaskError::InvalidConfig("task runtime was not initialized".into())
+            })?;
         let lost = self
-            .renew_leases_tx(&mut transaction, runner_id, task_ids, now)
+            .renew_leases_tx(&mut transaction, runner_id, leases, &conf, now)
             .await?;
         transaction.commit().await?;
         Ok(lost)
@@ -214,22 +220,38 @@ impl DbTaskStore {
     /// Renews still-owned leases inside an already-authorized scheduler transaction.
     pub(super) async fn renew_leases_tx(
         &self,
-        mut transaction: &mut db::DbTransaction<'_>,
+        transaction: &mut db::DbTransaction<'_>,
         runner_id: &str,
-        task_ids: &[TaskId],
+        leases: &[TaskLease],
+        conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
     ) -> Result<Vec<TaskId>, TaskError> {
-        if task_ids.is_empty() {
+        if leases.is_empty() {
             return Ok(Vec::new());
         }
-        let ids = task_ids.iter().map(|id| id.into_uuid()).collect::<Vec<_>>();
-        let mut rows = load_owned_batch(&mut transaction, ids, runner_id).await?;
+        let allowed = fenced_leases(transaction, runner_id, leases, conf, now).await?;
+        let ids = leases
+            .iter()
+            .filter(|lease| allowed.contains(&lease.task_id))
+            .map(|lease| lease.task_id.into_uuid())
+            .collect::<Vec<_>>();
+        let mut rows = load_owned_batch(transaction, ids, runner_id).await?;
+        let lanes = leases
+            .iter()
+            .map(|lease| (lease.task_id, lease.lane))
+            .collect::<std::collections::HashMap<_, _>>();
+        rows.retain(|row| {
+            lanes
+                .get(&TaskId::new(row.id))
+                .is_some_and(|lane| lane.as_str() == row.lane_name)
+        });
         for row in &mut rows {
             row.leased_until = Some(self.lease_until(row, now)?);
             row.updated_at = now;
         }
-        batch_renew(&mut transaction, &rows, self.batch_size).await?;
-        Ok(lost_ids(task_ids, &rows))
+        batch_renew(transaction, &rows, self.batch_size).await?;
+        let task_ids = leases.iter().map(|lease| lease.task_id).collect::<Vec<_>>();
+        Ok(lost_ids(&task_ids, &rows))
     }
 
     /// Reassigns non-running work after verifying the source lane has drained.
@@ -307,6 +329,161 @@ impl DbTaskStore {
             .map(TaskRecord::try_from)
             .transpose()
     }
+}
+
+/// Verifies lane-owner tokens only for renewals belonging to opt-in lanes.
+async fn fenced_leases(
+    transaction: &mut db::DbTransaction<'_>,
+    runner_id: &str,
+    leases: &[TaskLease],
+    conf: &crate::tasks::TaskStoreConf,
+    now: DateTime<Utc>,
+) -> Result<std::collections::HashSet<TaskId>, TaskError> {
+    let mut allowed = std::collections::HashSet::with_capacity(leases.len());
+    let mut lanes = std::collections::BTreeMap::new();
+    for lease in leases {
+        if !locked_lane(conf, lease.lane.as_str()) {
+            allowed.insert(lease.task_id);
+            continue;
+        }
+        insert_lane_token(
+            &mut lanes,
+            lease.lane.as_str(),
+            lease.owner_token.as_deref(),
+        )?;
+    }
+    let valid_lanes = valid_locked_lanes(transaction, runner_id, lanes, now).await?;
+    for lease in leases {
+        if valid_lanes.contains(lease.lane.as_str()) {
+            allowed.insert(lease.task_id);
+        }
+    }
+    Ok(allowed)
+}
+
+fn locked_lane(conf: &crate::tasks::TaskStoreConf, lane_name: &str) -> bool {
+    conf.lanes
+        .iter()
+        .find(|lane| lane.lane().as_str() == lane_name)
+        .is_some_and(|lane| lane.lane_lock().is_some())
+}
+
+/// Locks one scheduler turn's owned lanes in a globally stable order.
+pub(super) async fn lock_lane_rows(
+    transaction: &mut db::DbTransaction<'_>,
+    lanes: std::collections::BTreeSet<crate::tasks::TaskLane>,
+) -> Result<(), TaskError> {
+    for lane in lanes {
+        if load_lane_lock(transaction, lane.as_str()).await?.is_none() {
+            return Err(TaskError::InvalidConfig(format!(
+                "task lane lock '{lane}' is not initialized"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Verifies lane-owner tokens only for commits belonging to opt-in lanes.
+async fn fenced_commits(
+    transaction: &mut db::DbTransaction<'_>,
+    runner_id: &str,
+    commits: &[TaskCommit],
+    conf: &crate::tasks::TaskStoreConf,
+    now: DateTime<Utc>,
+) -> Result<std::collections::HashSet<TaskId>, TaskError> {
+    let mut allowed = std::collections::HashSet::with_capacity(commits.len());
+    let mut lanes = std::collections::BTreeMap::new();
+    for commit in commits {
+        if !locked_lane(conf, commit.lane.as_str()) {
+            allowed.insert(commit.task_id);
+            continue;
+        }
+        insert_lane_token(
+            &mut lanes,
+            commit.lane.as_str(),
+            commit.owner_token.as_deref(),
+        )?;
+    }
+    let valid_lanes = valid_locked_lanes(transaction, runner_id, lanes, now).await?;
+    for commit in commits {
+        if valid_lanes.contains(commit.lane.as_str()) {
+            allowed.insert(commit.task_id);
+        }
+    }
+    Ok(allowed)
+}
+
+fn insert_lane_token<'a>(
+    lanes: &mut std::collections::BTreeMap<&'a str, Option<&'a str>>,
+    lane: &'a str,
+    token: Option<&'a str>,
+) -> Result<(), TaskError> {
+    if let Some(existing) = lanes.insert(lane, token)
+        && existing != token
+    {
+        return Err(TaskError::TaskExecutionError(format!(
+            "lane '{lane}' has conflicting owner tokens in one scheduler turn"
+        )));
+    }
+    Ok(())
+}
+
+async fn valid_locked_lanes<'a>(
+    transaction: &mut db::DbTransaction<'_>,
+    runner_id: &str,
+    lanes: std::collections::BTreeMap<&'a str, Option<&'a str>>,
+    now: DateTime<Utc>,
+) -> Result<std::collections::HashSet<&'a str>, TaskError> {
+    let mut valid = std::collections::HashSet::with_capacity(lanes.len());
+    for (lane, token) in lanes {
+        if locked_commit(transaction, runner_id, lane, token, now).await? {
+            valid.insert(lane);
+        }
+    }
+    Ok(valid)
+}
+
+async fn locked_commit(
+    transaction: &mut db::DbTransaction<'_>,
+    runner_id: &str,
+    lane: &str,
+    token: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool, TaskError> {
+    let row = load_lane_lock(transaction, lane).await?;
+    Ok(row.is_some_and(|row| {
+        row.owner_id.as_deref() == Some(runner_id)
+            && row.owner_token.as_deref() == token
+            && row.leased_until.is_some_and(|deadline| deadline > now)
+    }))
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn load_lane_lock(
+    transaction: &mut db::DbTransaction<'_>,
+    lane: &str,
+) -> Result<Option<super::model::TaskLaneLockRow>, TaskError> {
+    use crate::db::backend::RowLockExt as _;
+    let table = DbTaskStore::lane_lock_table();
+    Ok(db::from(&table)
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
+        .for_update()
+        .first::<super::model::TaskLaneLockRow>()
+        .exec(transaction)
+        .await?)
+}
+
+#[cfg(feature = "sqlite")]
+async fn load_lane_lock(
+    transaction: &mut db::DbTransaction<'_>,
+    lane: &str,
+) -> Result<Option<super::model::TaskLaneLockRow>, TaskError> {
+    let table = DbTaskStore::lane_lock_table();
+    Ok(db::from(&table)
+        .filter(table.lane_name.eq(db::val(lane.to_string())))
+        .first::<super::model::TaskLaneLockRow>()
+        .exec(transaction)
+        .await?)
 }
 
 type OwnerKey = (String, String);

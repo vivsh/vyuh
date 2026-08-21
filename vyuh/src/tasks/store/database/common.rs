@@ -7,7 +7,9 @@ use crate::{
     tasks::{TaskError, TaskFilter, TaskRecord, TaskStatus},
 };
 
-use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow};
+use super::model::{
+    TaskIdempotencyRow, TaskLaneLockRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow,
+};
 
 /// Mool-backed persistent task store selected by Vyuh's database feature.
 #[derive(Clone)]
@@ -43,6 +45,11 @@ impl DbTaskStore {
     /// Returns the typed global rate-bucket table.
     pub(super) fn rate_table() -> db::queries::ModelTable<TaskRateRow> {
         <TaskRateRow as db::Model>::table()
+    }
+
+    /// Returns the durable lane-owner coordination table.
+    pub(super) fn lane_lock_table() -> db::queries::ModelTable<TaskLaneLockRow> {
+        <TaskLaneLockRow as db::Model>::table()
     }
 
     /// Returns the singleton task-runtime policy table.

@@ -48,6 +48,39 @@ impl std::str::FromStr for TaskId {
     }
 }
 
+/// Durable workflow classification reserved for task orchestration.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[repr(i16)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    /// Effectful application work.
+    #[default]
+    Work = 0,
+    /// Pure synchronization or orchestration work.
+    Flow = 1,
+}
+
+impl TaskKind {
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub(crate) const fn as_i16(self) -> i16 {
+        self as i16
+    }
+
+    /// Converts the stable persisted representation into a task kind.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+        match value {
+            0 => Ok(Self::Work),
+            1 => Ok(Self::Flow),
+            _ => Err(TaskError::TaskExecutionError(format!(
+                "invalid task kind value {value}"
+            ))),
+        }
+    }
+}
+
 /// Immutable idempotency policy for one typed task definition.
 pub struct TaskIdempotency<T> {
     revision: &'static str,
@@ -376,6 +409,9 @@ impl Default for TaskFilter {
 /// Persisted task state exposed through task inspection APIs.
 pub struct TaskRecord {
     pub id: TaskId,
+    pub parent_id: Option<TaskId>,
+    pub root_id: Option<TaskId>,
+    pub kind: TaskKind,
     pub name: String,
     pub input: String,
     pub state: Option<String>,
@@ -444,6 +480,9 @@ impl TaskRecord {
 #[derive(Debug, Clone)]
 pub struct TaskInfo {
     pub(crate) id: TaskId,
+    pub(crate) parent_id: Option<TaskId>,
+    pub(crate) root_id: Option<TaskId>,
+    pub(crate) kind: TaskKind,
     pub(crate) name: String,
     pub(crate) input: String,
     pub(crate) state: Option<String>,
@@ -466,6 +505,21 @@ impl TaskInfo {
     /// Returns the canonical durable execution identifier.
     pub const fn id(&self) -> TaskId {
         self.id
+    }
+
+    /// Returns the task that directly spawned this task, when recorded.
+    pub const fn parent_id(&self) -> Option<TaskId> {
+        self.parent_id
+    }
+
+    /// Returns the root task of this task's workflow chain, when recorded.
+    pub const fn root_id(&self) -> Option<TaskId> {
+        self.root_id
+    }
+
+    /// Returns the durable workflow classification.
+    pub const fn kind(&self) -> TaskKind {
+        self.kind
     }
 
     /// Returns the registered handler name.
@@ -548,6 +602,9 @@ impl From<TaskRecord> for TaskInfo {
     fn from(record: TaskRecord) -> Self {
         Self {
             id: record.id,
+            parent_id: record.parent_id,
+            root_id: record.root_id,
+            kind: record.kind,
             name: record.name,
             input: record.input,
             state: record.state,
@@ -596,5 +653,19 @@ mod tests {
         (decoded == id)
             .then_some(())
             .ok_or_else(|| "task ID serde changed its value".into())
+    }
+
+    /// Verifies workflow kinds default to work and retain lowercase wire names.
+    #[test]
+    fn task_kind_defaults_and_serializes_stably() -> Result<(), String> {
+        if TaskKind::default() != TaskKind::Work {
+            return Err("task kind no longer defaults to work".into());
+        }
+        let work = serde_json::to_string(&TaskKind::Work).map_err(|error| error.to_string())?;
+        let flow = serde_json::to_string(&TaskKind::Flow).map_err(|error| error.to_string())?;
+        if work != "\"work\"" || flow != "\"flow\"" {
+            return Err("task kind wire names changed".into());
+        }
+        Ok(())
     }
 }

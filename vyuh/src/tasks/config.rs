@@ -172,6 +172,7 @@ impl Default for TaskRetry {
 pub struct TaskLaneConf {
     lane: TaskLane,
     concurrency: usize,
+    lane_lock: Option<super::TaskLaneLock>,
     rate: Option<TaskRate>,
     global_rate: Option<TaskRate>,
     retry: TaskRetry,
@@ -184,11 +185,18 @@ impl TaskLaneConf {
         Self {
             lane,
             concurrency,
+            lane_lock: None,
             rate: None,
             global_rate: None,
             retry: DEFAULT_RETRY,
             idempotency_retention: IdempotencyRetention::ActiveOnly,
         }
+    }
+
+    /// Enables durable single-owner coordination for this lane.
+    pub fn lock(mut self, lane_lock: super::TaskLaneLock) -> Self {
+        self.lane_lock = Some(lane_lock);
+        self
     }
 
     /// Limits task starts within this site's local runner.
@@ -223,6 +231,11 @@ impl TaskLaneConf {
     /// Returns this worker's concurrency quota.
     pub const fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// Returns this lane's optional durable owner policy.
+    pub const fn lane_lock(&self) -> Option<&super::TaskLaneLock> {
+        self.lane_lock.as_ref()
     }
 
     /// Returns the optional local runner rate.
@@ -398,7 +411,7 @@ impl TaskConf {
     pub(crate) fn validate(&self) -> Result<(), TaskError> {
         validate_scalars(self)?;
         validate_readiness(self.readiness)?;
-        validate_overrides(&self.lanes)?;
+        validate_overrides(&self.lanes, self.batch_size)?;
         Ok(())
     }
 
@@ -414,7 +427,7 @@ impl TaskConf {
         }
         insert_default_lane(&mut lanes, self.concurrency)?;
         let lanes = lanes.into_values().collect::<Vec<_>>();
-        validate_lanes(&lanes, self.concurrency)?;
+        validate_lanes(&lanes, self.concurrency, self.batch_size)?;
         Ok(lanes)
     }
 
@@ -467,7 +480,7 @@ impl TaskConf {
 }
 
 /// Rejects duplicate or invalid application lane overrides before merging defaults.
-fn validate_overrides(lanes: &[TaskLaneConf]) -> Result<(), TaskError> {
+fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), TaskError> {
     if lanes.len() > MAX_TASK_LANES {
         return Err(TaskError::InvalidConfig(format!(
             "task lanes must contain at most {MAX_TASK_LANES} entries"
@@ -476,6 +489,7 @@ fn validate_overrides(lanes: &[TaskLaneConf]) -> Result<(), TaskError> {
     let mut names = HashSet::with_capacity(lanes.len());
     for lane in lanes {
         validate_lane(lane, &mut names)?;
+        validate_lock(lane, batch_size)?;
     }
     Ok(())
 }
@@ -583,7 +597,11 @@ fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskError> {
 }
 
 /// Validates the complete lane set against global concurrency and count limits.
-fn validate_lanes(lanes: &[TaskLaneConf], concurrency: usize) -> Result<(), TaskError> {
+fn validate_lanes(
+    lanes: &[TaskLaneConf],
+    concurrency: usize,
+    batch_size: usize,
+) -> Result<(), TaskError> {
     if lanes.is_empty() || lanes.len() > MAX_TASK_LANES {
         return Err(TaskError::InvalidConfig(format!(
             "task lanes must contain between 1 and {MAX_TASK_LANES} entries"
@@ -598,6 +616,7 @@ fn validate_lanes(lanes: &[TaskLaneConf], concurrency: usize) -> Result<(), Task
     let mut total = 0_usize;
     for lane in lanes {
         validate_lane(lane, &mut names)?;
+        validate_lock(lane, batch_size)?;
         total = total
             .checked_add(lane.concurrency())
             .ok_or_else(|| TaskError::InvalidConfig("task lane concurrency overflowed".into()))?;
@@ -606,6 +625,29 @@ fn validate_lanes(lanes: &[TaskLaneConf], concurrency: usize) -> Result<(), Task
         return Err(TaskError::InvalidConfig(
             "task lane concurrency exceeds global task concurrency".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Validates one optional durable lane-owner policy.
+fn validate_lock(conf: &TaskLaneConf, maximum: usize) -> Result<(), TaskError> {
+    let Some(lane_lock) = conf.lane_lock() else {
+        return Ok(());
+    };
+    let paired = lane_lock.idle_hook().is_some() == lane_lock.busy_hook().is_some();
+    let deadline_valid = lane_lock
+        .batch_deadline()
+        .is_none_or(|duration| !duration.is_zero() && duration <= MAX_INTERVAL);
+    if lane_lock.batch_size() == 0
+        || lane_lock.batch_size() > maximum
+        || !deadline_valid
+        || lane_lock.idle_duration() > MAX_INTERVAL
+        || !paired
+    {
+        return Err(TaskError::InvalidConfig(format!(
+            "task lane '{}' has an invalid lane lock policy",
+            conf.lane()
+        )));
     }
     Ok(())
 }
@@ -665,9 +707,67 @@ fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tasks::{TaskLaneContext, TaskLaneLock};
 
     const FAST: TaskLane = TaskLane::new("fast");
     const SLOW: TaskLane = TaskLane::new("slow");
+
+    async fn lane_hook(_lane: TaskLaneContext) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
+    /// Verifies lane-lock builders accept typed callable extraction and bounded policy values.
+    #[test]
+    fn task_config_validates_lane_lock_policy() {
+        let valid = TaskConf::default().lane(
+            TaskLaneConf::new(FAST, 1).lock(
+                TaskLaneLock::new(8)
+                    .deadline(Duration::from_secs(2))
+                    .idle_after(Duration::from_secs(30))
+                    .on_idle(lane_hook)
+                    .on_busy(lane_hook),
+            ),
+        );
+        assert!(valid.validate().is_ok());
+
+        let unpaired = TaskConf::default()
+            .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(8).on_idle(lane_hook)));
+        assert!(matches!(
+            unpaired.validate(),
+            Err(TaskError::InvalidConfig(_))
+        ));
+
+        let oversized = TaskConf::default()
+            .batch_size(1)
+            .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(2)));
+        assert!(matches!(
+            oversized.validate(),
+            Err(TaskError::InvalidConfig(_))
+        ));
+
+        let zero_size =
+            TaskConf::default().lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(0)));
+        assert!(matches!(
+            zero_size.validate(),
+            Err(TaskError::InvalidConfig(_))
+        ));
+
+        let zero_deadline = TaskConf::default()
+            .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(1).deadline(Duration::ZERO)));
+        assert!(matches!(
+            zero_deadline.validate(),
+            Err(TaskError::InvalidConfig(_))
+        ));
+
+        let long_idle = TaskConf::default().lane(
+            TaskLaneConf::new(FAST, 1)
+                .lock(TaskLaneLock::new(1).idle_after(MAX_INTERVAL + Duration::from_secs(1))),
+        );
+        assert!(matches!(
+            long_idle.validate(),
+            Err(TaskError::InvalidConfig(_))
+        ));
+    }
 
     /// Verifies adaptive polling defaults use one-second backlog and five-minute fallback checks.
     #[test]

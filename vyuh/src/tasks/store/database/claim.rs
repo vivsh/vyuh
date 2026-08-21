@@ -43,7 +43,7 @@ impl DbTaskStore {
     /// Claims one fair lane batch inside an already-authorized scheduler transaction.
     pub(super) async fn claim_tasks_tx(
         &self,
-        mut transaction: &mut db::DbTransaction<'_>,
+        transaction: &mut db::DbTransaction<'_>,
         runner_id: &str,
         claims: &[LaneClaim],
         conf: &crate::tasks::TaskStoreConf,
@@ -54,9 +54,12 @@ impl DbTaskStore {
         let mut lanes = Vec::with_capacity(claims.len());
         for claim in ordered {
             let lane_conf = configured_lane(&conf, claim.lane)?;
-            let lane = self
-                .claim_lane(
-                    &mut transaction,
+            let lane = if lane_conf.lane_lock().is_some() {
+                self.claim_owned_lane(transaction, runner_id, claim, lane_conf, conf, now)
+                    .await?
+            } else {
+                self.claim_lane(
+                    transaction,
                     runner_id,
                     claim,
                     lane_conf.global_rate(),
@@ -64,10 +67,11 @@ impl DbTaskStore {
                     conf,
                     now,
                 )
-                .await?;
+                .await?
+            };
             lanes.push(lane);
         }
-        super::writes::delete_expired_owners(&mut transaction, now, self.batch_size).await?;
+        super::writes::delete_expired_owners(transaction, now, self.batch_size).await?;
         lanes.sort_by_key(|lane| {
             claims
                 .iter()
@@ -78,7 +82,7 @@ impl DbTaskStore {
     }
 
     /// Claims one lane's bounded candidates and reserves its durable permits.
-    async fn claim_lane(
+    pub(super) async fn claim_lane(
         &self,
         transaction: &mut db::DbTransaction<'_>,
         runner_id: &str,
@@ -115,6 +119,7 @@ impl DbTaskStore {
             reclaimed,
             saturated,
             next_wake_in: effective_lane_wake(rate_blocked, rate_wake, task_wake),
+            owner: None,
         })
     }
 
@@ -227,7 +232,7 @@ impl DbTaskStore {
 }
 
 /// Reads one bounded candidate page without taking ownership locks.
-async fn probe_candidates(
+pub(super) async fn probe_candidates(
     transaction: &mut db::DbTransaction<'_>,
     now: DateTime<Utc>,
     lane: &str,
@@ -314,7 +319,7 @@ async fn statement_now(
 }
 
 /// Finds the earliest future ready task or reclaimable lease for polled lanes.
-async fn next_task_deadline(
+pub(super) async fn next_task_deadline(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
     now: DateTime<Utc>,

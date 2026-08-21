@@ -41,6 +41,11 @@ Each task record stores:
 - `input`: immutable submitted data.
 - `state`: private continuation state saved by the handler.
 - `resume_input`: optional input supplied when a suspended task is resumed.
+- `parent_id` and `root_id`: nullable workflow lineage reserved for future orchestration.
+- `kind`: `work` by default, with `flow` reserved for pure synchronization work.
+
+Lineage and kind are currently storage and inspection metadata only. Submission
+does not set or propagate them, and they do not change execution behavior.
 
 Each wake runs the handler with the latest durable snapshot:
 
@@ -229,6 +234,44 @@ async fn approve_document(
 
 `TaskState` has no result type. The state supplied to `suspend` or `sleep` is
 the only serializable value it carries.
+
+## Local Handler Batching
+
+A handler can consume matching tasks already present in its process-local lane
+queue in one call by accepting `Data<Batch<T>>`:
+
+```rust
+use vyuh::prelude::*;
+
+#[bundles::task_batch]
+async fn index_documents(Data(documents): Data<Batch<IndexDocument>>) -> Result<(), Error> {
+    search.index_all(documents.as_ref()).await?;
+    Ok(())
+}
+```
+
+The distinct macro selects the reduced value-only batch contract without inspecting
+or resolving the handler's argument syntax. The equivalent direct registration is
+`bundles::task_batch(index_documents, TaskDefinition::new("index_documents"))`.
+The submitted type remains `T`: every call to `submit(T)` creates its own
+durable task row, attempt count, lease, retry policy, and terminal outcome.
+
+Batching never waits for more rows and adds no store query. At dispatch, Vyuh
+groups all currently eligible queued rows for the same registered handler while
+leaving other task names in their existing relative order. One batch call uses
+one local handler-concurrency slot; rate permits and durable lifecycle remain
+per task.
+
+Return `()` to complete every input, one `TaskState` to apply `complete`,
+`retry`, or `fail` uniformly, or an ordered `Batch<TaskState>` containing
+exactly one outcome per input. Invalid historical inputs fail individually.
+Cardinality mismatches fail the valid invocation. Value-only batch handlers do
+not expose `TaskId`, `Continuation`, state, or resume input, so `sleep` and
+`suspend` outcomes are rejected as terminal failures.
+
+Local batching and `TaskLaneLock` are orthogonal. An ordinary lane can batch;
+a locked lane may also batch the matching task names inside a claimed cohort.
+The lock controls when a cohort reaches the local queue, not the handler type.
 
 ## Complete, Suspend, Sleep, Retry, And Fail
 
@@ -428,6 +471,84 @@ store coordinates a global limit only among runners sharing that in-process
 store. Restarting a runner restores its local burst, and adding processes
 multiplies a local-only limit.
 
+## Durable Lane Ownership
+
+A lane can opt into cluster-safe ownership when external capacity has a real
+idle cost, such as a GPU process or compute server:
+
+```rust
+use std::time::Duration;
+use vyuh::{Error, Service};
+use vyuh::tasks::{TaskLaneContext, TaskLaneLock};
+
+async fn stop_gpu(
+    gpu: Service<GpuManager>,
+    lane: TaskLaneContext,
+) -> Result<(), Error> {
+    gpu.stop(lane.lane()).await
+}
+
+async fn start_gpu(
+    gpu: Service<GpuManager>,
+    lane: TaskLaneContext,
+) -> Result<(), Error> {
+    gpu.ensure_running(lane.lane()).await
+}
+
+let gpu = TaskLaneConf::new(GPU, 8).lock(
+    TaskLaneLock::new(32)
+        .deadline(Duration::from_secs(2))
+        .idle_after(Duration::from_secs(30))
+        .on_idle(stop_gpu)
+        .on_busy(start_gpu),
+);
+```
+
+`TaskLaneLock::new(32)` is a scheduling threshold, not a batch-handler API.
+Candidates remain pending until 32 ready rows have accumulated or the oldest
+ready row reaches the optional `deadline`. Vyuh then claims a bounded cohort
+and invokes ordinary handlers per task or explicitly batch-registered handlers
+over matching rows already in that local cohort. Task durability, retry, rate,
+and owner fencing remain per row.
+
+One worker owns the lane through accumulation, execution, and commit. Ownership
+uses a renewable store-time lease and an opaque token. A replacement can take
+over after expiry, while the token prevents a stale worker from renewing tasks,
+committing outcomes, applying hook results, or releasing the replacement's
+lease. Handler and hook execution never holds a database transaction.
+
+`idle_after` is continuous-empty debounce. Scheduled future work does not keep
+the lane busy; its readiness time becomes a wake deadline. Ready work resets the
+debounce. After the lane drains, `on_idle` runs before ownership is released.
+When work later becomes ready, `on_busy` must succeed before any task in that
+lane can be claimed.
+
+Lifecycle hooks are extracted Vyuh callables, not durable tasks. They run in
+independently spawned futures, do not consume `TaskConf::concurrency` or lane
+task concurrency, and do not block polling, commits, or other lanes. Configure
+both hooks or neither. Prefer function items as shown above and obtain mutable
+configuration through site services; captured process-local closures are not a
+cluster-stable configuration identity. Hooks must remain asynchronous and must
+delegate blocking integration work with `spawn_blocking` or to an external
+service.
+
+Hook calls are at least once and must reconcile the desired external state.
+An idle-hook failure releases ownership and fails open, but another idle attempt
+is suppressed until real work runs and drains. A busy-hook failure releases
+ownership, leaves work pending, and fails closed until a later normal poll
+retries it. Panics become bounded failures. A hung hook holds only its lane in a
+transition while the owner lease continues renewing; shutdown or ownership loss
+aborts the local future.
+
+Only locked lanes use the lane-lock table and bounded owner coordination query.
+Ordinary lanes retain their existing claim query, and task submission never
+reads or writes lane ownership state.
+
+Lane lease renewal is part of the runner's central paced store turn. The runner
+wakes that turn at the earliest normal poll, useful-work, fallback, task-lease,
+or half-lane-lease deadline; ownership does not create a separate per-lane
+poller or renewal query stream.
+
 Reusable bundles can contribute a complete default for a named lane without
 changing `bundle!` syntax:
 
@@ -482,6 +603,8 @@ task consumes another attempt and another rate permit.
 When observability is enabled, Vyuh exports bounded-label task counters for
 submission receipts and conflicts, claims and reclaimed leases, handler starts
 and lifecycle outcomes, lease renewals and ownership loss, and store failures.
+Batch handlers additionally expose invocation and item counters by registered
+handler name.
 Queue, handler, and outcome-commit durations are exported without dynamic
 application-data labels. Handler and lane labels come only from the immutable
 site registries.
@@ -521,10 +644,13 @@ With a database backend feature enabled, Vyuh stores tasks durably:
 - `mysql`: `vyuh_tasks`
 - `sqlite`: `vyuh_tasks`
 
-Durable stores use four framework-owned tables: task lifecycle records,
-idempotency ownership, per-lane rate buckets, and the store-wide scheduling
-policy fingerprint. The fingerprint prevents workers with incompatible lane,
-retry, rate, or idempotency policies from sharing one store.
+Durable stores use framework-owned tables for task lifecycle records,
+idempotency ownership, per-lane rate buckets, opt-in lane-owner leases, durable
+schedule cursors, and the store-wide scheduling policy fingerprint. The
+fingerprint prevents workers with incompatible lane, retry, rate, ownership,
+hook, or idempotency policies from sharing one store. The lane-owner table has
+one primary-key row per configured locked lane and no foreign keys or secondary
+indexes.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
 migrations before starting task workers; `Site::build` never creates or alters
@@ -570,6 +696,7 @@ It covers:
 - Fire-and-forget task handlers.
 - Fallible task handlers.
 - Direct registration without the task macro.
+- Local `Data<Batch<T>>` handler registration and ordered outcomes.
 - Suspend/resume with `Continuation<S, R>` and `TaskState`.
 
 ## Failure Modes
@@ -577,6 +704,10 @@ It covers:
 - Unregistered task data types return `TaskError::TaskNotFound`.
 - Handler `Err(vyuh::Error)` values are committed as failed task outcomes.
 - Stale workers cannot overwrite tasks they no longer own.
+- Stale lane owners cannot renew tasks, commit outcomes, or apply lifecycle
+  results after another owner takes over.
+- Lane lifecycle hooks may repeat after lease recovery and therefore must be
+  idempotent reconcilers rather than one-shot external effects.
 - A crashed worker's running task is reclaimed only after its lease expires;
   the replacement invocation consumes another attempt and may repeat effects.
 - A malformed historical running row without a lease deadline is marked failed

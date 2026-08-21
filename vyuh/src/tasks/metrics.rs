@@ -11,20 +11,39 @@ use super::{TaskHealthSnapshot, TaskOutcome, TaskReceipt};
 
 const RECEIPTS: [&str; 4] = ["queued", "existing", "ignored", "error"];
 const OUTCOMES: [&str; 5] = ["complete", "suspend", "sleep", "retry", "fail"];
+const HOOKS: [&str; 2] = ["idle", "busy"];
+const LANE_PHASES: [&str; 6] = [
+    "active",
+    "idling",
+    "idle",
+    "busying",
+    "idle_failed",
+    "busy_failed",
+];
 
 pub(crate) struct TaskMetrics {
     handlers: BTreeMap<String, usize>,
     lanes: BTreeMap<String, usize>,
     submissions: Vec<[AtomicU64; 4]>,
     starts: Vec<AtomicU64>,
+    batch_invocations: Vec<AtomicU64>,
+    batch_items: Vec<AtomicU64>,
     outcomes: Vec<[AtomicU64; 5]>,
     claims: Vec<AtomicU64>,
     reclaimed: Vec<AtomicU64>,
     idempotency_conflicts: Vec<AtomicU64>,
     renewals: Vec<AtomicU64>,
     ownership_losses: Vec<AtomicU64>,
+    ownership_acquires: Vec<AtomicU64>,
+    ownership_takeovers: Vec<AtomicU64>,
+    lane_owner_losses: Vec<AtomicU64>,
+    stale_hook_results: Vec<AtomicU64>,
+    lifecycle_transitions: Vec<[AtomicU64; 6]>,
+    hook_starts: Vec<[AtomicU64; 2]>,
+    hook_failures: Vec<[AtomicU64; 2]>,
     queue_micros: Timing,
     handler_micros: Timing,
+    hook_micros: Timing,
     commit_micros: Timing,
     store_failures: AtomicU64,
 }
@@ -45,16 +64,26 @@ impl TaskMetrics {
         Self {
             submissions: atomic_matrix(handlers.len()),
             starts: atomic_vector(handlers.len()),
+            batch_invocations: atomic_vector(handlers.len()),
+            batch_items: atomic_vector(handlers.len()),
             outcomes: atomic_outcomes(handlers.len()),
             claims: atomic_vector(lanes.len()),
             reclaimed: atomic_vector(lanes.len()),
             idempotency_conflicts: atomic_vector(handlers.len()),
             renewals: atomic_vector(lanes.len()),
             ownership_losses: atomic_vector(lanes.len()),
+            ownership_acquires: atomic_vector(lanes.len()),
+            ownership_takeovers: atomic_vector(lanes.len()),
+            lane_owner_losses: atomic_vector(lanes.len()),
+            stale_hook_results: atomic_vector(lanes.len()),
+            lifecycle_transitions: atomic_phases(lanes.len()),
+            hook_starts: atomic_pairs(lanes.len()),
+            hook_failures: atomic_pairs(lanes.len()),
             handlers,
             lanes,
             queue_micros: Timing::default(),
             handler_micros: Timing::default(),
+            hook_micros: Timing::default(),
             commit_micros: Timing::default(),
             store_failures: AtomicU64::new(0),
         }
@@ -98,11 +127,19 @@ impl TaskMetrics {
         self.queue_micros.record(queue);
     }
 
-    pub(crate) fn completed(&self, handler: &str, outcome: &TaskOutcome, elapsed: Duration) {
+    pub(crate) fn outcome(&self, handler: &str, outcome: &TaskOutcome) {
         if let Some(index) = self.handlers.get(handler) {
             self.outcomes[*index][outcome_index(outcome)].fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn handler_completed(&self, elapsed: Duration) {
         self.handler_micros.record(elapsed);
+    }
+
+    pub(crate) fn batch_started(&self, handler: &str, items: usize) {
+        increment(&self.handlers, &self.batch_invocations, handler, 1);
+        increment(&self.handlers, &self.batch_items, handler, items as u64);
     }
 
     pub(crate) fn renewed(&self, lane: &str, lost: bool) {
@@ -112,6 +149,47 @@ impl TaskMetrics {
             &self.renewals
         };
         increment(&self.lanes, counters, lane, 1);
+    }
+
+    pub(crate) fn owner_acquired(&self, lane: &str) {
+        increment(&self.lanes, &self.ownership_acquires, lane, 1);
+    }
+
+    pub(crate) fn owner_takeover(&self, lane: &str) {
+        increment(&self.lanes, &self.ownership_takeovers, lane, 1);
+    }
+
+    pub(crate) fn owner_lost(&self, lane: &str) {
+        increment(&self.lanes, &self.lane_owner_losses, lane, 1);
+    }
+
+    pub(crate) fn stale_hook_result(&self, lane: &str) {
+        increment(&self.lanes, &self.stale_hook_results, lane, 1);
+    }
+
+    pub(crate) fn lifecycle_transition(&self, lane: &str, phase: super::LaneOwnerPhase) {
+        if let Some(index) = self.lanes.get(lane) {
+            self.lifecycle_transitions[*index][phase_index(phase)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn hook_started(&self, lane: &str, action: super::LaneHookAction) {
+        if let Some(index) = self.lanes.get(lane) {
+            self.hook_starts[*index][hook_index(action)].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn hook_completed(
+        &self,
+        lane: &str,
+        action: super::LaneHookAction,
+        failed: bool,
+        elapsed: Duration,
+    ) {
+        self.hook_micros.record(elapsed);
+        if failed && let Some(index) = self.lanes.get(lane) {
+            self.hook_failures[*index][hook_index(action)].fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn commit(&self, elapsed: Duration, failed: bool) {
@@ -131,6 +209,7 @@ impl TaskMetrics {
         self.render_lane_metrics(&mut output);
         render_timing(&mut output, "queue", &self.queue_micros);
         render_timing(&mut output, "handler", &self.handler_micros);
+        render_timing(&mut output, "lane_hook", &self.hook_micros);
         render_timing(&mut output, "commit", &self.commit_micros);
         let failures = self.store_failures.load(Ordering::Relaxed);
         let _ = writeln!(
@@ -157,6 +236,22 @@ impl TaskMetrics {
             "handler",
             &self.handlers,
             &self.starts,
+        );
+        output.push_str("# TYPE vyuh_task_batch_invocations_total counter\n");
+        render_vector(
+            output,
+            "vyuh_task_batch_invocations_total",
+            "handler",
+            &self.handlers,
+            &self.batch_invocations,
+        );
+        output.push_str("# TYPE vyuh_task_batch_items_total counter\n");
+        render_vector(
+            output,
+            "vyuh_task_batch_items_total",
+            "handler",
+            &self.handlers,
+            &self.batch_items,
         );
         output.push_str("# TYPE vyuh_task_outcomes_total counter\n");
         render_matrix(
@@ -209,6 +304,59 @@ impl TaskMetrics {
             "lane",
             &self.lanes,
             &self.ownership_losses,
+        );
+        output.push_str("# TYPE vyuh_task_lane_owner_acquisitions_total counter\n");
+        render_vector(
+            output,
+            "vyuh_task_lane_owner_acquisitions_total",
+            "lane",
+            &self.lanes,
+            &self.ownership_acquires,
+        );
+        render_vector(
+            output,
+            "vyuh_task_lane_owner_takeovers_total",
+            "lane",
+            &self.lanes,
+            &self.ownership_takeovers,
+        );
+        render_vector(
+            output,
+            "vyuh_task_lane_owner_losses_total",
+            "lane",
+            &self.lanes,
+            &self.lane_owner_losses,
+        );
+        render_vector(
+            output,
+            "vyuh_task_lane_stale_hook_results_total",
+            "lane",
+            &self.lanes,
+            &self.stale_hook_results,
+        );
+        render_matrix(
+            output,
+            "vyuh_task_lane_hook_starts_total",
+            "lane",
+            &self.lanes,
+            &self.hook_starts,
+            &HOOKS,
+        );
+        render_matrix(
+            output,
+            "vyuh_task_lane_lifecycle_transitions_total",
+            "lane",
+            &self.lanes,
+            &self.lifecycle_transitions,
+            &LANE_PHASES,
+        );
+        render_matrix(
+            output,
+            "vyuh_task_lane_hook_failures_total",
+            "lane",
+            &self.lanes,
+            &self.hook_failures,
+            &HOOKS,
         );
     }
 }
@@ -275,6 +423,18 @@ fn atomic_outcomes(size: usize) -> Vec<[AtomicU64; 5]> {
         .collect()
 }
 
+fn atomic_pairs(size: usize) -> Vec<[AtomicU64; 2]> {
+    (0..size)
+        .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+        .collect()
+}
+
+fn atomic_phases(size: usize) -> Vec<[AtomicU64; 6]> {
+    (0..size)
+        .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+        .collect()
+}
+
 fn increment(indexes: &BTreeMap<String, usize>, counters: &[AtomicU64], name: &str, value: u64) {
     if let Some(index) = indexes.get(name) {
         counters[*index].fetch_add(value, Ordering::Relaxed);
@@ -296,6 +456,24 @@ fn outcome_index(outcome: &TaskOutcome) -> usize {
         TaskOutcome::Sleep { .. } => 2,
         TaskOutcome::Retry { .. } => 3,
         TaskOutcome::Fail { .. } => 4,
+    }
+}
+
+fn hook_index(action: super::LaneHookAction) -> usize {
+    match action {
+        super::LaneHookAction::Idle => 0,
+        super::LaneHookAction::Busy => 1,
+    }
+}
+
+fn phase_index(phase: super::LaneOwnerPhase) -> usize {
+    match phase {
+        super::LaneOwnerPhase::Active => 0,
+        super::LaneOwnerPhase::Idling => 1,
+        super::LaneOwnerPhase::Idle => 2,
+        super::LaneOwnerPhase::Busying => 3,
+        super::LaneOwnerPhase::IdleFailed => 4,
+        super::LaneOwnerPhase::BusyFailed => 5,
     }
 }
 

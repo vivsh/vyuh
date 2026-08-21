@@ -15,6 +15,12 @@ use crate::{
 pub(super) struct TaskRow {
     #[column(primary_key, type = "uuid")]
     pub(super) id: uuid::Uuid,
+    #[column(type = "uuid")]
+    pub(super) parent_id: Option<uuid::Uuid>,
+    #[column(type = "uuid")]
+    pub(super) root_id: Option<uuid::Uuid>,
+    #[column(default = "0")]
+    pub(super) kind: i16,
     #[column(type = "varchar(191)")]
     pub(super) name: String,
     pub(super) input: String,
@@ -43,6 +49,9 @@ impl From<TaskRecord> for TaskRow {
     fn from(record: TaskRecord) -> Self {
         Self {
             id: record.id.into_uuid(),
+            parent_id: record.parent_id.map(crate::tasks::TaskId::into_uuid),
+            root_id: record.root_id.map(crate::tasks::TaskId::into_uuid),
+            kind: record.kind.as_i16(),
             name: record.name,
             input: record.input,
             state: record.state,
@@ -71,6 +80,9 @@ impl TryFrom<TaskRow> for TaskRecord {
     fn try_from(row: TaskRow) -> Result<Self, Self::Error> {
         Ok(Self {
             id: crate::tasks::TaskId::new(row.id),
+            parent_id: row.parent_id.map(crate::tasks::TaskId::new),
+            root_id: row.root_id.map(crate::tasks::TaskId::new),
+            kind: crate::tasks::TaskKind::from_i16(row.kind)?,
             name: row.name,
             input: row.input,
             state: row.state,
@@ -123,6 +135,43 @@ pub(super) struct TaskRateRow {
     #[column(type = "varchar(64)")]
     pub(super) policy_fingerprint: String,
     pub(super) tokens_micros: i64,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Durable ownership and lifecycle state for one opt-in task lane.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_task_lane_locks")]
+pub(super) struct TaskLaneLockRow {
+    #[column(primary_key, type = "varchar(64)")]
+    pub(super) lane_name: String,
+    #[column(type = "varchar(191)")]
+    pub(super) owner_id: Option<String>,
+    #[column(type = "varchar(64)")]
+    pub(super) owner_token: Option<String>,
+    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) phase: i16,
+    pub(super) flushing: bool,
+    pub(super) empty_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) generation: i64,
+    pub(super) hook_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) last_hook_error: Option<String>,
+    pub(super) created_at: chrono::DateTime<chrono::Utc>,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Mutable fields written while the lane-lock row is exclusively held.
+#[derive(Debug, Clone, db::Record)]
+#[table(name = "vyuh_task_lane_locks")]
+pub(super) struct TaskLaneLockPatch {
+    pub(super) owner_id: Option<String>,
+    pub(super) owner_token: Option<String>,
+    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) phase: i16,
+    pub(super) flushing: bool,
+    pub(super) empty_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) generation: i64,
+    pub(super) hook_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) last_hook_error: Option<String>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 

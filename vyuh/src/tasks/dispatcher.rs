@@ -268,6 +268,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             lanes: self.registry.lanes().to_vec(),
             idempotency: self.registry.idempotency_conf()?,
             schedules: self.schedules.to_vec(),
+            poll_interval: self.registry.config.poll_interval_value(),
         })
     }
 
@@ -448,6 +449,9 @@ fn build_record(
     let now = chrono::Utc::now();
     Ok(TaskRecord {
         id: TaskId::new(uuid::Uuid::now_v7()),
+        parent_id: None,
+        root_id: None,
+        kind: super::TaskKind::Work,
         name: name.into(),
         input,
         state: None,

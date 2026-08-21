@@ -2,7 +2,9 @@
 
 use crate::db;
 
-use super::model::{TaskIdempotencyRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow};
+use super::model::{
+    TaskIdempotencyRow, TaskLaneLockRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow,
+};
 
 /// Builds the desired task, idempotency, rate, and runtime coordination schema.
 pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
@@ -10,6 +12,7 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
         .model::<TaskRow>()
         .model::<TaskIdempotencyRow>()
         .model::<TaskRateRow>()
+        .model::<TaskLaneLockRow>()
         .model::<TaskRuntimeRow>()
         .model::<TaskScheduleRow>()
         .build()?;
@@ -137,6 +140,7 @@ mod tests {
             "vyuh_tasks",
             "vyuh_task_idempotency",
             "vyuh_task_lane_rates",
+            "vyuh_task_lane_locks",
             "vyuh_task_runtime",
             "vyuh_schedules",
         ] {
@@ -158,7 +162,15 @@ mod tests {
         }
         require_columns(
             tasks,
-            &["lane_name", "ready_at", "leased_until", "idempotency_key"],
+            &[
+                "parent_id",
+                "root_id",
+                "kind",
+                "lane_name",
+                "ready_at",
+                "leased_until",
+                "idempotency_key",
+            ],
         )?;
         let lane_default = tasks
             .columns
@@ -167,6 +179,14 @@ mod tests {
             .and_then(|column| column.default.as_deref());
         if lane_default != Some("'default'") {
             return Err("task lane migration does not backfill the default lane".into());
+        }
+        let kind_default = tasks
+            .columns
+            .iter()
+            .find(|column| column.name == "kind")
+            .and_then(|column| column.default.as_deref());
+        if kind_default != Some("0") {
+            return Err("task kind migration does not backfill work tasks".into());
         }
         require_indexes(
             tasks,
@@ -184,6 +204,30 @@ mod tests {
                 .ok_or("missing idempotency table")?,
             &["idx_vyuh_task_idempotency_owner"],
         )?;
+        let lane_locks = schema
+            .tables
+            .get("vyuh_task_lane_locks")
+            .ok_or("missing task lane lock table")?;
+        require_columns(
+            lane_locks,
+            &[
+                "lane_name",
+                "owner_id",
+                "owner_token",
+                "leased_until",
+                "phase",
+                "flushing",
+                "empty_since",
+                "generation",
+                "hook_retry_at",
+                "last_hook_error",
+                "created_at",
+                "updated_at",
+            ],
+        )?;
+        if !lane_locks.indexes.is_empty() {
+            return Err("task lane lock table must not have secondary indexes".into());
+        }
         Ok(())
     }
 

@@ -18,6 +18,15 @@ struct TaskArgs {
 
 /// Unified implementation for both free functions and methods
 pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    parse_task_as(attr, item, false)
+}
+
+/// Registers a value-only local batch handler.
+pub(crate) fn parse_task_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    parse_task_as(attr, item, true)
+}
+
+fn parse_task_as(attr: TokenStream, item: TokenStream, batch: bool) -> TokenStream {
     let args = if attr.is_empty() {
         TaskArgs::default()
     } else {
@@ -39,7 +48,7 @@ pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "#[task] can only be applied to functions or methods",
+            "task attributes can only be applied to functions or methods",
         )
         .to_compile_error()
         .into();
@@ -65,13 +74,18 @@ pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
         .idempotency
         .map(|policy| quote! { .idempotency(#policy) })
         .unwrap_or_default();
+    let register = if batch {
+        quote! { ::vyuh::bundles::task_batch }
+    } else {
+        quote! { ::vyuh::bundles::task }
+    };
 
     let expanded = quote! {
         #original
 
         #[allow(non_snake_case)]
         fn #bundle_part_fn_name() -> ::vyuh::bundles::BundlePart {
-            ::vyuh::bundles::task(
+            #register(
                 #call_expr,
                 ::vyuh::tasks::TaskDefinition::new(#task_name)
                     #lane

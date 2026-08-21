@@ -56,6 +56,36 @@ impl callables::IntoArgPart for super::TaskId {
 
 type TaskHandler = Callable<TaskContext, Error>;
 
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct BatchTaskContext {
+    site: Site,
+    payload: callables::DataBox,
+    operation_id: crate::OperationId,
+}
+
+impl callables::IntoDataBox for BatchTaskContext {
+    fn into_data_box(self) -> callables::DataBox {
+        self.payload
+    }
+}
+
+impl callables::HasSite for BatchTaskContext {
+    fn site(&self) -> &Site {
+        &self.site
+    }
+}
+
+impl callables::FromContextParts<BatchTaskContext> for crate::OperationId {
+    fn from_context_parts(context: &BatchTaskContext) -> Result<Self, callables::CallError> {
+        Ok(context.operation_id)
+    }
+}
+
+type BatchHandler = Callable<BatchTaskContext, Error>;
+type BatchDecoder = fn(Vec<Arc<TaskRecord>>, crate::OperationId) -> DecodedBatch;
+type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, TaskError>;
+
 /// Failure produced while configuring, submitting, storing, or executing a task.
 #[derive(Debug, thiserror::Error)]
 pub enum TaskError {
@@ -321,8 +351,7 @@ impl IntoTaskOutcomePart for TaskState {
 }
 
 impl TaskState {
-    /// Unwraps lifecycle state for focused contract tests.
-    #[cfg(test)]
+    /// Unwraps lifecycle state for framework outcome adapters.
     pub(crate) fn into_outcome(self) -> TaskOutcome {
         self.inner
     }
@@ -384,10 +413,34 @@ pub(crate) struct RegisteredTask {
     pub name: String,
     pub type_id: TypeId,
     pub type_name: String,
-    outcome: fn(callables::DataBox) -> TaskOutcome,
-    handler: TaskHandler,
+    handler: RegisteredHandler,
     operation: callables::Operation,
     policy: TaskPolicy,
+}
+
+#[derive(Clone)]
+enum RegisteredHandler {
+    Single {
+        handler: TaskHandler,
+        outcome: fn(callables::DataBox) -> TaskOutcome,
+    },
+    Batch {
+        handler: BatchHandler,
+        decode: BatchDecoder,
+        outcome: BatchOutcome,
+    },
+}
+
+pub(crate) struct TaskExecutionResult {
+    pub(crate) record: Arc<TaskRecord>,
+    pub(crate) outcome: TaskOutcome,
+}
+
+struct DecodedBatch {
+    records: Vec<Arc<TaskRecord>>,
+    positions: Vec<usize>,
+    outcomes: Vec<Option<TaskOutcome>>,
+    payload: callables::DataBox,
 }
 
 impl RegisteredTask {
@@ -397,6 +450,10 @@ impl RegisteredTask {
 
     pub(crate) fn operation(&self) -> callables::Operation {
         self.operation.clone()
+    }
+
+    pub(crate) const fn is_batch(&self) -> bool {
+        matches!(self.handler, RegisteredHandler::Batch { .. })
     }
 
     pub(crate) const fn declared_lane(&self) -> super::TaskLane {
@@ -452,11 +509,43 @@ impl RegisteredTask {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn execute(&self, site: Site, record: Arc<TaskRecord>) -> TaskOutcome {
-        let payload = match self.handler.deserialize_input(&record.input) {
+        let mut results = self.execute_many(site, vec![record]).await;
+        match results.pop() {
+            Some(result) => result.outcome,
+            None => TaskOutcome::fail("Task handler produced no outcome"),
+        }
+    }
+
+    pub(crate) async fn execute_many(
+        &self,
+        site: Site,
+        records: Vec<Arc<TaskRecord>>,
+    ) -> Vec<TaskExecutionResult> {
+        match &self.handler {
+            RegisteredHandler::Single { handler, outcome } => {
+                execute_singles(handler, *outcome, site, records, self.operation.id).await
+            }
+            RegisteredHandler::Batch {
+                handler,
+                decode,
+                outcome,
+            } => execute_batch(handler, *decode, *outcome, site, records, self.operation.id).await,
+        }
+    }
+
+    async fn execute_single(
+        handler: &TaskHandler,
+        outcome: fn(callables::DataBox) -> TaskOutcome,
+        site: Site,
+        record: Arc<TaskRecord>,
+        operation_id: crate::OperationId,
+    ) -> TaskOutcome {
+        let payload = match handler.deserialize_input(&record.input) {
             Ok(value) => value,
             Err(error) => {
-                log_handler_error(&record, self.operation.id, &error);
+                log_handler_error(&record, operation_id, &error);
                 return TaskOutcome::fail("Task input is invalid");
             }
         };
@@ -465,18 +554,18 @@ impl RegisteredTask {
             site,
             payload,
             record: record.clone(),
-            operation_id: self.operation.id,
+            operation_id,
         };
 
-        let data = match self.handler.call(ctx).await {
+        let data = match handler.call(ctx).await {
             Ok(data) => data,
             Err(error) => {
-                log_handler_error(&record, self.operation.id, &error);
+                log_handler_error(&record, operation_id, &error);
                 return TaskOutcome::handler_failed();
             }
         };
 
-        (self.outcome)(data)
+        outcome(data)
     }
 
     pub fn new<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
@@ -503,12 +592,198 @@ impl RegisteredTask {
             name,
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>().to_string(),
-            outcome: H::Output::into_task_outcome,
-            handler: callable,
+            handler: RegisteredHandler::Single {
+                outcome: H::Output::into_task_outcome,
+                handler: callable,
+            },
             operation,
             policy: policy.erase(),
         }
     }
+
+    pub fn new_batch<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
+    where
+        T: callables::DataValue,
+        H: callables::Specable<Args> + Send + Sync + 'static,
+        H::Output: callables::IntoOutput<Error>
+            + callables::IntoReturnPart
+            + super::IntoTaskBatchOutcomePart
+            + Send
+            + 'static,
+        Args: callables::FromContext<BatchTaskContext>
+            + callables::IntoArgSpecs
+            + callables::HasData<super::Batch<T>>
+            + Send
+            + 'static,
+    {
+        let (name, policy) = definition.into_parts();
+        let callable: BatchHandler = Callable::new(handler);
+        let mut operation =
+            callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
+        operation.name = name.clone();
+        Self {
+            name,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>().to_string(),
+            handler: RegisteredHandler::Batch {
+                handler: callable,
+                decode: decode_batch::<T>,
+                outcome: <H::Output as super::IntoTaskBatchOutcomePart>::into_task_outcomes,
+            },
+            operation,
+            policy: policy.erase(),
+        }
+    }
+}
+
+async fn execute_singles(
+    handler: &TaskHandler,
+    outcome: fn(callables::DataBox) -> TaskOutcome,
+    site: Site,
+    records: Vec<Arc<TaskRecord>>,
+    operation_id: crate::OperationId,
+) -> Vec<TaskExecutionResult> {
+    let mut results = Vec::with_capacity(records.len());
+    for record in records {
+        let task_outcome = RegisteredTask::execute_single(
+            handler,
+            outcome,
+            site.clone(),
+            record.clone(),
+            operation_id,
+        )
+        .await;
+        results.push(TaskExecutionResult {
+            record,
+            outcome: task_outcome,
+        });
+    }
+    results
+}
+
+async fn execute_batch(
+    handler: &BatchHandler,
+    decode: BatchDecoder,
+    outcome: BatchOutcome,
+    site: Site,
+    records: Vec<Arc<TaskRecord>>,
+    operation_id: crate::OperationId,
+) -> Vec<TaskExecutionResult> {
+    let mut batch = decode(records, operation_id);
+    if !batch.positions.is_empty() {
+        let context = BatchTaskContext {
+            site,
+            payload: batch.payload.clone(),
+            operation_id,
+        };
+        let outcomes = call_batch(
+            handler,
+            outcome,
+            context,
+            batch.positions.len(),
+            batch.records.first().map(Arc::as_ref),
+        )
+        .await;
+        apply_batch_outcomes(&mut batch, outcomes);
+    }
+    finish_batch(batch)
+}
+
+async fn call_batch(
+    handler: &BatchHandler,
+    outcome: BatchOutcome,
+    context: BatchTaskContext,
+    expected: usize,
+    record: Option<&TaskRecord>,
+) -> Vec<TaskOutcome> {
+    let operation_id = context.operation_id;
+    match handler.call(context).await {
+        Ok(data) => match outcome(data, expected) {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                log_batch_error(record, operation_id, expected, &error);
+                vec![TaskOutcome::handler_failed(); expected]
+            }
+        },
+        Err(error) => {
+            log_batch_error(record, operation_id, expected, &error);
+            vec![TaskOutcome::handler_failed(); expected]
+        }
+    }
+}
+
+fn log_batch_error(
+    record: Option<&TaskRecord>,
+    operation_id: crate::OperationId,
+    count: usize,
+    error: &(dyn std::error::Error + 'static),
+) {
+    if let Some(record) = record {
+        tracing::error!(
+            task_id = %record.id(),
+            operation_id = %operation_id,
+            lane = %record.lane,
+            attempt = record.attempts,
+            count,
+            error = %error_chain(error),
+            "durable task batch failed"
+        );
+    } else {
+        tracing::error!(operation_id = %operation_id, count, error = %error_chain(error),
+            "durable task batch failed");
+    }
+}
+
+fn decode_batch<T: callables::DataValue>(
+    records: Vec<Arc<TaskRecord>>,
+    operation_id: crate::OperationId,
+) -> DecodedBatch {
+    let mut values = Vec::with_capacity(records.len());
+    let mut positions = Vec::with_capacity(records.len());
+    let mut outcomes = vec![None; records.len()];
+    for (position, record) in records.iter().enumerate() {
+        match serde_json::from_str::<T>(&record.input) {
+            Ok(value) => {
+                values.push(value);
+                positions.push(position);
+            }
+            Err(error) => {
+                log_handler_error(record, operation_id, &error);
+                if let Some(slot) = outcomes.get_mut(position) {
+                    *slot = Some(TaskOutcome::fail("Task input is invalid"));
+                }
+            }
+        }
+    }
+    DecodedBatch {
+        records,
+        positions,
+        outcomes,
+        payload: callables::DataBox::new_data(super::Batch::new(values)),
+    }
+}
+
+fn apply_batch_outcomes(batch: &mut DecodedBatch, outcomes: Vec<TaskOutcome>) {
+    for (position, outcome) in batch.positions.iter().copied().zip(outcomes) {
+        if let Some(slot) = batch.outcomes.get_mut(position) {
+            *slot = Some(outcome);
+        }
+    }
+}
+
+fn finish_batch(batch: DecodedBatch) -> Vec<TaskExecutionResult> {
+    batch
+        .records
+        .into_iter()
+        .zip(batch.outcomes)
+        .map(|(record, outcome)| TaskExecutionResult {
+            record,
+            outcome: match outcome {
+                Some(outcome) => outcome,
+                None => TaskOutcome::handler_failed(),
+            },
+        })
+        .collect()
 }
 
 /// Logs one native handler failure while keeping durable task state generic.
@@ -595,6 +870,11 @@ impl TaskRegistry {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+
+    /// Returns whether one registered handler consumes local task batches.
+    pub(crate) fn is_batch(&self, name: &str) -> bool {
+        self.tasks.get(name).is_some_and(RegisteredTask::is_batch)
     }
 
     pub(crate) fn register(&mut self, service: RegisteredTask) -> Result<(), TaskError> {
@@ -687,13 +967,29 @@ impl TaskRegistry {
         }
     }
 
-    pub async fn execute(&self, site: Site, record: Arc<TaskRecord>) -> TaskOutcome {
-        let task = match self.tasks.get(record.name()) {
-            Some(task) => task,
-            None => return TaskOutcome::fail(format!("Task '{}' not found", record.name())),
+    pub(crate) async fn execute_many(
+        &self,
+        site: Site,
+        records: Vec<Arc<TaskRecord>>,
+    ) -> Vec<TaskExecutionResult> {
+        let Some(name) = records.first().map(|record| record.name().to_owned()) else {
+            return Vec::new();
         };
-        task.execute(site, record).await
+        let Some(task) = self.tasks.get(&name) else {
+            return missing_results(records, &name);
+        };
+        task.execute_many(site, records).await
     }
+}
+
+fn missing_results(records: Vec<Arc<TaskRecord>>, name: &str) -> Vec<TaskExecutionResult> {
+    records
+        .into_iter()
+        .map(|record| TaskExecutionResult {
+            record,
+            outcome: TaskOutcome::fail(format!("Task '{name}' not found")),
+        })
+        .collect()
 }
 
 impl Default for TaskRegistry {
@@ -807,10 +1103,60 @@ mod tests {
         Err(crate::Error::invalid("secret task detail"))
     }
 
+    async fn batch_job(
+        input: Data<super::super::Batch<DirectJob>>,
+    ) -> super::super::Batch<TaskState> {
+        input
+            .iter()
+            .map(|job| {
+                if job.id % 2 == 0 {
+                    TaskState::complete()
+                } else {
+                    TaskState::retry("odd job")
+                }
+            })
+            .collect()
+    }
+
+    async fn short_batch(
+        _input: Data<super::super::Batch<DirectJob>>,
+    ) -> super::super::Batch<TaskState> {
+        super::super::Batch::new(Vec::new())
+    }
+
+    async fn sleeping_batch(
+        _input: Data<super::super::Batch<DirectJob>>,
+    ) -> Result<TaskState, crate::Error> {
+        Ok(TaskState::sleep("state", Duration::from_secs(1))?)
+    }
+
+    async fn suspended_batch(
+        _input: Data<super::super::Batch<DirectJob>>,
+    ) -> Result<TaskState, crate::Error> {
+        Ok(TaskState::suspend("state")?)
+    }
+
+    async fn unit_batch(_input: Data<super::super::Batch<DirectJob>>) {}
+
+    async fn retrying_batch(_input: Data<super::super::Batch<DirectJob>>) -> TaskState {
+        TaskState::retry("try again")
+    }
+
+    async fn failing_batch(_input: Data<super::super::Batch<DirectJob>>) -> TaskState {
+        TaskState::fail("permanent failure")
+    }
+
+    async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(), crate::Error> {
+        Err(crate::Error::invalid("batch handler failed"))
+    }
+
     fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskError> {
         let now = chrono::Utc::now();
         Ok(Arc::new(TaskRecord {
             id: TaskId::new(uuid::Uuid::now_v7()),
+            parent_id: None,
+            root_id: None,
+            kind: super::super::TaskKind::Work,
             name: name.to_string(),
             input: serde_json::to_string(input)?,
             state: None,
@@ -840,6 +1186,207 @@ mod tests {
         .await
     }
 
+    /// Verifies direct batch registration preserves ordered per-task outcomes.
+    #[tokio::test]
+    async fn batch_registration_maps_ordered_outcomes() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("batch_job"), batch_job);
+        let records = vec![
+            record("batch_job", &DirectJob { id: 1 }).map_err(|error| error.to_string())?,
+            record("batch_job", &DirectJob { id: 2 }).map_err(|error| error.to_string())?,
+        ];
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                records,
+            )
+            .await;
+        assert!(matches!(
+            results.first().map(|result| &result.outcome),
+            Some(TaskOutcome::Retry { error }) if error == "odd job"
+        ));
+        assert!(matches!(
+            results.get(1).map(|result| &result.outcome),
+            Some(TaskOutcome::Complete)
+        ));
+        Ok(())
+    }
+
+    /// Verifies malformed rows fail alone while valid rows still reach the batch handler.
+    #[tokio::test]
+    async fn batch_invalid_input_is_isolated() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("batch_job"), batch_job);
+        let mut invalid = record("batch_job", &DirectJob { id: 1 })
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .clone();
+        invalid.input = "{".into();
+        let records = vec![
+            Arc::new(invalid),
+            record("batch_job", &DirectJob { id: 2 }).map_err(|error| error.to_string())?,
+        ];
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                records,
+            )
+            .await;
+        assert!(matches!(
+            results.first().map(|result| &result.outcome),
+            Some(TaskOutcome::Fail { error }) if error == "Task input is invalid"
+        ));
+        assert!(matches!(
+            results.get(1).map(|result| &result.outcome),
+            Some(TaskOutcome::Complete)
+        ));
+        Ok(())
+    }
+
+    /// Verifies invalid cardinality fails every valid member of an invocation.
+    #[tokio::test]
+    async fn batch_cardinality_mismatch_fails_all() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("short_batch"), short_batch);
+        let records = vec![
+            record("short_batch", &DirectJob { id: 1 }).map_err(|error| error.to_string())?,
+            record("short_batch", &DirectJob { id: 2 }).map_err(|error| error.to_string())?,
+        ];
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                records,
+            )
+            .await;
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result.outcome, TaskOutcome::Fail { .. }))
+        );
+        Ok(())
+    }
+
+    /// Verifies value-only batches reject continuation lifecycle outcomes.
+    #[tokio::test]
+    async fn batch_sleep_is_rejected() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("sleeping_batch"), sleeping_batch);
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                vec![
+                    record("sleeping_batch", &DirectJob { id: 1 })
+                        .map_err(|error| error.to_string())?,
+                ],
+            )
+            .await;
+        assert!(matches!(
+            results.first().map(|result| &result.outcome),
+            Some(TaskOutcome::Fail { error }) if error.contains("cannot suspend or sleep")
+        ));
+        Ok(())
+    }
+
+    /// Verifies unit and uniform task-state returns map independently to every batch member.
+    #[tokio::test]
+    async fn batch_uniform_returns_apply_to_every_member() -> Result<(), String> {
+        let site = test_site().await.map_err(|error| error.to_string())?;
+        let records = || -> Result<Vec<Arc<TaskRecord>>, String> {
+            Ok(vec![
+                record("uniform", &DirectJob { id: 1 }).map_err(|error| error.to_string())?,
+                record("uniform", &DirectJob { id: 2 }).map_err(|error| error.to_string())?,
+            ])
+        };
+        let unit = RegisteredTask::new_batch(TaskDefinition::new("unit"), unit_batch)
+            .execute_many(site.clone(), records()?)
+            .await;
+        assert!(
+            unit.iter()
+                .all(|result| matches!(result.outcome, TaskOutcome::Complete))
+        );
+        let retried = RegisteredTask::new_batch(TaskDefinition::new("retry"), retrying_batch)
+            .execute_many(site.clone(), records()?)
+            .await;
+        assert!(retried.iter().all(|result| matches!(
+            &result.outcome,
+            TaskOutcome::Retry { error } if error == "try again"
+        )));
+        let failed = RegisteredTask::new_batch(TaskDefinition::new("fail"), failing_batch)
+            .execute_many(site, records()?)
+            .await;
+        assert!(failed.iter().all(|result| matches!(
+            &result.outcome,
+            TaskOutcome::Fail { error } if error == "permanent failure"
+        )));
+        Ok(())
+    }
+
+    /// Verifies a handler error becomes one contained terminal failure per valid input.
+    #[tokio::test]
+    async fn batch_handler_error_fails_every_valid_member() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("error_batch"), error_batch);
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                vec![
+                    record("error_batch", &DirectJob { id: 1 })
+                        .map_err(|error| error.to_string())?,
+                    record("error_batch", &DirectJob { id: 2 })
+                        .map_err(|error| error.to_string())?,
+                ],
+            )
+            .await;
+        assert!(results.iter().all(|result| matches!(
+            &result.outcome,
+            TaskOutcome::Fail { error } if error == "Task handler failed"
+        )));
+        Ok(())
+    }
+
+    /// Verifies an all-malformed invocation is rejected without applying handler failure outcomes.
+    #[tokio::test]
+    async fn batch_all_invalid_inputs_skip_the_handler() -> Result<(), String> {
+        let task = RegisteredTask::new_batch(TaskDefinition::new("error_batch"), error_batch);
+        let mut first = record("error_batch", &DirectJob { id: 1 })
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .clone();
+        first.input = "{".into();
+        let mut second = record("error_batch", &DirectJob { id: 2 })
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .clone();
+        second.input = "[".into();
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                vec![Arc::new(first), Arc::new(second)],
+            )
+            .await;
+        assert!(results.iter().all(|result| matches!(
+            &result.outcome,
+            TaskOutcome::Fail { error } if error == "Task input is invalid"
+        )));
+        Ok(())
+    }
+
+    /// Verifies value-only batches reject both continuation lifecycle variants.
+    #[tokio::test]
+    async fn batch_suspend_is_rejected() -> Result<(), String> {
+        let task =
+            RegisteredTask::new_batch(TaskDefinition::new("suspended_batch"), suspended_batch);
+        let results = task
+            .execute_many(
+                test_site().await.map_err(|error| error.to_string())?,
+                vec![
+                    record("suspended_batch", &DirectJob { id: 1 })
+                        .map_err(|error| error.to_string())?,
+                ],
+            )
+            .await;
+        assert!(matches!(
+            results.first().map(|result| &result.outcome),
+            Some(TaskOutcome::Fail { error }) if error.contains("cannot suspend or sleep")
+        ));
+        Ok(())
+    }
+
     /// Verifies direct task registration retains typed task submission without result storage.
     #[tokio::test]
     async fn direct_registration_supports_typed_submit() -> Result<(), TaskError> {
@@ -858,6 +1405,7 @@ mod tests {
                 &[LaneClaim {
                     lane: DEFAULT_TASK_LANE,
                     limit: 10,
+                    owner: None,
                 }],
             )
             .await?;
@@ -870,6 +1418,9 @@ mod tests {
         assert_eq!(task.id, task_id);
         assert_eq!(task.name, "direct_job");
         assert_eq!(task.input::<DirectJob>()?.id, 42);
+        assert_eq!(task.parent_id, None);
+        assert_eq!(task.root_id, None);
+        assert_eq!(task.kind, super::super::TaskKind::Work);
 
         store
             .commit_outcomes(
@@ -878,6 +1429,7 @@ mod tests {
                     task_id,
                     lane: DEFAULT_TASK_LANE,
                     outcome: TaskOutcome::complete(),
+                    owner_token: None,
                 }],
             )
             .await?;

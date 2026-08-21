@@ -433,6 +433,30 @@ where
     }
 }
 
+/// Creates a durable handler that receives matching local work as `Data<Batch<T>>`.
+pub fn task_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+where
+    T: callables::DataValue,
+    H: callables::Specable<Args> + Send + Sync + 'static,
+    H::Output: callables::IntoOutput<Error>
+        + callables::IntoReturnPart
+        + crate::tasks::IntoTaskBatchOutcomePart
+        + Send
+        + 'static,
+    Args: callables::FromContext<crate::tasks::BatchTaskContext>
+        + callables::IntoArgSpecs
+        + callables::HasData<crate::tasks::Batch<T>>
+        + Send
+        + 'static,
+{
+    let task = crate::tasks::RegisteredTask::new_batch::<T, H, Args>(definition, handler);
+    let op = task.operation();
+    BundlePart {
+        operation: Some(op),
+        part: BundlePartInner::Task(task),
+    }
+}
+
 /// Creates a background service part.
 pub fn service<T, H, Args>(handler: H) -> BundlePart
 where

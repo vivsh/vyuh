@@ -459,6 +459,29 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_task(attr, item)
 }
 
+/// Registers a value-only local batch task handler.
+///
+/// This macro is sugar over `vyuh::bundles::task_batch(handler, TaskDefinition)`.
+/// Batch handlers accept `Data<Batch<T>>` and return `()`, `TaskState`, an
+/// ordered `Batch<TaskState>`, or the corresponding `Result<_, Error>` form.
+/// They do not expose task identity or continuation state, and cannot suspend
+/// or sleep individual tasks.
+///
+/// The supported attributes are `name`, `lane`, and `idempotency`, matching
+/// [`task`].
+///
+/// ```ignore
+/// #[task_batch]
+/// async fn index_documents(Data(items): Data<Batch<IndexDocument>>) -> Result<(), Error> {
+///     index_all(items.as_ref()).await?;
+///     Ok(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn task_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    task::parse_task_batch(attr, item)
+}
+
 /// Builds an isolated `TestSite` around an async integration-test body.
 ///
 /// This is syntax sugar over `vyuh::testing::test_site` and
