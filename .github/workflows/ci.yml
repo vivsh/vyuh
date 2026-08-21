@@ -30,7 +30,7 @@ jobs:
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.97"
+          toolchain: "1.92"
       - name: Check Vyuh at the declared MSRV
         run: cargo check -p vyuh --no-default-features --features oauth,id-token,federated,mcp,paseto,branca
       - name: Check Vyuh macros at the declared MSRV
