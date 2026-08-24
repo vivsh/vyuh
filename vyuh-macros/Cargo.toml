@@ -1,6 +1,6 @@
 [package]
 name = "vyuh-macros"
-version = "0.2.23"
+version = "0.2.24"
 edition = "2024"
 rust-version.workspace = true
 license = "MIT"
@@ -21,7 +21,7 @@ syn = { version = "2", features = ["full"] }
 darling = "0.20"
 heck = "0.4"
 cron = "0.12"
-mool-macros-impl = { version = "0.1.7" }
+mool-macros-impl = { version = "0.1.8" }
 rust-silos-macros-impl = "0.1.0"
 
 tokio = {workspace = true}
