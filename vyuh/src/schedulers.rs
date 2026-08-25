@@ -115,12 +115,12 @@ impl ScheduledQueue {
                 let now = tokio::time::Instant::now();
                 if work.deadline <= now {
                     if let Some(mut work) = self.heap.pop() {
-                        if let Some(updated_deadline) = self.updates.get(&work.key) {
-                            if *updated_deadline > work.deadline {
-                                work.deadline = *updated_deadline;
-                                self.heap.push(work);
-                                continue;
-                            }
+                        if let Some(updated_deadline) = self.updates.get(&work.key)
+                            && *updated_deadline > work.deadline
+                        {
+                            work.deadline = *updated_deadline;
+                            self.heap.push(work);
+                            continue;
                         }
                         return work.key;
                     } else {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{ErrorReport, ErrorSourceKind};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HttpConf {
     pub catch_panic: CatchPanicConf,
     pub request_id: RequestIdConf,
@@ -22,22 +22,6 @@ pub struct HttpConf {
     pub security_headers: SecurityHeadersConf,
     #[serde(default)]
     pub shutdown: ShutdownConf,
-}
-
-impl Default for HttpConf {
-    fn default() -> Self {
-        Self {
-            catch_panic: CatchPanicConf::default(),
-            request_id: RequestIdConf::default(),
-            trace: TraceConf::default(),
-            compression: CompressionConf::default(),
-            cors: CorsConf::default(),
-            timeout: TimeoutConf::default(),
-            body_limit: BodyLimitConf::default(),
-            security_headers: SecurityHeadersConf::default(),
-            shutdown: ShutdownConf::default(),
-        }
-    }
 }
 
 impl HttpConf {
@@ -91,26 +75,14 @@ impl Default for RequestIdConf {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TraceConf {
     pub enabled: bool,
 }
 
-impl Default for TraceConf {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CompressionConf {
     pub enabled: bool,
-}
-
-impl Default for CompressionConf {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,16 +196,15 @@ pub(crate) async fn body_limit_middleware(
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
+        && content_length > conf.max_bytes
     {
-        if content_length > conf.max_bytes {
-            return ErrorReport::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                ErrorSourceKind::Parse,
-                "request_body_too_large",
-                format!("Request body exceeds {} bytes.", conf.max_bytes),
-            )
-            .into_response();
-        }
+        return ErrorReport::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorSourceKind::Parse,
+            "request_body_too_large",
+            format!("Request body exceeds {} bytes.", conf.max_bytes),
+        )
+        .into_response();
     }
     next.run(req).await
 }

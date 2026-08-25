@@ -8,6 +8,12 @@ use super::specs::{
     Tuple5, Tuple6,
 };
 
+type HandlerFuture<E> = Pin<Box<dyn Future<Output = Result<DataBox, E>> + Send>>;
+type HandlerFn<C, E> = dyn Fn(C) -> HandlerFuture<E> + Send + Sync;
+
+/// Deserializes a handler's textual payload into its erased runtime value.
+pub type DataDeserializer = fn(&str) -> Result<DataBox, CallError>;
+
 /// Extracts typed arguments from context, excluding data extractors.
 ///
 /// Types implementing this can appear at any position in a handler signature.
@@ -26,7 +32,7 @@ pub trait FromContextParts<C>: Sized + Send {
 pub trait FromContext<C>: Sized + Send {
     fn from_context(ctx: C) -> Result<Self, CallError>;
 
-    fn deserializer() -> Option<fn(&str) -> Result<DataBox, CallError>> {
+    fn deserializer() -> Option<DataDeserializer> {
         None
     }
 }
@@ -241,9 +247,9 @@ where
 {
     spec: Arc<CallSpec>,
     pub(crate) type_id: TypeId,
-    deserializer: Option<fn(&str) -> Result<DataBox, CallError>>,
+    deserializer: Option<DataDeserializer>,
     // serializer: Option<fn(DataBox) -> Result<String, CallError>>,
-    inner: Arc<dyn Fn(C) -> Pin<Box<dyn Future<Output = Result<DataBox, E>> + Send>> + Send + Sync>,
+    inner: Arc<HandlerFn<C, E>>,
 }
 
 impl<C, E> Clone for Callable<C, E>

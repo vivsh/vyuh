@@ -111,7 +111,8 @@ impl FromRequestParts<Site> for Subscriber {
 
     async fn from_request_parts(parts: &mut Parts, state: &Site) -> Result<Self, Self::Rejection> {
         let mode = request_mode(parts);
-        let after = request_cursor(parts)?;
+        let after =
+            request_cursor(parts).map_err(|error| ErrorReport::bad_request(error.to_string()))?;
         let upgrade = if mode == WS {
             Some(extract_upgrade(parts, state).await?)
         } else {
@@ -159,13 +160,10 @@ fn transport_value(value: &str) -> Option<ChannelTransport> {
     }
 }
 
-fn request_cursor(parts: &Parts) -> Result<Option<ChannelCursor>, ErrorReport> {
+fn request_cursor(parts: &Parts) -> Result<Option<ChannelCursor>, ChannelError> {
     for (key, value) in query_pairs(parts) {
         if matches!(key.as_str(), "after" | "cursor") {
-            return value
-                .parse::<ChannelCursor>()
-                .map(Some)
-                .map_err(|err| ErrorReport::bad_request(err.to_string()));
+            return value.parse::<ChannelCursor>().map(Some);
         }
     }
     Ok(None)
@@ -175,10 +173,7 @@ fn query_pairs(parts: &Parts) -> Vec<(String, String)> {
     let Some(query) = parts.uri.query() else {
         return Vec::new();
     };
-    match serde_urlencoded::from_str::<Vec<(String, String)>>(query) {
-        Ok(pairs) => pairs,
-        Err(_) => Vec::new(),
-    }
+    serde_urlencoded::from_str::<Vec<(String, String)>>(query).unwrap_or_default()
 }
 
 fn wants_websocket(headers: &HeaderMap) -> bool {

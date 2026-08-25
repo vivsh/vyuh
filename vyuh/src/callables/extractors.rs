@@ -1,6 +1,6 @@
 //! Extractors for extracting data from context in callable handlers.
 
-use super::callables::{DataBox, FromContext, FromContextParts, IntoDataBox, IntoOutput};
+use super::handler::{DataBox, FromContext, FromContextParts, IntoDataBox, IntoOutput};
 use super::specs::{
     ArgPart, CallError, DataValue, IntoArgPart, IntoReturnPart, ReturnPart, ReturnSpec, TypeSchema,
 };
@@ -443,7 +443,7 @@ where
     }
 }
 
-impl<'a> IntoReturnPart for JsonStr {
+impl IntoReturnPart for JsonStr {
     fn into_return_part() -> ReturnPart {
         ReturnPart::Body(TypeSchema::wrap::<String>(), "application/json".into())
     }

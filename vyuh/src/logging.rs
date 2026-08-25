@@ -91,16 +91,27 @@ pub enum LogLevel {
     Error,
 }
 
-impl LogLevel {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "TRACE" => Some(LogLevel::Trace),
-            "DEBUG" => Some(LogLevel::Debug),
-            "INFO" => Some(LogLevel::Info),
-            "WARN" => Some(LogLevel::Warn),
-            "ERROR" => Some(LogLevel::Error),
-            _ => None,
+/// Error returned when a string is not a recognized logging level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("unknown log level")]
+pub struct ParseLogLevelError;
+
+impl std::str::FromStr for LogLevel {
+    type Err = ParseLogLevelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        for (name, level) in [
+            ("TRACE", Self::Trace),
+            ("DEBUG", Self::Debug),
+            ("INFO", Self::Info),
+            ("WARN", Self::Warn),
+            ("ERROR", Self::Error),
+        ] {
+            if name.eq_ignore_ascii_case(value) {
+                return Ok(level);
+            }
         }
+        Err(ParseLogLevelError)
     }
 }
 
@@ -214,14 +225,12 @@ impl LogRule {
     ) -> Result<Option<EnvFilter>, LoggingError> {
         let rule_env_var = format!("{}_{}", env_prefix, &self.name.to_ascii_uppercase());
 
-        let filter_str = if let Some(rule_filter) = std::env::var(&rule_env_var).ok() {
+        let filter_str = if let Ok(rule_filter) = std::env::var(&rule_env_var) {
             rule_filter
+        } else if let Some(gfilter) = global_filter {
+            gfilter.clone()
         } else {
-            if let Some(gfilter) = global_filter {
-                gfilter.clone()
-            } else {
-                self.default_filter.clone()
-            }
+            self.default_filter.clone()
         }
         .trim()
         .to_string();
@@ -381,38 +390,48 @@ impl LoggingConf {
         log_init: bool,
         mail_enabled: bool,
     ) -> Result<(), LoggingError> {
-        #[cfg(not(feature = "email"))]
-        let _ = mail_enabled;
-        let admins = self.rules.iter().filter_map(|rule| match &rule.sink {
-            LogSink::MailAdmins(admins) => Some(admins),
-            _ => None,
-        });
-        for admins in admins {
-            if !log_init {
-                return Err(LoggingError::MailAdminsLoggingDisabled);
-            }
-            #[cfg(not(feature = "email"))]
-            {
-                let _ = admins;
-                return Err(LoggingError::MailAdminsFeature);
-            }
-            #[cfg(feature = "email")]
-            {
-                if !mail_enabled {
-                    return Err(LoggingError::MailAdminsMailDisabled);
-                }
-                for recipient in admins.recipients() {
-                    crate::email::validate_recipient(recipient).map_err(|reason| {
-                        LoggingError::MailAdminsRecipient {
-                            recipient: recipient.clone(),
-                            reason,
-                        }
-                    })?;
-                }
-            }
+        let has_admins = self
+            .rules
+            .iter()
+            .any(|rule| matches!(rule.sink, LogSink::MailAdmins(_)));
+        if !has_admins {
+            return Ok(());
         }
-        Ok(())
+        if !log_init {
+            return Err(LoggingError::MailAdminsLoggingDisabled);
+        }
+        #[cfg(not(feature = "email"))]
+        {
+            let _ = mail_enabled;
+            Err(LoggingError::MailAdminsFeature)
+        }
+        #[cfg(feature = "email")]
+        {
+            if !mail_enabled {
+                return Err(LoggingError::MailAdminsMailDisabled);
+            }
+            for admins in self.rules.iter().filter_map(|rule| match &rule.sink {
+                LogSink::MailAdmins(admins) => Some(admins),
+                _ => None,
+            }) {
+                validate_admin_recipients(admins)?;
+            }
+            Ok(())
+        }
     }
+}
+
+#[cfg(feature = "email")]
+fn validate_admin_recipients(admins: &MailAdmins) -> Result<(), LoggingError> {
+    for recipient in admins.recipients() {
+        crate::email::validate_recipient(recipient).map_err(|reason| {
+            LoggingError::MailAdminsRecipient {
+                recipient: recipient.clone(),
+                reason,
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// Joins two filter directive lists without introducing an empty directive.
@@ -871,15 +890,16 @@ mod tests {
         assert!(filter.is_none());
     }
 
+    /// Verifies log-level parsing is case-insensitive and rejects unknown values.
     #[test]
     fn test_log_level_from_str() {
-        assert!(matches!(LogLevel::from_str("TRACE"), Some(LogLevel::Trace)));
-        assert!(matches!(LogLevel::from_str("trace"), Some(LogLevel::Trace)));
-        assert!(matches!(LogLevel::from_str("DEBUG"), Some(LogLevel::Debug)));
-        assert!(matches!(LogLevel::from_str("INFO"), Some(LogLevel::Info)));
-        assert!(matches!(LogLevel::from_str("WARN"), Some(LogLevel::Warn)));
-        assert!(matches!(LogLevel::from_str("ERROR"), Some(LogLevel::Error)));
-        assert!(LogLevel::from_str("invalid").is_none());
+        assert!(matches!("TRACE".parse(), Ok(LogLevel::Trace)));
+        assert!(matches!("trace".parse(), Ok(LogLevel::Trace)));
+        assert!(matches!("DEBUG".parse(), Ok(LogLevel::Debug)));
+        assert!(matches!("INFO".parse(), Ok(LogLevel::Info)));
+        assert!(matches!("WARN".parse(), Ok(LogLevel::Warn)));
+        assert!(matches!("ERROR".parse(), Ok(LogLevel::Error)));
+        assert!("invalid".parse::<LogLevel>().is_err());
     }
 
     /// Verifies debug builds keep Vyuh diagnostics while limiting SQLx to errors.
@@ -989,5 +1009,32 @@ mod tests {
         assert!(matches!(error, Some(LoggingError::MailAdminsMailDisabled)));
         #[cfg(not(feature = "email"))]
         assert!(matches!(error, Some(LoggingError::MailAdminsFeature)));
+    }
+
+    /// Verifies every configured mail-admin sink receives address validation.
+    #[cfg(feature = "email")]
+    #[test]
+    fn mail_admins_validates_every_sink() {
+        let conf = LoggingConf {
+            env_prefix: None,
+            rules: vec![
+                LogRule {
+                    name: "PRIMARY_ADMINS".into(),
+                    sink: LogSink::mail_admins(MailAdmins::new(["ops@example.com"])),
+                    default_filter: "error".into(),
+                },
+                LogRule {
+                    name: "SECONDARY_ADMINS".into(),
+                    sink: LogSink::mail_admins(MailAdmins::new(["invalid"])),
+                    default_filter: "error".into(),
+                },
+            ],
+        };
+
+        let error = conf.validate_mail_admins(true, true).err();
+        assert!(matches!(
+            error,
+            Some(LoggingError::MailAdminsRecipient { .. })
+        ));
     }
 }

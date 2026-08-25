@@ -10,7 +10,7 @@ pub enum Nature {
     Reference,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ColumnMeta {
     pub name: Option<Cow<'static, str>>,
     pub primary_key: bool,
@@ -24,25 +24,6 @@ pub struct ColumnMeta {
     pub index_type: Option<Cow<'static, str>>,
     pub unique: bool,
     pub unique_groups: Vec<Cow<'static, str>>,
-}
-
-impl Default for ColumnMeta {
-    fn default() -> Self {
-        Self {
-            name: None,
-            primary_key: false,
-            skip: None,
-            nature: None,
-            reference_from: None,
-            reference_to: None,
-            serial: false,
-            default: None,
-            index: false,
-            index_type: None,
-            unique: false,
-            unique_groups: Vec::new(),
-        }
-    }
 }
 
 /// Table metadata for database mapping.

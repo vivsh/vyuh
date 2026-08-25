@@ -328,17 +328,15 @@ impl DbTaskStore {
             limit: lock.batch_size(),
             owner: None,
         };
-        let mut poll = self
-            .claim_lane(
-                transaction,
-                turn.runner_id,
-                &claim,
-                turn.lane.global_rate(),
-                turn.lane.retry_policy(),
-                turn.conf,
-                turn.now,
-            )
-            .await?;
+        let claim_turn = super::claim::ClaimTurn {
+            runner_id: turn.runner_id,
+            claim: &claim,
+            rate: turn.lane.global_rate(),
+            retry: turn.lane.retry_policy(),
+            conf: turn.conf,
+            now: turn.now,
+        };
+        let mut poll = self.claim_lane(transaction, claim_turn).await?;
         poll.owner = Some(owner_poll(row, None)?);
         Ok(poll)
     }

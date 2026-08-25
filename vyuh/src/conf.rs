@@ -3,7 +3,11 @@
 //! Secrets and deployment-specific values go in env vars.
 //! Project structure and logic go in source code.
 
-use std::{ffi::OsString, fmt, path::PathBuf};
+use std::{
+    ffi::OsString,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     auth::AuthConf, cache::CacheConf, channels::ChannelConf, console::ConsoleConf, db::DbConf,
@@ -59,12 +63,11 @@ pub fn workspace_root(crate_dir: OsString) -> PathBuf {
     loop {
         let cargo = dir.join("Cargo.toml");
 
-        if cargo.exists() {
-            if let Ok(content) = std::fs::read_to_string(&cargo) {
-                if content.contains("[workspace]") {
-                    return dir;
-                }
-            }
+        if cargo.exists()
+            && let Ok(content) = std::fs::read_to_string(&cargo)
+            && content.contains("[workspace]")
+        {
+            return dir;
         }
 
         if !dir.pop() {
@@ -662,10 +665,10 @@ fn apply_env_patches(conf: &mut SiteConf, prefix: Option<&str>) -> Result<(), Co
     };
 
     for (key, value) in std::env::vars() {
-        if let Some(pref) = prefix {
-            if !key.starts_with(pref) {
-                continue;
-            }
+        if let Some(pref) = prefix
+            && !key.starts_with(pref)
+        {
+            continue;
         }
 
         let field_name = strip_prefix(&key, prefix);
@@ -783,7 +786,7 @@ fn validate_dir_readable(path: &PathBuf, field: &str, errors: &mut Vec<ConfError
     }
 }
 
-fn validate_dir_writable(base: &PathBuf, dir: &str, field: &str, errors: &mut Vec<ConfError>) {
+fn validate_dir_writable(base: &Path, dir: &str, field: &str, errors: &mut Vec<ConfError>) {
     if dir.is_empty() {
         return;
     }
@@ -804,7 +807,7 @@ fn validate_dir_writable(base: &PathBuf, dir: &str, field: &str, errors: &mut Ve
     }
 }
 
-fn validate_upload_dir(base: &PathBuf, dir: &str, field: &str, errors: &mut Vec<ConfError>) {
+fn validate_upload_dir(base: &Path, dir: &str, field: &str, errors: &mut Vec<ConfError>) {
     if dir.is_empty() {
         errors.push(ConfError::RequiredField {
             field: field.into(),
@@ -829,7 +832,7 @@ fn validate_upload_dir(base: &PathBuf, dir: &str, field: &str, errors: &mut Vec<
     }
 }
 
-fn validate_file_writable(base: &PathBuf, file: &str, field: &str, errors: &mut Vec<ConfError>) {
+fn validate_file_writable(base: &Path, file: &str, field: &str, errors: &mut Vec<ConfError>) {
     if file.is_empty() {
         return;
     }

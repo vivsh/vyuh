@@ -1021,13 +1021,16 @@ pub(super) async fn update_idempotency_batch(
     Ok(())
 }
 
+type RetentionGroup = (Duration, Vec<uuid::Uuid>);
+type RetentionGroups = (Vec<uuid::Uuid>, Vec<RetentionGroup>);
+
 /// Groups terminal idempotent rows by their finalized per-handler lane policy.
 fn retention_groups(
     rows: &mut [TaskRow],
     conf: &crate::tasks::TaskStoreConf,
-) -> Result<(Vec<uuid::Uuid>, Vec<(Duration, Vec<uuid::Uuid>)>), TaskError> {
+) -> Result<RetentionGroups, TaskError> {
     let mut active = Vec::new();
-    let mut retained: Vec<(Duration, Vec<uuid::Uuid>)> = Vec::new();
+    let mut retained: Vec<RetentionGroup> = Vec::new();
     for row in rows.iter_mut() {
         if !is_terminal_idempotent(row)? {
             continue;

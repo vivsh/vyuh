@@ -280,7 +280,7 @@ pub(crate) fn validate_scopes(scopes: &[Scope]) -> Result<(), ScopeRuleError> {
 }
 
 /// Validates and deterministically orders one static authorization rule.
-pub(crate) fn normalize_rule(scopes: &mut Vec<Scope>) -> Result<(), ScopeRuleError> {
+pub(crate) fn normalize_rule(scopes: &mut [Scope]) -> Result<(), ScopeRuleError> {
     if scopes.is_empty() {
         return Err(ScopeRuleError::Empty);
     }

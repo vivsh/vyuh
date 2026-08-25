@@ -936,7 +936,7 @@ impl Site {
         let forced = CancellationNotifier::new();
         let _ = tokio::time::timeout(grace, SiteBuilder::drain_runtime(self, forced)).await;
         self.inner.joinset.lock().abort_all();
-        while let Some(_) = self.inner.joinset.lock().try_join_next() {}
+        while self.inner.joinset.lock().try_join_next().is_some() {}
     }
 
     /// Return the signal client for emitting typed in-process events.
@@ -1425,12 +1425,12 @@ mod tests {
             "login_failed",
             "secret response detail",
         );
-        report.debug = Some(ErrorDebug {
+        report.debug = Some(Box::new(ErrorDebug {
             details: Some("secret diagnostic".into()),
             context: vec!["secret context".into()],
             causes: vec!["secret cause".into()],
             backtrace: Some("secret backtrace".into()),
-        });
+        }));
         report
     }
 

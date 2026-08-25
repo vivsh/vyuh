@@ -317,10 +317,10 @@ impl SubscriptionRuntime {
             return;
         };
         if channel.generation != key.target.generation
-            || !channel
+            || channel
                 .rules
                 .get(&key.type_id)
-                .is_some_and(|rule| rule.debounce.is_some())
+                .is_none_or(|rule| rule.debounce.is_none())
         {
             return;
         }

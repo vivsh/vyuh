@@ -304,15 +304,18 @@ impl Service<Request> for AssetServe {
         };
 
         Box::pin(async move {
-            Ok(serve_file_impl(
+            let request = AssetRequest {
+                method: &method,
+                raw_path: &raw_path,
+                accept_encoding: accept_encoding.as_deref(),
+                if_none_match: if_none_match.as_deref(),
+            };
+            Ok(serve_asset(
                 &silos,
                 &prefix,
                 &url_prefix,
-                &method,
-                &raw_path,
+                request,
                 precompressed,
-                accept_encoding.as_deref(),
-                if_none_match.as_deref(),
                 use_etag,
                 &cache,
             )
@@ -321,20 +324,25 @@ impl Service<Request> for AssetServe {
     }
 }
 
-async fn serve_file_impl(
+struct AssetRequest<'a> {
+    method: &'a Method,
+    raw_path: &'a str,
+    accept_encoding: Option<&'a str>,
+    if_none_match: Option<&'a str>,
+}
+
+/// Resolves and serves one normalized asset request from the configured silos.
+async fn serve_asset(
     silos: &SiloSet,
     prefix: &str,
     url_prefix: &str,
-    method: &Method,
-    raw_path: &str,
+    request: AssetRequest<'_>,
     precompressed: bool,
-    accept_encoding: Option<&str>,
-    if_none_match: Option<&str>,
     use_etag: bool,
     cache: &RwLock<HashMap<String, String>>,
 ) -> Response {
     // Only GET/HEAD for static
-    if *method != Method::GET && *method != Method::HEAD {
+    if *request.method != Method::GET && *request.method != Method::HEAD {
         return Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Body::empty())
@@ -342,18 +350,20 @@ async fn serve_file_impl(
     }
 
     // Decode & normalize path safely
-    let clean_rel =
-        match clean_rel_path(raw_path).and_then(|path| strip_url_prefix(path, url_prefix)) {
-            Some(p) => p,
-            None => return not_found(),
-        };
+    let clean_rel = match clean_rel_path(request.raw_path)
+        .and_then(|path| strip_url_prefix(path, url_prefix))
+    {
+        Some(p) => p,
+        None => return not_found(),
+    };
 
     // Build lookup path inside silo root
     let logical_path = join_prefix(prefix, &clean_rel);
 
     // Select and read bytes (possibly precompressed variant)
     let (served_path, bytes, content_encoding) =
-        match read_best_variant(silos, &logical_path, precompressed, accept_encoding).await {
+        match read_best_variant(silos, &logical_path, precompressed, request.accept_encoding).await
+        {
             Some(v) => v,
             None => return not_found(),
         };
@@ -365,7 +375,7 @@ async fn serve_file_impl(
         None
     };
 
-    if let (Some(etag), Some(client_etag)) = (etag_val.as_deref(), if_none_match) {
+    if let (Some(etag), Some(client_etag)) = (etag_val.as_deref(), request.if_none_match) {
         // Very simple exact match. (If client sends a list, you can extend later.)
         if client_etag.trim() == etag {
             return not_modified(etag, precompressed);
@@ -401,7 +411,7 @@ async fn serve_file_impl(
     builder = builder.header(header::CONTENT_LENGTH, bytes.len().to_string());
 
     // HEAD returns headers only
-    if *method == Method::HEAD {
+    if *request.method == Method::HEAD {
         return builder.body(Body::empty()).unwrap();
     }
 
@@ -644,10 +654,10 @@ impl AcceptEncoding {
             let mut q = 1.0f32;
 
             for p in pieces {
-                if let Some(v) = p.strip_prefix("q=") {
-                    if let Ok(val) = v.parse::<f32>() {
-                        q = val;
-                    }
+                if let Some(v) = p.strip_prefix("q=")
+                    && let Ok(val) = v.parse::<f32>()
+                {
+                    q = val;
                 }
             }
 

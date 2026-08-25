@@ -18,6 +18,16 @@ use super::{
 
 use crate::tasks::rate::{TOKEN_SCALE, next_permit, refill};
 
+/// Immutable inputs shared by one database lane-claim turn.
+pub(super) struct ClaimTurn<'a> {
+    pub(super) runner_id: &'a str,
+    pub(super) claim: &'a LaneClaim,
+    pub(super) rate: Option<TaskRate>,
+    pub(super) retry: TaskRetry,
+    pub(super) conf: &'a crate::tasks::TaskStoreConf,
+    pub(super) now: DateTime<Utc>,
+}
+
 impl DbTaskStore {
     /// Claims all requested lanes in one transaction and returns store-relative timing evidence.
     #[allow(dead_code)]
@@ -53,21 +63,20 @@ impl DbTaskStore {
         ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
         let mut lanes = Vec::with_capacity(claims.len());
         for claim in ordered {
-            let lane_conf = configured_lane(&conf, claim.lane)?;
+            let lane_conf = configured_lane(conf, claim.lane)?;
             let lane = if lane_conf.lane_lock().is_some() {
                 self.claim_owned_lane(transaction, runner_id, claim, lane_conf, conf, now)
                     .await?
             } else {
-                self.claim_lane(
-                    transaction,
+                let turn = ClaimTurn {
                     runner_id,
                     claim,
-                    lane_conf.global_rate(),
-                    lane_conf.retry_policy(),
+                    rate: lane_conf.global_rate(),
+                    retry: lane_conf.retry_policy(),
                     conf,
                     now,
-                )
-                .await?
+                };
+                self.claim_lane(transaction, turn).await?
             };
             lanes.push(lane);
         }
@@ -85,23 +94,26 @@ impl DbTaskStore {
     pub(super) async fn claim_lane(
         &self,
         transaction: &mut db::DbTransaction<'_>,
-        runner_id: &str,
-        claim: &LaneClaim,
-        rate: Option<TaskRate>,
-        retry: TaskRetry,
-        conf: &crate::tasks::TaskStoreConf,
-        now: DateTime<Utc>,
+        turn: ClaimTurn<'_>,
     ) -> Result<LanePoll, TaskError> {
-        let limit = claim.limit.min(self.batch_size);
-        let probed = probe_candidates(transaction, now, claim.lane.as_str(), limit).await?;
+        let limit = turn.claim.limit.min(self.batch_size);
+        let probed =
+            probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
         let saturated = limit > 0 && probed.len() == limit;
-        let runnable_count = runnable_count(&probed, retry)?;
+        let runnable_count = runnable_count(&probed, turn.retry)?;
         let (permits, rate_wake) = self
-            .reserve_rate(transaction, claim.lane, rate, runnable_count, now)
+            .reserve_rate(
+                transaction,
+                turn.claim.lane,
+                turn.rate,
+                runnable_count,
+                turn.now,
+            )
             .await?;
-        let selected = select_candidates(transaction, now, claim.lane.as_str(), limit).await?;
-        let (mut exhausted, mut candidates) = split_exhausted(selected, retry)?;
-        self.fail_exhausted(transaction, &mut exhausted, conf, now)
+        let selected =
+            select_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
+        let (mut exhausted, mut candidates) = split_exhausted(selected, turn.retry)?;
+        self.fail_exhausted(transaction, &mut exhausted, turn.conf, turn.now)
             .await?;
         candidates.truncate(permits);
         let rate_blocked = permits < runnable_count;
@@ -110,11 +122,11 @@ impl DbTaskStore {
             .filter(|row| row.status == TaskStatus::Running.as_i16())
             .count();
         let tasks = self
-            .claim_candidates(transaction, candidates, runner_id, now)
+            .claim_candidates(transaction, candidates, turn.runner_id, turn.now)
             .await?;
-        let task_wake = next_task_deadline(transaction, claim.lane.as_str(), now).await?;
+        let task_wake = next_task_deadline(transaction, turn.claim.lane.as_str(), turn.now).await?;
         Ok(LanePoll {
-            lane: claim.lane,
+            lane: turn.claim.lane,
             tasks,
             reclaimed,
             saturated,

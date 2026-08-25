@@ -2,7 +2,6 @@ use crate::{SiteError, notifiers::CancellationNotifier};
 use notify::{RecursiveMode, Watcher};
 use std::{future::Future, path::PathBuf, pin::Pin, time::Duration};
 use tokio::signal;
-use tracing;
 
 pub async fn watch_file(path: PathBuf) -> Result<(), SiteError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(1024);
@@ -24,7 +23,7 @@ async fn reload_signal(touch_reload: Option<String>) -> Result<(), SiteError> {
             return watch_file(path).await;
         }
     }
-    return futures::future::pending().await;
+    futures::future::pending().await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

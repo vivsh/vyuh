@@ -95,7 +95,8 @@ model and raw Axum limitation.
 
 `Methods` supports `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`,
 `TRACE`, and `CONNECT`. `CONNECT` routes can be served, but OpenAPI 3 does not
-represent them as operations.
+represent them as operations. It implements `FromStr`, so configuration code
+can parse a case-insensitive method with `"patch".parse::<Methods>()`.
 
 ## Handlers
 

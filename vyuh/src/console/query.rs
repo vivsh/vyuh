@@ -32,7 +32,7 @@ pub struct TaskQuery {
 }
 
 /// Bounded filters accepted by the console's file-log views.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct LogQuery {
     pub rule: Option<String>,
     pub level: Option<String>,

@@ -37,7 +37,7 @@ impl File {
         let mut reader = self
             .inner
             .reader()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf)?;
         Ok(buf)

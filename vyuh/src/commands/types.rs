@@ -34,6 +34,8 @@ impl CommandConf {
 
 pub type CommandHandlerIn = Callable<CommandContext, Error>;
 
+type CommandParser = fn(&str, &[&str], &[CommandArg]) -> Result<callables::DataBox, CommandError>;
+
 // ── context ───────────────────────────────────────────────────────────────────
 
 pub struct CommandContext {
@@ -81,7 +83,7 @@ pub(crate) struct Command {
     pub(crate) handler: CommandHandlerIn,
     pub(crate) options: CommandConf,
     pub(crate) args: Vec<CommandArg>,
-    pub(crate) parser: fn(&str, &[&str], &[CommandArg]) -> Result<callables::DataBox, CommandError>,
+    pub(crate) parser: CommandParser,
     operation: callables::Operation,
 }
 
@@ -106,11 +108,10 @@ where
     let mut callable: Callable<CommandContext, Error> = Callable::new(handler);
     let schema = command_schema_from_args::<Args>()?;
     let parsed_args = args::parse_schema_to_args(&schema)?;
-    let parser: fn(&str, &[&str], &[CommandArg]) -> Result<callables::DataBox, CommandError> =
-        |command_name, cli, arg_defs| {
-            let obj: T = args::parse_args(command_name, cli, arg_defs)?;
-            Ok(callables::DataBox::new(obj))
-        };
+    let parser: CommandParser = |command_name, cli, arg_defs| {
+        let obj: T = args::parse_args(command_name, cli, arg_defs)?;
+        Ok(callables::DataBox::new(obj))
+    };
     callable.type_id = TypeId::of::<T>();
     let operation =
         callables::Operation::from_specs(callables::OperationKind::Command, callable.inspect());

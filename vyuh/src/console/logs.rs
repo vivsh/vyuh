@@ -307,16 +307,16 @@ fn read_page(
     let mut next = next_entries(&mut readers, query, &mut state)?;
     let mut entries = Vec::with_capacity(limit);
     let mut seen = HashSet::with_capacity(limit);
-    fill_page(
+    PageScan {
         codec,
-        &mut readers,
-        &mut next,
+        readers: &mut readers,
+        next: &mut next,
         query,
-        &mut state,
-        limit,
-        &mut entries,
-        &mut seen,
-    )?;
+        state: &mut state,
+        entries: &mut entries,
+        seen: &mut seen,
+    }
+    .fill(limit)?;
     let cursor = next_cursor(codec, query, &readers, &next, state.truncated)?;
     Ok(LogPage {
         items: entries,
@@ -476,37 +476,41 @@ fn next_entries(
         .collect()
 }
 
-fn fill_page(
-    codec: &CursorCodec,
-    readers: &mut [FileReader],
-    next: &mut [Option<FoundEntry>],
-    query: &LogQuery,
-    state: &mut ScanState,
-    limit: usize,
-    entries: &mut Vec<LogEntry>,
-    seen: &mut HashSet<String>,
-) -> Result<(), LogError> {
-    while entries.len() < limit {
-        let Some(index) = newest_index(next) else {
-            break;
-        };
-        let Some(found) = next.get_mut(index).and_then(Option::take) else {
-            break;
-        };
-        if seen.insert(found.digest.clone()) {
-            let id = entry_cursor(codec, &found)?;
-            let mut entry = found.entry;
-            entry.id = id;
-            entries.push(entry);
+struct PageScan<'a> {
+    codec: &'a CursorCodec,
+    readers: &'a mut [FileReader],
+    next: &'a mut [Option<FoundEntry>],
+    query: &'a LogQuery,
+    state: &'a mut ScanState,
+    entries: &'a mut Vec<LogEntry>,
+    seen: &'a mut HashSet<String>,
+}
+
+impl PageScan<'_> {
+    /// Fills one bounded page while preserving the cursor of every source.
+    fn fill(&mut self, limit: usize) -> Result<(), LogError> {
+        while self.entries.len() < limit {
+            let Some(index) = newest_index(self.next) else {
+                break;
+            };
+            let Some(found) = self.next.get_mut(index).and_then(Option::take) else {
+                break;
+            };
+            if self.seen.insert(found.digest.clone()) {
+                let id = entry_cursor(self.codec, &found)?;
+                let mut entry = found.entry;
+                entry.id = id;
+                self.entries.push(entry);
+            }
+            let reader = self.readers.get_mut(index).ok_or(LogError::Unavailable)?;
+            let slot = self.next.get_mut(index).ok_or(LogError::Unavailable)?;
+            *slot = next_entry(reader, self.query, self.state)?;
+            if self.state.truncated {
+                break;
+            }
         }
-        let reader = readers.get_mut(index).ok_or(LogError::Unavailable)?;
-        let slot = next.get_mut(index).ok_or(LogError::Unavailable)?;
-        *slot = next_entry(reader, query, state)?;
-        if state.truncated {
-            break;
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn newest_index(entries: &[Option<FoundEntry>]) -> Option<usize> {
@@ -698,9 +702,9 @@ fn matches_query(
             .as_ref()
             .is_none_or(|prefix| target.starts_with(prefix))
         && query
-            .from_date()
+            .start_date()
             .is_none_or(|start| time.date_naive() >= start)
-        && query.to_date().is_none_or(|end| time.date_naive() <= end)
+        && query.end_date().is_none_or(|end| time.date_naive() <= end)
         && query
             .q
             .as_ref()
@@ -878,10 +882,10 @@ impl LogQuery {
             .to_string()
     }
 
-    fn from_date(&self) -> Option<NaiveDate> {
+    fn start_date(&self) -> Option<NaiveDate> {
         parse_date(self.from.as_deref())
     }
-    fn to_date(&self) -> Option<NaiveDate> {
+    fn end_date(&self) -> Option<NaiveDate> {
         parse_date(self.to.as_deref())
     }
 }
@@ -890,7 +894,7 @@ fn validate_query(query: &LogQuery) -> Result<(), LogError> {
     if query
         .level
         .as_deref()
-        .is_some_and(|value| LogLevel::from_str(value).is_none())
+        .is_some_and(|value| value.parse::<LogLevel>().is_err())
     {
         return Err(LogError::InvalidQuery);
     }
@@ -913,22 +917,6 @@ fn validate_query(query: &LogQuery) -> Result<(), LogError> {
 
 fn parse_date(value: Option<&str>) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()
-}
-
-impl Default for LogQuery {
-    fn default() -> Self {
-        Self {
-            rule: None,
-            level: None,
-            target: None,
-            from: None,
-            to: None,
-            q: None,
-            limit: None,
-            cursor: None,
-            selected: None,
-        }
-    }
 }
 
 #[cfg(test)]

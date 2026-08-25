@@ -1,6 +1,12 @@
 #[derive(Clone)]
 pub struct CancellationNotifier(tokio_util::sync::CancellationToken);
 
+impl Default for CancellationNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CancellationNotifier {
     pub fn new() -> Self {
         Self(tokio_util::sync::CancellationToken::new())

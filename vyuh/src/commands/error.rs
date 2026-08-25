@@ -142,7 +142,7 @@ fn handler_error_view(error: &Error) -> ErrorView {
 #[cfg(feature = "migrations")]
 /// Preserves Mool migration diagnostics for terminal commands without HTTP error redaction.
 fn migration_command_view(error: &Error) -> Option<ErrorView> {
-    let ErrorSource::Other(source) = error.source.as_ref()? else {
+    let ErrorSource::Other(source) = error.source.as_deref()? else {
         return None;
     };
     let migration = source.downcast_ref::<crate::db::engine::MigrationCommandError>()?;

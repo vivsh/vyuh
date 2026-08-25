@@ -593,6 +593,12 @@ pub struct EmitterRegistry {
     sources: HashMap<EmitterKey, Arc<Emitter>>,
 }
 
+impl Default for EmitterRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EmitterRegistry {
     pub fn new() -> Self {
         Self {
@@ -732,17 +738,14 @@ impl EmitterEngine {
                     interval: dur,
                     handler,
                 } => {
-                    let work = TimerWork::new(
-                        emitter.type_id,
-                        TimerKind::Interval(dur.clone()),
-                        handler.clone(),
-                    );
+                    let work =
+                        TimerWork::new(emitter.type_id, TimerKind::Interval(*dur), handler.clone());
                     timer_tasks.push(work);
                 }
                 EmitterSource::Cron { schedule, handler } => {
                     let work = TimerWork::new(
                         emitter.type_id,
-                        TimerKind::Schedule(schedule.clone()),
+                        TimerKind::Schedule(Box::new(schedule.clone())),
                         handler.clone(),
                     );
                     timer_tasks.push(work);
@@ -1057,7 +1060,7 @@ struct NotifyCall {
 
 #[derive(Clone, Debug)]
 enum TimerKind {
-    Schedule(cron::Schedule),
+    Schedule(Box<cron::Schedule>),
     Interval(tokio::time::Duration),
 }
 
@@ -1195,11 +1198,11 @@ impl TimerQueue {
                     } else {
                         continue;
                     };
-                    if let Some(updated) = self.timeout_map.remove(&popped.type_id) {
-                        if popped.update_deadline(updated) {
-                            self.heap.push(popped);
-                            continue;
-                        }
+                    if let Some(updated) = self.timeout_map.remove(&popped.type_id)
+                        && popped.update_deadline(updated)
+                    {
+                        self.heap.push(popped);
+                        continue;
                     }
                     popped.update();
                     return Some(popped);

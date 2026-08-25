@@ -327,7 +327,7 @@ pub(super) fn parse_args<T: DeserializeOwned + 'static>(
         .map_err(|e| CommandError::DeserializeError(e.to_string()))
 }
 
-fn build_arg_map<'a>(arg_defs: &'a [CommandArg]) -> IndexMap<&'a str, &'a CommandArg> {
+fn build_arg_map(arg_defs: &[CommandArg]) -> IndexMap<&str, &CommandArg> {
     let mut arg_map = IndexMap::new();
     for arg in arg_defs {
         arg_map.insert(arg.name.as_str(), arg);
@@ -381,11 +381,11 @@ fn handle_flag(
     };
 
     if let Some(stripped) = key.strip_prefix("no-") {
-        if let Some(arg_def) = arg_map.get(stripped) {
-            if matches!(arg_def.arg_type, CommandArgType::Boolean) {
-                insert_flag_value(command_name, store, arg_def, "false".to_string())?;
-                return Ok((i + 1, None));
-            }
+        if let Some(arg_def) = arg_map.get(stripped)
+            && matches!(arg_def.arg_type, CommandArgType::Boolean)
+        {
+            insert_flag_value(command_name, store, arg_def, "false".to_string())?;
+            return Ok((i + 1, None));
         }
         return Err(CommandError::UnknownFlag {
             command: command_name.to_string(),
@@ -413,7 +413,7 @@ fn handle_flag(
         flag: key.to_string(),
     })?;
     ensure_flag_can_start(command_name, store, arg_def)?;
-    store.entry(arg_def.name.clone()).or_insert_with(Vec::new);
+    store.entry(arg_def.name.clone()).or_default();
     Ok((i + 1, Some(arg_def.name.clone())))
 }
 

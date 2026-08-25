@@ -429,29 +429,29 @@ impl FieldRule {
             );
         }
         for value in values {
-            if let Some(max) = self.max_length {
-                if value.chars().count() > max {
-                    report.push(
-                        ValidationPath::root().at_field(name.to_string()),
-                        ValidationError::new(
-                            "max_length",
-                            format!("Ensure this field has at most {max} characters."),
-                        )
-                        .with_param("max", max),
-                    );
-                }
+            if let Some(max) = self.max_length
+                && value.chars().count() > max
+            {
+                report.push(
+                    ValidationPath::root().at_field(name.to_string()),
+                    ValidationError::new(
+                        "max_length",
+                        format!("Ensure this field has at most {max} characters."),
+                    )
+                    .with_param("max", max),
+                );
             }
-            if let Some(max) = self.max_bytes {
-                if value.len() as u64 > max {
-                    report.push(
-                        ValidationPath::root().at_field(name.to_string()),
-                        ValidationError::new(
-                            "max_bytes",
-                            format!("Ensure this field has at most {max} bytes."),
-                        )
-                        .with_param("max", max),
-                    );
-                }
+            if let Some(max) = self.max_bytes
+                && value.len() as u64 > max
+            {
+                report.push(
+                    ValidationPath::root().at_field(name.to_string()),
+                    ValidationError::new(
+                        "max_bytes",
+                        format!("Ensure this field has at most {max} bytes."),
+                    )
+                    .with_param("max", max),
+                );
             }
         }
     }
@@ -622,13 +622,13 @@ impl FileRule {
             );
         }
         for file in values {
-            if let Some(max_size) = self.max_size {
-                if file.size() > max_size {
-                    return Err(MultipartError::too_large(
-                        name,
-                        format!("file exceeds {max_size} bytes"),
-                    ));
-                }
+            if let Some(max_size) = self.max_size
+                && file.size() > max_size
+            {
+                return Err(MultipartError::too_large(
+                    name,
+                    format!("file exceeds {max_size} bytes"),
+                ));
             }
             self.validate_headers(name, file.file_name(), file.content_type())?;
             if self.sniff.is_some() {
@@ -932,13 +932,13 @@ async fn read_text_field(
     let mut bytes = Vec::new();
     while let Some(chunk) = field.chunk().await.map_err(MultipartError::from)? {
         add_bytes(request_bytes, chunk.len() as u64, conf.max_request_bytes)?;
-        if let Some(max) = rule.max_bytes {
-            if bytes.len() as u64 + chunk.len() as u64 > max {
-                return Err(MultipartError::too_large(
-                    name,
-                    format!("field exceeds {max} bytes"),
-                ));
-            }
+        if let Some(max) = rule.max_bytes
+            && bytes.len() as u64 + chunk.len() as u64 > max
+        {
+            return Err(MultipartError::too_large(
+                name,
+                format!("field exceeds {max} bytes"),
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -984,13 +984,14 @@ async fn read_file_field(
         if rule.sniff.is_some() && sniff_prefix.len() < sniff_limit {
             let remaining = sniff_limit - sniff_prefix.len();
             sniff_prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            if !sniff_checked && !sniff_prefix.is_empty() {
-                if let Some(kind) = infer::get(&sniff_prefix) {
-                    let mime = kind.mime_type().to_ascii_lowercase();
-                    rule.validate_sniff(name, Some(&mime))?;
-                    sniffed_content_type = Some(mime);
-                    sniff_checked = true;
-                }
+            if !sniff_checked
+                && !sniff_prefix.is_empty()
+                && let Some(kind) = infer::get(&sniff_prefix)
+            {
+                let mime = kind.mime_type().to_ascii_lowercase();
+                rule.validate_sniff(name, Some(&mime))?;
+                sniffed_content_type = Some(mime);
+                sniff_checked = true;
             }
         }
 

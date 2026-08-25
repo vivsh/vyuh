@@ -226,7 +226,7 @@ impl CommandRegistry {
             .call(ctx)
             .await
             .map(|_| ())
-            .map_err(|err| match &err.source {
+            .map_err(|err| match err.source.as_deref() {
                 Some(ErrorSource::Validation(report)) => CommandError::Validation(report.clone()),
                 _ => CommandError::Handler(err),
             })

@@ -122,6 +122,12 @@ impl fmt::Debug for SignalRegistry {
     }
 }
 
+impl Default for SignalRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SignalRegistry {
     /// Creates a new, empty signal engine.
     pub fn new() -> Self {

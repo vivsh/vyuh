@@ -624,10 +624,7 @@ pub struct TaskConfigOut {
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {
-    match u64::try_from(duration.as_millis()) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -767,20 +764,13 @@ impl From<&crate::logging::LogRule> for LogRuleOut {
 }
 
 fn database_backend() -> &'static str {
-    #[cfg(feature = "postgres")]
-    {
-        return "postgres";
-    }
-    #[cfg(all(not(feature = "postgres"), feature = "mysql"))]
-    {
-        return "mysql";
-    }
-    #[cfg(all(not(any(feature = "postgres", feature = "mysql")), feature = "sqlite"))]
-    {
-        return "sqlite";
-    }
-    #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-    {
+    if cfg!(feature = "postgres") {
+        "postgres"
+    } else if cfg!(feature = "mysql") {
+        "mysql"
+    } else if cfg!(feature = "sqlite") {
+        "sqlite"
+    } else {
         "memory"
     }
 }

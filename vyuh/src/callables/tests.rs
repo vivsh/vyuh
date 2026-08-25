@@ -244,7 +244,7 @@ mod tests {
             .await
             .expect_err("invalid data should fail");
         assert!(matches!(
-            err.source,
+            err.source.as_deref(),
             Some(crate::errors::ErrorSource::Validation(_))
         ));
     }

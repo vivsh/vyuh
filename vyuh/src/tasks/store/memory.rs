@@ -1472,10 +1472,7 @@ fn matches_query(task: &TaskRecord, query: Option<&str>) -> bool {
 
 /// Builds the canonical one-indexed task inspection page.
 fn page(records: Vec<TaskRecord>, filter: &TaskFilter) -> crate::routes::Page<TaskRecord> {
-    let total = match i64::try_from(records.len()) {
-        Ok(value) => value,
-        Err(_) => i64::MAX,
-    };
+    let total = i64::try_from(records.len()).unwrap_or(i64::MAX);
     let offset = filter
         .page
         .saturating_sub(1)

@@ -3,6 +3,11 @@ use std::ops::{BitOr, BitOrAssign};
 
 use axum::routing::MethodFilter;
 
+/// Error returned when a string is not a recognized HTTP method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unknown HTTP method")]
+pub struct ParseMethodError;
+
 /// HTTP methods a handler accepts. Supports combining methods with `|` operator.
 ///
 /// # Examples
@@ -63,7 +68,8 @@ impl<'de> serde::Deserialize<'de> for Methods {
             where
                 E: serde::de::Error,
             {
-                Methods::from_str(v).ok_or_else(|| E::custom(format!("unknown HTTP method: {}", v)))
+                v.parse::<Methods>()
+                    .map_err(|_| E::custom(format!("unknown HTTP method: {}", v)))
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -72,7 +78,7 @@ impl<'de> serde::Deserialize<'de> for Methods {
             {
                 let mut methods: Option<Methods> = None;
                 while let Some(method_str) = seq.next_element::<String>()? {
-                    let method = Methods::from_str(&method_str).ok_or_else(|| {
+                    let method = method_str.parse::<Methods>().map_err(|_| {
                         serde::de::Error::custom(format!("unknown HTTP method: {}", method_str))
                     })?;
                     methods = Some(methods.map_or(method, |m| m | method));
@@ -140,13 +146,17 @@ impl Methods {
     pub fn intersects(&self, other: Self) -> bool {
         other.iter().any(|(_, method)| self.contains(method))
     }
+}
 
-    /// Parse a method string (case-insensitive).
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for Methods {
+    type Err = ParseMethodError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         KNOWN_METHODS
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(s))
+            .find(|(name, _)| name.eq_ignore_ascii_case(value))
             .map(|(_, filter)| Self(*filter))
+            .ok_or(ParseMethodError)
     }
 }
 
@@ -221,12 +231,13 @@ const KNOWN_METHODS: &[(&str, MethodFilter)] = &[
 mod tests {
     use super::Methods;
 
+    /// Verifies HTTP method parsing is case-insensitive and rejects unknown values.
     #[test]
     fn parses_methods_case_insensitively() {
-        assert_eq!(Methods::from_str("get"), Some(Methods::GET));
-        assert_eq!(Methods::from_str("Trace"), Some(Methods::TRACE));
-        assert_eq!(Methods::from_str("connect"), Some(Methods::CONNECT));
-        assert_eq!(Methods::from_str("BREW"), None);
+        assert_eq!("get".parse(), Ok(Methods::GET));
+        assert_eq!("Trace".parse(), Ok(Methods::TRACE));
+        assert_eq!("connect".parse(), Ok(Methods::CONNECT));
+        assert!("BREW".parse::<Methods>().is_err());
     }
 
     #[test]

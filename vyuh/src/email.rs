@@ -131,14 +131,14 @@ impl MailConf {
             ));
         }
         #[cfg(feature = "email")]
-        if let Some(sender) = &self.sender {
-            if sender.parse::<lettre::message::Mailbox>().is_err() {
-                errors.push(invalid(
-                    "mail.sender",
-                    "must be a valid mailbox",
-                    "name <address@example.com>",
-                ));
-            }
+        if let Some(sender) = &self.sender
+            && sender.parse::<lettre::message::Mailbox>().is_err()
+        {
+            errors.push(invalid(
+                "mail.sender",
+                "must be a valid mailbox",
+                "name <address@example.com>",
+            ));
         }
     }
 }

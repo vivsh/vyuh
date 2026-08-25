@@ -179,10 +179,10 @@ impl PatchOp {
             arg_patch.apply_to_op(op);
         }
         // Modify last return if specified
-        if let Some(return_patch) = self.return_patch {
-            if let Some(last_ret) = op.returns.last_mut() {
-                return_patch.apply(last_ret);
-            }
+        if let Some(return_patch) = self.return_patch
+            && let Some(last_ret) = op.returns.last_mut()
+        {
+            return_patch.apply(last_ret);
         }
         // Append new returns
         for append_patch in self.append_returns {

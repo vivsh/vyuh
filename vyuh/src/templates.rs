@@ -93,6 +93,12 @@ pub struct TemplateEngine {
     env: minijinja::Environment<'static>,
 }
 
+impl Default for TemplateEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TemplateEngine {
     pub fn new() -> Self {
         Self::from_conf(
@@ -123,7 +129,7 @@ impl TemplateEngine {
                 TemplateError::NotFound(format!("Template '{}' not found: {}", template_name, e))
             })?
             .render(context)
-            .map_err(|e| TemplateError::RenderError(e).into())
+            .map_err(TemplateError::RenderError)
     }
 
     pub fn html<S: serde::Serialize>(

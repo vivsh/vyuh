@@ -980,16 +980,16 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
             return;
         };
         let error_limit = self.registry.config.error_limit();
-        let future = execute_hook(
+        let call = HookCall {
             hook,
             site,
-            sender,
             lane,
-            token.clone(),
+            token: token.clone(),
             generation,
             action,
             error_limit,
-        );
+        };
+        let future = execute_hook(call, sender);
         let handle = tokio::spawn(future);
         self.metrics.hook_started(lane.as_str(), action);
         self.running_hooks.insert(
@@ -1334,34 +1334,40 @@ fn task_commits(
         .collect()
 }
 
-/// Contains one lifecycle hook and reports its fenced result without blocking the runner.
-async fn execute_hook(
+struct HookCall {
     hook: super::lane_lock::LaneHook,
     site: Site,
-    sender: mpsc::Sender<HookCompletion>,
     lane: TaskLane,
     token: String,
     generation: i64,
     action: super::LaneHookAction,
     error_limit: usize,
-) {
-    let future = std::panic::AssertUnwindSafe(hook.call(site, lane, generation)).catch_unwind();
+}
+
+/// Executes one lifecycle hook and reports its fenced result without blocking the runner.
+async fn execute_hook(call: HookCall, sender: mpsc::Sender<HookCompletion>) {
+    let future =
+        std::panic::AssertUnwindSafe(call.hook.call(call.site, call.lane, call.generation))
+            .catch_unwind();
     let result = match future.await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(super::store::truncate_utf8(error.to_string(), error_limit)),
+        Ok(Err(error)) => Err(super::store::truncate_utf8(
+            error.to_string(),
+            call.error_limit,
+        )),
         Err(_) => Err("task lane lifecycle hook panicked".into()),
     };
     let completion = HookCompletion {
-        lane,
-        token,
+        lane: call.lane,
+        token: call.token,
         result: super::LaneHookResult {
-            generation,
-            action,
+            generation: call.generation,
+            action: call.action,
             result,
         },
     };
     if sender.send(completion).await.is_err() {
-        tracing::error!(lane = %lane, "task lane hook completion channel closed");
+        tracing::error!(lane = %call.lane, "task lane hook completion channel closed");
     }
 }
 
@@ -2171,17 +2177,16 @@ mod tests {
             .cloned()
             .ok_or_else(|| "idle hook is missing".to_string())?;
         let (sender, mut receiver) = mpsc::channel(1);
-        execute_hook(
+        let call = HookCall {
             hook,
-            site.clone(),
-            sender,
-            EMAIL,
-            "owner".into(),
-            1,
-            super::super::LaneHookAction::Idle,
-            1024,
-        )
-        .await;
+            site: site.clone(),
+            lane: EMAIL,
+            token: "owner".into(),
+            generation: 1,
+            action: super::super::LaneHookAction::Idle,
+            error_limit: 1024,
+        };
+        execute_hook(call, sender).await;
         let completion = receiver
             .recv()
             .await

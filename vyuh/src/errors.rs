@@ -10,7 +10,6 @@ use axum::{
 };
 use schemars::JsonSchema;
 use serde::Serialize;
-use smallvec::SmallVec;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -46,7 +45,7 @@ pub struct ErrorReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub errors: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub debug: Option<ErrorDebug>,
+    pub debug: Option<Box<ErrorDebug>>,
 }
 
 /// Optional diagnostic payload for development error responses.
@@ -92,17 +91,12 @@ pub struct ErrorRenderContext {
     pub command: Option<ErrorCommandContext>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HttpErrorRenderMode {
     Json,
     Html,
+    #[default]
     Auto,
-}
-
-impl Default for HttpErrorRenderMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -422,11 +416,11 @@ impl ErrorView {
     }
 
     pub fn from_error(error: &Error) -> Self {
-        if let Some(ErrorSource::Validation(report)) = &error.source {
+        if let Some(ErrorSource::Validation(report)) = error.source.as_deref() {
             return Self::from_validation(report.clone());
         }
 
-        let source = match &error.source {
+        let source = match error.source.as_deref() {
             Some(ErrorSource::Database(_)) | Some(ErrorSource::Sqlx(_)) => {
                 ErrorSourceKind::Database
             }
@@ -592,12 +586,12 @@ impl ErrorKind {
 
 /// Universal error type for all vyuh handlers (signals, tasks, commands, routes).
 /// Provides semantic error categories while preserving full error chains.
-/// Context uses SmallVec to avoid heap allocations for typical error chains (0-4 items).
+/// Empty errors remain allocation-free; sources and context allocate only on failure paths.
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
-    pub source: Option<ErrorSource>,
-    pub context: SmallVec<[Cow<'static, str>; 4]>,
+    pub source: Option<Box<ErrorSource>>,
+    pub context: Vec<Cow<'static, str>>,
 }
 
 impl std::fmt::Display for Error {
@@ -612,7 +606,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.source.as_ref().map(|src| match src {
+        self.source.as_deref().map(|src| match src {
             ErrorSource::Auth(e) => e as &(dyn StdError + 'static),
             ErrorSource::Database(e) => e as &(dyn StdError + 'static),
             ErrorSource::Sqlx(e) => e as &(dyn StdError + 'static),
@@ -628,7 +622,7 @@ impl Error {
         Self {
             kind,
             source: None,
-            context: SmallVec::new(),
+            context: Vec::new(),
         }
     }
 
@@ -659,8 +653,8 @@ impl Error {
     {
         Self {
             kind: ErrorKind::Other,
-            source: Some(ErrorSource::Other(Box::new(err))),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Other(Box::new(err)))),
+            context: Vec::new(),
         }
     }
 
@@ -671,8 +665,8 @@ impl Error {
     {
         Self {
             kind,
-            source: Some(ErrorSource::Other(Box::new(err))),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Other(Box::new(err)))),
+            context: Vec::new(),
         }
     }
 
@@ -708,7 +702,7 @@ impl Error {
 
         // Source chain (walk the error chain)
         let mut source_chain: Vec<String> = Vec::new();
-        if let Some(src) = &self.source {
+        if let Some(src) = self.source.as_deref() {
             match src {
                 ErrorSource::Validation(report) => {
                     if !report.is_empty() {
@@ -777,7 +771,7 @@ impl From<Error> for ErrorReport {
         let debug = debug_error_payload(&err);
         let mut report = ErrorView::from_error(&err).to_report();
         if let Some(debug) = debug {
-            report.debug = Some(debug);
+            report.debug = Some(Box::new(debug));
         }
         report
     }
@@ -795,7 +789,7 @@ fn debug_error_payload(err: &Error) -> Option<ErrorDebug> {
         .map(|c| c.to_string())
         .collect::<Vec<_>>();
     let mut causes = Vec::new();
-    if let Some(source) = &err.source {
+    if let Some(source) = err.source.as_deref() {
         collect_error_source_chain(source, &mut causes);
     }
 
@@ -843,8 +837,8 @@ impl From<ValidationReport> for Error {
     fn from(report: ValidationReport) -> Self {
         Self {
             kind: ErrorKind::Invalid,
-            source: Some(ErrorSource::Validation(report)),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Validation(report))),
+            context: Vec::new(),
         }
     }
 }
@@ -868,8 +862,8 @@ impl From<DbError> for Error {
         };
         Self {
             kind,
-            source: Some(ErrorSource::Database(err)),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Database(err))),
+            context: Vec::new(),
         }
     }
 }
@@ -882,8 +876,8 @@ impl From<AuthError> for Error {
         };
         Self {
             kind,
-            source: Some(ErrorSource::Auth(err)),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Auth(err))),
+            context: Vec::new(),
         }
     }
 }
@@ -902,8 +896,8 @@ impl From<crate::db::sqlx::Error> for Error {
         };
         Self {
             kind,
-            source: Some(ErrorSource::Sqlx(err)),
-            context: SmallVec::new(),
+            source: Some(Box::new(ErrorSource::Sqlx(err))),
+            context: Vec::new(),
         }
     }
 }
@@ -941,8 +935,8 @@ impl From<CallError> for Error {
             CallError::NotFound(msg) => Self::not_found(msg),
             CallError::Other(err) => Self {
                 kind: ErrorKind::Other,
-                source: Some(ErrorSource::Other(err)),
-                context: SmallVec::new(),
+                source: Some(Box::new(ErrorSource::Other(err))),
+                context: Vec::new(),
             },
         }
     }

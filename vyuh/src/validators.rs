@@ -7,8 +7,6 @@ use std::str::FromStr;
 
 use super::validation::ValidationError;
 
-/// ---------- shared helpers ----------
-
 #[inline]
 fn err(code: &'static str, msg: impl Into<Cow<'static, str>>) -> ValidationError {
     ValidationError::new(code, msg)
@@ -24,8 +22,6 @@ fn err_param(
     ValidationError::new(code, msg).with_param(key, value)
 }
 
-/// ---------- presence / option ----------
-
 /// Checks that an Option contains Some value.
 /// For required fields, prefer making the field non-optional in your struct.
 pub fn present<T>(v: &Option<T>) -> Result<(), ValidationError> {
@@ -35,8 +31,6 @@ pub fn present<T>(v: &Option<T>) -> Result<(), ValidationError> {
         Err(err("required", "This field is required."))
     }
 }
-
-/// ---------- string validators ----------
 
 /// Checks that a string is not empty or whitespace-only.
 pub fn non_empty(s: &str) -> Result<(), ValidationError> {
@@ -327,8 +321,6 @@ pub fn datetime(s: &str) -> Result<(), ValidationError> {
     }
 }
 
-/// ---------- numeric validators ----------
-
 pub fn min<T>(min: T) -> impl Fn(&T) -> Result<(), ValidationError>
 where
     T: PartialOrd + std::fmt::Display,
@@ -437,8 +429,6 @@ where
     }
 }
 
-/// ---------- collections ----------
-
 /// Checks that a collection is not empty.
 pub fn non_empty_vec<T>(v: &[T]) -> Result<(), ValidationError> {
     if v.is_empty() {
@@ -490,8 +480,6 @@ where
     }
 }
 
-/// ---------- boolean ----------
-
 pub fn must_be_true(v: &bool) -> Result<(), ValidationError> {
     if *v {
         Ok(())
@@ -499,8 +487,6 @@ pub fn must_be_true(v: &bool) -> Result<(), ValidationError> {
         Err(err("required", "This field must be true."))
     }
 }
-
-/// ---------- enums / choices ----------
 
 /// Validates that value is one of the allowed choices.
 pub fn one_of<T: PartialEq + 'static>(

@@ -754,10 +754,7 @@ fn default_throttles() -> Vec<MailThrottle> {
 }
 
 fn duration_millis(duration: Duration) -> u64 {
-    match u64::try_from(duration.as_millis()) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(feature = "email")]

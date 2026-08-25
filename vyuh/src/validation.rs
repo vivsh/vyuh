@@ -86,18 +86,6 @@ impl Path {
         &self.segs
     }
 
-    pub fn to_string(&self) -> String {
-        self.segs
-            .iter()
-            .map(|s| match s {
-                PathSeg::Field(f) => f.to_string(),
-                PathSeg::Index(i) => i.to_string(),
-                PathSeg::Key(k) => k.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(".")
-    }
-
     /// Returns a new path with the given segment prepended.
     pub fn prefixed(self, prefix: PathSeg) -> Self {
         let mut segs = Vec::with_capacity(self.segs.len() + 1);
@@ -119,6 +107,22 @@ impl Path {
     pub fn at_key(mut self, key: impl Into<String>) -> Self {
         self.segs.push(PathSeg::Key(key.into()));
         self
+    }
+}
+
+impl fmt::Display for Path {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, segment) in self.segs.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(".")?;
+            }
+            match segment {
+                PathSeg::Field(field) => formatter.write_str(field)?,
+                PathSeg::Index(index) => write!(formatter, "{index}")?,
+                PathSeg::Key(key) => formatter.write_str(key)?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -250,6 +254,7 @@ impl ValidationReport {
     /// Produce a nested JSON-like map/array structure from full `Path`s.
     /// - Objects for `Field`/`Key` segments
     /// - Arrays for `Index` segments
+    ///
     /// Leaves are arrays of messages (strings).
     pub fn to_nested_map(&self) -> serde_json::Value {
         self.to_nested_messages()
@@ -285,16 +290,14 @@ impl ValidationReport {
                                 arr.push(msg.clone());
                             }
                         }
-                    } else {
-                        if let Some(map) = cur.as_object_mut() {
-                            let entry = map.entry(key).or_insert_with(|| {
-                                serde_json::Value::Object(serde_json::Map::new())
-                            });
-                            if !entry.is_object() {
-                                *entry = serde_json::Value::Object(serde_json::Map::new());
-                            }
-                            insert_at(entry, &segs[1..], msg);
+                    } else if let Some(map) = cur.as_object_mut() {
+                        let entry = map
+                            .entry(key)
+                            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                        if !entry.is_object() {
+                            *entry = serde_json::Value::Object(serde_json::Map::new());
                         }
+                        insert_at(entry, &segs[1..], msg);
                     }
                 }
                 PathSeg::Key(k) => {
@@ -308,16 +311,14 @@ impl ValidationReport {
                                 arr.push(msg.clone());
                             }
                         }
-                    } else {
-                        if let Some(map) = cur.as_object_mut() {
-                            let entry = map.entry(key).or_insert_with(|| {
-                                serde_json::Value::Object(serde_json::Map::new())
-                            });
-                            if !entry.is_object() {
-                                *entry = serde_json::Value::Object(serde_json::Map::new());
-                            }
-                            insert_at(entry, &segs[1..], msg);
+                    } else if let Some(map) = cur.as_object_mut() {
+                        let entry = map
+                            .entry(key)
+                            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                        if !entry.is_object() {
+                            *entry = serde_json::Value::Object(serde_json::Map::new());
                         }
+                        insert_at(entry, &segs[1..], msg);
                     }
                 }
                 PathSeg::Index(idx) => {
@@ -457,14 +458,13 @@ fn apply_to_schema_target<F>(
 ) where
     F: FnMut(&mut serde_json::Value, &mut serde_json::Map<String, serde_json::Value>),
 {
-    if let Some(reference) = schema.get("$ref").and_then(|v| v.as_str()) {
-        if let Some(name) = ref_name(reference) {
-            if let Some(mut definition) = definitions.remove(&name) {
-                f(&mut definition, definitions);
-                definitions.insert(name, definition);
-                return;
-            }
-        }
+    if let Some(reference) = schema.get("$ref").and_then(|v| v.as_str())
+        && let Some(name) = ref_name(reference)
+        && let Some(mut definition) = definitions.remove(&name)
+    {
+        f(&mut definition, definitions);
+        definitions.insert(name, definition);
+        return;
     }
 
     f(schema, definitions);
@@ -674,7 +674,7 @@ where
 {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        &self.0
     }
 }
 

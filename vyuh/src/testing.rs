@@ -542,9 +542,7 @@ impl TestRequestBuilder {
         for (k, v) in self.headers {
             req = req.header(&k, &v);
         }
-        let mut req = req
-            .body(self.body.unwrap_or_else(|| Body::empty()))
-            .unwrap();
+        let mut req = req.body(self.body.unwrap_or_else(Body::empty)).unwrap();
         req.extensions_mut().insert(ConnectInfo(self.peer_addr));
         let resp = self.app.clone().oneshot(req).await.unwrap();
         TestResponse { resp }
@@ -651,7 +649,8 @@ pub async fn mock_site() -> SiteConf {
     use uuid::Uuid;
 
     let _test_db_name = format!("vyuh_test_{}", Uuid::now_v7().simple());
-    let conf = SiteConf {
+
+    SiteConf {
         host: "localhost".to_string(),
         port: 8080,
         project_dir: "/tmp/vyuh_test".to_string(),
@@ -665,7 +664,5 @@ pub async fn mock_site() -> SiteConf {
         tz: Some("UTC".to_string()),
         auth: crate::auth::AuthConf::default(),
         ..Default::default()
-    };
-
-    conf
+    }
 }

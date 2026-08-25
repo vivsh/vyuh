@@ -1,5 +1,5 @@
-mod callables;
 mod extractors;
+mod handler;
 mod operations;
 mod patch;
 pub(crate) mod specs;
@@ -37,10 +37,11 @@ pub use specs::{
     TypeSchema,
 };
 
-pub use callables::{
+pub use handler::{
     // Runtime types
     Callable,
     DataBox,
+    DataDeserializer,
     // Extraction traits
     FromContext,
     FromContextParts,

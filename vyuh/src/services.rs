@@ -307,19 +307,16 @@ struct ServiceRecord {
     workers: Vec<ServiceWorker>,
 }
 
+type ServiceBuildFuture =
+    Pin<Box<dyn std::future::Future<Output = Result<ServiceEntry, ServiceError>> + Send>>;
+type ServiceBuildFn = dyn Fn(ServiceBuildContext) -> ServiceBuildFuture + Send + Sync;
+
 #[derive(Clone)]
 pub struct ServiceHandler {
     type_id: TypeId,
     type_name: &'static str,
     spec: callables::CallSpec,
-    build_fn: Arc<
-        dyn Fn(
-                ServiceBuildContext,
-            ) -> Pin<
-                Box<dyn std::future::Future<Output = Result<ServiceEntry, ServiceError>> + Send>,
-            > + Send
-            + Sync,
-    >,
+    build_fn: Arc<ServiceBuildFn>,
 }
 
 impl ServiceHandler {
@@ -423,6 +420,12 @@ pub struct ServiceRegistry {
     services: IndexMap<TypeId, ServiceHandler>,
 }
 
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServiceRegistry {
     pub fn new() -> Self {
         Self {
@@ -451,6 +454,12 @@ pub struct ServiceEngine {
     services: IndexMap<TypeId, AnyBox>,
     workers: Vec<ServiceWorker>,
     records: Vec<ServiceRecord>,
+}
+
+impl Default for ServiceEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ServiceEngine {
