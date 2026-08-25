@@ -10,14 +10,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.92"
 
 jobs:
   format:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all --check
@@ -30,7 +32,7 @@ jobs:
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.92"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Check Vyuh at the declared MSRV
         run: cargo check -p vyuh --no-default-features --features oauth,id-token,federated,mcp,paseto,branca
       - name: Check Vyuh macros at the declared MSRV
@@ -42,8 +44,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - name: Lint backendless framework
         run: cargo clippy -p vyuh --no-default-features -- -D warnings
@@ -56,7 +59,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -87,7 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Test authentication codec feature set
         run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --test auth
       - name: Test OAuth resource-server internals
@@ -118,7 +125,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Compile selected feature set
         run: cargo check -p vyuh --no-default-features --features ${{ matrix.features }}
 
@@ -142,7 +151,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Run PostgreSQL migration and task contracts
         env:
           DATABASE_URL: postgres://vyuh:vyuh@localhost:5432/vyuh_ci
@@ -154,7 +165,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Checkout Mool prerequisite
         run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Run SQLite migration and task contracts
         run: cargo test -p vyuh --no-default-features --features sqlite,migrations --lib tasks::store_tests
 
@@ -162,7 +175,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Install mdBook
         run: cargo install mdbook --version 0.5.3 --locked
       - name: Build book
