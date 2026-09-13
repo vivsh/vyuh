@@ -98,6 +98,9 @@ impl Authenticator {
             return Err(AuthError::NoCredential);
         };
         let provider = self.provider_at(position)?;
+        if provider.access_location().is_cookie() && scan.has_authorization() {
+            return Err(AuthError::MalformedLocation);
+        }
         let result = provider.authenticate(raw.as_ref(), parts, audience).await;
         self.record(provider.id(), &result);
         result

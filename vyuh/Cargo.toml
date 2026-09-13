@@ -1,6 +1,6 @@
 [package]
 name = "vyuh"
-version = "0.2.26"
+version = "0.2.27"
 edition = "2024"
 rust-version.workspace = true
 license = "MIT"
@@ -72,7 +72,7 @@ http-serde = "2.1.1"
 serde_urlencoded = "0.7"
 rust-silos = { version = "^0.3.2" }
 
-vyuh-macros = { path = "../vyuh-macros", version = "0.2.26" }
+vyuh-macros = { path = "../vyuh-macros", version = "0.2.27" }
 db_core = { package = "mool", version = "0.2.13" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"

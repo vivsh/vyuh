@@ -232,6 +232,15 @@ impl<'a> RequestCredentialScan<'a> {
         }
     }
 
+    /// Returns whether the request presents a non-empty Authorization credential.
+    pub(crate) fn has_authorization(&self) -> bool {
+        self.parts
+            .headers
+            .get_all(header::AUTHORIZATION)
+            .iter()
+            .any(|value| !value.as_bytes().is_empty())
+    }
+
     fn cookie(&mut self, name: &str) -> Result<Option<Cow<'a, str>>, AuthError> {
         let parsed = self
             .cookies

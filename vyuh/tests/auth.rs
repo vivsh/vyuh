@@ -26,7 +26,7 @@ use vyuh::{
         TokenProvider, TokenVerifier, UnsafeQueryCredentials,
     },
     bundles,
-    routes::{Json, Methods, RouteConf},
+    routes::{Json, Methods, Path, RouteConf},
     testing::TestSite,
 };
 
@@ -132,6 +132,10 @@ async fn me(user: AuthUser) -> Json<WhoAmI> {
     })
 }
 
+async fn persona(_user: AuthUser, Path(_): Path<u64>) -> Json<()> {
+    Json(())
+}
+
 async fn assurance(user: AuthUser) -> Json<Vec<String>> {
     Json(user.authentication().methods().to_vec())
 }
@@ -223,6 +227,19 @@ fn bundle_without_audience() -> bundles::Bundle {
             trim: true,
         },
     )])
+}
+
+fn persona_bundle() -> bundles::Bundle {
+    bundles::bundle([bundles::route(
+        persona,
+        RouteConf {
+            name: "persona".into(),
+            methods: Methods::GET,
+            path: "/personas/{persona}".into(),
+            trim: true,
+        },
+    )])
+    .with_conf(bundles::conf().audience(REPORTS))
 }
 
 fn dual_audience_bundle() -> bundles::Bundle {
@@ -780,6 +797,35 @@ async fn test_site_login_authenticates_a_cookie_request() -> Result<(), AuthErro
         .send()
         .await
         .assert_status(vyuh::routes::StatusCode::OK);
+    Ok(())
+}
+
+/// Verifies a cookie-authenticated request rejects an accompanying Authorization credential.
+#[tokio::test]
+async fn cookie_access_rejects_authorization_header() -> Result<(), AuthError> {
+    let auth = configured_token_auth(TokenConf::cookie("access"), TokenConf::cookie("refresh"));
+    let site = Site::build(config().auth(auth), persona_bundle())
+        .await
+        .map_err(auth_error)?;
+    let test = TestSite::new(site);
+    let login = test
+        .login(
+            DEFAULT_AUTH_PROVIDER,
+            AuthUser::new("cookie-user"),
+            &[REPORTS],
+        )
+        .await?;
+    test.get("/personas/not-a-number")
+        .with_login(&login)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::BAD_REQUEST);
+    test.get("/personas/not-a-number")
+        .with_login(&login)
+        .header("authorization", "Bearer unrelated")
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
