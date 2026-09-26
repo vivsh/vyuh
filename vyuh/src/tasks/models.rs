@@ -325,7 +325,7 @@ impl TaskFilter {
         self
     }
 
-    /// Applies a bounded text search to safe diagnostic fields.
+    /// Searches task names, lanes, and idempotency keys; payloads and results are excluded.
     pub fn search(mut self, value: impl Into<String>) -> Self {
         self.query = Some(value.into());
         self
@@ -418,9 +418,10 @@ pub struct TaskRecord {
     pub resume_input: Option<String>,
     pub status: TaskStatus,
     pub attempts: i32,
+    pub step_attempts: i32,
     pub lane: String,
     pub lease_duration_ms: Option<i64>,
-    pub last_error: Option<String>,
+    pub last_result: Option<String>,
     pub idempotency_key: Option<String>,
     pub idempotency_fingerprint: Option<String>,
     pub idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -464,7 +465,7 @@ impl TaskRecord {
     }
 
     /// Deserializes the payload supplied when a suspended task resumed.
-    pub fn resume_input<T>(&self) -> Result<Option<T>, TaskError>
+    pub fn resume_input<T>(&self) -> Result<Option<Result<T, super::TaskFailure>>, TaskError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -489,8 +490,9 @@ pub struct TaskInfo {
     pub(crate) resume_input: Option<String>,
     pub(crate) status: TaskStatus,
     pub(crate) attempts: i32,
+    pub(crate) step_attempts: i32,
     pub(crate) lane: String,
-    pub(crate) last_error: Option<String>,
+    pub(crate) last_result: Option<String>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) locked_by: Option<String>,
@@ -542,9 +544,21 @@ impl TaskInfo {
         self.attempts
     }
 
-    /// Returns the most recent bounded failure message.
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+    /// Returns invocations since the last successfully committed checkpoint.
+    pub const fn step_attempts(&self) -> i32 {
+        self.step_attempts
+    }
+
+    /// Returns the stored JSON result envelope, or none before a result or after a checkpoint.
+    pub fn last_result_json(&self) -> Option<&str> {
+        self.last_result.as_deref()
+    }
+
+    /// Decodes the latest result; malformed JSON or a mismatched success type returns an error.
+    pub fn last_result<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskError> {
+        decode_optional(&self.last_result)
     }
 
     /// Returns the submitted idempotency key when one was used.
@@ -593,7 +607,9 @@ impl TaskInfo {
     }
 
     /// Deserializes optional resume input.
-    pub fn resume_input<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, TaskError> {
+    pub fn resume_input<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskError> {
         decode_optional(&self.resume_input)
     }
 }
@@ -611,8 +627,9 @@ impl From<TaskRecord> for TaskInfo {
             resume_input: record.resume_input,
             status: record.status,
             attempts: record.attempts,
+            step_attempts: record.step_attempts,
             lane: record.lane,
-            last_error: record.last_error,
+            last_result: record.last_result,
             idempotency_key: record.idempotency_key,
             idempotency_expires_at: record.idempotency_expires_at,
             locked_by: record.locked_by,

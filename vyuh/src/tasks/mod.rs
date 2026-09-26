@@ -2,6 +2,7 @@ mod batch;
 mod config;
 mod diagnostics;
 mod dispatcher;
+mod failure;
 mod handler;
 mod health;
 mod lane_lock;
@@ -10,6 +11,7 @@ mod lane_lock_tests;
 mod metrics;
 mod models;
 mod rate;
+mod result;
 mod runner;
 pub(crate) mod store;
 #[cfg(test)]
@@ -19,11 +21,12 @@ mod submission;
 pub use config::*;
 pub(crate) use dispatcher::TaskDispatcher;
 pub use dispatcher::Tasks;
+pub use failure::{TaskError, TaskFailure, TaskStatus};
 #[doc(hidden)]
 pub use handler::BatchTaskContext;
 #[doc(hidden)]
 pub use handler::IntoTaskOutcomePart;
-pub use handler::{Continuation, TaskContext, TaskError, TaskState, TaskStatus};
+pub use handler::{Continuation, TaskContext, TaskState};
 pub(crate) use handler::{RegisteredTask, TaskOutcome, TaskRegistry};
 pub(crate) use health::{TaskHealth, TaskHealthSnapshot};
 pub use lane_lock::{TaskLaneContext, TaskLaneLock};

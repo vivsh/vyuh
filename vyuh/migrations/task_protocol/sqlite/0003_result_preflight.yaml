@@ -1,0 +1,31 @@
+dependencies: [0002_resume_results]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      CREATE TEMP TABLE vyuh_result_preflight (task_id VARCHAR(191), valid INTEGER NOT NULL CHECK (valid = 1))
+  - type: statement
+    up: >-
+      INSERT INTO vyuh_result_preflight (task_id, valid) SELECT LOWER(SUBSTR(HEX(id), 1, 8) || '-' || SUBSTR(HEX(id), 9, 4) || '-' || SUBSTR(HEX(id), 13, 4) || '-' || SUBSTR(HEX(id), 17, 4) || '-' || SUBSTR(HEX(id), 21, 12)), CASE WHEN (resume_input IS NULL OR (length(CAST(resume_input AS BLOB)) <= 32768 AND (CASE WHEN json_valid(resume_input) THEN
+       CASE WHEN json_type(resume_input) = 'object' THEN
+       (SELECT count(*) FROM json_each(resume_input)) = 1 AND
+       (json_type(resume_input, '$.Ok') IS NOT NULL OR
+       (json_type(resume_input, '$.Err') = 'object'
+       AND json_type(resume_input, '$.Err.message') = 'text'
+       AND (json_type(resume_input, '$.Err.task_id') IS NULL
+       OR json_type(resume_input, '$.Err.task_id') = 'null'
+       OR (json_type(resume_input, '$.Err.task_id') = 'text'
+       AND length(json_extract(resume_input, '$.Err.task_id')) = 36
+       AND substr(json_extract(resume_input, '$.Err.task_id'),9,1) = '-'
+       AND substr(json_extract(resume_input, '$.Err.task_id'),14,1) = '-'
+       AND substr(json_extract(resume_input, '$.Err.task_id'),19,1) = '-'
+       AND substr(json_extract(resume_input, '$.Err.task_id'),24,1) = '-'
+       AND length(replace(json_extract(resume_input, '$.Err.task_id'),'-','')) = 32
+       AND replace(json_extract(resume_input, '$.Err.task_id'),'-','') NOT GLOB '*[^0-9a-fA-F]*'))))
+       ELSE 0 END ELSE 0 END))) AND (last_error IS NULL OR length(CAST(json_object('Err', json_object('task_id', LOWER(SUBSTR(HEX(id), 1, 8) || '-' || SUBSTR(HEX(id), 9, 4) || '-' || SUBSTR(HEX(id), 13, 4) || '-' || SUBSTR(HEX(id), 17, 4) || '-' || SUBSTR(HEX(id), 21, 12)), 'message', last_error)) AS BLOB)) <= 32768) THEN 1 ELSE 0 END FROM vyuh_tasks
+  - type: statement
+    up: >-
+      INSERT INTO vyuh_result_preflight (task_id, valid) SELECT 'runtime policy', CASE WHEN SUBSTR(policy_fingerprint, 1, 6) IN ('tr-up:', 'tr-v1:') THEN 1 ELSE 0 END FROM vyuh_task_runtime
+  - type: statement
+    up: >-
+      DROP TABLE vyuh_result_preflight

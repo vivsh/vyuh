@@ -283,7 +283,7 @@ use vyuh::prelude::*;
 
 async fn send_email(Data(job): Data<EmailJob>) -> Result<TaskState, Error> {
     match deliver(&job).await {
-        Ok(()) => Ok(TaskState::complete()),
+        Ok(()) => Ok(TaskState::complete(())?),
         Err(err) if err.is_transient() => Ok(TaskState::retry(err.to_string())),
         Err(err) => Err(Error::unavailable(err.to_string())),
     }

@@ -383,10 +383,10 @@ pub struct TaskOut {
     pub name: String,
     pub status: TaskStatus,
     pub attempts: i32,
+    pub step_attempts: i32,
     pub lane: String,
     pub idempotency_key: Option<String>,
     pub idempotency_expires_at: Option<String>,
-    pub last_error: Option<String>,
     pub locked_by: Option<String>,
     pub leased_until: Option<String>,
     pub ready_at: Option<String>,
@@ -405,12 +405,12 @@ impl From<&TaskInfo> for TaskOut {
             name: record.name.clone(),
             status: record.status,
             attempts: record.attempts,
+            step_attempts: record.step_attempts,
             lane: record.lane.clone(),
             idempotency_key: record.idempotency_key.clone(),
             idempotency_expires_at: record
                 .idempotency_expires_at
                 .map(|value| value.to_rfc3339()),
-            last_error: record.last_error.clone(),
             locked_by: record.locked_by.clone(),
             leased_until: record.leased_until.map(|value| value.to_rfc3339()),
             ready_at: record.ready_at.map(|value| value.to_rfc3339()),
@@ -428,15 +428,29 @@ pub struct TaskDetailOut {
     pub input: Option<serde_json::Value>,
     pub state: Option<serde_json::Value>,
     pub resume_input: Option<serde_json::Value>,
+    pub last_result: Option<serde_json::Value>,
+    pub last_result_error: Option<String>,
 }
 
 impl From<&TaskInfo> for TaskDetailOut {
     fn from(record: &TaskInfo) -> Self {
+        let decoded = record.last_result::<serde_json::Value>().and_then(|value| {
+            value
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(Into::into)
+        });
+        let (last_result, last_result_error) = match decoded {
+            Ok(value) => (value, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         Self {
             task: TaskOut::from(record),
             input: parse_json(&record.input),
             state: record.state.as_deref().and_then(parse_json),
             resume_input: record.resume_input.as_deref().and_then(parse_json),
+            last_result,
+            last_result_error,
         }
     }
 }

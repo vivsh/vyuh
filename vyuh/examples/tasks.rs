@@ -5,6 +5,7 @@
 ///   2. Fallible fire-and-forget       (Result<(), Error>)
 ///   3. Method-based registration      (no #[bundles::task] macro)
 ///   4. Suspend/resume with enum state (Result<TaskState, Error>)
+///   5. Atomic child spawning with a typed result
 use schemars::JsonSchema;
 use std::time::Duration;
 use vyuh::prelude::*;
@@ -23,6 +24,39 @@ struct SendEmailJob {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ProcessingJob {
     data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct ParentJob {
+    value: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct DoubleJob {
+    value: u32,
+}
+
+/// Suspends atomically with child creation and receives its result on a later poll.
+#[bundles::task]
+async fn parent_job(
+    site: Site,
+    continuation: Continuation<(), u32>,
+    input: Data<ParentJob>,
+) -> Result<TaskState, Error> {
+    match continuation.resume() {
+        None => Ok(site.tasks().spawn(DoubleJob { value: input.value }, ())?),
+        Some(Ok(value)) => {
+            println!("Child returned {value}");
+            Ok(TaskState::complete(())?)
+        }
+        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
+    }
+}
+
+/// Returns a typed output to a waiting parent without retaining an output archive.
+#[bundles::task]
+async fn double_job(input: Data<DoubleJob>) -> Result<TaskState, Error> {
+    Ok(TaskState::complete(input.value.saturating_mul(2))?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -88,7 +122,7 @@ async fn approve_document(
 ) -> Result<TaskState, Error> {
     match continuation.resume() {
         // ── Resumed: approver has responded ──────────────────────────────
-        Some(decision) => {
+        Some(Ok(decision)) => {
             match &decision {
                 ApprovalDecision::Approved { approver } => {
                     println!("✅ '{}' approved by {}", input.title, approver);
@@ -97,10 +131,11 @@ async fn approve_document(
                     println!("❌ '{}' rejected by {} — {}", input.title, approver, reason);
                 }
             }
-            Ok(TaskState::complete())
+            Ok(TaskState::complete(())?)
         }
 
         // ── First run: suspend and wait ───────────────────────────────────
+        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
         None => {
             println!(
                 "⏳ '{}' (id={}) by {} — waiting for approval",
@@ -125,6 +160,8 @@ async fn main() -> Result<(), Error> {
         send_email,
         process_data,
         approve_document,
+        parent_job,
+        double_job,
     }
     .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL, 2)));
 
@@ -147,6 +184,7 @@ async fn main() -> Result<(), Error> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await.map_err(Error::other)?;
     let tasks = site.tasks();
+    tasks.submit(ParentJob { value: 21 }).await?;
 
     // ── Fire-and-forget tasks ─────────────────────────────────────────────
     tasks

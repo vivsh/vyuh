@@ -1,0 +1,12 @@
+dependencies: [0004_result_columns]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_tasks SET last_result = CASE WHEN last_result IS NULL THEN NULL ELSE json_build_object('Err', json_build_object('task_id', id::text, 'message', last_result))::text END
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = CASE WHEN SUBSTR(policy_fingerprint, 1, 6) = 'tr-up:' THEN 'tr-r0:' ELSE 'tr-r1:' END || SUBSTR(policy_fingerprint, 7)
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = CASE WHEN SUBSTR(policy_fingerprint, 1, 6) = 'tr-up:' THEN 'tr-r0:' ELSE 'tr-r1:' END || SUBSTR(policy_fingerprint, 7)

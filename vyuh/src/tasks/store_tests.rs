@@ -42,9 +42,10 @@ fn task_record(name: &str, lane: TaskLane) -> TaskRecord {
         resume_input: None,
         status: TaskStatus::Pending,
         attempts: 0,
+        step_attempts: 0,
         lane: lane.to_string(),
         lease_duration_ms: None,
-        last_error: None,
+        last_result: None,
         idempotency_key: None,
         idempotency_fingerprint: None,
         idempotency_expires_at: None,
@@ -763,6 +764,7 @@ async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::T
     let mut record = task_record("exhausted", EMAIL);
     record.status = TaskStatus::Running;
     record.attempts = 1;
+    record.step_attempts = 1;
     record.leased_until = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     let id = record.id;
     store.store_tasks(vec![write(record)]).await?;
@@ -786,6 +788,7 @@ async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::Task
     let mut record = task_record("email", EMAIL);
     record.status = TaskStatus::Running;
     record.attempts = 1;
+    record.step_attempts = 1;
     record.leased_until = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     store.store_tasks(vec![write(record)]).await?;
 
@@ -856,7 +859,7 @@ async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::T
         .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing failure".into()))?;
     assert!(
         record
-            .last_error
+            .last_result
             .is_some_and(|message| message.contains("lease deadline"))
     );
     Ok(())

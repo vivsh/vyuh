@@ -25,7 +25,7 @@ impl DbTaskStore {
         self.fail_unleased_running(&mut transaction, &conf, now)
             .await?;
         reject_orphaned_tasks(&mut transaction, &conf).await?;
-        ensure_runtime_policy(&mut transaction, &fingerprint, now).await?;
+        ensure_runtime_policy(&mut transaction, &fingerprint, &conf, now).await?;
         initialize_rate_rows(&mut transaction, &conf, &fingerprint, now).await?;
         initialize_lock_rows(&mut transaction, &conf, now).await?;
         transaction.commit().await?;
@@ -71,13 +71,7 @@ impl DbTaskStore {
         now: chrono::DateTime<Utc>,
     ) -> Result<(), TaskError> {
         loop {
-            let table = DbTaskStore::table();
-            let mut rows = db::from(&table)
-                .filter(table.status.eq(db::val(TaskStatus::Running.as_i16())))
-                .filter(table.leased_until.is_null())
-                .slice::<TaskRow>(0, self.batch_size)
-                .exec(&mut *transaction)
-                .await?;
+            let mut rows = load_unleased(transaction, self.batch_size).await?;
             if rows.is_empty() {
                 return Ok(());
             }
@@ -94,14 +88,46 @@ impl DbTaskStore {
             }
             update_idempotency_batch(transaction, &mut rows, conf, now).await?;
             batch_update_rows(transaction, &rows, self.batch_size).await?;
+            let mut deliveries = Vec::new();
+            for row in &rows {
+                super::writes::queue_delivery(row, &mut deliveries)?;
+            }
+            super::writes::finalize_workflow(
+                transaction,
+                &[],
+                deliveries,
+                conf,
+                now,
+                self.batch_size,
+            )
+            .await?;
         }
     }
+}
+
+/// Locks orphaned running rows so concurrent initializers cannot redeliver an old failure.
+async fn load_unleased(
+    transaction: &mut db::DbTransaction<'_>,
+    limit: usize,
+) -> Result<Vec<TaskRow>, TaskError> {
+    let table = DbTaskStore::table();
+    let query = db::from(&table)
+        .filter(table.status.eq(db::val(TaskStatus::Running.as_i16())))
+        .filter(table.leased_until.is_null())
+        .sort(table.id.asc());
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    let query = {
+        use crate::db::backend::RowLockExt as _;
+        query.for_update()
+    };
+    Ok(query.slice::<TaskRow>(0, limit).exec(transaction).await?)
 }
 
 /// Creates or safely advances the singleton policy while no work is running.
 async fn ensure_runtime_policy(
     transaction: &mut db::DbTransaction<'_>,
     fingerprint: &str,
+    conf: &TaskStoreConf,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), TaskError> {
     let table = DbTaskStore::runtime_table();
@@ -114,6 +140,21 @@ async fn ensure_runtime_policy(
     let stored = load_runtime_for_update(transaction).await?.ok_or_else(|| {
         TaskError::TaskExecutionError("task runtime policy was not stored".into())
     })?;
+    if crate::tasks::store::is_migrated_policy(conf, &stored.policy_fingerprint) {
+        let patch = RuntimePolicyPatch {
+            policy_fingerprint: fingerprint.into(),
+            updated_at: now,
+        };
+        db::from(&table)
+            .filter(table.id.eq(db::val(RUNTIME_ID)))
+            .update(&patch)
+            .exec(transaction)
+            .await?;
+        return Ok(());
+    }
+    if !stored.policy_fingerprint.starts_with("tr-v2:") {
+        return Err(TaskError::InvalidConfig("task persisted-result protocol migration is required; stop all old workers and writers before upgrading".into()));
+    }
     if stored.policy_fingerprint != fingerprint {
         replace_runtime_policy(transaction, fingerprint, now).await?;
     }
@@ -181,7 +222,7 @@ async fn initialize_rate_rows(
             updated_at: now,
         };
         insert_rate_if_missing(transaction, &table, &row).await?;
-        let stored = db::from(&table)
+        let mut stored = db::from(&table)
             .filter(table.lane_name.eq(db::val(lane.lane().to_string())))
             .first::<TaskRateRow>()
             .exec(&mut *transaction)
@@ -189,7 +230,14 @@ async fn initialize_rate_rows(
             .ok_or_else(|| {
                 TaskError::TaskExecutionError("task rate state was not stored".into())
             })?;
-        if stored.policy_fingerprint != fingerprint {
+        if crate::tasks::store::is_migrated_policy(conf, &stored.policy_fingerprint) {
+            stored.policy_fingerprint = fingerprint.into();
+            db::from(&table)
+                .filter(table.lane_name.eq(db::val(lane.lane().to_string())))
+                .update(&stored)
+                .exec(&mut *transaction)
+                .await?;
+        } else if stored.policy_fingerprint != fingerprint {
             return Err(TaskError::InvalidConfig(format!(
                 "task lane '{}' has an incompatible global rate policy",
                 lane.lane()
@@ -297,7 +345,7 @@ async fn load_runtime_for_update(
         .await?)
 }
 
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "postgres")]
 /// Holds a shared policy lock across each persistent runtime mutation.
 async fn load_runtime_for_share(
     transaction: &mut db::DbTransaction<'_>,
@@ -310,6 +358,17 @@ async fn load_runtime_for_share(
         .first::<TaskRuntimeRow>()
         .exec(transaction)
         .await?)
+}
+
+#[cfg(feature = "mysql")]
+/// Uses the shared-lock spelling supported by both MySQL and MariaDB.
+async fn load_runtime_for_share(
+    transaction: &mut db::DbTransaction<'_>,
+) -> Result<Option<TaskRuntimeRow>, TaskError> {
+    use db::DbSession as _;
+    Ok(transaction.fetch_optional(db::Statement::raw(
+        "SELECT id, policy_fingerprint, updated_at FROM vyuh_task_runtime WHERE id = ? LOCK IN SHARE MODE"
+    ).bind(RUNTIME_ID)).await?)
 }
 
 #[cfg(feature = "sqlite")]

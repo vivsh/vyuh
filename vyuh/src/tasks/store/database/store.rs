@@ -27,16 +27,63 @@ impl DbTaskStore {
         let now = statement_now(&mut transaction).await?;
         let lanes = locked_turn_lanes(&conf, claims, commits, renewals);
         super::writes::lock_lane_rows(&mut transaction, lanes).await?;
-        self.commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
+        let (children, mut deliveries) = self
+            .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
             .await?;
         let lost = self
             .renew_leases_tx(&mut transaction, runner_id, renewals, &conf, now)
             .await?;
-        let poll = self
-            .claim_tasks_tx(&mut transaction, runner_id, claims, &conf, now)
+        let (mut poll, new_idle) = self
+            .claim_tasks_tx(
+                &mut transaction,
+                runner_id,
+                claims,
+                &conf,
+                now,
+                &mut deliveries,
+            )
+            .await?;
+        let wake_lanes = self
+            .finish_workflow(
+                &mut transaction,
+                &children,
+                deliveries,
+                &conf,
+                now,
+                &mut poll,
+                &new_idle,
+            )
             .await?;
         transaction.commit().await?;
-        Ok(TaskTick { poll, lost })
+        Ok(TaskTick {
+            poll,
+            lost,
+            wake_lanes,
+        })
+    }
+
+    /// Finalizes workflow writes and reconciles pre-insert idle evidence before commit.
+    async fn finish_workflow(
+        &self,
+        transaction: &mut crate::db::DbTransaction<'_>,
+        children: &[super::model::TaskRow],
+        deliveries: Vec<(TaskId, String)>,
+        conf: &TaskStoreConf,
+        now: chrono::DateTime<chrono::Utc>,
+        poll: &mut TaskPoll,
+        new_idle: &[crate::tasks::TaskLane],
+    ) -> Result<Vec<crate::tasks::TaskLane>, TaskError> {
+        let wake = super::writes::finalize_workflow(
+            transaction,
+            children,
+            deliveries,
+            conf,
+            now,
+            self.batch_size,
+        )
+        .await?;
+        super::lane_owner::reconcile_workflow(transaction, poll, &wake, new_idle, now).await?;
+        Ok(wake)
     }
 }
 

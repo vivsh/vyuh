@@ -10,7 +10,7 @@ pub(crate) fn log_runtime_error(error: &TaskError, message: &'static str) {
 }
 
 /// Builds a bounded causal chain for operator-only logs and tracing.
-fn causal_chain(error: &TaskError) -> String {
+pub(crate) fn causal_chain(error: &(dyn StdError + 'static)) -> String {
     let mut chain = error.to_string();
     let mut source = error.source();
     for _ in 0..16 {

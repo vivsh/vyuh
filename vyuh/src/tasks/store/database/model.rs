@@ -13,11 +13,9 @@ use crate::{
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_tasks")]
 pub(super) struct TaskRow {
-    #[column(primary_key, type = "uuid")]
+    #[column(primary_key)]
     pub(super) id: uuid::Uuid,
-    #[column(type = "uuid")]
     pub(super) parent_id: Option<uuid::Uuid>,
-    #[column(type = "uuid")]
     pub(super) root_id: Option<uuid::Uuid>,
     #[column(default = "0")]
     pub(super) kind: i16,
@@ -28,10 +26,12 @@ pub(super) struct TaskRow {
     pub(super) resume_input: Option<String>,
     pub(super) status: i16,
     pub(super) attempts: i32,
+    #[column(default = "0")]
+    pub(super) step_attempts: i32,
     #[column(type = "varchar(64)", default = "'default'")]
     pub(super) lane_name: String,
     pub(super) lease_duration_ms: Option<i64>,
-    pub(super) last_error: Option<String>,
+    pub(super) last_result: Option<String>,
     #[column(type = "varchar(512)")]
     pub(super) idempotency_key: Option<String>,
     #[column(type = "varchar(64)")]
@@ -58,9 +58,10 @@ impl From<TaskRecord> for TaskRow {
             resume_input: record.resume_input,
             status: record.status.as_i16(),
             attempts: record.attempts,
+            step_attempts: record.step_attempts,
             lane_name: record.lane,
             lease_duration_ms: record.lease_duration_ms,
-            last_error: record.last_error,
+            last_result: record.last_result,
             idempotency_key: record.idempotency_key,
             idempotency_fingerprint: record.idempotency_fingerprint,
             idempotency_expires_at: record.idempotency_expires_at,
@@ -89,9 +90,10 @@ impl TryFrom<TaskRow> for TaskRecord {
             resume_input: row.resume_input,
             status: crate::tasks::TaskStatus::from_i16(row.status)?,
             attempts: row.attempts,
+            step_attempts: row.step_attempts,
             lane: row.lane_name,
             lease_duration_ms: row.lease_duration_ms,
-            last_error: row.last_error,
+            last_result: row.last_result,
             idempotency_key: row.idempotency_key,
             idempotency_fingerprint: row.idempotency_fingerprint,
             idempotency_expires_at: row.idempotency_expires_at,
@@ -109,7 +111,7 @@ impl TryFrom<TaskRow> for TaskRecord {
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_task_idempotency")]
 pub(super) struct TaskIdempotencyRow {
-    #[column(primary_key, type = "uuid")]
+    #[column(primary_key)]
     pub(super) id: uuid::Uuid,
     #[column(type = "varchar(191)")]
     pub(super) task_name: String,
@@ -117,7 +119,6 @@ pub(super) struct TaskIdempotencyRow {
     pub(super) key_value: String,
     #[column(type = "varchar(64)")]
     pub(super) fingerprint: String,
-    #[column(type = "uuid")]
     pub(super) task_id: uuid::Uuid,
     pub(super) expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) created_at: chrono::DateTime<chrono::Utc>,
@@ -128,7 +129,7 @@ pub(super) struct TaskIdempotencyRow {
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_task_lane_rates")]
 pub(super) struct TaskRateRow {
-    #[column(primary_key, type = "uuid")]
+    #[column(primary_key)]
     pub(super) id: uuid::Uuid,
     #[column(type = "varchar(64)")]
     pub(super) lane_name: String,
@@ -179,7 +180,7 @@ pub(super) struct TaskLaneLockPatch {
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_task_runtime")]
 pub(super) struct TaskRuntimeRow {
-    #[column(primary_key, type = "uuid")]
+    #[column(primary_key)]
     pub(super) id: uuid::Uuid,
     #[column(type = "varchar(64)")]
     pub(super) policy_fingerprint: String,

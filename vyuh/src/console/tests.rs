@@ -735,7 +735,7 @@ fn console_access_has_no_global_runtime_state() {
 #[path = "tests/web.rs"]
 mod web;
 
-/// Verifies console task inspection exposes lifecycle data without task values.
+/// Verifies task lists omit results while detail inspection exposes the result field.
 #[tokio::test]
 async fn console_task_pages_show_submitted_tasks() {
     let conf = test_conf()
@@ -771,6 +771,7 @@ async fn console_task_pages_show_submitted_tasks() {
     assert_eq!(api_tasks.status(), StatusCode::OK);
     let api_tasks = api_tasks.text().await;
     assert!(api_tasks.contains("console_test_task"));
+    assert!(!api_tasks.contains("last_result"));
 
     let detail = client
         .get(&format!("/console/api/tasks/{task_id}"))
@@ -782,6 +783,14 @@ async fn console_task_pages_show_submitted_tasks() {
     assert!(detail.get("input").is_some());
     assert!(detail.get("output").is_none());
     assert!(detail.get("result").is_none());
+    assert!(detail.get("last_result").is_some());
+    let html = client
+        .get(&format!("/console/tasks/{task_id}"))
+        .header(header::COOKIE.as_str(), &cookie)
+        .send()
+        .await;
+    assert_eq!(html.status(), StatusCode::OK);
+    assert!(html.text().await.contains("Last result"));
 
     let tasks = client
         .get("/console/tasks")

@@ -451,8 +451,8 @@ fn receipt_index(receipt: TaskReceipt) -> usize {
 
 fn outcome_index(outcome: &TaskOutcome) -> usize {
     match outcome {
-        TaskOutcome::Complete => 0,
-        TaskOutcome::Suspend { .. } => 1,
+        TaskOutcome::Complete | TaskOutcome::CompleteWith { .. } => 0,
+        TaskOutcome::Suspend { .. } | TaskOutcome::Spawn { .. } => 1,
         TaskOutcome::Sleep { .. } => 2,
         TaskOutcome::Retry { .. } => 3,
         TaskOutcome::Fail { .. } => 4,

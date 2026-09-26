@@ -65,10 +65,10 @@ The `vyuh` crate is organized around these subsystems:
   Cron and periodic emitters may submit deterministic input through the shared
   task runtime using a cursor-backed transaction; this is a narrow durable
   enqueue path, not a second scheduler or workflow runtime.
-- `tasks` provides typed input, value-less durable background task registration,
+- `tasks` provides typed input, durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
   and commits, optional process-local `Data<Batch<T>>` handler invocation,
-  storage-only workflow lineage/kind metadata, lane-owned retry/backoff and
+  store-owned parent/root lineage, storage-only kind metadata, lane-owned retry/backoff and
   idempotency-retention policy, local
   runner and store-wide database rate limits, adaptive polling, lease renewal,
   opt-in durable lane ownership, and explicit continuation lifecycle control.
@@ -86,6 +86,19 @@ The `vyuh` crate is organized around these subsystems:
   ownership: each row retains its own attempt, rate permit, lease, fenced
   commit, and inspection history while one batch future consumes one local
   handler-concurrency slot.
+  Spawn outcomes checkpoint a suspended parent and prepare one child; terminal
+  child outcomes deliver Serde `Result` values through the existing resume input.
+  Task updates, child inserts, and narrow parent updates use bounded Mool bulk
+  writes in the same transaction. Children and parent deliveries finalize after
+  claim selection; transient wake lanes feed the existing next-poll gate. Public
+  resume remains independent. Per-step retries reset at successful checkpoints,
+  while lifetime invocation counts remain intact. No workflow scheduler,
+  waiting-on state, or separate output archive is introduced. Each task retains
+  its latest JSON result in `last_result`; checkpoint commits clear it. Results
+  and resume inputs share a fixed 32,768-byte envelope limit. Terminal child
+  delivery reuses the persisted result bytes. Result envelopes require a
+  coordinated schema/data upgrade and versioned runtime policy; mixed old/new
+  workers or writers are unsupported.
 - `cache` provides an immutable per-site registry of asynchronous named cache
   providers. Its typed handles own JSON serialization, canonical provider and
   namespace key scoping, and bounded metrics; providers own byte storage, TTL,

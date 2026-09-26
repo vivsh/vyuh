@@ -36,6 +36,8 @@ impl DbTaskStore {
         lane: &TaskLaneConf,
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        new_idle: &mut Vec<crate::tasks::TaskLane>,
     ) -> Result<LanePoll, TaskError> {
         let mut row = load_for_update(transaction, claim.lane.as_str())
             .await?
@@ -46,6 +48,7 @@ impl DbTaskStore {
                 ))
             })?;
         let had_owner = row.owner_token.is_some();
+        let was_idling = row.phase == LaneOwnerPhase::Idling as i16;
         let acquiring = claim
             .owner
             .as_ref()
@@ -68,10 +71,18 @@ impl DbTaskStore {
                 persist(transaction, &row).await?;
                 wait_poll(transaction, row, &turn).await
             } else {
-                self.poll_owner(transaction, row, &turn).await
+                self.poll_owner(transaction, row, &turn, deliveries).await
             }
         };
         let mut poll = result?;
+        if !was_idling
+            && poll
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.action == Some(LaneHookAction::Idle))
+        {
+            new_idle.push(claim.lane);
+        }
         mark_takeover(&mut poll, acquiring && had_owner);
         Ok(poll)
     }
@@ -148,6 +159,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         mut row: TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<LanePoll, TaskError> {
         let phase = LaneOwnerPhase::from_i16(row.phase)?;
         if let Some(action) = phase_action(phase) {
@@ -165,7 +177,7 @@ impl DbTaskStore {
         }
         let candidates = self.candidates(transaction, turn).await?;
         let poll = self
-            .phase_poll(transaction, &mut row, candidates, turn)
+            .phase_poll(transaction, &mut row, candidates, turn, deliveries)
             .await?;
         persist(transaction, &row).await?;
         Ok(poll)
@@ -177,6 +189,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         candidates: Vec<TaskRow>,
         turn: &OwnerTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<LanePoll, TaskError> {
         let mut phase = LaneOwnerPhase::from_i16(row.phase)?;
         let completed_work = turn
@@ -194,7 +207,7 @@ impl DbTaskStore {
         }
         row.empty_since = None;
         if matches!(phase, LaneOwnerPhase::Idle | LaneOwnerPhase::BusyFailed) {
-            return self.start_busy(transaction, row, turn).await;
+            return self.start_busy(transaction, row, turn, deliveries).await;
         }
         if row.flushing || should_flush(&candidates, turn.lane, turn.now)? {
             row.flushing = true;
@@ -204,7 +217,7 @@ impl DbTaskStore {
                 .as_ref()
                 .is_some_and(|owner| owner.allow_claim);
             if allow_claim {
-                return self.claim_flush(transaction, row, turn).await;
+                return self.claim_flush(transaction, row, turn, deliveries).await;
             }
             return owned_poll(turn.claim.lane, row.clone(), None, Some(Duration::ZERO));
         }
@@ -283,6 +296,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<LanePoll, TaskError> {
         if row.hook_retry_at.is_some_and(|retry| retry > turn.now) {
             release(row, LaneOwnerPhase::BusyFailed, turn.now);
@@ -310,7 +324,7 @@ impl DbTaskStore {
             );
         }
         activate(row, turn.now);
-        self.claim_flush(transaction, row, turn).await
+        self.claim_flush(transaction, row, turn, deliveries).await
     }
 
     async fn claim_flush(
@@ -318,6 +332,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         row: &TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<LanePoll, TaskError> {
         let lock = turn
             .lane
@@ -336,7 +351,7 @@ impl DbTaskStore {
             conf: turn.conf,
             now: turn.now,
         };
-        let mut poll = self.claim_lane(transaction, claim_turn).await?;
+        let mut poll = self.claim_lane(transaction, claim_turn, deliveries).await?;
         poll.owner = Some(owner_poll(row, None)?);
         Ok(poll)
     }
@@ -349,6 +364,47 @@ impl DbTaskStore {
         let size = turn.lane.lane_lock().map_or(1, |lock| lock.batch_size());
         probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), size).await
     }
+}
+
+/// Rechecks only affected owned lanes before exposing lifecycle hooks to the runner.
+pub(super) async fn reconcile_workflow(
+    tx: &mut db::DbTransaction<'_>,
+    poll: &mut crate::tasks::TaskPoll,
+    wake: &[crate::tasks::TaskLane],
+    new_idle: &[crate::tasks::TaskLane],
+    now: DateTime<Utc>,
+) -> Result<(), TaskError> {
+    for lane in &mut poll.lanes {
+        if !wake.contains(&lane.lane) {
+            continue;
+        }
+        lane.next_wake_in = Some(Duration::ZERO);
+        let Some(owner) = &lane.owner else {
+            continue;
+        };
+        let Some(token) = owner.token.as_deref() else {
+            continue;
+        };
+        if probe_candidates(tx, now, lane.lane.as_str(), 1)
+            .await?
+            .is_empty()
+        {
+            continue;
+        }
+        let Some(mut row) = load_for_update(tx, lane.lane.as_str()).await? else {
+            continue;
+        };
+        if row.owner_token.as_deref() != Some(token) {
+            continue;
+        }
+        row.empty_since = None;
+        if new_idle.contains(&lane.lane) && row.phase == LaneOwnerPhase::Idling as i16 {
+            activate(&mut row, now);
+            lane.owner = Some(owner_poll(&row, None)?);
+        }
+        persist(tx, &row).await?;
+    }
+    Ok(())
 }
 
 fn mark_takeover(poll: &mut LanePoll, candidate: bool) {

@@ -10,8 +10,8 @@ type JobBatch = Batch<Job>;
 struct QualifiedJob;
 
 #[bundles::task_batch]
-async fn macro_batch(_: Data<JobBatch>) -> Batch<TaskState> {
-    Batch::new(vec![TaskState::complete()])
+async fn macro_batch(_: Data<JobBatch>) -> Result<Batch<TaskState>, Error> {
+    Ok(Batch::new(vec![TaskState::complete(())?]))
 }
 
 #[bundles::task_batch(name = "qualified_batch")]

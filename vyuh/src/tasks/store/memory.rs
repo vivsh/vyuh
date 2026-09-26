@@ -2,6 +2,13 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+#[path = "memory_workflow.rs"]
+mod workflow;
+
+#[cfg(test)]
+#[path = "tests/memory.rs"]
+pub(crate) mod tests;
+
 use crate::tasks::{
     AbstractTaskStore, IdempotencyRetention, LaneClaim, LaneHookAction, LaneHookResult,
     LaneOwnerPhase, LaneOwnerPoll, LanePoll, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter,
@@ -102,7 +109,9 @@ impl MemoryTaskStore {
 
 impl AbstractTaskStore for MemoryTaskStore {
     async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskError> {
-        let mut state = self.state.lock().await;
+        let mut current = self.state.lock().await;
+        // Initialization stages legacy recovery once; steady-state turns journal only touched rows.
+        let mut state = current.clone();
         let fingerprint = crate::tasks::store::policy_fingerprint(&conf);
         if state
             .fingerprint
@@ -113,12 +122,15 @@ impl AbstractTaskStore for MemoryTaskStore {
                 "task workers use incompatible lane or global rate policies".into(),
             ));
         }
-        fail_unleased_running(&mut state.tasks, &conf, chrono::Utc::now())?;
+        let now = chrono::Utc::now();
+        let deliveries = fail_unleased_running(&mut state.tasks, &conf, now)?;
         reject_orphaned_tasks(&state.tasks, &conf)?;
         initialize_rates(&mut state, &conf);
         initialize_lane_locks(&mut state, &conf);
         state.fingerprint = Some(fingerprint);
         state.conf = Some(conf);
+        workflow::finalize_workflow(&mut state, Vec::new(), deliveries, now);
+        *current = state;
         Ok(())
     }
 
@@ -127,15 +139,7 @@ impl AbstractTaskStore for MemoryTaskStore {
         runner_id: &str,
         claims: &[LaneClaim],
     ) -> Result<TaskPoll, TaskError> {
-        let mut state = self.state.lock().await;
-        claim_tasks_state(
-            &mut state,
-            runner_id,
-            claims,
-            self.batch_size,
-            self.lease_duration,
-            chrono::Utc::now(),
-        )
+        Ok(self.tick(runner_id, claims, &[], &[]).await?.poll)
     }
 
     async fn commit_outcomes(
@@ -143,8 +147,8 @@ impl AbstractTaskStore for MemoryTaskStore {
         runner_id: &str,
         commits: &[TaskCommit],
     ) -> Result<(), TaskError> {
-        let mut state = self.state.lock().await;
-        commit_outcomes_state(&mut state, runner_id, commits, chrono::Utc::now())
+        self.tick(runner_id, &[], commits, &[]).await?;
+        Ok(())
     }
 
     async fn renew_leases(
@@ -152,14 +156,7 @@ impl AbstractTaskStore for MemoryTaskStore {
         runner_id: &str,
         leases: &[TaskLease],
     ) -> Result<Vec<TaskId>, TaskError> {
-        let mut state = self.state.lock().await;
-        renew_leases_state(
-            &mut state,
-            runner_id,
-            leases,
-            self.lease_duration,
-            chrono::Utc::now(),
-        )
+        Ok(self.tick(runner_id, &[], &[], leases).await?.lost)
     }
 
     async fn tick(
@@ -171,17 +168,16 @@ impl AbstractTaskStore for MemoryTaskStore {
     ) -> Result<TaskTick, TaskError> {
         let mut state = self.state.lock().await;
         let now = chrono::Utc::now();
-        commit_outcomes_state(&mut state, runner_id, commits, now)?;
-        let lost = renew_leases_state(&mut state, runner_id, renewals, self.lease_duration, now)?;
-        let poll = claim_tasks_state(
+        workflow::atomic_turn(
             &mut state,
             runner_id,
             claims,
+            commits,
+            renewals,
             self.batch_size,
             self.lease_duration,
             now,
-        )?;
-        Ok(TaskTick { poll, lost })
+        )
     }
 
     async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
@@ -260,6 +256,7 @@ impl AbstractTaskStore for MemoryTaskStore {
     }
 
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskError> {
+        crate::tasks::result::validate_resume(&input)?;
         let mut state = self.state.lock().await;
         let now = chrono::Utc::now();
         let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
@@ -310,6 +307,8 @@ fn claim_tasks_state(
     batch_size: usize,
     lease_duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
+    deliveries: &mut Vec<(TaskId, String)>,
+    undo: &mut Vec<TaskRecord>,
 ) -> Result<TaskPoll, TaskError> {
     let conf = state
         .conf
@@ -330,12 +329,22 @@ fn claim_tasks_state(
                 lane_conf,
                 lease_duration,
                 now,
+                deliveries,
+                undo,
             )?);
             continue;
         }
         let bounded = bounded_claim(claim, batch_size);
         let retry = configured_retry(state, bounded.lane)?;
-        fail_exhausted(&mut state.tasks, bounded.lane.as_str(), now, &conf, retry)?;
+        fail_exhausted(
+            &mut state.tasks,
+            bounded.lane.as_str(),
+            now,
+            &conf,
+            retry,
+            deliveries,
+            undo,
+        )?;
         let candidates = due_count(state, bounded.lane, now);
         let rate = configured_rate(state, bounded.lane)?;
         let (permits, rate_wake) = reserve_permits(state, bounded.lane, candidates, rate, now)?;
@@ -351,513 +360,15 @@ fn claim_tasks_state(
             reservation,
             lease_duration,
             now,
+            undo,
         )?);
     }
     Ok(TaskPoll { lanes })
 }
 
-/// Coordinates one process-local lane owner using the durable-store state machine.
-fn claim_owned_state(
-    state: &mut MemoryState,
-    runner_id: &str,
-    claim: &LaneClaim,
-    lane: &crate::tasks::TaskLaneConf,
-    lease_duration: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    #[cfg(test)]
-    {
-        state.lane_lock_turns = state.lane_lock_turns.saturating_add(1);
-    }
-    let name = claim.lane.to_string();
-    let mut owner = state.lane_locks.remove(&name).ok_or_else(|| {
-        TaskError::InvalidConfig(format!(
-            "task lane lock '{}' is not initialized",
-            claim.lane
-        ))
-    })?;
-    let had_owner = owner.owner_token.is_some();
-    let acquiring = claim
-        .owner
-        .as_ref()
-        .is_some_and(|request| request.token.is_none());
-    let mut result = claim_owned_inner(
-        state,
-        &mut owner,
-        runner_id,
-        claim,
-        lane,
-        lease_duration,
-        now,
-    );
-    let took_over = acquiring
-        && had_owner
-        && result.as_ref().is_ok_and(|poll| {
-            poll.owner
-                .as_ref()
-                .is_some_and(|owner| owner.token.is_some())
-        });
-    if took_over
-        && let Ok(poll) = &mut result
-        && let Some(owner) = &mut poll.owner
-    {
-        owner.takeover = true;
-    }
-    state.lane_locks.insert(name, owner);
-    result
-}
-
-fn claim_owned_inner(
-    state: &mut MemoryState,
-    owner: &mut MemoryLaneLock,
-    runner_id: &str,
-    claim: &LaneClaim,
-    lane: &crate::tasks::TaskLaneConf,
-    lease_duration: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    if !memory_owner(owner, runner_id, claim, lease_duration, now)? {
-        let wake = owner
-            .leased_until
-            .and_then(|deadline| (deadline - now).to_std().ok())
-            .or_else(|| task_deadline(&state.tasks, claim.lane.as_str(), now));
-        return memory_wait_poll(claim.lane, owner, wake);
-    }
-    if let Some(hook) = claim
-        .owner
-        .as_ref()
-        .and_then(|request| request.hook.as_ref())
-    {
-        apply_memory_hook(state, owner, hook, claim.lane, lane, now)?;
-    }
-    if let Some(action) = memory_action(owner.phase) {
-        return memory_poll_action(claim.lane, owner, action, None);
-    }
-    memory_phase_poll(state, owner, runner_id, claim, lane, lease_duration, now)
-}
-
-fn memory_owner(
-    owner: &mut MemoryLaneLock,
-    runner_id: &str,
-    claim: &LaneClaim,
-    duration: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, TaskError> {
-    let requested = claim
-        .owner
-        .as_ref()
-        .and_then(|request| request.token.as_deref());
-    let current = requested.is_some_and(|token| {
-        owner.owner_id.as_deref() == Some(runner_id)
-            && owner.owner_token.as_deref() == Some(token)
-            && memory_owner_live(owner, now)
-    });
-    if current {
-        owner.leased_until = checked_deadline(now, duration)?;
-        return Ok(true);
-    }
-    if requested.is_some() || memory_owner_live(owner, now) {
-        return Ok(false);
-    }
-    owner.owner_id = Some(runner_id.into());
-    owner.owner_token = Some(uuid::Uuid::now_v7().to_string());
-    owner.leased_until = checked_deadline(now, duration)?;
-    Ok(true)
-}
-
-fn memory_phase_poll(
-    state: &mut MemoryState,
-    owner: &mut MemoryLaneLock,
-    runner_id: &str,
-    claim: &LaneClaim,
-    lane: &crate::tasks::TaskLaneConf,
-    lease_duration: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    let quiescent = claim
-        .owner
-        .as_ref()
-        .is_some_and(|request| request.quiescent);
-    if matches!(
-        owner.phase,
-        LaneOwnerPhase::Active | LaneOwnerPhase::IdleFailed
-    ) && !quiescent
-    {
-        return memory_poll(claim.lane, owner, None);
-    }
-    let completed_work = claim
-        .owner
-        .as_ref()
-        .is_some_and(|request| request.completed_work);
-    if owner.phase == LaneOwnerPhase::IdleFailed && completed_work {
-        memory_activate(owner);
-    }
-    let candidates = memory_candidates(state, claim.lane, lane, now);
-    if candidates.is_empty() {
-        owner.flushing = false;
-        return memory_empty(state, owner, claim, lane, now);
-    }
-    owner.empty_since = None;
-    if matches!(
-        owner.phase,
-        LaneOwnerPhase::Idle | LaneOwnerPhase::BusyFailed
-    ) {
-        return memory_start_busy(owner, claim.lane, lane, now);
-    }
-    let turn = MemoryOwnerTurn {
-        runner_id,
-        claim,
-        lane,
-        lease_duration,
-        now,
-    };
-    memory_flush_poll(state, owner, candidates, &turn)
-}
-
-/// Selects one ordered, bounded candidate window without claiming its tasks.
-fn memory_candidates(
-    state: &MemoryState,
-    lane_name: TaskLane,
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Vec<usize> {
-    let size = lane
-        .lane_lock()
-        .map_or(1, crate::tasks::TaskLaneLock::batch_size);
-    let mut candidates = due_indices(&state.tasks, lane_name.as_str(), now);
-    candidates.sort_by_key(|index| state.tasks.get(*index).map(|task| readiness(task, now)));
-    candidates.truncate(size);
-    candidates
-}
-
-/// Continues an open cohort or waits for its threshold before claiming.
-fn memory_flush_poll(
-    state: &mut MemoryState,
-    owner: &mut MemoryLaneLock,
-    candidates: Vec<usize>,
-    turn: &MemoryOwnerTurn<'_>,
-) -> Result<LanePoll, TaskError> {
-    if !owner.flushing && !memory_flush(&state.tasks, &candidates, turn.lane, turn.now)? {
-        return memory_poll(
-            turn.claim.lane,
-            owner,
-            memory_flush_wake(&state.tasks, &candidates, turn.lane, turn.now)?,
-        );
-    }
-    owner.flushing = true;
-    let allow_claim = turn
-        .claim
-        .owner
-        .as_ref()
-        .is_some_and(|request| request.allow_claim);
-    if !allow_claim {
-        return memory_poll(turn.claim.lane, owner, Some(Duration::ZERO));
-    }
-    memory_claim(
-        state,
-        owner,
-        turn.runner_id,
-        turn.claim,
-        turn.lane,
-        turn.lease_duration,
-        turn.now,
-    )
-}
-
-fn memory_empty(
-    state: &MemoryState,
-    owner: &mut MemoryLaneLock,
-    claim: &LaneClaim,
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    if matches!(
-        owner.phase,
-        LaneOwnerPhase::Idle | LaneOwnerPhase::IdleFailed | LaneOwnerPhase::BusyFailed
-    ) {
-        let phase = owner.phase;
-        memory_release(owner, phase);
-        return memory_poll(
-            claim.lane,
-            owner,
-            task_deadline(&state.tasks, claim.lane.as_str(), now),
-        );
-    }
-    let quiescent = claim
-        .owner
-        .as_ref()
-        .is_some_and(|request| request.quiescent);
-    if !quiescent {
-        return memory_poll(claim.lane, owner, None);
-    }
-    let delay = lane
-        .lane_lock()
-        .map_or(Duration::ZERO, crate::tasks::TaskLaneLock::idle_duration);
-    let started = *owner.empty_since.get_or_insert(now);
-    let elapsed = (now - started).to_std().unwrap_or(Duration::ZERO);
-    if elapsed < delay {
-        return memory_poll(claim.lane, owner, Some(delay.saturating_sub(elapsed)));
-    }
-    memory_start_idle(owner, claim.lane, lane)
-}
-
-fn memory_start_idle(
-    owner: &mut MemoryLaneLock,
-    lane_name: TaskLane,
-    lane: &crate::tasks::TaskLaneConf,
-) -> Result<LanePoll, TaskError> {
-    if lane.lane_lock().and_then(|lock| lock.idle_hook()).is_some() {
-        memory_transition(owner, LaneOwnerPhase::Idling)?;
-        return memory_poll_action(lane_name, owner, LaneHookAction::Idle, None);
-    }
-    memory_release(owner, LaneOwnerPhase::Idle);
-    memory_poll(lane_name, owner, None)
-}
-
-fn memory_start_busy(
-    owner: &mut MemoryLaneLock,
-    lane_name: TaskLane,
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    if owner.hook_retry_at.is_some_and(|retry| retry > now) {
-        let wake = owner
-            .hook_retry_at
-            .and_then(|retry| (retry - now).to_std().ok());
-        memory_release(owner, LaneOwnerPhase::BusyFailed);
-        return memory_poll(lane_name, owner, wake);
-    }
-    if lane.lane_lock().and_then(|lock| lock.busy_hook()).is_some() {
-        memory_transition(owner, LaneOwnerPhase::Busying)?;
-        return memory_poll_action(lane_name, owner, LaneHookAction::Busy, None);
-    }
-    memory_activate(owner);
-    memory_poll(lane_name, owner, Some(Duration::ZERO))
-}
-
-fn memory_claim(
-    state: &mut MemoryState,
-    owner: &MemoryLaneLock,
-    runner_id: &str,
-    claim: &LaneClaim,
-    lane: &crate::tasks::TaskLaneConf,
-    lease_duration: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
-    let size = lane
-        .lane_lock()
-        .map_or(1, crate::tasks::TaskLaneLock::batch_size);
-    let retry = lane.retry_policy();
-    let conf = state
-        .conf
-        .clone()
-        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
-    fail_exhausted(&mut state.tasks, claim.lane.as_str(), now, &conf, retry)?;
-    let candidates = due_count(state, claim.lane, now).min(size);
-    let (permits, rate_wake) =
-        reserve_permits(state, claim.lane, candidates, lane.global_rate(), now)?;
-    let reservation = ClaimReservation {
-        claim: LaneClaim {
-            lane: claim.lane,
-            limit: size,
-            owner: None,
-        },
-        permits,
-        rate_wake,
-        candidates,
-    };
-    let mut poll = claim_lane_state(state, runner_id, reservation, lease_duration, now)?;
-    poll.owner = Some(memory_owner_poll(owner, None));
-    Ok(poll)
-}
-
-fn apply_memory_hook(
-    state: &MemoryState,
-    owner: &mut MemoryLaneLock,
-    hook: &LaneHookResult,
-    lane_name: TaskLane,
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
-    if owner.generation != hook.generation || memory_action(owner.phase) != Some(hook.action) {
-        return Ok(());
-    }
-    match (hook.action, &hook.result) {
-        (LaneHookAction::Idle, Ok(())) => finish_memory_idle(state, owner, lane_name, lane, now)?,
-        (LaneHookAction::Idle, Err(error)) => memory_fail_idle(owner, error),
-        (LaneHookAction::Busy, Ok(())) => memory_activate(owner),
-        (LaneHookAction::Busy, Err(error)) => memory_fail_busy(state, owner, error, now)?,
-    }
-    Ok(())
-}
-
-fn finish_memory_idle(
-    state: &MemoryState,
-    owner: &mut MemoryLaneLock,
-    lane_name: TaskLane,
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
-    if due_indices(&state.tasks, lane_name.as_str(), now).is_empty() {
-        memory_release(owner, LaneOwnerPhase::Idle);
-    } else if lane.lane_lock().and_then(|lock| lock.busy_hook()).is_some() {
-        memory_transition(owner, LaneOwnerPhase::Busying)?;
-    } else {
-        memory_activate(owner);
-    }
-    Ok(())
-}
-
-fn memory_fail_idle(owner: &mut MemoryLaneLock, error: &str) {
-    owner.last_hook_error = Some(error.into());
-    memory_release(owner, LaneOwnerPhase::IdleFailed);
-}
-
-fn memory_fail_busy(
-    state: &MemoryState,
-    owner: &mut MemoryLaneLock,
-    error: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
-    let delay = state
-        .conf
-        .as_ref()
-        .map_or(Duration::from_secs(1), |conf| conf.poll_interval);
-    owner.last_hook_error = Some(error.into());
-    owner.hook_retry_at = checked_deadline(now, delay)?;
-    memory_release(owner, LaneOwnerPhase::BusyFailed);
-    Ok(())
-}
-
-fn memory_flush(
-    tasks: &[TaskRecord],
-    candidates: &[usize],
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, TaskError> {
-    let lock = lane
-        .lane_lock()
-        .ok_or_else(|| TaskError::InvalidConfig("locked lane lost its policy".into()))?;
-    Ok(candidates.len() >= lock.batch_size()
-        || memory_flush_wake(tasks, candidates, lane, now)? == Some(Duration::ZERO))
-}
-
-fn memory_flush_wake(
-    tasks: &[TaskRecord],
-    candidates: &[usize],
-    lane: &crate::tasks::TaskLaneConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<Duration>, TaskError> {
-    let Some(deadline) = lane.lane_lock().and_then(|lock| lock.batch_deadline()) else {
-        return Ok(None);
-    };
-    let oldest = candidates
-        .first()
-        .and_then(|index| tasks.get(*index))
-        .map(|task| readiness(task, now).0);
-    let Some(oldest) = oldest else {
-        return Ok(None);
-    };
-    let due = oldest
-        .checked_add_signed(chrono_duration(deadline)?)
-        .ok_or_else(|| {
-            TaskError::InvalidConfig("lane lock deadline exceeds timestamp range".into())
-        })?;
-    Ok(Some((due - now).to_std().unwrap_or(Duration::ZERO)))
-}
-
-fn memory_owner_live(owner: &MemoryLaneLock, now: chrono::DateTime<chrono::Utc>) -> bool {
-    owner.owner_token.is_some() && owner.leased_until.is_some_and(|deadline| deadline > now)
-}
-
-fn memory_action(phase: LaneOwnerPhase) -> Option<LaneHookAction> {
-    match phase {
-        LaneOwnerPhase::Idling => Some(LaneHookAction::Idle),
-        LaneOwnerPhase::Busying => Some(LaneHookAction::Busy),
-        _ => None,
-    }
-}
-
-fn memory_transition(owner: &mut MemoryLaneLock, phase: LaneOwnerPhase) -> Result<(), TaskError> {
-    owner.generation = owner.generation.checked_add(1).ok_or_else(|| {
-        TaskError::TaskExecutionError("lane lifecycle generation overflowed".into())
-    })?;
-    owner.phase = phase;
-    owner.hook_retry_at = None;
-    owner.last_hook_error = None;
-    Ok(())
-}
-
-fn memory_activate(owner: &mut MemoryLaneLock) {
-    owner.phase = LaneOwnerPhase::Active;
-    owner.empty_since = None;
-    owner.hook_retry_at = None;
-    owner.last_hook_error = None;
-}
-
-fn memory_release(owner: &mut MemoryLaneLock, phase: LaneOwnerPhase) {
-    owner.owner_id = None;
-    owner.owner_token = None;
-    owner.leased_until = None;
-    owner.phase = phase;
-    owner.flushing = false;
-}
-
-fn memory_owner_poll(owner: &MemoryLaneLock, action: Option<LaneHookAction>) -> LaneOwnerPoll {
-    LaneOwnerPoll {
-        token: owner.owner_token.clone(),
-        generation: owner.generation,
-        phase: owner.phase,
-        action,
-        takeover: false,
-    }
-}
-
-fn memory_poll_action(
-    lane: TaskLane,
-    owner: &MemoryLaneLock,
-    action: LaneHookAction,
-    wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
-    memory_poll_with(lane, owner, Some(action), wake)
-}
-
-fn memory_poll(
-    lane: TaskLane,
-    owner: &MemoryLaneLock,
-    wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
-    memory_poll_with(lane, owner, None, wake)
-}
-
-fn memory_wait_poll(
-    lane: TaskLane,
-    owner: &MemoryLaneLock,
-    wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
-    let mut poll = memory_poll(lane, owner, wake)?;
-    if let Some(owner) = &mut poll.owner {
-        owner.token = None;
-        owner.action = None;
-    }
-    Ok(poll)
-}
-
-fn memory_poll_with(
-    lane: TaskLane,
-    owner: &MemoryLaneLock,
-    action: Option<LaneHookAction>,
-    wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
-    Ok(LanePoll {
-        lane,
-        tasks: Vec::new(),
-        reclaimed: 0,
-        saturated: false,
-        next_wake_in: wake,
-        owner: Some(memory_owner_poll(owner, action)),
-    })
-}
+#[path = "memory_owner.rs"]
+mod owner;
+use owner::*;
 
 /// Commits one bounded batch of outcomes while the in-memory transaction lock is held.
 fn commit_outcomes_state(
@@ -865,26 +376,17 @@ fn commit_outcomes_state(
     runner_id: &str,
     commits: &[TaskCommit],
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
-    let conf = state
-        .conf
-        .clone()
-        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
-    for commit in commits {
-        let retry = configured_retry(state, commit.lane)?;
-        if !memory_commit_allowed(state, runner_id, commit, now)? {
-            continue;
-        }
-        let Some(task) = owned_task_mut(&mut state.tasks, commit.task_id, runner_id) else {
-            continue;
-        };
-        if task.lane != commit.lane.as_str() {
-            return Err(TaskError::UnknownLane(task.lane.clone()));
-        }
-        apply_outcome(task, commit.outcome.clone(), retry, now)?;
-        finalize_idempotency(task, &conf, now)?;
+    undo: &mut Vec<TaskRecord>,
+) -> Result<(Vec<TaskRecord>, Vec<(TaskId, String)>), TaskError> {
+    let (updates, children, deliveries) = workflow::stage_outcomes(state, runner_id, commits, now)?;
+    for (index, task) in updates {
+        let current = state
+            .tasks
+            .get_mut(index)
+            .ok_or_else(|| TaskError::TaskExecutionError("staged task disappeared".into()))?;
+        undo.push(std::mem::replace(current, task));
     }
-    Ok(())
+    Ok((children, deliveries))
 }
 
 /// Fences outcomes from runners that no longer own an opt-in lane.
@@ -920,6 +422,7 @@ fn renew_leases_state(
     leases: &[TaskLease],
     lease_duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
+    undo: &mut Vec<TaskRecord>,
 ) -> Result<Vec<TaskId>, TaskError> {
     let mut lost = Vec::new();
     for lease in leases {
@@ -928,6 +431,7 @@ fn renew_leases_state(
             continue;
         }
         if let Some(task) = owned_task_mut(&mut state.tasks, lease.task_id, runner_id) {
+            undo.push(task.clone());
             task.leased_until = checked_deadline(now, lease_duration)?;
             task.updated_at = now;
         } else {
@@ -987,6 +491,7 @@ fn claim_lane_state(
     reservation: ClaimReservation,
     lease_duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
+    undo: &mut Vec<TaskRecord>,
 ) -> Result<LanePoll, TaskError> {
     let mut poll = claim_lane(
         &mut state.tasks,
@@ -995,6 +500,7 @@ fn claim_lane_state(
         reservation.permits,
         now,
         lease_duration,
+        undo,
     )?;
     let task_wake = task_deadline(&state.tasks, reservation.claim.lane.as_str(), now);
     poll.next_wake_in = effective_lane_wake(
@@ -1010,17 +516,19 @@ fn fail_unleased_running(
     tasks: &mut [TaskRecord],
     conf: &TaskStoreConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
+) -> Result<Vec<(TaskId, String)>, TaskError> {
+    let mut deliveries = Vec::new();
     for task in tasks {
         if task.status != TaskStatus::Running || task.leased_until.is_some() {
             continue;
         }
         fail(task, "Running task has no lease deadline".into(), now);
+        workflow::queue_delivery(task, &mut deliveries)?;
         task.locked_by = None;
         task.updated_at = now;
         finalize_idempotency(task, conf, now)?;
     }
-    Ok(())
+    Ok(deliveries)
 }
 
 /// Marks expired leases terminal once their invocation budget is exhausted.
@@ -1030,15 +538,19 @@ fn fail_exhausted(
     now: chrono::DateTime<chrono::Utc>,
     conf: &TaskStoreConf,
     retry: TaskRetry,
+    deliveries: &mut Vec<(TaskId, String)>,
+    undo: &mut Vec<TaskRecord>,
 ) -> Result<(), TaskError> {
     for task in tasks {
         let expired = task.lane == lane
             && task.status == TaskStatus::Running
             && task.leased_until.is_some_and(|lease| lease <= now);
-        if !expired || !retry.exhausted(task.attempts)? {
+        if !expired || !retry.exhausted(task.step_attempts)? {
             continue;
         }
+        undo.push(task.clone());
         fail(task, "Maximum task attempts exhausted".into(), now);
+        workflow::queue_delivery(task, deliveries)?;
         task.locked_by = None;
         task.leased_until = None;
         task.updated_at = now;
@@ -1084,6 +596,7 @@ fn claim_lane(
     permit_limit: usize,
     now: chrono::DateTime<chrono::Utc>,
     default_lease: Duration,
+    undo: &mut Vec<TaskRecord>,
 ) -> Result<LanePoll, TaskError> {
     let requested = claim.limit;
     let claim_count = requested.min(permit_limit);
@@ -1104,6 +617,7 @@ fn claim_lane(
         let task = tasks.get_mut(index).ok_or_else(|| {
             TaskError::TaskExecutionError("task candidate disappeared during claim".into())
         })?;
+        undo.push(task.clone());
         claim_task(task, runner_id, now, default_lease)?;
         claimed.push(task.clone());
     }
@@ -1166,6 +680,9 @@ fn claim_task(
         .attempts
         .checked_add(1)
         .ok_or_else(|| TaskError::TaskExecutionError("task attempt count overflowed".into()))?;
+    task.step_attempts = task.step_attempts.checked_add(1).ok_or_else(|| {
+        TaskError::TaskExecutionError("task step attempt count overflowed".into())
+    })?;
     task.status = TaskStatus::Running;
     task.locked_by = Some(runner_id.into());
     task.leased_until = Some(leased_until);
@@ -1290,7 +807,7 @@ fn idempotency_held(task: &TaskRecord, now: chrono::DateTime<chrono::Utc>) -> bo
             .is_some_and(|expiry| expiry > now)
 }
 
-/// Applies a payload-free lifecycle transition to an owned task record.
+/// Applies a lifecycle transition to an owned task record.
 fn apply_outcome(
     task: &mut TaskRecord,
     outcome: TaskOutcome,
@@ -1299,8 +816,20 @@ fn apply_outcome(
 ) -> Result<(), TaskError> {
     let preserve_resume = matches!(outcome, TaskOutcome::Retry { .. });
     match outcome {
-        TaskOutcome::Complete => complete(task, TaskStatus::Succeeded, now),
-        TaskOutcome::Suspend { state } => suspend(task, state),
+        TaskOutcome::Complete => {
+            task.last_result = Some(crate::tasks::result::UNIT_RESULT.into());
+            complete(task, TaskStatus::Succeeded, now)
+        }
+        TaskOutcome::CompleteWith { output } => {
+            match crate::tasks::result::validate_output(&output) {
+                Ok(()) => {
+                    task.last_result = Some(crate::tasks::result::success(&output));
+                    complete(task, TaskStatus::Succeeded, now)
+                }
+                Err(error) => fail(task, error.to_string(), now),
+            }
+        }
+        TaskOutcome::Suspend { state } | TaskOutcome::Spawn { state, .. } => suspend(task, state),
         TaskOutcome::Sleep { state, delay } => sleep(task, state, delay, now)?,
         TaskOutcome::Retry { error } => retry(task, retry_policy, error, now)?,
         TaskOutcome::Fail { error } => fail(task, error, now),
@@ -1321,6 +850,8 @@ fn complete(task: &mut TaskRecord, status: TaskStatus, now: chrono::DateTime<chr
 }
 
 fn suspend(task: &mut TaskRecord, state: String) {
+    task.last_result = None;
+    task.step_attempts = 0;
     task.status = TaskStatus::Suspended;
     task.state = Some(state);
     task.ready_at = None;
@@ -1332,6 +863,8 @@ fn sleep(
     delay: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), TaskError> {
+    task.step_attempts = 0;
+    task.last_result = None;
     task.status = TaskStatus::Pending;
     task.state = Some(state);
     task.ready_at = checked_deadline(now, delay)?;
@@ -1345,223 +878,21 @@ fn retry(
     error: String,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), TaskError> {
-    task.last_error = Some(error);
-    if policy.exhausted(task.attempts)? {
+    task.last_result = Some(crate::tasks::result::failure(task.id, error));
+    if policy.exhausted(task.step_attempts)? {
         complete(task, TaskStatus::Failed, now);
         return Ok(());
     }
     task.status = TaskStatus::Pending;
-    task.ready_at = checked_deadline(now, policy.delay(task.attempts)?)?;
+    task.ready_at = checked_deadline(now, policy.delay(task.step_attempts)?)?;
     Ok(())
 }
 
 fn fail(task: &mut TaskRecord, error: String, now: chrono::DateTime<chrono::Utc>) {
-    task.last_error = Some(error);
+    task.last_result = Some(crate::tasks::result::failure(task.id, error));
     complete(task, TaskStatus::Failed, now);
 }
 
-fn checked_deadline(
-    now: chrono::DateTime<chrono::Utc>,
-    delay: Duration,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, TaskError> {
-    now.checked_add_signed(chrono_duration(delay)?)
-        .map(Some)
-        .ok_or_else(|| TaskError::InvalidConfig("task delay exceeds timestamp range".into()))
-}
-
-/// Releases or archives a key when its task reaches a terminal status.
-fn finalize_idempotency(
-    task: &mut TaskRecord,
-    conf: &TaskStoreConf,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
-    if !matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed) {
-        return Ok(());
-    }
-    if task.idempotency_key.is_none() {
-        return Ok(());
-    }
-    let policy = conf.idempotency_for(&task.name).ok_or_else(|| {
-        TaskError::InvalidConfig(format!("task '{}' has no idempotency policy", task.name))
-    })?;
-    task.idempotency_expires_at = match policy {
-        IdempotencyRetention::ActiveOnly => None,
-        IdempotencyRetention::RetainFor(duration) => checked_deadline(now, duration)?,
-    };
-    Ok(())
-}
-
-/// Selects a task only while the committing runner still owns its lease.
-fn owned_task_mut<'a>(
-    tasks: &'a mut [TaskRecord],
-    id: TaskId,
-    runner_id: &str,
-) -> Option<&'a mut TaskRecord> {
-    tasks.iter_mut().find(|task| {
-        task.id == id
-            && task.status == TaskStatus::Running
-            && task.locked_by.as_deref() == Some(runner_id)
-    })
-}
-
-/// Returns the earliest future readiness or lease-expiry deadline.
-fn task_deadline(
-    tasks: &[TaskRecord],
-    lane: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<Duration> {
-    tasks
-        .iter()
-        .filter(|task| task.lane == lane)
-        .filter_map(|task| {
-            let deadline = match task.status {
-                TaskStatus::Pending => task.ready_at,
-                TaskStatus::Running => task.leased_until,
-                _ => None,
-            }?;
-            (deadline > now)
-                .then(|| (deadline - now).to_std().ok())
-                .flatten()
-        })
-        .min()
-}
-
-/// Combines future work and token readiness without polling a blocked lane early.
-fn effective_lane_wake(
-    rate_blocked: bool,
-    rate_wake: Option<Duration>,
-    task_wake: Option<Duration>,
-) -> Option<Duration> {
-    if rate_blocked {
-        return rate_wake;
-    }
-    task_wake.map(|task| rate_wake.map_or(task, |permit| permit.max(task)))
-}
-
-/// Applies every bounded console and inspection filter to one record.
-fn matches_filter(task: &TaskRecord, filter: &TaskFilter) -> bool {
-    filter.status.is_none_or(|status| task.status == status)
-        && filter.name.as_deref().is_none_or(|name| task.name == name)
-        && filter.lane.as_deref().is_none_or(|lane| task.lane == lane)
-        && filter
-            .idempotency_key
-            .as_deref()
-            .is_none_or(|key| task.idempotency_key.as_deref() == Some(key))
-        && filter
-            .created_from
-            .is_none_or(|time| task.created_at >= time)
-        && filter.created_to.is_none_or(|time| task.created_at <= time)
-        && matches_query(task, filter.query.as_deref())
-}
-
-/// Performs the in-memory store's case-insensitive diagnostic search.
-fn matches_query(task: &TaskRecord, query: Option<&str>) -> bool {
-    let Some(query) = query else { return true };
-    let query = query.to_lowercase();
-    task.name.to_lowercase().contains(&query)
-        || task.lane.to_lowercase().contains(&query)
-        || task
-            .idempotency_key
-            .as_ref()
-            .is_some_and(|value| value.to_lowercase().contains(&query))
-        || task
-            .last_error
-            .as_ref()
-            .is_some_and(|value| value.to_lowercase().contains(&query))
-}
-
-/// Builds the canonical one-indexed task inspection page.
-fn page(records: Vec<TaskRecord>, filter: &TaskFilter) -> crate::routes::Page<TaskRecord> {
-    let total = i64::try_from(records.len()).unwrap_or(i64::MAX);
-    let offset = filter
-        .page
-        .saturating_sub(1)
-        .saturating_mul(filter.per_page);
-    let items = records
-        .into_iter()
-        .skip(offset)
-        .take(filter.per_page)
-        .collect();
-    crate::routes::Page::new(items, total, filter.page, filter.per_page)
-}
-
-/// Creates buckets only for lanes with configured global rate limits.
-fn initialize_rates(state: &mut MemoryState, conf: &TaskStoreConf) {
-    let now = chrono::Utc::now();
-    for lane in &conf.lanes {
-        if let Some(rate) = lane.global_rate() {
-            state
-                .rates
-                .entry(lane.lane().to_string())
-                .or_insert(RateBucket {
-                    tokens_micros: i64::from(rate.burst_size())
-                        .saturating_mul(crate::tasks::rate::TOKEN_SCALE),
-                    updated_at: now,
-                });
-        }
-    }
-}
-
-/// Adds missing in-memory lane-owner rows without resetting current lifecycle state.
-fn initialize_lane_locks(state: &mut MemoryState, conf: &TaskStoreConf) {
-    for lane in conf.lanes.iter().filter(|lane| lane.lane_lock().is_some()) {
-        state
-            .lane_locks
-            .entry(lane.lane().to_string())
-            .or_insert(MemoryLaneLock {
-                owner_id: None,
-                owner_token: None,
-                leased_until: None,
-                phase: LaneOwnerPhase::Active,
-                flushing: false,
-                empty_since: None,
-                generation: 0,
-                hook_retry_at: None,
-                last_hook_error: None,
-            });
-    }
-}
-
-/// Prevents active work from silently falling into another configured lane.
-fn reject_orphaned_tasks(tasks: &[TaskRecord], conf: &TaskStoreConf) -> Result<(), TaskError> {
-    let configured = conf
-        .lanes
-        .iter()
-        .map(|lane| lane.lane().as_str())
-        .collect::<std::collections::HashSet<_>>();
-    if let Some(task) = tasks
-        .iter()
-        .find(|task| is_active(task.status) && !configured.contains(task.lane.as_str()))
-    {
-        return Err(TaskError::UnknownLane(task.lane.clone()));
-    }
-    let handlers = conf
-        .handlers
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    if let Some(task) = tasks
-        .iter()
-        .find(|task| is_active(task.status) && !handlers.contains(task.name.as_str()))
-    {
-        return Err(TaskError::TaskNotFound(task.name.clone()));
-    }
-    Ok(())
-}
-
-fn is_active(status: TaskStatus) -> bool {
-    matches!(
-        status,
-        TaskStatus::Pending | TaskStatus::Running | TaskStatus::Suspended
-    )
-}
-
-fn is_reassignable(status: TaskStatus) -> bool {
-    matches!(status, TaskStatus::Pending | TaskStatus::Suspended)
-}
-
-fn chrono_duration(duration: Duration) -> Result<chrono::Duration, TaskError> {
-    chrono::Duration::from_std(duration).map_err(|_| {
-        TaskError::InvalidConfig("task duration exceeds supported timestamp range".into())
-    })
-}
+#[path = "memory_utils.rs"]
+mod utils;
+use utils::*;

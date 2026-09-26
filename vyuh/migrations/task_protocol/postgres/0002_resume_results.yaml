@@ -1,0 +1,13 @@
+dependencies: [0001_step_attempts]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_tasks SET
+      step_attempts = CASE WHEN status = 2 THEN 0 ELSE attempts END,
+      resume_input = CASE WHEN resume_input IS NULL THEN NULL
+      ELSE '{"Ok":' || resume_input || '}' END
+  - type: statement
+    up: UPDATE vyuh_task_runtime SET policy_fingerprint = 'tr-up:' || SUBSTR(policy_fingerprint, 1, 58)
+  - type: statement
+    up: UPDATE vyuh_task_lane_rates SET policy_fingerprint = 'tr-up:' || SUBSTR(policy_fingerprint, 1, 58)

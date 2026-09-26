@@ -1,0 +1,7 @@
+dependencies: [0003_result_preflight]
+atomic: true
+operations:
+  - type: rename_column
+    table_name: vyuh_tasks
+    old_name: last_error
+    new_name: last_result

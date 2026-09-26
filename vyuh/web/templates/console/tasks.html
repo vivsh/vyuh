@@ -11,7 +11,7 @@
   </div>
 
   <form class="vyuh-console-toolbar" method="get" action="{{ urls.tasks }}">
-    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, lane, key, or error..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
+    <label><svg><use href="#vyuh-icon-search"></use></svg><input type="search" name="q" placeholder="Search tasks by name, lane, or key..." value="{% if query.q %}{{ query.q }}{% endif %}"></label>
     <select name="status">
       <option value="">All Status</option>
       {% for status in statuses %}
@@ -72,7 +72,7 @@
       <nav class="vyuh-console-tabs is-compact" role="tablist" data-console-tabs aria-label="Task detail sections">
         <button type="button" role="tab" id="task-overview-tab" aria-controls="task-overview-panel" aria-selected="true">Overview</button>
         <button type="button" role="tab" id="task-timing-tab" aria-controls="task-timing-panel" aria-selected="false" tabindex="-1">Timing</button>
-        <button type="button" role="tab" id="task-error-tab" aria-controls="task-error-panel" aria-selected="false" tabindex="-1">Error</button>
+        <button type="button" role="tab" id="task-error-tab" aria-controls="task-error-panel" aria-selected="false" tabindex="-1">Result</button>
       </nav>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="task-overview-panel" aria-labelledby="task-overview-tab">
         <dl class="vyuh-console-kv">
@@ -89,11 +89,11 @@
         </dl>
       </section>
       <section class="vyuh-console-tab-panel" role="tabpanel" id="task-error-panel" aria-labelledby="task-error-tab" hidden>
-        <article class="vyuh-console-muted-panel"><strong>Last Error</strong><code>{% if selected_task.last_error %}{{ selected_task.last_error }}{% else %}No error recorded{% endif %}</code></article>
+        <article class="vyuh-console-muted-panel"><strong>Last result</strong><p>Open the task detail page to inspect its result.</p><a href="{{ urls.tasks }}/{{ selected_task.id }}">View task result</a></article>
       </section>
       {% else %}
       <header><h2>Task Details</h2></header>
-      <p>Select a task row to inspect its lane, attempts, timing, and errors.</p>
+      <p>Select a task row to inspect its lane, attempts, timing, and result.</p>
       {% endif %}
     </aside>
   </div>

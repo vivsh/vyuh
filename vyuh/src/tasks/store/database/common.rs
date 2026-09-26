@@ -161,9 +161,8 @@ fn text_filter(table: &db::queries::ModelTable<TaskRow>, query: &str) -> db::que
         .or(case_fold_like(table.lane_name.clone(), pattern.clone()))
         .or(case_fold_like_optional(
             table.idempotency_key.clone(),
-            pattern.clone(),
+            pattern,
         ))
-        .or(case_fold_like_optional(table.last_error.clone(), pattern))
 }
 
 #[derive(Clone)]
@@ -207,3 +206,6 @@ where
     })
     .eq(db::val(true))
 }
+#[cfg(all(test, feature = "migrations"))]
+#[path = "tests/common.rs"]
+mod tests;

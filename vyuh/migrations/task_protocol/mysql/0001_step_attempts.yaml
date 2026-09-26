@@ -1,0 +1,9 @@
+atomic: false
+operations:
+  - type: add_column
+    table_name: vyuh_tasks
+    column:
+      name: step_attempts
+      type: integer
+      default: '0'
+      nullable: false

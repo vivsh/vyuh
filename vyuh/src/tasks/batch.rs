@@ -170,8 +170,8 @@ where
 
 fn batch_safe(outcome: TaskOutcome) -> TaskOutcome {
     match outcome {
-        TaskOutcome::Suspend { .. } | TaskOutcome::Sleep { .. } => {
-            TaskOutcome::fail("Batch task handlers cannot suspend or sleep")
+        TaskOutcome::Suspend { .. } | TaskOutcome::Sleep { .. } | TaskOutcome::Spawn { .. } => {
+            TaskOutcome::fail("Batch task handlers cannot suspend or sleep or spawn")
         }
         outcome => outcome,
     }

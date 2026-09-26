@@ -41,11 +41,12 @@ Each task record stores:
 - `input`: immutable submitted data.
 - `state`: private continuation state saved by the handler.
 - `resume_input`: optional input supplied when a suspended task is resumed.
-- `parent_id` and `root_id`: nullable workflow lineage reserved for future orchestration.
+- `parent_id` and `root_id`: nullable lineage assigned to spawned children.
 - `kind`: `work` by default, with `flow` reserved for pure synchronization work.
 
-Lineage and kind are currently storage and inspection metadata only. Submission
-does not set or propagate them, and they do not change execution behavior.
+Ordinary submission leaves lineage unset. Spawn derives lineage in the accepting
+store transaction. Kind remains storage and inspection metadata, with no public
+setter or execution semantics.
 
 Each wake runs the handler with the latest durable snapshot:
 
@@ -53,7 +54,7 @@ Each wake runs the handler with the latest durable snapshot:
 input + state + resume_input -> handler -> () | TaskState
 ```
 
-Tasks are value-less: use `()` or `Result<(), Error>` for completed work, and
+Use `()` or `Result<(), Error>` for completed work, and
 `TaskState` or `Result<TaskState, Error>` for explicit lifecycle control.
 Task persistence is framework-owned; applications compose work through
 `site.tasks()` rather than implementing a scheduler store.
@@ -171,7 +172,7 @@ use vyuh::prelude::*;
 #[bundles::task]
 async fn poll_status(input: Data<PollJob>) -> Result<TaskState, Error> {
     if is_ready(input.id).await? {
-        return Ok(TaskState::complete());
+        return Ok(TaskState::complete(())?);
     }
 
     Ok(TaskState::sleep(
@@ -188,7 +189,7 @@ of the task.
 
 `Continuation<S, R>` is an optional handler argument for tasks that save state,
 sleep, suspend, or resume. Initial execution has neither value, sleeping work
-has state only, and resumed work has state plus resume input. Its accessors
+has state only, and resumed work has state plus a `Result<R, TaskFailure>`. Its accessors
 borrow values, so continuation types do not need `Clone`.
 
 ```rust
@@ -218,9 +219,12 @@ async fn approve_document(
     continuation: Continuation<PendingApproval, ApprovalDecision>,
     input: Data<ApprovalRequest>,
 ) -> Result<TaskState, Error> {
-    if let Some(decision) = continuation.resume() {
+    if let Some(Ok(decision)) = continuation.resume() {
         apply_decision(&input, decision).await?;
-        return Ok(TaskState::complete());
+        return Ok(TaskState::complete(())?);
+    }
+    if let Some(Err(failure)) = continuation.resume() {
+        return Ok(TaskState::fail(failure.message()));
     }
 
     let state = PendingApproval {
@@ -232,8 +236,93 @@ async fn approve_document(
 }
 ```
 
-`TaskState` has no result type. The state supplied to `suspend` or `sleep` is
-the only serializable value it carries.
+`R` is the successful resume value type. A failure carries a safe message and an
+optional originating task ID. Initial execution has no result; `Ok(())` is a
+successful unit result, not an absent input. Retrying a step preserves its resume
+result so the next attempt sees the same input.
+
+## Spawning And Waiting For A Child
+
+Prepare a spawn outcome from the site task facade:
+
+```rust,ignore
+#[bundles::task]
+async fn build_report(
+    site: Site,
+    continuation: Continuation<ReportCheckpoint, ReportData>,
+    input: Data<ReportRequest>,
+) -> Result<TaskState, Error> {
+    match continuation.resume() {
+        Some(Ok(data)) => {
+            save_report(data).await?;
+            Ok(TaskState::complete(())?)
+        }
+        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
+        None => Ok(site.tasks().spawn(
+            FetchReport { source: input.source.clone() },
+            ReportCheckpoint { report_id: input.report_id },
+        )?),
+    }
+}
+
+#[bundles::task]
+async fn fetch_report(input: Data<FetchReport>) -> Result<TaskState, Error> {
+    Ok(TaskState::complete(fetch_data(&input.source).await?)?)
+}
+```
+
+The equivalent registration remains `bundles::task(handler,
+TaskDefinition::new("handler_name"))`. Spawning adds no macro syntax.
+
+`spawn` and `spawn_with(input, state, options)` validate and serialize only; they
+do not submit immediately. Returning the outcome atomically checkpoints and
+suspends the parent and inserts its child. The child inherits the parent's root
+ID and records the parent's ID. Its own registered lane, retries, and submission
+delay still apply. `ignore_conflicts` is invalid for spawning. A child key already
+owned by another task fails this spawn; it never adopts that task.
+
+The child's successful output becomes `Ok(value)` in the parent continuation;
+plain `()`/`complete(())` becomes `Ok(())`. Terminal failure, including exhausted
+retries or leases, becomes `Err(TaskFailure)` with the child's ID. A retry,
+sleep, or suspension is not terminal and does not resume the parent. The child's
+result is retained on its task row and copied to the parent atomically.
+Applications own any archive that must outlive task cleanup.
+
+Child insertion and terminal-child parent resumption commit in the same
+transaction as the originating outcome. New children and resumed parents are
+eligible only through a subsequent poll, never synchronous invocation or that
+turn's claim selection. Another process may claim them after transaction commit.
+
+One outstanding child per parent supports sequential and nested workflows.
+**Do not externally resume a parent waiting for its child.** This is a caller
+contract, not a runtime waiting-on guard. Missing or no-longer-suspended parents
+do not receive a child's result. Value-only batch handlers cannot spawn children.
+
+## Retained Results
+
+`TaskState::complete(value)?` serializes a successful value and retains it as
+`{"Ok": value}` on the completed task. Ordinary unit-return handlers retain
+`{"Ok": null}`. Retrying and terminal failures retain `{"Err": TaskFailure}`;
+the task status distinguishes a retry from terminal failure. Successful suspend,
+sleep, and spawn checkpoints clear the previous result. Claims and lease
+renewals preserve it. This is the latest result, not an attempt history.
+
+Inspect results with `task.last_result::<Output>()?`, which returns
+`Option<Result<Output, TaskFailure>>`, or borrow their JSON using
+`task.last_result_json()`. A decoding error is an inspection error, not a task
+failure. Old rows without retained outputs have no result, even if succeeded.
+Results disappear when their task records are deleted.
+
+Both retained results and `resume_input` have a fixed **32 KiB (32,768 bytes)**
+limit, including the entire JSON envelope and escaping. The input/checkpoint
+payload setting does not change this limit. Oversized successful outputs return
+`TaskError::ResultTooLarge`; they are never truncated. Oversized external resume
+requests leave the task unchanged. Error diagnostics may be shortened to fit.
+Store large artifacts elsewhere and return their identifiers.
+
+The console exposes results in task details, not routine list responses. Task
+search matches names, lanes, and idempotency keys, not result payloads. Treat
+results as application data and return only values appropriate for task viewers.
 
 ## Local Handler Batching
 
@@ -266,8 +355,8 @@ Return `()` to complete every input, one `TaskState` to apply `complete`,
 `retry`, or `fail` uniformly, or an ordered `Batch<TaskState>` containing
 exactly one outcome per input. Invalid historical inputs fail individually.
 Cardinality mismatches fail the valid invocation. Value-only batch handlers do
-not expose `TaskId`, `Continuation`, state, or resume input, so `sleep` and
-`suspend` outcomes are rejected as terminal failures.
+not expose `TaskId`, `Continuation`, state, or resume input, so `sleep`,
+`suspend`, and `spawn` outcomes are rejected as terminal failures.
 
 Local batching and `TaskLaneLock` are orthogonal. An ordinary lane can batch;
 a locked lane may also batch the matching task names inside a claimed cohort.
@@ -282,7 +371,7 @@ use vyuh::prelude::*;
 use std::time::Duration;
 use vyuh::tasks::TaskState;
 
-let done = TaskState::complete();
+let done = TaskState::complete(())?;
 let suspended = TaskState::suspend(state)?;
 let sleeping = TaskState::sleep(state, Duration::from_secs(30))?;
 let retry = TaskState::retry("try again using the lane's backoff policy");
@@ -323,9 +412,13 @@ let resumed = site
     .await?;
 ```
 
-`resume` stores the serialized resume input, moves the suspended task back to
+`resume` stores the input inside `{"Ok": value}`, moves the suspended task back to
 pending, notifies the local worker, and returns `true` when it changed the task.
 It returns `false` when the ID is absent or no longer suspended.
+
+Use `resume_failed(id, TaskFailure::new(None, "safe explanation"))` to deliver an
+external failure instead. These remain independent operations; child completion
+does not call either method. Neither method may be used to interrupt a child wait.
 
 There are no retained topic events in the current task model. If an application
 needs to resume multiple tasks for one external event, it should keep its own
@@ -458,9 +551,12 @@ let conf = SiteConf::default().tasks(tasks);
 A site may configure at most 32 lanes. Names are stable lowercase descriptors,
 quotas must be positive, and their sum cannot exceed global concurrency.
 Each lane also owns its retry limit and exponential backoff. The default is
-five total handler attempts, beginning at one second and capped at five
+five handler attempts per continuation step, beginning at one second and capped at five
 minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
 by `max_delay`. This policy cannot be overridden by a submission or handler.
+`attempts()` reports lifetime invocations; `step_attempts()` reports the current
+step's retry budget. A committed `suspend`, `sleep`, or `spawn` resets the step
+counter. Retries and lease reclaims do not reset it.
 `rate_limit` is an inexpensive in-memory token bucket owned by the local site
 runner. `global_rate_limit` coordinates starts across workers sharing a durable
 task store. Configure either one independently, or configure both when each
@@ -657,11 +753,16 @@ migrations before starting task workers; `Site::build` never creates or alters
 task tables. This makes schema changes reviewable and prevents a replica from
 changing production DDL during startup.
 
-The value-less task revision removes the historical `output` and `result`
-columns. Deploy it by stopping old workers, generating and applying the normal
-application migration, deploying the new binary, then starting workers again.
-Pending, sleeping, and suspended work keeps its input and continuation state;
-only historical task result values are discarded.
+The resume-result protocol is a coordinated breaking upgrade. Stop old workers
+and writers, integrate the backend-specific templates from
+`vyuh/migrations/task_protocol/` into the application's Gaman migration history,
+and apply them through its ledger before starting new workers. Keep runtime
+policy unchanged during this upgrade. Schema creation alone is insufficient:
+every legacy non-null resume value must be wrapped once as `Ok(value)` and retry
+counters must be backfilled. Never infer migration state from a JSON object's
+shape. New workers reject an unmarked legacy policy. Existing running leases
+remain recoverable; global rate buckets are preserved. There is still no
+separate task output/result archive.
 
 Claims, commits, runner queues, and persistence records remain internal. The
 ordinary task API exposes only typed submission, resumption, reassignment, and

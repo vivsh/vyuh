@@ -43,8 +43,27 @@ impl DbTaskStore {
             })?;
         super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
         let now = statement_now(&mut transaction).await?;
-        let poll = self
-            .claim_tasks_tx(&mut transaction, runner_id, claims, &conf, now)
+        let mut deliveries = Vec::new();
+        let (mut poll, new_idle) = self
+            .claim_tasks_tx(
+                &mut transaction,
+                runner_id,
+                claims,
+                &conf,
+                now,
+                &mut deliveries,
+            )
+            .await?;
+        let wake = super::writes::finalize_workflow(
+            &mut transaction,
+            &[],
+            deliveries,
+            &conf,
+            now,
+            self.batch_size,
+        )
+        .await?;
+        super::lane_owner::reconcile_workflow(&mut transaction, &mut poll, &wake, &new_idle, now)
             .await?;
         transaction.commit().await?;
         Ok(poll)
@@ -58,15 +77,26 @@ impl DbTaskStore {
         claims: &[LaneClaim],
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
-    ) -> Result<TaskPoll, TaskError> {
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+    ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskError> {
+        let mut new_idle = Vec::new();
         let mut ordered = claims.iter().collect::<Vec<_>>();
         ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
         let mut lanes = Vec::with_capacity(claims.len());
         for claim in ordered {
             let lane_conf = configured_lane(conf, claim.lane)?;
             let lane = if lane_conf.lane_lock().is_some() {
-                self.claim_owned_lane(transaction, runner_id, claim, lane_conf, conf, now)
-                    .await?
+                self.claim_owned_lane(
+                    transaction,
+                    runner_id,
+                    claim,
+                    lane_conf,
+                    conf,
+                    now,
+                    deliveries,
+                    &mut new_idle,
+                )
+                .await?
             } else {
                 let turn = ClaimTurn {
                     runner_id,
@@ -76,7 +106,7 @@ impl DbTaskStore {
                     conf,
                     now,
                 };
-                self.claim_lane(transaction, turn).await?
+                self.claim_lane(transaction, turn, deliveries).await?
             };
             lanes.push(lane);
         }
@@ -87,7 +117,7 @@ impl DbTaskStore {
                 .position(|claim| claim.lane == lane.lane)
                 .unwrap_or(usize::MAX)
         });
-        Ok(TaskPoll { lanes })
+        Ok((TaskPoll { lanes }, new_idle))
     }
 
     /// Claims one lane's bounded candidates and reserves its durable permits.
@@ -95,6 +125,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<LanePoll, TaskError> {
         let limit = turn.claim.limit.min(self.batch_size);
         let probed =
@@ -115,6 +146,9 @@ impl DbTaskStore {
         let (mut exhausted, mut candidates) = split_exhausted(selected, turn.retry)?;
         self.fail_exhausted(transaction, &mut exhausted, turn.conf, turn.now)
             .await?;
+        for row in &exhausted {
+            super::writes::queue_delivery(row, deliveries)?;
+        }
         candidates.truncate(permits);
         let rate_blocked = permits < runnable_count;
         let reclaimed = candidates
@@ -173,6 +207,9 @@ impl DbTaskStore {
             row.attempts = row.attempts.checked_add(1).ok_or_else(|| {
                 TaskError::TaskExecutionError("task attempt count overflowed".into())
             })?;
+            row.step_attempts = row.step_attempts.checked_add(1).ok_or_else(|| {
+                TaskError::TaskExecutionError("task step attempt count overflowed".into())
+            })?;
             row.status = TaskStatus::Running.as_i16();
             row.locked_by = Some(runner_id.into());
             row.leased_until = Some(self.lease_until(row, now)?);
@@ -188,6 +225,7 @@ impl DbTaskStore {
                 (
                     &table.status,
                     &table.attempts,
+                    &table.step_attempts,
                     &table.locked_by,
                     &table.leased_until,
                     &table.updated_at,
@@ -269,7 +307,7 @@ pub(super) async fn probe_candidates(
 fn runnable_count(rows: &[TaskRow], retry: TaskRetry) -> Result<usize, TaskError> {
     let mut count = 0;
     for row in rows {
-        if !retry.exhausted(row.attempts)? {
+        if !retry.exhausted(row.step_attempts)? {
             count += 1;
         }
     }
@@ -283,7 +321,7 @@ fn split_exhausted(
     let mut exhausted = Vec::new();
     let mut runnable = Vec::new();
     for row in rows {
-        if retry.exhausted(row.attempts)? {
+        if retry.exhausted(row.step_attempts)? {
             exhausted.push(row);
         } else {
             runnable.push(row);

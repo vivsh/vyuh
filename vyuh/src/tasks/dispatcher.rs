@@ -32,6 +32,36 @@ pub struct Tasks {
 }
 
 impl Tasks {
+    /// Prepares a child and checkpoint; neither is stored until this outcome commits.
+    /// Returns an error for an unregistered payload, invalid options, or serialization failure.
+    pub fn spawn<T: Serialize + 'static, C: Serialize>(
+        &self,
+        input: T,
+        state: C,
+    ) -> Result<super::TaskState, TaskError> {
+        self.dispatcher.spawn_with(input, state, TaskOptions::new())
+    }
+
+    /// Prepares an atomic child spawn with scheduling options. Conflicts cannot be ignored.
+    /// Invalid configuration or payloads fail preparation without submitting work.
+    pub fn spawn_with<T: Serialize + 'static, C: Serialize>(
+        &self,
+        input: T,
+        state: C,
+        options: TaskOptions,
+    ) -> Result<super::TaskState, TaskError> {
+        self.dispatcher.spawn_with(input, state, options)
+    }
+
+    /// Resumes an ordinary suspension with a failure. Do not externally resume child waits.
+    pub async fn resume_failed(
+        &self,
+        id: TaskId,
+        failure: super::TaskFailure,
+    ) -> Result<bool, TaskError> {
+        self.dispatcher.resume_failed(id, failure).await
+    }
+
     pub(crate) fn new(dispatcher: TaskDispatcher<super::TaskStore>) -> Self {
         Self { dispatcher }
     }
@@ -67,7 +97,8 @@ impl Tasks {
         self.dispatcher.submit_many_with(inputs, options).await
     }
 
-    /// Resumes one suspended task and wakes the local runner.
+    /// Resumes an ordinary suspension with success and wakes the local runner.
+    /// Do not externally resume a parent waiting for a child. Returns false if not suspended.
     pub async fn resume<T: Serialize>(&self, id: TaskId, input: T) -> Result<bool, TaskError> {
         self.dispatcher.resume(id, input).await
     }
@@ -125,6 +156,45 @@ impl Tasks {
 }
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
+    /// Validates a child using ordinary submission preparation without touching storage.
+    pub fn spawn_with<T: Serialize + 'static, C: Serialize>(
+        &self,
+        input: T,
+        state: C,
+        options: TaskOptions,
+    ) -> Result<super::TaskState, TaskError> {
+        if options.ignore_conflicts {
+            return Err(TaskError::InvalidOptions(
+                "spawn cannot ignore idempotency conflicts".into(),
+            ));
+        }
+        let name = self.task_name::<T>()?;
+        let service = self
+            .registry
+            .tasks
+            .get(name)
+            .ok_or_else(|| TaskError::TaskNotFound(name.into()))?;
+        let mut writes = build_writes(service, name, [input], &options, &self.registry.config)?;
+        let child = writes
+            .pop()
+            .ok_or_else(|| TaskError::TaskExecutionError("missing prepared child".into()))?;
+        let state = serde_json::to_string(&state)?;
+        validate_payload(&state, self.registry.config.payload_limit())?;
+        Ok(super::TaskState {
+            inner: super::TaskOutcome::Spawn { state, child },
+        })
+    }
+
+    /// Delivers a bounded failure through the independent external resume operation.
+    pub async fn resume_failed(
+        &self,
+        id: TaskId,
+        failure: super::TaskFailure,
+    ) -> Result<bool, TaskError> {
+        let result: Result<(), _> = Err(failure.bounded(self.registry.config.error_limit()));
+        self.resume_result(id, result).await
+    }
+
     /// Reports whether the site registered any task handlers.
     pub fn has_tasks(&self) -> bool {
         !self.registry.is_empty()
@@ -185,11 +255,22 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         Ok(receipts)
     }
 
-    /// Resumes one suspended task and wakes local workers when it changed.
+    /// Resumes an ordinary suspension with success and wakes local workers when it changed.
+    /// Do not externally resume a parent waiting for its child.
     pub async fn resume<T: Serialize>(&self, id: TaskId, input: T) -> Result<bool, TaskError> {
-        self.ensure_initialized().await?;
+        self.resume_result(id, Ok::<_, super::TaskFailure>(input))
+            .await
+    }
+
+    /// Encodes the shared result envelope while retaining the conditional resume write.
+    async fn resume_result<T: Serialize>(
+        &self,
+        id: TaskId,
+        input: Result<T, super::TaskFailure>,
+    ) -> Result<bool, TaskError> {
         let serialized = serde_json::to_string(&input)?;
-        validate_payload(&serialized, self.registry.config.payload_limit())?;
+        super::result::validate_size(&serialized)?;
+        self.ensure_initialized().await?;
         let changed = self.store.resume(id, serialized).await?;
         if changed {
             self.notifier.notify_waiters();
@@ -458,9 +539,10 @@ fn build_record(
         resume_input: None,
         status: TaskStatus::Pending,
         attempts: 0,
+        step_attempts: 0,
         lane: lane.to_string(),
         lease_duration_ms: None,
-        last_error: None,
+        last_result: None,
         idempotency_key: key,
         idempotency_fingerprint: fingerprint,
         idempotency_expires_at: None,

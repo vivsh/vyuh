@@ -13,7 +13,7 @@
         <tr><th>Lane</th><td>{{ task.lane }}</td></tr>
         <tr><th>Idempotency key</th><td>{{ task.idempotency_key | default(value="") }}</td></tr>
         <tr><th>Idempotency expires</th><td>{{ task.idempotency_expires_at | default(value="") }}</td></tr>
-        <tr><th>Last error</th><td>{{ task.last_error | default(value="") }}</td></tr>
+        <tr><th>Last result</th><td>{% if task.last_result_error %}Unable to decode result: {{ task.last_result_error }}{% elif task.last_result %}<pre><code>{{ task.last_result | json_encode(pretty=true) }}</code></pre>{% else %}No result recorded{% endif %}</td></tr>
         <tr><th>Created</th><td>{{ task.created_at }}</td></tr>
         <tr><th>Updated</th><td>{{ task.updated_at }}</td></tr>
       </tbody>
