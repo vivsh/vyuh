@@ -591,9 +591,9 @@ async fn task_state_encodes_only_lifecycle() -> Result<(), TaskError> {
     ));
     Ok(())
 }
-/// Spawn preparation performs no submission and external resumes share the result envelope.
+/// External success and failure resumes share the result envelope.
 #[tokio::test]
-async fn spawn_preparation_and_external_results() -> Result<(), TaskError> {
+async fn external_results_share_envelope() -> Result<(), TaskError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
@@ -601,18 +601,6 @@ async fn spawn_preparation_and_external_results() -> Result<(), TaskError> {
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
-    let prepared = dispatcher.spawn_with(DirectJob { id: 7 }, "checkpoint", TaskOptions::new())?;
-    assert!(matches!(prepared.into_outcome(), TaskOutcome::Spawn { .. }));
-    assert_eq!(store.task_count().await, 0);
-    assert!(
-        dispatcher
-            .spawn_with(
-                DirectJob { id: 7 },
-                (),
-                TaskOptions::new().ignore_conflicts()
-            )
-            .is_err()
-    );
     let id = dispatcher.submit(DirectJob { id: 8 }).await?.id();
     let claim = LaneClaim {
         lane: DEFAULT_TASK_LANE,
@@ -723,24 +711,12 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Task
 async fn batch_outputs_and_spawn_rejection() -> Result<(), String> {
     async fn outcomes(
         Data(_): Data<crate::tasks::Batch<DirectJob>>,
-    ) -> crate::tasks::Batch<TaskState> {
-        vec![
-            TaskState::complete(42).expect("serialize integer"),
-            TaskState {
-                inner: TaskOutcome::Spawn {
-                    state: "null".into(),
-                    child: crate::tasks::TaskWrite {
-                        record: record("child", &DirectJob { id: 3 })
-                            .expect("serialize input")
-                            .as_ref()
-                            .clone(),
-                        ignore_conflicts: false,
-                        initial_delay: None,
-                    },
-                },
-            },
+    ) -> Result<crate::tasks::Batch<TaskState>, crate::Error> {
+        Ok(vec![
+            TaskState::complete(42)?,
+            TaskState::spawn(DirectJob { id: 3 }, ())?,
         ]
-        .into()
+        .into())
     }
     let task = RegisteredTask::new_batch(TaskDefinition::new("outputs"), outcomes);
     let records = [1, 2]

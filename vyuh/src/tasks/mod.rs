@@ -13,6 +13,7 @@ mod models;
 mod rate;
 mod result;
 mod runner;
+mod state;
 pub(crate) mod store;
 #[cfg(test)]
 mod store_tests;
@@ -26,7 +27,7 @@ pub use failure::{TaskError, TaskFailure, TaskStatus};
 pub use handler::BatchTaskContext;
 #[doc(hidden)]
 pub use handler::IntoTaskOutcomePart;
-pub use handler::{Continuation, TaskContext, TaskState};
+pub use handler::{Continuation, TaskContext};
 pub(crate) use handler::{RegisteredTask, TaskOutcome, TaskRegistry};
 pub(crate) use health::{TaskHealth, TaskHealthSnapshot};
 pub use lane_lock::{TaskLaneContext, TaskLaneLock};
@@ -34,6 +35,7 @@ pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
 pub use models::{TaskDefinition, TaskFilter, TaskId, TaskIdempotency, TaskInfo, TaskKind};
 pub(crate) use runner::AbstractTaskRunner;
+pub use state::TaskState;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 pub(crate) use store::MemoryTaskStore;
 pub(crate) use store::{

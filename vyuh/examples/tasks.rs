@@ -39,12 +39,11 @@ struct DoubleJob {
 /// Suspends atomically with child creation and receives its result on a later poll.
 #[bundles::task]
 async fn parent_job(
-    site: Site,
     continuation: Continuation<(), u32>,
     input: Data<ParentJob>,
 ) -> Result<TaskState, Error> {
     match continuation.resume() {
-        None => Ok(site.tasks().spawn(DoubleJob { value: input.value }, ())?),
+        None => Ok(TaskState::spawn(DoubleJob { value: input.value }, ())?),
         Some(Ok(value)) => {
             println!("Child returned {value}");
             Ok(TaskState::complete(())?)

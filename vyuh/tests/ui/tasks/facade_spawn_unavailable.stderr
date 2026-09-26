@@ -1,0 +1,11 @@
+error[E0599]: no method named `spawn` found for reference `&Tasks` in the current scope
+ --> tests/ui/tasks/facade_spawn_unavailable.rs:4:19
+  |
+4 |     let _ = tasks.spawn((), ());
+  |                   ^^^^^ method not found in `&Tasks`
+
+error[E0599]: no method named `spawn_with` found for reference `&Tasks` in the current scope
+ --> tests/ui/tasks/facade_spawn_unavailable.rs:5:19
+  |
+5 |     let _ = tasks.spawn_with((), (), TaskOptions::new());
+  |                   ^^^^^^^^^^ method not found in `&Tasks`

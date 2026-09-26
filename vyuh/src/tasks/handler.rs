@@ -16,7 +16,7 @@ use super::TaskError;
 use super::TaskStatus;
 use super::diagnostics::causal_chain as error_chain;
 use super::models::{IdempotencyPolicy, TaskPolicy};
-use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord};
+use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord, TaskState};
 
 /// Invocation context used internally to extract task data and runtime identity.
 #[doc(hidden)]
@@ -164,18 +164,19 @@ mod task_handler_return {
 /// bounds. It is sealed and cannot be implemented by applications.
 #[doc(hidden)]
 pub trait IntoTaskOutcomePart: task_handler_return::Sealed {
-    fn into_task_outcome(data: callables::DataBox) -> TaskOutcome;
+    /// Resolves one handler return against its executing site without storing work.
+    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError>;
 }
 
 impl task_handler_return::Sealed for () {}
 
 impl IntoTaskOutcomePart for () {
-    fn into_task_outcome(data: callables::DataBox) -> TaskOutcome {
-        if data.downcast_ref::<()>().is_some() {
+    fn into_task_outcome(data: callables::DataBox, _site: &Site) -> Result<TaskOutcome, TaskError> {
+        Ok(if data.downcast_ref::<()>().is_some() {
             TaskOutcome::Complete
         } else {
             unsupported_task_state()
-        }
+        })
     }
 }
 
@@ -185,8 +186,8 @@ impl<T, E> IntoTaskOutcomePart for Result<T, E>
 where
     T: IntoTaskOutcomePart,
 {
-    fn into_task_outcome(data: callables::DataBox) -> TaskOutcome {
-        T::into_task_outcome(data)
+    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError> {
+        T::into_task_outcome(data, site)
     }
 }
 
@@ -194,92 +195,14 @@ fn unsupported_task_state() -> TaskOutcome {
     TaskOutcome::fail("Task handler returned an unsupported task state")
 }
 
-/// Lifecycle control returned by task handlers.
-///
-/// Use the lifecycle constructors or `Tasks::spawn` to checkpoint and await a child.
-pub struct TaskState {
-    pub(crate) inner: TaskOutcome,
-}
-
-impl TaskState {
-    /// Completes with a persisted value, also delivered to an awaiting parent.
-    /// Returns serialization or size errors if its JSON envelope exceeds 32 KiB.
-    pub fn complete<T: Serialize>(output: T) -> Result<Self, TaskError> {
-        let output = serde_json::to_string(&output)?;
-        super::result::validate_output(&output)?;
-        Ok(Self {
-            inner: if output == "null" {
-                TaskOutcome::Complete
-            } else {
-                TaskOutcome::CompleteWith { output }
-            },
-        })
-    }
-
-    /// Suspends a task with durable continuation state.
-    pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskError> {
-        Ok(Self {
-            inner: TaskOutcome::Suspend {
-                state: serde_json::to_string(&state)?,
-            },
-        })
-    }
-
-    /// Sleeps a task until the supplied delay with durable continuation state.
-    pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskError> {
-        Ok(Self {
-            inner: TaskOutcome::Sleep {
-                state: serde_json::to_string(&state)?,
-                delay,
-            },
-        })
-    }
-
-    /// Requests another attempt under the selected task lane's retry policy.
-    pub fn retry(error: impl Into<String>) -> Self {
-        Self {
-            inner: TaskOutcome::Retry {
-                error: error.into(),
-            },
-        }
-    }
-
-    /// Fails a task with a safe stored error message.
-    pub fn fail(error: impl Into<String>) -> Self {
-        Self {
-            inner: TaskOutcome::Fail {
-                error: error.into(),
-            },
-        }
-    }
-}
-
-impl<E: From<TaskError>> callables::IntoOutput<E> for TaskState {
-    fn into_output(self) -> Result<callables::DataBox, E> {
-        Ok(callables::DataBox::new(self.inner))
-    }
-}
-
-impl callables::IntoReturnPart for TaskState {
-    fn into_return_part() -> callables::ReturnPart {
-        callables::ReturnPart::Empty
-    }
-}
-
 impl task_handler_return::Sealed for TaskState {}
 
 impl IntoTaskOutcomePart for TaskState {
-    fn into_task_outcome(data: callables::DataBox) -> TaskOutcome {
-        data.downcast_ref::<TaskOutcome>()
-            .cloned()
-            .unwrap_or_else(unsupported_task_state)
-    }
-}
-
-impl TaskState {
-    /// Unwraps lifecycle state for framework outcome adapters.
-    pub(crate) fn into_outcome(self) -> TaskOutcome {
-        self.inner
+    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError> {
+        match data.downcast_ref::<TaskState>() {
+            Some(state) => state.resolve(site),
+            None => Ok(unsupported_task_state()),
+        }
     }
 }
 
@@ -348,7 +271,7 @@ pub(crate) struct RegisteredTask {
 enum RegisteredHandler {
     Single {
         handler: TaskHandler,
-        outcome: fn(callables::DataBox) -> TaskOutcome,
+        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
     },
     Batch {
         handler: BatchHandler,
@@ -461,10 +384,11 @@ impl RegisteredTask {
         }
     }
 
+    /// Invokes a handler and contains errors from both execution and child preparation.
     async fn execute_single(
         handler: &TaskHandler,
-        outcome: fn(callables::DataBox) -> TaskOutcome,
-        site: Site,
+        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
+        site: &Site,
         record: Arc<TaskRecord>,
         operation_id: crate::OperationId,
     ) -> TaskOutcome {
@@ -477,7 +401,7 @@ impl RegisteredTask {
         };
 
         let ctx = TaskContext {
-            site,
+            site: site.clone(),
             payload,
             record: record.clone(),
             operation_id,
@@ -491,7 +415,13 @@ impl RegisteredTask {
             }
         };
 
-        outcome(data)
+        match outcome(data, site) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                log_handler_error(&record, operation_id, &error);
+                TaskOutcome::handler_failed()
+            }
+        }
     }
 
     pub fn new<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
@@ -562,23 +492,19 @@ impl RegisteredTask {
     }
 }
 
+/// Converts queued records to independently prepared outcomes without mutating storage.
 async fn execute_singles(
     handler: &TaskHandler,
-    outcome: fn(callables::DataBox) -> TaskOutcome,
+    outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
     site: Site,
     records: Vec<Arc<TaskRecord>>,
     operation_id: crate::OperationId,
 ) -> Vec<TaskExecutionResult> {
     let mut results = Vec::with_capacity(records.len());
     for record in records {
-        let task_outcome = RegisteredTask::execute_single(
-            handler,
-            outcome,
-            site.clone(),
-            record.clone(),
-            operation_id,
-        )
-        .await;
+        let task_outcome =
+            RegisteredTask::execute_single(handler, outcome, &site, record.clone(), operation_id)
+                .await;
         results.push(TaskExecutionResult {
             record,
             outcome: task_outcome,

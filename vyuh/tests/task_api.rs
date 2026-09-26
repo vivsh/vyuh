@@ -14,3 +14,11 @@ fn task_batch_handlers_compile() {
     let tests = trybuild::TestCases::new();
     tests.pass("tests/ui/tasks/batch_handlers.rs");
 }
+
+/// Verifies spawn requests are constructed by handlers, not the site task facade.
+#[test]
+fn task_spawn_is_outcome_only() {
+    let tests = trybuild::TestCases::new();
+    tests.pass("tests/ui/tasks/spawn_handlers.rs");
+    tests.compile_fail("tests/ui/tasks/facade_spawn_unavailable.rs");
+}

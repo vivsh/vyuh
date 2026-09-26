@@ -86,6 +86,12 @@ The `vyuh` crate is organized around these subsystems:
   ownership: each row retains its own attempt, rate permit, lease, fenced
   commit, and inspection history while one batch future consumes one local
   handler-concurrency slot.
+  Handlers construct `TaskState::spawn` requests without accessing the site.
+  The returned request owns its typed child payload, serialized checkpoint, and
+  options only until internal preparation resolves it through the executing
+  site's registry. It becomes the existing store-facing `TaskOutcome::Spawn`;
+  no unresolved payload reaches the store, and no public task-facade spawn
+  operation exists. Ordinary outcomes do not perform registry preparation.
   Spawn outcomes checkpoint a suspended parent and prepare one child; terminal
   child outcomes deliver Serde `Result` values through the existing resume input.
   Task updates, child inserts, and narrow parent updates use bounded Mool bulk

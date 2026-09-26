@@ -243,12 +243,11 @@ result so the next attempt sees the same input.
 
 ## Spawning And Waiting For A Child
 
-Prepare a spawn outcome from the site task facade:
+Return a spawn outcome directly from the parent handler; no `Site` argument is needed:
 
 ```rust,ignore
 #[bundles::task]
 async fn build_report(
-    site: Site,
     continuation: Continuation<ReportCheckpoint, ReportData>,
     input: Data<ReportRequest>,
 ) -> Result<TaskState, Error> {
@@ -258,7 +257,7 @@ async fn build_report(
             Ok(TaskState::complete(())?)
         }
         Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
-        None => Ok(site.tasks().spawn(
+        None => Ok(TaskState::spawn(
             FetchReport { source: input.source.clone() },
             ReportCheckpoint { report_id: input.report_id },
         )?),
@@ -274,12 +273,19 @@ async fn fetch_report(input: Data<FetchReport>) -> Result<TaskState, Error> {
 The equivalent registration remains `bundles::task(handler,
 TaskDefinition::new("handler_name"))`. Spawning adds no macro syntax.
 
-`spawn` and `spawn_with(input, state, options)` validate and serialize only; they
-do not submit immediately. Returning the outcome atomically checkpoints and
-suspends the parent and inserts its child. The child inherits the parent's root
-ID and records the parent's ID. Its own registered lane, retries, and submission
-delay still apply. `ignore_conflicts` is invalid for spawning. A child key already
-owned by another task fails this spawn; it never adopts that task.
+`TaskState::spawn(input, state)` and `TaskState::spawn_with(input, state, options)`
+construct an outcome, not a submission. They serialize the checkpoint and reject
+invalid options immediately. After the handler returns, the runtime resolves the
+child through the executing site's registry, serializes its input, and validates
+configured payload limits. Preparation errors fail the parent without creating a
+child. Batch handlers cannot spawn children.
+
+The accepted outcome atomically checkpoints and suspends the parent and inserts
+its child. The child inherits the parent's root ID and records the parent's ID.
+Its own registered lane, retries, and submission delay still apply.
+`ignore_conflicts` is invalid for spawning. A child key already owned by another
+task fails this spawn; it never adopts that task. Discarding an outcome creates no
+child. The site task facade has no public spawn operation.
 
 The child's successful output becomes `Ok(value)` in the parent continuation;
 plain `()`/`complete(())` becomes `Ok(())`. Terminal failure, including exhausted

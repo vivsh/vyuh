@@ -126,8 +126,8 @@ impl IntoTaskBatchOutcomePart for TaskState {
         expected: usize,
     ) -> Result<Vec<TaskOutcome>, TaskError> {
         let outcome = data
-            .downcast_ref::<TaskOutcome>()
-            .cloned()
+            .downcast_ref::<TaskState>()
+            .map(TaskState::batch_outcome)
             .ok_or_else(unsupported_return)?;
         Ok(vec![batch_safe(outcome); expected])
     }

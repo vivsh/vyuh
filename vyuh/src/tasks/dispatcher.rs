@@ -32,25 +32,14 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    /// Prepares a child and checkpoint; neither is stored until this outcome commits.
-    /// Returns an error for an unregistered payload, invalid options, or serialization failure.
-    pub fn spawn<T: Serialize + 'static, C: Serialize>(
+    /// Resolves a returned child request without submitting or waking any work.
+    pub(super) fn prepare_child(
         &self,
-        input: T,
-        state: C,
-    ) -> Result<super::TaskState, TaskError> {
-        self.dispatcher.spawn_with(input, state, TaskOptions::new())
-    }
-
-    /// Prepares an atomic child spawn with scheduling options. Conflicts cannot be ignored.
-    /// Invalid configuration or payloads fail preparation without submitting work.
-    pub fn spawn_with<T: Serialize + 'static, C: Serialize>(
-        &self,
-        input: T,
-        state: C,
-        options: TaskOptions,
-    ) -> Result<super::TaskState, TaskError> {
-        self.dispatcher.spawn_with(input, state, options)
+        input: &DataBox,
+        state: &str,
+        options: &TaskOptions,
+    ) -> Result<super::TaskOutcome, TaskError> {
+        self.dispatcher.prepare_child(input, state, options)
     }
 
     /// Resumes an ordinary suspension with a failure. Do not externally resume child waits.
@@ -157,31 +146,20 @@ impl Tasks {
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     /// Validates a child using ordinary submission preparation without touching storage.
-    pub fn spawn_with<T: Serialize + 'static, C: Serialize>(
+    pub(super) fn prepare_child(
         &self,
-        input: T,
-        state: C,
-        options: TaskOptions,
-    ) -> Result<super::TaskState, TaskError> {
-        if options.ignore_conflicts {
-            return Err(TaskError::InvalidOptions(
-                "spawn cannot ignore idempotency conflicts".into(),
-            ));
-        }
-        let name = self.task_name::<T>()?;
-        let service = self
-            .registry
-            .tasks
-            .get(name)
-            .ok_or_else(|| TaskError::TaskNotFound(name.into()))?;
-        let mut writes = build_writes(service, name, [input], &options, &self.registry.config)?;
-        let child = writes
-            .pop()
-            .ok_or_else(|| TaskError::TaskExecutionError("missing prepared child".into()))?;
-        let state = serde_json::to_string(&state)?;
-        validate_payload(&state, self.registry.config.payload_limit())?;
-        Ok(super::TaskState {
-            inner: super::TaskOutcome::Spawn { state, child },
+        input: &DataBox,
+        state: &str,
+        options: &TaskOptions,
+    ) -> Result<super::TaskOutcome, TaskError> {
+        validate_spawn_options(options)?;
+        validate_payload(state, self.registry.config.payload_limit())?;
+        let service = self.task_for_payload(input)?;
+        let mut child = build_box_write(service, input, &self.registry.config)?;
+        child.initial_delay = options.initial_delay;
+        Ok(super::TaskOutcome::Spawn {
+            state: state.to_owned(),
+            child,
         })
     }
 
@@ -469,7 +447,7 @@ fn build_writes<T: Serialize + 'static>(
     Ok(writes)
 }
 
-/// Converts one verified type-erased emitter output into a normal task write.
+/// Converts one verified type-erased payload into a normal task write.
 fn build_box_write(
     service: &RegisteredTask,
     input: &DataBox,
@@ -478,7 +456,7 @@ fn build_box_write(
     service.validate_box(input)?;
     let value = input
         .to_json()
-        .ok_or_else(|| TaskError::TaskExecutionError("emitter data cannot be serialized".into()))?
+        .ok_or_else(|| TaskError::TaskExecutionError("task input cannot be serialized".into()))?
         .map_err(TaskError::TaskExecutionError)?;
     let key = service.idempotency_key_box(input.as_any())?;
     let serialized = if key.is_some() {
@@ -503,6 +481,16 @@ fn build_box_write(
         ignore_conflicts: false,
         initial_delay: None,
     })
+}
+
+/// Rejects incompatible conflict behavior before a child request can be returned.
+pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskError> {
+    if options.ignore_conflicts {
+        return Err(TaskError::InvalidOptions(
+            "spawn cannot ignore idempotency conflicts".into(),
+        ));
+    }
+    validate_options(options)
 }
 
 /// Surfaces all accumulated builder failures at the submission terminal.
