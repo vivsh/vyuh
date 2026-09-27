@@ -1,0 +1,7 @@
+dependencies: [0009_typed_returns_protocol]
+atomic: true
+operations:
+  - type: statement
+    up: ALTER TABLE vyuh_tasks ADD COLUMN waiting_children TEXT NULL
+  - type: statement
+    up: ALTER TABLE vyuh_tasks ADD COLUMN remaining_completions INTEGER NOT NULL DEFAULT 0

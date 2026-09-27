@@ -13,6 +13,11 @@ pub(super) fn atomic_turn(
     lease: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<TaskTick, TaskRuntimeError> {
+    let maximum = state
+        .conf
+        .as_ref()
+        .map_or(256, |conf| conf.max_all_children);
+    super::super::all::validate_turn(commits, batch_size, maximum)?;
     let rates = state.rates.clone();
     let locks = state.lane_locks.clone();
     let mut undo = Vec::new();
@@ -43,7 +48,8 @@ fn run_turn(
     now: chrono::DateTime<chrono::Utc>,
     undo: &mut Vec<TaskRecord>,
 ) -> Result<TaskTick, TaskRuntimeError> {
-    let (children, mut deliveries) = commit_outcomes_state(state, runner, commits, now, undo)?;
+    let (children, mut deliveries, waits) =
+        commit_outcomes_state(state, runner, commits, now, undo)?;
     let phases = state
         .lane_locks
         .iter()
@@ -61,7 +67,10 @@ fn run_turn(
         &mut deliveries,
         undo,
     )?;
-    let wake_lanes = finalize_workflow(state, children, deliveries, now);
+    all::materialize(state, &mut poll);
+    let mut wake_lanes = all::install(state, waits, now);
+    wake_lanes.extend(finalize_workflow(state, children, deliveries, now));
+    all::clear_terminal(state, undo);
     reconcile_poll(state, &mut poll, &wake_lanes, &phases, now);
     Ok(TaskTick {
         poll,
@@ -82,12 +91,14 @@ pub(super) fn stage_outcomes(
         Vec<(usize, TaskRecord)>,
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
+        Vec<(TaskId, all::TaskWait)>,
     ),
     TaskRuntimeError,
 > {
     let mut updates = Vec::with_capacity(commits.len());
     let mut children = Vec::new();
     let mut deliveries = Vec::new();
+    let mut waits = Vec::new();
     let mut seen = std::collections::HashSet::with_capacity(commits.len());
     for commit in commits {
         if !seen.insert(commit.task_id) {
@@ -99,16 +110,9 @@ pub(super) fn stage_outcomes(
         if !memory_commit_allowed(state, runner, commit, now)? {
             continue;
         }
-        let Some((index, task)) = state.tasks.iter().enumerate().find(|(_, task)| {
-            task.id == commit.task_id
-                && task.status == TaskStatus::Running
-                && task.locked_by.as_deref() == Some(runner)
-        }) else {
+        let Some((index, task)) = owned_task(state, runner, commit)? else {
             continue;
         };
-        if task.lane != commit.lane.as_str() {
-            return Err(TaskRuntimeError::UnknownLane(task.lane.clone()));
-        }
         let task = staged_task(
             state,
             task,
@@ -118,9 +122,32 @@ pub(super) fn stage_outcomes(
             &mut children,
             &mut deliveries,
         )?;
+        if matches!(commit.outcome, TaskOutcome::All { .. }) && task.status == TaskStatus::Suspended
+        {
+            waits.push((task.id, all::prepared_wait(task.id, &children)));
+        }
         updates.push((index, task));
     }
-    Ok((updates, children, deliveries))
+    Ok((updates, children, deliveries, waits))
+}
+
+/// Borrows only the authoritative row still owned by the outcome's runner and lane.
+fn owned_task<'a>(
+    state: &'a MemoryState,
+    runner: &str,
+    commit: &TaskCommit,
+) -> Result<Option<(usize, &'a TaskRecord)>, TaskRuntimeError> {
+    let owned = state.tasks.iter().enumerate().find(|(_, task)| {
+        task.id == commit.task_id
+            && task.status == TaskStatus::Running
+            && task.locked_by.as_deref() == Some(runner)
+    });
+    if let Some((_, task)) = owned
+        && task.lane != commit.lane.as_str()
+    {
+        return Err(TaskRuntimeError::UnknownLane(task.lane.clone()));
+    }
+    Ok(owned)
 }
 
 /// Calculates an accepted row's checkpoint and delivery without mutating stored tasks.
@@ -161,6 +188,13 @@ fn prepare_spawn(
     children: &mut Vec<TaskRecord>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<TaskOutcome, TaskRuntimeError> {
+    if let TaskOutcome::All {
+        state: checkpoint,
+        children: group,
+    } = outcome
+    {
+        return all::prepare(state, parent, checkpoint, group, children, now);
+    }
     let TaskOutcome::Spawn {
         state: checkpoint,
         mut child,
@@ -212,14 +246,30 @@ pub(super) fn finalize_workflow(
         names.insert(child.lane.clone());
     }
     state.tasks.extend(children);
-    for (id, result) in deliveries {
+    for (id, (count, result)) in group_deliveries(deliveries) {
         if let Some(parent) = state
             .tasks
             .iter_mut()
             .find(|task| task.id == id && !task.cancelled && task.status == TaskStatus::Suspended)
         {
+            if let Some(wait) = state.waits.get_mut(&id) {
+                let remaining = wait.remaining_completions.checked_sub(count);
+                if remaining.is_none_or(|remaining| remaining < 0) {
+                    parent.resume_input = Some(super::super::all::failure(
+                        id,
+                        "All completion counter underflow",
+                    ));
+                    state.waits.remove(&id);
+                } else {
+                    wait.remaining_completions = remaining.unwrap_or(0);
+                    if wait.remaining_completions > 0 {
+                        continue;
+                    }
+                }
+            } else {
+                parent.resume_input = Some(result);
+            }
             parent.status = TaskStatus::Pending;
-            parent.resume_input = Some(result);
             parent.ready_at = Some(now);
             parent.updated_at = now;
             names.insert(parent.lane.clone());
@@ -232,6 +282,16 @@ pub(super) fn finalize_workflow(
         .flat_map(|conf| &conf.lanes)
         .filter_map(|lane| names.contains(lane.lane().as_str()).then_some(lane.lane()))
         .collect()
+}
+
+fn group_deliveries(
+    deliveries: Vec<(TaskId, String)>,
+) -> std::collections::BTreeMap<TaskId, (i32, String)> {
+    let mut grouped = std::collections::BTreeMap::new();
+    for (id, result) in deliveries {
+        grouped.entry(id).or_insert((0, result)).0 += 1;
+    }
+    grouped
 }
 
 /// Cancels only a newly proposed idle hook when finalization added ready work.

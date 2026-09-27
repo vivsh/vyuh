@@ -1,5 +1,7 @@
 use super::*;
 use crate::tasks::{DEFAULT_TASK_LANE, TaskKind, TaskLaneConf};
+#[path = "all.rs"]
+pub(crate) mod all;
 
 #[path = "cancellation.rs"]
 pub(crate) mod cancellation;
@@ -66,6 +68,7 @@ pub(crate) fn flow_record() -> TaskRecord {
 
 pub(crate) fn conf() -> TaskStoreConf {
     TaskStoreConf {
+        max_all_children: 256,
         handlers: vec![
             ("workflow".into(), TaskKind::Work),
             ("flow".into(), TaskKind::Flow),
@@ -438,6 +441,21 @@ async fn lifecycle() -> Result<(), crate::Error> {
 pub(crate) async fn locked_workflow_contract<S: AbstractTaskStore>(
     store: &S,
 ) -> Result<(), TaskRuntimeError> {
+    locked_child_contract(store, false).await
+}
+
+/// All finalization follows the same owner and idle-hook gates as scalar child spawning.
+pub(crate) async fn locked_all_contract<S: AbstractTaskStore>(
+    store: &S,
+) -> Result<(), TaskRuntimeError> {
+    locked_child_contract(store, true).await
+}
+
+/// Runs both child-wait forms through the shared leased-lane lifecycle.
+async fn locked_child_contract<S: AbstractTaskStore>(
+    store: &S,
+    all: bool,
+) -> Result<(), TaskRuntimeError> {
     use crate::tasks::{LaneOwnerRequest, TaskLaneLock};
     let mut config = conf();
     config.lanes = vec![
@@ -467,13 +485,18 @@ pub(crate) async fn locked_workflow_contract<S: AbstractTaskStore>(
     lane.owner.as_mut().unwrap().token = token.clone();
     let child = record();
     let child_id = child.id;
-    let mut spawn = commit(
-        id,
+    let outcome = if all {
+        TaskOutcome::All {
+            state: "null".into(),
+            children: vec![write(child)],
+        }
+    } else {
         TaskOutcome::Spawn {
             state: "null".into(),
             child: write(child),
-        },
-    );
+        }
+    };
+    let mut spawn = commit(id, outcome);
     spawn.owner_token = token.clone();
     let spawned = store
         .tick("owner", std::slice::from_ref(&lane), &[spawn], &[])

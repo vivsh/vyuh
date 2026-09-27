@@ -99,6 +99,7 @@ impl DbTaskStore {
                 transaction,
                 &[],
                 deliveries,
+                &[],
                 conf,
                 now,
                 self.batch_size,
@@ -155,8 +156,8 @@ async fn ensure_runtime_policy(
             .await?;
         return Ok(());
     }
-    if !stored.policy_fingerprint.starts_with("tr-v5:") {
-        return Err(TaskRuntimeError::InvalidConfig("task Work/Flow protocol migration is required; stop all old workers and writers before upgrading".into()));
+    if !stored.policy_fingerprint.starts_with("tr-v6:") {
+        return Err(TaskRuntimeError::InvalidConfig("task all-join protocol migration is required; stop all old workers and writers before upgrading".into()));
     }
     if stored.policy_fingerprint != fingerprint {
         replace_runtime_policy(transaction, fingerprint, now).await?;

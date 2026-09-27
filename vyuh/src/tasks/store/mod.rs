@@ -16,6 +16,8 @@ pub use super::submission::TaskWrite;
     not(any(feature = "postgres", feature = "mysql", feature = "sqlite"))
 ))]
 pub(crate) use memory::MemoryTaskStore;
+#[cfg(test)]
+pub(crate) use memory::tests as fixtures;
 
 #[cfg(feature = "mysql")]
 pub(crate) type MySqlTaskStore = database::DbTaskStore;
@@ -26,4 +28,5 @@ pub(crate) type SqliteTaskStore = database::DbTaskStore;
 
 mod contract;
 pub use contract::*;
+pub(crate) mod all;
 mod workflow;

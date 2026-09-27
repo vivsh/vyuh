@@ -321,6 +321,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         if now < state.next_poll {
             return;
         }
+        self.limit_commits(&mut state.commits);
         let claims = self.claims(!state.shutting_down);
         let renewals = self.renewal_leases(&state.commits);
         let started = std::time::Instant::now();
@@ -626,6 +627,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
                 continue;
             }
             let available = lane.available(self.batch_size).min(capacity).min(batch);
+            let available = all::claim_capacity(lane, &self.pending_commits, available);
             let limit = lane.claim_limit(available, now);
             if limit > 0 {
                 claims.push(LaneClaim {
@@ -792,6 +794,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
     }
 
     fn queue_commits(&mut self, values: Vec<TaskCommit>, commits: &mut Vec<TaskCommit>) {
+        if !self.pending_commits.is_empty() {
+            self.pending_commits.extend(values);
+            self.fill_commits(commits);
+            return;
+        }
         let remaining = self.batch_size.saturating_sub(commits.len());
         let mut values = values.into_iter();
         commits.extend(values.by_ref().take(remaining));
@@ -960,6 +967,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
 
     fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
+            max_all_children: self.registry.config.all_limit(),
             handlers: self
                 .registry
                 .tasks
@@ -977,6 +985,8 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
 #[path = "runner_poll.rs"]
 mod poll;
 use poll::*;
+#[path = "runner_all.rs"]
+mod all;
 
 #[cfg(test)]
 #[path = "tests/runner.rs"]

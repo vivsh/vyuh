@@ -176,6 +176,8 @@ pub struct TaskLease {
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct TaskStoreConf {
+    /// Maximum members accepted in one atomic all-settled child group.
+    pub max_all_children: usize,
     /// Stable handler names and classifications understood by this worker deployment.
     pub handlers: Vec<(String, crate::tasks::TaskKind)>,
     /// Validated named lanes; stores coordinate only their global rate policies.
@@ -426,7 +428,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
 
 /// Produces the durable policy identity shared by every store implementation.
 pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-v5:{:.58}", policy_hash(conf, 5).to_hex())
+    format!("tr-v6:{:.58}", policy_hash(conf, 6).to_hex())
 }
 
 #[cfg(all(test, any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
@@ -436,22 +438,27 @@ mod tests;
 /// Identifies the exact pre-upgrade policy so protocol migration cannot change live budgets.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) fn migration_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-t0:{:.58}", policy_hash(conf, 0).to_hex())
+    format!("tr-a0:{:.58}", policy_hash(conf, 0).to_hex())
 }
 
 /// Accepts only a ledger-marked predecessor with exactly the same runtime policy.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) fn is_migrated_policy(conf: &TaskStoreConf, stored: &str) -> bool {
     stored == migration_fingerprint(conf)
-        || stored == format!("tr-t1:{:.58}", policy_hash(conf, 1).to_hex())
-        || stored == format!("tr-t2:{:.58}", policy_hash(conf, 2).to_hex())
-        || stored == format!("tr-t3:{:.58}", policy_hash(conf, 3).to_hex())
-        || stored == format!("tr-t4:{:.58}", policy_hash(conf, 4).to_hex())
+        || stored == format!("tr-a1:{:.58}", policy_hash(conf, 1).to_hex())
+        || stored == format!("tr-a2:{:.58}", policy_hash(conf, 2).to_hex())
+        || stored == format!("tr-a3:{:.58}", policy_hash(conf, 3).to_hex())
+        || stored == format!("tr-a4:{:.58}", policy_hash(conf, 4).to_hex())
+        || stored == format!("tr-a5:{:.58}", policy_hash(conf, 5).to_hex())
 }
 
 /// Hashes immutable deployment policy, optionally including the new result protocol.
 fn policy_hash(conf: &TaskStoreConf, result_protocol: u8) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
+    if result_protocol >= 6 {
+        hasher.update(b"task-all-claim-results-v6\0");
+        hasher.update(&(conf.max_all_children as u64).to_le_bytes());
+    }
     if result_protocol > 0 {
         hasher.update(b"task-resume-result-step-attempts-v1\0");
     }
@@ -568,7 +575,9 @@ pub(crate) fn normalize_outcome(
     error_limit: usize,
 ) -> TaskOutcome {
     match outcome {
-        TaskOutcome::Spawn { ref state, .. } if state.len() > payload_limit => {
+        TaskOutcome::Spawn { ref state, .. } | TaskOutcome::All { ref state, .. }
+            if state.len() > payload_limit =>
+        {
             TaskOutcome::fail("Task continuation state exceeded the configured limit")
         }
         TaskOutcome::CompleteWith { ref output }

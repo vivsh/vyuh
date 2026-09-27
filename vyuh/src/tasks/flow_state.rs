@@ -24,6 +24,10 @@ pub struct FlowState<T = ()> {
 enum FlowValue<T> {
     Complete(T),
     Outcome(TaskOutcome),
+    All {
+        inputs: Vec<DataBox>,
+        state: String,
+    },
     Spawn {
         input: DataBox,
         state: String,
@@ -32,6 +36,21 @@ enum FlowValue<T> {
 }
 
 impl<T> FlowState<T> {
+    /// Requests an ordered, all-settled group without submitting any work.
+    /// Checkpoint serialization can fail here; registration, size, and fan-out
+    /// limits are checked during framework preparation after the handler returns.
+    pub fn all<I: DataValue, S: Serialize>(
+        children: Vec<I>,
+        checkpoint: S,
+    ) -> Result<Self, TaskRuntimeError> {
+        Ok(Self {
+            inner: FlowValue::All {
+                inputs: children.into_iter().map(DataBox::new_data).collect(),
+                state: serde_json::to_string(&checkpoint)?,
+            },
+        })
+    }
+
     /// Requests one child and suspends this task with a serialized checkpoint.
     /// Returns checkpoint serialization errors. After the handler returns, the runtime
     /// resolves and serializes the registered child; preparation errors fail this task.
@@ -95,6 +114,7 @@ impl<T: Serialize + 'static> FlowState<T> {
         let inner = match self.inner {
             FlowValue::Complete(output) => FlowValue::Outcome(super::state::completion(output)),
             FlowValue::Outcome(outcome) => FlowValue::Outcome(outcome),
+            FlowValue::All { inputs, state } => FlowValue::All { inputs, state },
             FlowValue::Spawn {
                 input,
                 state,
@@ -124,6 +144,7 @@ impl FlowState {
         match self.inner {
             FlowValue::Complete(()) => Ok(TaskOutcome::Complete),
             FlowValue::Outcome(outcome) => Ok(outcome),
+            FlowValue::All { inputs, state } => site.tasks().prepare_all(&inputs, &state),
             FlowValue::Spawn {
                 input,
                 state,
@@ -138,6 +159,7 @@ impl FlowState {
         match &self.inner {
             FlowValue::Complete(()) => Ok(TaskOutcome::Complete),
             FlowValue::Outcome(outcome) => Ok(outcome.clone()),
+            FlowValue::All { inputs, state } => site.tasks().prepare_all(inputs, state),
             FlowValue::Spawn {
                 input,
                 state,

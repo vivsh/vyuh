@@ -58,6 +58,7 @@ impl DbTaskStore {
             &mut transaction,
             &[],
             deliveries,
+            &[],
             &conf,
             now,
             self.batch_size,
@@ -80,6 +81,7 @@ impl DbTaskStore {
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
     ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskRuntimeError> {
         let mut new_idle = Vec::new();
+        let mut waits = Vec::new();
         let mut ordered = claims.iter().collect::<Vec<_>>();
         ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
         let mut lanes = Vec::with_capacity(claims.len());
@@ -95,6 +97,7 @@ impl DbTaskStore {
                     now,
                     deliveries,
                     &mut new_idle,
+                    &mut waits,
                 )
                 .await?
             } else {
@@ -106,7 +109,8 @@ impl DbTaskStore {
                     conf,
                     now,
                 };
-                self.claim_lane(transaction, turn, deliveries).await?
+                self.claim_lane(transaction, turn, deliveries, &mut waits)
+                    .await?
             };
             lanes.push(lane);
         }
@@ -117,7 +121,9 @@ impl DbTaskStore {
                 .position(|claim| claim.lane == lane.lane)
                 .unwrap_or(usize::MAX)
         });
-        Ok((TaskPoll { lanes }, new_idle))
+        let mut poll = TaskPoll { lanes };
+        super::all::materialize(transaction, waits, &mut poll, self.batch_size).await?;
+        Ok((poll, new_idle))
     }
 
     /// Claims one lane's bounded candidates and reserves its durable permits.
@@ -126,6 +132,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let limit = turn.claim.limit.min(self.batch_size);
         let probed =
@@ -156,7 +163,7 @@ impl DbTaskStore {
             .filter(|row| row.status == TaskStatus::Running.as_i16())
             .count();
         let tasks = self
-            .claim_candidates(transaction, candidates, turn.runner_id, turn.now)
+            .claim_candidates(transaction, candidates, turn.runner_id, turn.now, waits)
             .await?;
         let task_wake = next_task_deadline(transaction, turn.claim.lane.as_str(), turn.now).await?;
         Ok(LanePoll {
@@ -202,6 +209,7 @@ impl DbTaskStore {
         mut candidates: Vec<TaskRow>,
         runner_id: &str,
         now: DateTime<Utc>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<Vec<TaskRecord>, TaskRuntimeError> {
         for row in &mut candidates {
             row.attempts = row.attempts.checked_add(1).ok_or_else(|| {
@@ -238,6 +246,15 @@ impl DbTaskStore {
             return Err(TaskRuntimeError::TaskExecutionError(
                 "task claim batch changed an unexpected number of rows".into(),
             ));
+        }
+        for row in &mut candidates {
+            if let Some(membership) = row.waiting_children.take() {
+                waits.push((
+                    crate::tasks::TaskId::new(row.id),
+                    membership,
+                    row.remaining_completions,
+                ));
+            }
         }
         Self::into_records(candidates)
     }
@@ -434,9 +451,12 @@ async fn select_candidates(
         .sort(table.id.asc())
         .for_update()
         .skip_locked()
-        .slice::<TaskRow>(0, limit)
+        .slice::<super::model::TaskClaimRow>(0, limit)
         .exec(transaction)
-        .await?)
+        .await?
+        .into_iter()
+        .map(TaskRow::from)
+        .collect())
 }
 
 #[cfg(feature = "sqlite")]
@@ -457,9 +477,12 @@ async fn select_candidates(
         .sort(table.ready_at.asc())
         .sort(table.created_at.asc())
         .sort(table.id.asc())
-        .slice::<TaskRow>(0, limit)
+        .slice::<super::model::TaskClaimRow>(0, limit)
         .exec(transaction)
-        .await?)
+        .await?
+        .into_iter()
+        .map(TaskRow::from)
+        .collect())
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]

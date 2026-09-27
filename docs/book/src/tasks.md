@@ -70,9 +70,9 @@ intents; it cannot make an external email, payment, or HTTP request exactly
 once. Use a transactional outbox or a domain-owned idempotency key around those
 effects.
 
-Vyuh tasks are durable continuations for a single unit of work. They do not
-provide a workflow DAG interpreter, parallel joins, or dependency graphs.
-Sequential and nested child orchestration uses explicit Flow state transitions.
+Vyuh tasks are durable continuations, not a workflow DAG interpreter.
+Sequential, nested, and homogeneous parallel child orchestration use explicit
+Flow state transitions; `all` waits for every member rather than selecting a winner.
 
 ## Registration
 
@@ -184,7 +184,8 @@ Use explicit `TaskError::retry` for retries; automatic `?` conversions are termi
 ## Work And Flow
 
 Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
-Flow handlers are synchronous and can complete, fail, suspend, sleep, or spawn.
+Flow handlers are synchronous and can complete, fail, suspend, sleep, spawn, or
+join a homogeneous group with `all`.
 Both use the same statuses, lanes, concurrency, rates, lane locks, leases,
 attempt counters, cancellation, and atomic outcome flushes. Neither executes
 a child or resumed parent recursively; those run after a later claim.
@@ -331,6 +332,56 @@ One outstanding child per parent supports sequential and nested workflows.
 contract, not a runtime waiting-on guard. Missing or no-longer-suspended parents
 do not receive a child's result. Value-only batch handlers cannot spawn children.
 
+## Parallel Children With `all`
+
+`FlowState::all(children, checkpoint)` atomically checkpoints a Flow and creates
+a group of children of one registered input type. It never submits work while
+constructing the outcome. Use the same `#[bundles::flow]` registration, or the
+equivalent `bundles::flow(handler, TaskDefinition::new("collect"))`:
+
+```rust,ignore
+#[bundles::flow]
+fn collect(
+    continuation: Continuation<(), Vec<Result<ItemOutput, TaskFailure>>>,
+    input: Data<CollectInput>,
+) -> Result<FlowState<Vec<ItemOutput>>, FlowError> {
+    if let (_, Some(results)) = continuation.into_parts() {
+        let values = results?.into_iter().collect::<Result<Vec<_>, _>>()?;
+        return Ok(FlowState::complete(values));
+    }
+    Ok(FlowState::all(input.items.clone(), ())?)
+}
+```
+
+Results are in **input order**, not completion order. The outer result describes
+whether the join could be assembled; each inner result describes one child.
+Failures and cancellations count as completed members. Retrying, sleeping, and
+suspended children do not. No sibling is cancelled and no failure resumes the
+parent early. An empty group resumes on a later poll with `Ok([])`.
+
+Set `TaskConf::max_all_children(n)` to limit fan-out (default 256; valid 1–10,000).
+This is separate from concurrency and claim/commit `batch_size`. The full combined
+resume JSON envelope must fit **32,768 bytes**, even when individual child results
+fit. Overflow or missing/malformed member results become an outer failure for
+the parent; children keep their own results. Prefer application-owned artifact
+references for large outputs. Decoding into `ItemOutput` still happens through
+the normal continuation extractor.
+
+The store decrements a durable counter when children finish. It collects results
+only when the satisfied parent is actually claimed, persists `resume_input`,
+and clears the wait atomically. Crash recovery then reuses that persisted input.
+Groups use normal lanes, rates, scheduling, leases, retries, and cancellation.
+Cancellation of a parent does not cancel its children.
+
+Do not externally resume a parent awaiting `all`. Duplicate/conflicting child
+idempotency keys reject the entire group without adopting existing tasks. Children
+use registered policies and default scheduling; per-child options and heterogeneous
+groups are not supported. Work and batch handlers cannot return `all`.
+
+Completed tasks remain stored; this feature adds no retention policy. Any future
+deletion feature must preserve results still needed by active joins. Upgrade using
+the coordinated task-protocol templates before starting new workers or writers.
+
 ## Retained Results
 
 `TaskState::complete(value)` and `FlowState::complete(value)` retain typed values
@@ -338,7 +389,7 @@ until the handler returns. The framework serializes a successful value and store
 `{"Ok": value}` on the completed task. Ordinary unit-return handlers retain
 `{"Ok": null}`. Retrying and terminal failures retain `{"Err": TaskFailure}`;
 the task status distinguishes a retry from terminal failure. Successful suspend,
-sleep, and spawn checkpoints clear the previous result. Claims and lease
+sleep, spawn, and all checkpoints clear the previous result. Claims and lease
 renewals preserve it. This is the latest result, not an attempt history.
 
 Inspect results with `task.last_result::<Output>()?`, which returns

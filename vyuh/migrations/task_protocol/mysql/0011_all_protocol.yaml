@@ -1,0 +1,10 @@
+# Apply with workers and writers stopped; preserve exact predecessor digests.
+dependencies: [0010_all_columns]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = CONCAT(CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-t0:' THEN 'tr-a0:' WHEN 'tr-t1:' THEN 'tr-a1:' WHEN 'tr-t2:' THEN 'tr-a2:' WHEN 'tr-t3:' THEN 'tr-a3:' WHEN 'tr-t4:' THEN 'tr-a4:' ELSE 'tr-a5:' END, SUBSTR(policy_fingerprint, 7)) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-t0:', 'tr-t1:', 'tr-t2:', 'tr-t3:', 'tr-t4:', 'tr-v5:')
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = CONCAT(CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-t0:' THEN 'tr-a0:' WHEN 'tr-t1:' THEN 'tr-a1:' WHEN 'tr-t2:' THEN 'tr-a2:' WHEN 'tr-t3:' THEN 'tr-a3:' WHEN 'tr-t4:' THEN 'tr-a4:' ELSE 'tr-a5:' END, SUBSTR(policy_fingerprint, 7)) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-t0:', 'tr-t1:', 'tr-t2:', 'tr-t3:', 'tr-t4:', 'tr-v5:')

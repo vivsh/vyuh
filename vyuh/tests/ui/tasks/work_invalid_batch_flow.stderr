@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>: vyuh::tasks::IntoTaskBatchOutcomePart` is not satisfied
+  --> tests/ui/tasks/work_invalid_batch_flow.rs:11:33
+   |
+11 |     let _ = bundles::task_batch(invalid, TaskDefinition::new("invalid"));
+   |             ------------------- ^^^^^^^ the trait `vyuh::tasks::IntoTaskBatchOutcomePart` is not implemented for `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>`
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `vyuh::tasks::IntoTaskBatchOutcomePart` is implemented for `Result<T, TaskError>`
+  --> src/tasks/batch.rs
+   |
+   | impl<T: IntoTaskBatchOutcomePart> IntoTaskBatchOutcomePart for Result<T, super::TaskError> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `task_batch`
+  --> src/bundles/part.rs
+   |
+   | pub fn task_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   |        ---------- required by a bound in this function
+...
+   |     H::Output: crate::tasks::IntoTaskBatchOutcomePart,
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `task_batch`

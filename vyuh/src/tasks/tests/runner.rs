@@ -12,6 +12,8 @@ const EMAIL: TaskLane = TaskLane::new("email");
 #[path = "runner_cancellation.rs"]
 mod cancellation;
 
+#[path = "runner_all.rs"]
+mod all_tests;
 #[path = "runner_flow.rs"]
 mod flow_tests;
 static HOOK_GATE: tokio::sync::Notify = tokio::sync::Notify::const_new();

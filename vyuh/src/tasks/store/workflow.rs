@@ -10,9 +10,10 @@ pub(super) fn capability_error(
 ) -> Option<&'static str> {
     use crate::tasks::{TaskKind, TaskOutcome};
     match (kind, outcome) {
-        (TaskKind::Work, TaskOutcome::Sleep { .. } | TaskOutcome::Spawn { .. }) => {
-            Some("Work tasks cannot sleep or spawn")
-        }
+        (
+            TaskKind::Work,
+            TaskOutcome::Sleep { .. } | TaskOutcome::Spawn { .. } | TaskOutcome::All { .. },
+        ) => Some("Work tasks cannot sleep or spawn"),
         (TaskKind::Flow, TaskOutcome::Retry { .. }) => Some("Flow handlers cannot request retry"),
         (_, TaskOutcome::Spawn { child, .. })
             if !handlers

@@ -1,5 +1,6 @@
 //! Mool-native durable task persistence.
 
+mod all;
 mod cancellation;
 mod claim;
 mod common;

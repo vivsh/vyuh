@@ -71,6 +71,7 @@ fn write(record: TaskRecord) -> TaskWrite {
 /// Creates the two-lane runtime policy used throughout store tests.
 fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
     TaskStoreConf {
+        max_all_children: 256,
         handlers: [
             "email",
             "archive",

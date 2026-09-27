@@ -23,6 +23,7 @@ fn locked_conf(size: usize, deadline: Option<Duration>, hooks: bool) -> TaskStor
         lane_lock = lane_lock.on_idle(lifecycle_hook).on_busy(lifecycle_hook);
     }
     TaskStoreConf {
+        max_all_children: 256,
         handlers: vec![("job".into(), super::TaskKind::Work)],
         lanes: vec![TaskLaneConf::new(GPU, 1).lock(lane_lock)],
         idempotency: Vec::new(),
@@ -33,6 +34,7 @@ fn locked_conf(size: usize, deadline: Option<Duration>, hooks: bool) -> TaskStor
 
 fn debounced_conf(delay: Duration) -> TaskStoreConf {
     TaskStoreConf {
+        max_all_children: 256,
         handlers: vec![("job".into(), super::TaskKind::Work)],
         lanes: vec![
             TaskLaneConf::new(GPU, 1).lock(

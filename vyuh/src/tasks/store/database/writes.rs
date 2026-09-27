@@ -142,13 +142,14 @@ impl DbTaskStore {
         let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
             TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
         })?;
-        let (children, deliveries) = self
+        let (children, deliveries, waits) = self
             .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
             .await?;
         finalize_workflow(
             &mut transaction,
             &children,
             deliveries,
+            &waits,
             &conf,
             now,
             self.batch_size,
@@ -166,23 +167,31 @@ impl DbTaskStore {
         commits: &[TaskCommit],
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
-    ) -> Result<(Vec<TaskRow>, Vec<(TaskId, String)>), TaskRuntimeError> {
+    ) -> Result<
+        (
+            Vec<TaskRow>,
+            Vec<(TaskId, String)>,
+            Vec<super::all::WaitWrite>,
+        ),
+        TaskRuntimeError,
+    > {
+        crate::tasks::store::all::validate_turn(commits, self.batch_size, conf.max_all_children)?;
         if commits.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
         let mut outcomes = collect_outcomes(commits)?;
         let allowed = fenced_commits(transaction, runner_id, commits, conf, now).await?;
         let ids = outcomes.keys().map(|id| id.into_uuid()).collect::<Vec<_>>();
         let mut rows = load_owned_batch(transaction, ids, runner_id).await?;
         rows.retain(|row| allowed.contains(&TaskId::new(row.id)));
-        let (children, conflicts) =
+        let (children, conflicts, waits) =
             workflow::prepare_children(transaction, &rows, &outcomes, conf, now, self.batch_size)
                 .await?;
         let deliveries = apply_owned_outcomes(&mut rows, &mut outcomes, &conflicts, conf, now)?;
         warn_unowned_outcomes(&outcomes, runner_id);
         update_idempotency_batch(transaction, &mut rows, conf, now).await?;
         batch_update_rows(transaction, &rows, self.batch_size).await?;
-        Ok((children, deliveries))
+        Ok((children, deliveries, waits))
     }
 
     /// Resumes a suspended task only while it remains suspended.
@@ -244,6 +253,7 @@ impl DbTaskStore {
             &mut transaction,
             &[],
             deliveries,
+            &[],
             &conf,
             now,
             self.batch_size,
@@ -328,37 +338,6 @@ impl DbTaskStore {
         };
         transaction.commit().await?;
         Ok(changed)
-    }
-
-    /// Returns one deterministic page after applying typed filters.
-    pub(super) async fn list_tasks_impl(
-        &self,
-        filter: TaskFilter,
-    ) -> Result<crate::routes::Page<TaskRecord>, TaskRuntimeError> {
-        let table = Self::table();
-        let mut pool = self.pool.clone();
-        let page = apply_filter(db::from(&table), &table, &filter)
-            .sort(table.created_at.desc())
-            .sort(table.id.desc())
-            .page::<TaskRow, _>(
-                db::Pagination {
-                    page_num: filter.page,
-                    page_size: filter.per_page,
-                },
-                &mut pool,
-            )
-            .await?;
-        let records = page
-            .items
-            .into_iter()
-            .map(TaskRecord::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::routes::Page::new(
-            records,
-            page.total,
-            page.page,
-            page.per_page,
-        ))
     }
 
     /// Reads one task without exposing its persistence row.
@@ -617,7 +596,9 @@ pub(super) fn apply_outcome(
     match outcome {
         TaskOutcome::Complete => finish(row, TaskStatus::Succeeded, None, now),
         TaskOutcome::CompleteWith { output } => complete_output(row, output, now),
-        TaskOutcome::Suspend { state } | TaskOutcome::Spawn { state, .. } => {
+        TaskOutcome::Suspend { state }
+        | TaskOutcome::Spawn { state, .. }
+        | TaskOutcome::All { state, .. } => {
             row.last_result = None;
             row.step_attempts = 0;
             row.status = TaskStatus::Suspended.as_i16();
@@ -833,13 +814,22 @@ pub(super) async fn batch_update_rows(
             ),
         )
         .batch_size(batch_size)
-        .exec(transaction)
+        .exec(&mut *transaction)
         .await?;
     if changed != rows.len() as u64 {
         return Err(TaskRuntimeError::TaskExecutionError(
             "task outcome batch changed an unexpected number of rows".into(),
         ));
     }
+    let terminal_waits = rows
+        .iter()
+        .filter(|row| {
+            matches!(row.status, 3 | 4)
+                && (row.waiting_children.is_some() || row.remaining_completions > 0)
+        })
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    super::all::clear(transaction, &terminal_waits, batch_size).await?;
     Ok(())
 }
 
@@ -987,3 +977,5 @@ mod tests;
 #[path = "workflow.rs"]
 mod workflow;
 pub(super) use workflow::{finalize_workflow, queue_delivery};
+#[path = "inspection.rs"]
+mod inspection;

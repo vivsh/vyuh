@@ -38,6 +38,7 @@ impl DbTaskStore {
         now: DateTime<Utc>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
         new_idle: &mut Vec<crate::tasks::TaskLane>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let mut row = load_for_update(transaction, claim.lane.as_str())
             .await?
@@ -71,7 +72,8 @@ impl DbTaskStore {
                 persist(transaction, &row).await?;
                 wait_poll(transaction, row, &turn).await
             } else {
-                self.poll_owner(transaction, row, &turn, deliveries).await
+                self.poll_owner(transaction, row, &turn, deliveries, waits)
+                    .await
             }
         };
         let mut poll = result?;
@@ -160,6 +162,7 @@ impl DbTaskStore {
         mut row: TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let phase = LaneOwnerPhase::from_i16(row.phase)?;
         if let Some(action) = phase_action(phase) {
@@ -177,7 +180,7 @@ impl DbTaskStore {
         }
         let candidates = self.candidates(transaction, turn).await?;
         let poll = self
-            .phase_poll(transaction, &mut row, candidates, turn, deliveries)
+            .phase_poll(transaction, &mut row, candidates, turn, deliveries, waits)
             .await?;
         persist(transaction, &row).await?;
         Ok(poll)
@@ -190,6 +193,7 @@ impl DbTaskStore {
         candidates: Vec<TaskRow>,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let mut phase = LaneOwnerPhase::from_i16(row.phase)?;
         let completed_work = turn
@@ -207,7 +211,9 @@ impl DbTaskStore {
         }
         row.empty_since = None;
         if matches!(phase, LaneOwnerPhase::Idle | LaneOwnerPhase::BusyFailed) {
-            return self.start_busy(transaction, row, turn, deliveries).await;
+            return self
+                .start_busy(transaction, row, turn, deliveries, waits)
+                .await;
         }
         if row.flushing || should_flush(&candidates, turn.lane, turn.now)? {
             row.flushing = true;
@@ -217,7 +223,9 @@ impl DbTaskStore {
                 .as_ref()
                 .is_some_and(|owner| owner.allow_claim);
             if allow_claim {
-                return self.claim_flush(transaction, row, turn, deliveries).await;
+                return self
+                    .claim_flush(transaction, row, turn, deliveries, waits)
+                    .await;
             }
             return owned_poll(turn.claim.lane, row.clone(), None, Some(Duration::ZERO));
         }
@@ -297,6 +305,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         if row.hook_retry_at.is_some_and(|retry| retry > turn.now) {
             release(row, LaneOwnerPhase::BusyFailed, turn.now);
@@ -324,7 +333,8 @@ impl DbTaskStore {
             );
         }
         activate(row, turn.now);
-        self.claim_flush(transaction, row, turn, deliveries).await
+        self.claim_flush(transaction, row, turn, deliveries, waits)
+            .await
     }
 
     async fn claim_flush(
@@ -333,6 +343,7 @@ impl DbTaskStore {
         row: &TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let lock = turn
             .lane
@@ -351,7 +362,9 @@ impl DbTaskStore {
             conf: turn.conf,
             now: turn.now,
         };
-        let mut poll = self.claim_lane(transaction, claim_turn, deliveries).await?;
+        let mut poll = self
+            .claim_lane(transaction, claim_turn, deliveries, waits)
+            .await?;
         poll.owner = Some(owner_poll(row, None)?);
         Ok(poll)
     }

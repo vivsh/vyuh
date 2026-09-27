@@ -4,6 +4,43 @@ use crate::tasks::store::memory::tests::workflow_contract;
 #[path = "cancellation.rs"]
 mod cancellation;
 
+/// Database joins match the memory ordering and claim-time persistence contract.
+#[tokio::test]
+#[cfg_attr(not(feature = "sqlite"), ignore = "requires disposable dbharness")]
+async fn database_all_contract() -> Result<(), String> {
+    crate::tasks::store::memory::tests::all::ordered_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Empty/large joins, overflow, mixed outcomes, conflicts, and nested lineage share one contract.
+#[tokio::test]
+#[cfg_attr(not(feature = "sqlite"), ignore = "requires disposable dbharness")]
+async fn database_all_edges() -> Result<(), String> {
+    use crate::tasks::store::memory::tests::all;
+    all::limits_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    all::mixed_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    all::conflicts_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    all::nested_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    all::cancellation_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    all::invalid_group_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())?;
+    crate::tasks::store::memory::tests::locked_all_contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// SQL backends retain and deliver the same bounded JSON results as the memory store.
 #[tokio::test]
 #[cfg_attr(
@@ -25,6 +62,10 @@ mod upgrade;
 #[path = "result_upgrade.rs"]
 mod result_upgrade;
 
+#[path = "all_database.rs"]
+mod all_database;
+#[path = "all_upgrade.rs"]
+mod all_upgrade;
 #[path = "flow_upgrade.rs"]
 mod flow_upgrade;
 
@@ -174,7 +215,7 @@ async fn upgrade_adoption(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
         .exec(&mut pool)
         .await?;
     assert_eq!(buckets[0].tokens_micros, tokens);
-    assert!(buckets[0].policy_fingerprint.starts_with("tr-v5:"));
+    assert!(buckets[0].policy_fingerprint.starts_with("tr-v6:"));
     Ok(())
 }
 
@@ -197,11 +238,19 @@ async fn rollback_contract(store: &DbTaskStore) -> Result<(), TaskRuntimeError> 
     );
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries) = store
+    let (children, deliveries, waits) = store
         .commit_outcomes_tx(&mut tx, "owner", std::slice::from_ref(&spawn), &conf(), now)
         .await?;
-    super::super::writes::finalize_workflow(&mut tx, &children, deliveries, &conf(), now, 32)
-        .await?;
+    super::super::writes::finalize_workflow(
+        &mut tx,
+        &children,
+        deliveries,
+        &waits,
+        &conf(),
+        now,
+        32,
+    )
+    .await?;
     tx.rollback().await?;
     assert!(store.get_task(child_id).await?.is_none());
     assert_eq!(
@@ -226,7 +275,7 @@ async fn rollback_delivery(
     let terminal = commit(child, TaskOutcome::Complete);
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries) = store
+    let (children, deliveries, waits) = store
         .commit_outcomes_tx(
             &mut tx,
             "owner",
@@ -235,8 +284,16 @@ async fn rollback_delivery(
             now,
         )
         .await?;
-    super::super::writes::finalize_workflow(&mut tx, &children, deliveries, &conf(), now, 32)
-        .await?;
+    super::super::writes::finalize_workflow(
+        &mut tx,
+        &children,
+        deliveries,
+        &waits,
+        &conf(),
+        now,
+        32,
+    )
+    .await?;
     tx.rollback().await?;
     assert_eq!(
         store.get_task(child).await?.unwrap().status,

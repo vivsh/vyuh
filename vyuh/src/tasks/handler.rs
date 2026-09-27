@@ -102,6 +102,11 @@ type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, Ta
 /// Work returns [`TaskState`] and Flow returns [`super::FlowState`], not this store contract.
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
+    /// Suspends this flow until every atomically created child becomes terminal.
+    All {
+        state: String,
+        children: Vec<super::TaskWrite>,
+    },
     /// Marks the task as successfully completed.
     Complete,
     /// Completes with a serialized success value, retained and delivered to the parent.

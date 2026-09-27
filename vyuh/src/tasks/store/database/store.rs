@@ -26,7 +26,7 @@ impl DbTaskStore {
         let now = statement_now(&mut transaction).await?;
         let lanes = locked_turn_lanes(&conf, claims, commits, renewals);
         super::writes::lock_lane_rows(&mut transaction, lanes).await?;
-        let (children, mut deliveries) = self
+        let (children, mut deliveries, waits) = self
             .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
             .await?;
         let (lost, cancelled) = self
@@ -54,6 +54,7 @@ impl DbTaskStore {
                 &mut transaction,
                 &children,
                 deliveries,
+                &waits,
                 &conf,
                 now,
                 &mut poll,
@@ -75,6 +76,7 @@ impl DbTaskStore {
         transaction: &mut crate::db::DbTransaction<'_>,
         children: &[super::model::TaskRow],
         deliveries: Vec<(TaskId, String)>,
+        waits: &[super::all::WaitWrite],
         conf: &TaskStoreConf,
         now: chrono::DateTime<chrono::Utc>,
         poll: &mut TaskPoll,
@@ -84,6 +86,7 @@ impl DbTaskStore {
             transaction,
             children,
             deliveries,
+            waits,
             conf,
             now,
             self.batch_size,
@@ -139,6 +142,7 @@ mod tests {
     #[test]
     fn only_opted_in_lanes_lock_durable_owner_rows() {
         let conf = TaskStoreConf {
+            max_all_children: 256,
             handlers: Vec::new(),
             lanes: vec![
                 TaskLaneConf::new(ORDINARY, 1),

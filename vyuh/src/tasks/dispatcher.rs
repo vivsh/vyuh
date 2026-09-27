@@ -32,6 +32,32 @@ pub struct Tasks {
 }
 
 impl Tasks {
+    /// Prepares an ordered child group without writing to the task store.
+    pub(super) fn prepare_all(
+        &self,
+        inputs: &[DataBox],
+        state: &str,
+    ) -> Result<super::TaskOutcome, TaskRuntimeError> {
+        let dispatcher = &self.dispatcher;
+        if inputs.len() > dispatcher.registry.config.all_limit() {
+            return Err(TaskRuntimeError::InvalidOptions(
+                "Too many all children".into(),
+            ));
+        }
+        validate_payload(state, dispatcher.registry.config.payload_limit())?;
+        let children = inputs
+            .iter()
+            .map(|input| {
+                let service = dispatcher.task_for_payload(input)?;
+                build_box_write(service, input, &dispatcher.registry.config)
+            })
+            .collect::<Result<Vec<_>, TaskRuntimeError>>()?;
+        Ok(super::TaskOutcome::All {
+            state: state.to_owned(),
+            children,
+        })
+    }
+
     /// Requests cancellation without waiting for finalization through normal polling.
     /// Returns false for missing, terminal, or already-cancelled tasks; store errors propagate.
     pub async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
@@ -362,6 +388,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
 
     pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
+            max_all_children: self.registry.config.all_limit(),
             handlers: self
                 .registry
                 .tasks

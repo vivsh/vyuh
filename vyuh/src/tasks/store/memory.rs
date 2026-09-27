@@ -2,6 +2,8 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+#[path = "memory_all.rs"]
+mod all;
 #[path = "memory_workflow.rs"]
 mod workflow;
 
@@ -30,6 +32,7 @@ struct MemoryState {
     rates: HashMap<String, RateBucket>,
     schedules: HashMap<String, chrono::DateTime<chrono::Utc>>,
     lane_locks: HashMap<String, MemoryLaneLock>,
+    waits: HashMap<TaskId, all::TaskWait>,
     #[cfg(test)]
     lane_lock_turns: usize,
 }
@@ -404,15 +407,23 @@ fn commit_outcomes_state(
     commits: &[TaskCommit],
     now: chrono::DateTime<chrono::Utc>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<(Vec<TaskRecord>, Vec<(TaskId, String)>), TaskRuntimeError> {
-    let (updates, children, deliveries) = workflow::stage_outcomes(state, runner_id, commits, now)?;
+) -> Result<
+    (
+        Vec<TaskRecord>,
+        Vec<(TaskId, String)>,
+        Vec<(TaskId, all::TaskWait)>,
+    ),
+    TaskRuntimeError,
+> {
+    let (updates, children, deliveries, waits) =
+        workflow::stage_outcomes(state, runner_id, commits, now)?;
     for (index, task) in updates {
         let current = state.tasks.get_mut(index).ok_or_else(|| {
             TaskRuntimeError::TaskExecutionError("staged task disappeared".into())
         })?;
         undo.push(std::mem::replace(current, task));
     }
-    Ok((children, deliveries))
+    Ok((children, deliveries, waits))
 }
 
 /// Fences outcomes from runners that no longer own an opt-in lane.
@@ -910,7 +921,9 @@ fn apply_outcome(
                 Err(error) => fail(task, error.to_string(), now),
             }
         }
-        TaskOutcome::Suspend { state } | TaskOutcome::Spawn { state, .. } => suspend(task, state),
+        TaskOutcome::Suspend { state }
+        | TaskOutcome::Spawn { state, .. }
+        | TaskOutcome::All { state, .. } => suspend(task, state),
         TaskOutcome::Sleep { state, delay } => sleep(task, state, delay, now)?,
         TaskOutcome::Retry { error } => retry(task, retry_policy, error, now)?,
         TaskOutcome::Fail { error } => fail(task, error, now),

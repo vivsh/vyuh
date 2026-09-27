@@ -96,7 +96,7 @@ The `vyuh` crate is organized around these subsystems:
   serializable outputs. Flow uses synchronous registration, `FlowState<T>`, and an
   invocation-local context containing only input and an immutable record.
   Both kinds support continuation extraction and suspension; only Flow can sleep
-  or spawn. Site/service and identity extraction remain unavailable to Flow.
+  or spawn children (one child or an `all` group). Site/service and identity extraction remain unavailable to Flow.
   Task-only return conversion serializes before type erasure through the existing
   single callable future. Work TaskError chooses retry/failure, FlowError permits
   only failure, and TaskRuntimeError describes infrastructure/API failures.
@@ -114,8 +114,19 @@ The `vyuh` crate is organized around these subsystems:
   writes in the same transaction. Children and parent deliveries finalize after
   claim selection; transient wake lanes feed the existing next-poll gate. Public
   resume remains independent. Per-step retries reset at successful checkpoints,
-  while lifetime invocation counts remain intact. No workflow scheduler,
-  waiting-on state, or separate output archive is introduced. Each task retains
+  while lifetime invocation counts remain intact. `FlowState::all` uses the same
+  transition engine. The store owns ordered `waiting_children` and a completion
+  counter; memory storage owns these in its private wait map. Neither is part of
+  runner/handler snapshots. Fenced first-terminal child transitions decrement
+  counters without membership or sibling-result reads. Satisfied parents become
+  pending after claim selection. Their next claim fetches terminal results in
+  shared bounded current-read chunks, persists one ordered resume envelope, and
+  clears the wait in that claim transaction. Reclaims reuse durable resume input.
+  Ordinary tasks issue no additional SQL; join writes use narrow bulk patches.
+  Fan-out outcomes use weighted FIFO flush capacity and the existing lease-renewal
+  path; no new scheduling loop or retained runner accounting is introduced.
+  `max_all_children` is part of deployment compatibility, not a concurrency limit.
+  No separate workflow scheduler or output archive is introduced. Each task retains
   its latest JSON result in `last_result`; checkpoint commits clear it. Results
   and resume inputs share a fixed 32,768-byte envelope limit. Terminal child
   delivery reuses the persisted result bytes. Result envelopes require a

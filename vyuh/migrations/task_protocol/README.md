@@ -22,7 +22,8 @@ workers can verify it, preserve global token buckets, and recover leased tasks.
    already adds the column, use it instead of 0006 and adjust the dependency of
    0007 before first application. Existing result and resume bytes are unchanged.
 6. Apply the Work/Flow and typed-return protocol templates below.
-7. Deploy handlers using `TaskState::complete(value)` and
+7. Apply the durable `all` templates below.
+8. Deploy handlers using `TaskState::complete(value)` and
    `Option<Result<R, TaskFailure>>`, then start new workers.
 
 The data migration and its ledger entry must commit atomically. For MySQL-family
@@ -118,3 +119,18 @@ Migrate handler signatures to `TaskState<T>` / `FlowState<T>`, infallible
 Infrastructure APIs now return `TaskRuntimeError`. Keep input and output JSON
 representations compatible with retained tasks. Work can extract Continuation and
 suspend, but cannot sleep or spawn. No mixed-version deployment is supported.
+
+## Durable all joins
+
+Apply `0010_all_columns` followed by `0011_all_protocol` after 0009, with all
+workers and writers stopped. The schema adds nullable `waiting_children` JSON
+text and `remaining_completions` with a zero default; existing task payloads,
+checkpoints, results, leases, lineage, and counters are unchanged. MySQL/MariaDB
+uses MEDIUMTEXT to accommodate the maximum 10,000 UUID members. No indexes or
+foreign keys are added. If an application schema migration adds these columns,
+depend on it instead of applying 0010 twice.
+
+The protocol template marks only recognized predecessors and preserves their
+digest for runtime verification. New fingerprints include `max_all_children`.
+Applied migration identities remain immutable, replay is ledger-controlled, and
+startup does not repair schema. Do not run mixed-version workers or writers.

@@ -24,6 +24,16 @@ pub(super) struct TaskRow {
     pub(super) input: String,
     pub(super) state: Option<String>,
     pub(super) resume_input: Option<String>,
+    #[cfg_attr(feature = "mysql", column(type = "mediumtext"))]
+    #[column(selectable = false, insertable = false, updatable = false)]
+    pub(super) waiting_children: Option<String>,
+    #[column(
+        default = "0",
+        selectable = false,
+        insertable = false,
+        updatable = false
+    )]
+    pub(super) remaining_completions: i32,
     pub(super) status: i16,
     #[column(default = "false")]
     pub(super) cancelled: bool,
@@ -47,6 +57,25 @@ pub(super) struct TaskRow {
     pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Candidate-only projection; ordinary reads neither select nor decode join metadata.
+#[derive(db::Record)]
+pub(super) struct TaskClaimRow {
+    #[column(flatten)]
+    row: TaskRow,
+    waiting_children: Option<String>,
+    remaining_completions: i32,
+}
+
+impl From<TaskClaimRow> for TaskRow {
+    fn from(claim: TaskClaimRow) -> Self {
+        Self {
+            waiting_children: claim.waiting_children,
+            remaining_completions: claim.remaining_completions,
+            ..claim.row
+        }
+    }
+}
+
 impl From<TaskRecord> for TaskRow {
     fn from(record: TaskRecord) -> Self {
         Self {
@@ -58,6 +87,8 @@ impl From<TaskRecord> for TaskRow {
             input: record.input,
             state: record.state,
             resume_input: record.resume_input,
+            waiting_children: None,
+            remaining_completions: 0,
             status: record.status.as_i16(),
             cancelled: record.cancelled,
             attempts: record.attempts,

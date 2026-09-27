@@ -13,13 +13,19 @@ error[E0599]: no associated function or constant named `retry` found for struct 
   |                                ^^^^^ associated function or constant not found in `vyuh::prelude::FlowState<_>`
   |
 note: if you're trying to build a new `vyuh::prelude::FlowState<_>` consider using one of the following associated functions:
+      vyuh::prelude::FlowState::<T>::all
       vyuh::prelude::FlowState::<T>::spawn
       vyuh::prelude::FlowState::<T>::spawn_with
       vyuh::prelude::FlowState::<T>::complete
-      vyuh::prelude::FlowState::<T>::suspend
-      vyuh::prelude::FlowState::<T>::sleep
+      and $N others
  --> src/tasks/flow_state.rs
   |
+  | /     pub fn all<I: DataValue, S: Serialize>(
+  | |         children: Vec<I>,
+  | |         checkpoint: S,
+  | |     ) -> Result<Self, TaskRuntimeError> {
+  | |_______________________________________^
+...
   |       pub fn spawn<I: DataValue, S: Serialize>(input: I, state: S) -> Result<Self, TaskRuntimeError> {
   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
@@ -32,9 +38,3 @@ note: if you're trying to build a new `vyuh::prelude::FlowState<_>` consider usi
 ...
   |       pub fn complete(output: T) -> Self {
   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-  |       pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
-  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-  |       pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
-  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

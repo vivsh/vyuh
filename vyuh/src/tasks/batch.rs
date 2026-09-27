@@ -160,7 +160,10 @@ pub(super) fn resolve_batch(
 
 fn batch_safe(outcome: TaskOutcome) -> TaskOutcome {
     match outcome {
-        TaskOutcome::Suspend { .. } | TaskOutcome::Sleep { .. } | TaskOutcome::Spawn { .. } => {
+        TaskOutcome::Suspend { .. }
+        | TaskOutcome::Sleep { .. }
+        | TaskOutcome::Spawn { .. }
+        | TaskOutcome::All { .. } => {
             TaskOutcome::fail("Batch task handlers cannot suspend or sleep or spawn")
         }
         outcome => outcome,
