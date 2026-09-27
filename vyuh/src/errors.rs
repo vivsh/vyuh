@@ -914,8 +914,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<crate::tasks::TaskError> for Error {
-    fn from(err: crate::tasks::TaskError) -> Self {
+impl From<crate::tasks::TaskRuntimeError> for Error {
+    fn from(err: crate::tasks::TaskRuntimeError) -> Self {
         Self::other(err)
     }
 }

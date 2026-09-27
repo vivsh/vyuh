@@ -1,0 +1,78 @@
+error[E0599]: no associated function or constant named `retry` found for struct `vyuh::prelude::TaskState<T>` in the current scope
+ --> tests/ui/tasks/typed_invalid_decisions.rs:3:30
+  |
+3 |     let _ = TaskState::<()>::retry("retry");
+  |                              ^^^^^ associated function or constant not found in `vyuh::prelude::TaskState`
+  |
+note: if you're trying to build a new `vyuh::prelude::TaskState` consider using one of the following associated functions:
+      vyuh::prelude::TaskState::<T>::complete
+      vyuh::prelude::TaskState::<T>::suspend
+ --> src/tasks/state.rs
+  |
+  |     pub fn complete(output: T) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::TaskState<T>` in the current scope
+ --> tests/ui/tasks/typed_invalid_decisions.rs:4:30
+  |
+4 |     let _ = TaskState::<()>::fail("fail");
+  |                              ^^^^ associated function or constant not found in `vyuh::prelude::TaskState`
+  |
+note: if you're trying to build a new `vyuh::prelude::TaskState` consider using one of the following associated functions:
+      vyuh::prelude::TaskState::<T>::complete
+      vyuh::prelude::TaskState::<T>::suspend
+ --> src/tasks/state.rs
+  |
+  |     pub fn complete(output: T) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::FlowState<T>` in the current scope
+ --> tests/ui/tasks/typed_invalid_decisions.rs:5:30
+  |
+5 |     let _ = FlowState::<()>::fail("fail");
+  |                              ^^^^ associated function or constant not found in `vyuh::prelude::FlowState`
+  |
+note: if you're trying to build a new `vyuh::prelude::FlowState` consider using one of the following associated functions:
+      vyuh::prelude::FlowState::<T>::spawn
+      vyuh::prelude::FlowState::<T>::spawn_with
+      vyuh::prelude::FlowState::<T>::complete
+      vyuh::prelude::FlowState::<T>::suspend
+      vyuh::prelude::FlowState::<T>::sleep
+ --> src/tasks/flow_state.rs
+  |
+  |       pub fn spawn<I: DataValue, S: Serialize>(input: I, state: S) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | /     pub fn spawn_with<I: DataValue, S: Serialize>(
+  | |         input: I,
+  | |         state: S,
+  | |         options: TaskOptions,
+  | |     ) -> Result<Self, TaskRuntimeError> {
+  | |_______________________________________^
+...
+  |       pub fn complete(output: T) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |       pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |       pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `retry` found for struct `vyuh::prelude::FlowError` in the current scope
+ --> tests/ui/tasks/typed_invalid_decisions.rs:6:24
+  |
+6 |     let _ = FlowError::retry("retry");
+  |                        ^^^^^ associated function or constant not found in `vyuh::prelude::FlowError`
+  |
+note: if you're trying to build a new `vyuh::prelude::FlowError`, consider using `vyuh::prelude::FlowError::fail` which returns `vyuh::prelude::FlowError`
+ --> src/tasks/handler_error.rs
+  |
+  |     pub fn fail(message: impl Into<String>) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

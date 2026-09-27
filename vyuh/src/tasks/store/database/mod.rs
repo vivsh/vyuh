@@ -1,5 +1,6 @@
 //! Mool-native durable task persistence.
 
+mod cancellation;
 mod claim;
 mod common;
 mod lane_owner;

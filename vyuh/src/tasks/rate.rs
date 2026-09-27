@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use super::{TaskError, TaskRate};
+use super::{TaskRate, TaskRuntimeError};
 
 pub(crate) const TOKEN_SCALE: i64 = 1_000_000;
 
@@ -87,13 +87,13 @@ pub(crate) fn refill(
     updated_at: &mut DateTime<Utc>,
     rate: TaskRate,
     now: DateTime<Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let elapsed = (now - *updated_at)
         .num_microseconds()
         .unwrap_or_default()
         .max(0);
     let period = i128::try_from(rate.period().as_micros())
-        .map_err(|_| TaskError::InvalidConfig("task rate period is too large".into()))?
+        .map_err(|_| TaskRuntimeError::InvalidConfig("task rate period is too large".into()))?
         .max(1);
     let credited = i128::from(elapsed)
         .saturating_mul(i128::from(rate.permits()))
@@ -149,7 +149,7 @@ fn apply_credit(
     period_micros: i128,
     rate: TaskRate,
     now: DateTime<Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let burst = i64::from(rate.burst_size()).saturating_mul(TOKEN_SCALE);
     let credited = i64::try_from(credited).unwrap_or(i64::MAX);
     let replenished = tokens_micros.saturating_add(credited);
@@ -168,14 +168,14 @@ fn advance_clock(
     credited: i64,
     period_micros: i128,
     rate: TaskRate,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let denominator = i128::from(rate.permits()).saturating_mul(i128::from(TOKEN_SCALE));
     let consumed = i128::from(credited).saturating_mul(period_micros) / denominator.max(1);
     let consumed = i64::try_from(consumed)
-        .map_err(|_| TaskError::InvalidConfig("task rate interval is too large".into()))?;
+        .map_err(|_| TaskRuntimeError::InvalidConfig("task rate interval is too large".into()))?;
     *updated_at = updated_at
         .checked_add_signed(chrono::Duration::microseconds(consumed))
-        .ok_or_else(|| TaskError::InvalidConfig("task rate timestamp overflowed".into()))?;
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task rate timestamp overflowed".into()))?;
     Ok(())
 }
 

@@ -1,0 +1,58 @@
+warning: unused imports: `bundles` and `tasks::TaskDefinition`
+ --> tests/ui/tasks/work_invalid_orchestration.rs:1:12
+  |
+1 | use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
+  |            ^^^^^^^              ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no associated function or constant named `sleep` found for struct `vyuh::prelude::TaskState<T>` in the current scope
+ --> tests/ui/tasks/work_invalid_orchestration.rs:6:21
+  |
+6 |  let _ = TaskState::sleep((), std::time::Duration::ZERO);
+  |                     ^^^^^ associated function or constant not found in `vyuh::prelude::TaskState<_>`
+  |
+note: if you're trying to build a new `vyuh::prelude::TaskState<_>` consider using one of the following associated functions:
+      vyuh::prelude::TaskState::<T>::complete
+      vyuh::prelude::TaskState::<T>::suspend
+ --> src/tasks/state.rs
+  |
+  |     pub fn complete(output: T) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `spawn` found for struct `vyuh::prelude::TaskState<T>` in the current scope
+ --> tests/ui/tasks/work_invalid_orchestration.rs:7:21
+  |
+7 |  let _ = TaskState::spawn(Job, ());
+  |                     ^^^^^ associated function or constant not found in `vyuh::prelude::TaskState<_>`
+  |
+note: if you're trying to build a new `vyuh::prelude::TaskState<_>` consider using one of the following associated functions:
+      vyuh::prelude::TaskState::<T>::complete
+      vyuh::prelude::TaskState::<T>::suspend
+ --> src/tasks/state.rs
+  |
+  |     pub fn complete(output: T) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated function or constant named `spawn_with` found for struct `vyuh::prelude::TaskState<T>` in the current scope
+ --> tests/ui/tasks/work_invalid_orchestration.rs:8:21
+  |
+8 |  let _ = TaskState::spawn_with(Job, (), vyuh::tasks::TaskOptions::new());
+  |                     ^^^^^^^^^^ associated function or constant not found in `vyuh::prelude::TaskState<_>`
+  |
+note: if you're trying to build a new `vyuh::prelude::TaskState<_>` consider using one of the following associated functions:
+      vyuh::prelude::TaskState::<T>::complete
+      vyuh::prelude::TaskState::<T>::suspend
+ --> src/tasks/state.rs
+  |
+  |     pub fn complete(output: T) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

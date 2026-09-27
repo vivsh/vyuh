@@ -1,9 +1,12 @@
 mod batch;
+mod callable;
 mod config;
 mod diagnostics;
 mod dispatcher;
 mod failure;
+mod flow_state;
 mod handler;
+mod handler_error;
 mod health;
 mod lane_lock;
 #[cfg(test)]
@@ -12,6 +15,7 @@ mod metrics;
 mod models;
 mod rate;
 mod result;
+mod returns;
 mod runner;
 mod state;
 pub(crate) mod store;
@@ -19,21 +23,27 @@ pub(crate) mod store;
 mod store_tests;
 mod submission;
 
+#[doc(hidden)]
+pub use callable::{FlowCallable, TaskCallable};
 pub use config::*;
 pub(crate) use dispatcher::TaskDispatcher;
 pub use dispatcher::Tasks;
-pub use failure::{TaskError, TaskFailure, TaskStatus};
+pub use failure::{TaskFailure, TaskRuntimeError, TaskStatus};
+pub use flow_state::FlowState;
 #[doc(hidden)]
 pub use handler::BatchTaskContext;
 #[doc(hidden)]
-pub use handler::IntoTaskOutcomePart;
+pub use handler::FlowContext;
 pub use handler::{Continuation, TaskContext};
 pub(crate) use handler::{RegisteredTask, TaskOutcome, TaskRegistry};
+pub use handler_error::{FlowError, TaskError};
 pub(crate) use health::{TaskHealth, TaskHealthSnapshot};
 pub use lane_lock::{TaskLaneContext, TaskLaneLock};
 pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
 pub use models::{TaskDefinition, TaskFilter, TaskId, TaskIdempotency, TaskInfo, TaskKind};
+#[doc(hidden)]
+pub use returns::{IntoFlowOutcomePart, IntoTaskOutcomePart};
 pub(crate) use runner::AbstractTaskRunner;
 pub use state::TaskState;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]

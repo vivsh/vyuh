@@ -1,0 +1,5 @@
+dependencies: [0005_persisted_results]
+atomic: true
+operations:
+  - type: statement
+    up: ALTER TABLE vyuh_tasks ADD COLUMN cancelled BOOLEAN NOT NULL DEFAULT FALSE

@@ -11,12 +11,19 @@ use crate::{
     callables::{self, Callable},
 };
 
-use super::TaskError;
+use super::TaskRuntimeError;
+#[cfg(test)]
+use super::TaskState;
 #[cfg(test)]
 use super::TaskStatus;
 use super::diagnostics::causal_chain as error_chain;
 use super::models::{IdempotencyPolicy, TaskPolicy};
-use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord, TaskState};
+use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord};
+
+#[path = "flow_handler.rs"]
+mod flow;
+use super::{IntoTaskBatchOutcomePart, IntoTaskOutcomePart};
+pub use flow::FlowContext;
 
 /// Invocation context used internally to extract task data and runtime identity.
 #[doc(hidden)]
@@ -88,11 +95,11 @@ impl callables::FromContextParts<BatchTaskContext> for crate::OperationId {
 
 type BatchHandler = Callable<BatchTaskContext, Error>;
 type BatchDecoder = fn(Vec<Arc<TaskRecord>>, crate::OperationId) -> DecodedBatch;
-type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, TaskError>;
+type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, TaskRuntimeError>;
 
 /// Prepared lifecycle outcome committed by Vyuh's internal task store.
 ///
-/// Task handlers return [`TaskState`] rather than this low-level store contract.
+/// Work returns [`TaskState`] and Flow returns [`super::FlowState`], not this store contract.
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
     /// Marks the task as successfully completed.
@@ -121,14 +128,14 @@ impl TaskOutcome {
     }
 
     /// Suspends a task with durable continuation state.
-    pub fn suspend<S: Serialize>(state: &S) -> Result<Self, TaskError> {
+    pub fn suspend<S: Serialize>(state: &S) -> Result<Self, TaskRuntimeError> {
         Ok(Self::Suspend {
             state: serde_json::to_string(state)?,
         })
     }
 
     /// Sleeps a task until the supplied delay with durable continuation state.
-    pub fn sleep<S: Serialize>(state: &S, delay: Duration) -> Result<Self, TaskError> {
+    pub fn sleep<S: Serialize>(state: &S, delay: Duration) -> Result<Self, TaskRuntimeError> {
         Ok(Self::Sleep {
             state: serde_json::to_string(state)?,
             delay,
@@ -154,62 +161,37 @@ impl TaskOutcome {
     }
 }
 
-mod task_handler_return {
-    pub trait Sealed {}
-}
-
-/// Internal marker for supported task handler return forms.
-///
-/// This trait is public only because direct task registration needs it in its
-/// bounds. It is sealed and cannot be implemented by applications.
-#[doc(hidden)]
-pub trait IntoTaskOutcomePart: task_handler_return::Sealed {
-    /// Resolves one handler return against its executing site without storing work.
-    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError>;
-}
-
-impl task_handler_return::Sealed for () {}
-
-impl IntoTaskOutcomePart for () {
-    fn into_task_outcome(data: callables::DataBox, _site: &Site) -> Result<TaskOutcome, TaskError> {
-        Ok(if data.downcast_ref::<()>().is_some() {
-            TaskOutcome::Complete
-        } else {
-            unsupported_task_state()
-        })
+/// Consumes prepared outcomes without copying successful output strings.
+fn prepared_outcome(
+    data: callables::DataBox,
+    _site: &Site,
+) -> Result<TaskOutcome, TaskRuntimeError> {
+    if data.downcast_ref::<()>().is_some() {
+        return Ok(TaskOutcome::Complete);
     }
+    let value = data.downcast_arc::<TaskOutcome>().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("Invalid prepared task outcome".into())
+    })?;
+    Ok(Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()))
 }
 
-impl<T, E> task_handler_return::Sealed for Result<T, E> where T: IntoTaskOutcomePart {}
-
-impl<T, E> IntoTaskOutcomePart for Result<T, E>
-where
-    T: IntoTaskOutcomePart,
-{
-    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError> {
-        T::into_task_outcome(data, site)
-    }
-}
-
-fn unsupported_task_state() -> TaskOutcome {
-    TaskOutcome::fail("Task handler returned an unsupported task state")
-}
-
-impl task_handler_return::Sealed for TaskState {}
-
-impl IntoTaskOutcomePart for TaskState {
-    fn into_task_outcome(data: callables::DataBox, site: &Site) -> Result<TaskOutcome, TaskError> {
-        match data.downcast_ref::<TaskState>() {
-            Some(state) => state.resolve(site),
-            None => Ok(unsupported_task_state()),
-        }
-    }
-}
-
-/// Optional typed continuation state and resume input for a durable task.
+/// Optional typed checkpoint and resume input for Work or Flow handlers.
 pub struct Continuation<S, R = ()> {
     state: Option<S>,
     resume: Option<Result<R, super::TaskFailure>>,
+}
+
+impl<S, R> callables::FromContextParts<FlowContext> for Continuation<S, R>
+where
+    S: serde::de::DeserializeOwned + Send,
+    R: serde::de::DeserializeOwned + Send,
+{
+    fn from_context_parts(ctx: &FlowContext) -> Result<Self, callables::CallError> {
+        Ok(Self {
+            state: decode_optional(ctx.record.state.as_deref())?,
+            resume: decode_optional(ctx.record.resume_input.as_deref())?,
+        })
+    }
 }
 
 impl<S, R> callables::FromContextParts<TaskContext> for Continuation<S, R>
@@ -269,9 +251,13 @@ pub(crate) struct RegisteredTask {
 
 #[derive(Clone)]
 enum RegisteredHandler {
+    Flow {
+        handler: Callable<FlowContext, Error>,
+        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
+    },
     Single {
         handler: TaskHandler,
-        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
+        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
     },
     Batch {
         handler: BatchHandler,
@@ -324,7 +310,7 @@ impl RegisteredTask {
     pub(crate) fn idempotency_key<T: 'static>(
         &self,
         input: &T,
-    ) -> Result<Option<String>, TaskError> {
+    ) -> Result<Option<String>, TaskRuntimeError> {
         self.policy.key_for(input)
     }
 
@@ -332,25 +318,25 @@ impl RegisteredTask {
     pub(crate) fn idempotency_key_box(
         &self,
         input: &dyn std::any::Any,
-    ) -> Result<Option<String>, TaskError> {
+    ) -> Result<Option<String>, TaskRuntimeError> {
         self.policy.key_for_box(input)
     }
 
     /// Verifies that one type-erased payload is the input accepted by this task.
-    pub(crate) fn validate_box(&self, input: &callables::DataBox) -> Result<(), TaskError> {
+    pub(crate) fn validate_box(&self, input: &callables::DataBox) -> Result<(), TaskRuntimeError> {
         if self.type_id == input.payload_type_id() {
             Ok(())
         } else {
-            Err(TaskError::TypeMismatch(
+            Err(TaskRuntimeError::TypeMismatch(
                 self.type_name.clone(),
                 "emitter payload".into(),
             ))
         }
     }
 
-    pub fn validate_object<T: 'static>(&self, _obj: &T) -> Result<(), TaskError> {
+    pub fn validate_object<T: 'static>(&self, _obj: &T) -> Result<(), TaskRuntimeError> {
         if self.type_id != TypeId::of::<T>() {
-            return Err(TaskError::TypeMismatch(
+            return Err(TaskRuntimeError::TypeMismatch(
                 self.type_name.clone(),
                 std::any::type_name::<T>().to_string(),
             ));
@@ -373,6 +359,9 @@ impl RegisteredTask {
         records: Vec<Arc<TaskRecord>>,
     ) -> Vec<TaskExecutionResult> {
         match &self.handler {
+            RegisteredHandler::Flow { handler, outcome } => {
+                flow::execute_flows(handler, *outcome, site, records, self.operation.id).await
+            }
             RegisteredHandler::Single { handler, outcome } => {
                 execute_singles(handler, *outcome, site, records, self.operation.id).await
             }
@@ -387,11 +376,14 @@ impl RegisteredTask {
     /// Invokes a handler and contains errors from both execution and child preparation.
     async fn execute_single(
         handler: &TaskHandler,
-        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
+        outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
         site: &Site,
         record: Arc<TaskRecord>,
         operation_id: crate::OperationId,
     ) -> TaskOutcome {
+        if record.kind != super::TaskKind::Work {
+            return flow::kind_mismatch();
+        }
         let payload = match handler.deserialize_input(&record.input) {
             Ok(value) => value,
             Err(error) => {
@@ -424,15 +416,11 @@ impl RegisteredTask {
         }
     }
 
-    pub fn new<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
+    pub fn new<T, H, Args, K>(definition: TaskDefinition<T>, handler: H) -> Self
     where
         T: callables::DataValue,
-        H: callables::Specable<Args> + Send + Sync + 'static,
-        H::Output: callables::IntoOutput<Error>
-            + callables::IntoReturnPart
-            + IntoTaskOutcomePart
-            + Send
-            + 'static,
+        H: super::TaskCallable<Args> + 'static,
+        H::Output: IntoTaskOutcomePart<K>,
         Args: callables::FromContext<TaskContext>
             + callables::IntoArgSpecs
             + callables::HasData<T>
@@ -440,7 +428,9 @@ impl RegisteredTask {
             + 'static,
     {
         let (name, policy) = definition.into_parts();
-        let callable: callables::Callable<TaskContext, Error> = Callable::new(handler);
+        let callable = super::callable::work(handler, |value: H::Output| {
+            super::returns::erase_outcome(value.into_task_outcome())
+        });
         let mut operation =
             callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
         operation.name = name.clone();
@@ -449,7 +439,7 @@ impl RegisteredTask {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>().to_string(),
             handler: RegisteredHandler::Single {
-                outcome: H::Output::into_task_outcome,
+                outcome: prepared_outcome,
                 handler: callable,
             },
             operation,
@@ -460,12 +450,8 @@ impl RegisteredTask {
     pub fn new_batch<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
     where
         T: callables::DataValue,
-        H: callables::Specable<Args> + Send + Sync + 'static,
-        H::Output: callables::IntoOutput<Error>
-            + callables::IntoReturnPart
-            + super::IntoTaskBatchOutcomePart
-            + Send
-            + 'static,
+        H: super::TaskCallable<Args> + 'static,
+        H::Output: super::IntoTaskBatchOutcomePart,
         Args: callables::FromContext<BatchTaskContext>
             + callables::IntoArgSpecs
             + callables::HasData<super::Batch<T>>
@@ -473,7 +459,7 @@ impl RegisteredTask {
             + 'static,
     {
         let (name, policy) = definition.into_parts();
-        let callable: BatchHandler = Callable::new(handler);
+        let callable: BatchHandler = super::callable::work(handler, H::Output::into_batch_return);
         let mut operation =
             callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
         operation.name = name.clone();
@@ -484,7 +470,7 @@ impl RegisteredTask {
             handler: RegisteredHandler::Batch {
                 handler: callable,
                 decode: decode_batch::<T>,
-                outcome: <H::Output as super::IntoTaskBatchOutcomePart>::into_task_outcomes,
+                outcome: super::batch::resolve_batch,
             },
             operation,
             policy: policy.erase(),
@@ -495,7 +481,7 @@ impl RegisteredTask {
 /// Converts queued records to independently prepared outcomes without mutating storage.
 async fn execute_singles(
     handler: &TaskHandler,
-    outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskError>,
+    outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
     site: Site,
     records: Vec<Arc<TaskRecord>>,
     operation_id: crate::OperationId,
@@ -594,6 +580,12 @@ fn decode_batch<T: callables::DataValue>(
     let mut positions = Vec::with_capacity(records.len());
     let mut outcomes = vec![None; records.len()];
     for (position, record) in records.iter().enumerate() {
+        if record.kind != super::TaskKind::Work {
+            if let Some(slot) = outcomes.get_mut(position) {
+                *slot = Some(flow::kind_mismatch());
+            }
+            continue;
+        }
         match serde_json::from_str::<T>(&record.input) {
             Ok(value) => {
                 values.push(value);
@@ -675,14 +667,14 @@ impl TaskRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_config(mut self, config: TaskConf) -> Result<Self, TaskError> {
+    pub(crate) fn with_config(mut self, config: TaskConf) -> Result<Self, TaskRuntimeError> {
         self.lanes = config.resolve_lanes(std::iter::empty())?;
         self.config = config;
         Ok(self)
     }
 
     /// Resolves every immutable task definition against validated site policy.
-    pub(crate) fn finalize(mut self, config: TaskConf) -> Result<Self, TaskError> {
+    pub(crate) fn finalize(mut self, config: TaskConf) -> Result<Self, TaskRuntimeError> {
         let lanes = config.resolve_lanes(self.lane_defaults.values().cloned())?;
         for task in self.tasks.values_mut() {
             let declared = task.declared_lane();
@@ -714,11 +706,11 @@ impl TaskRegistry {
         self.tasks.get(name).is_some_and(RegisteredTask::is_batch)
     }
 
-    pub(crate) fn register(&mut self, service: RegisteredTask) -> Result<(), TaskError> {
+    pub(crate) fn register(&mut self, service: RegisteredTask) -> Result<(), TaskRuntimeError> {
         let name = service.name().to_string();
         validate_task_name(&name)?;
         if self.tasks.contains_key(&name) || self.typed_map.contains_key(&service.type_id) {
-            return Err(TaskError::AlreadyExists(name));
+            return Err(TaskRuntimeError::AlreadyExists(name));
         }
         self.typed_map.insert(service.type_id, name.clone());
         self.tasks.insert(name, service);
@@ -726,31 +718,36 @@ impl TaskRegistry {
     }
 
     /// Adds one bundle-owned default for a named non-default task lane.
-    pub(crate) fn register_lane(&mut self, lane: super::TaskLaneConf) -> Result<(), TaskError> {
+    pub(crate) fn register_lane(
+        &mut self,
+        lane: super::TaskLaneConf,
+    ) -> Result<(), TaskRuntimeError> {
         let name = lane.lane();
         if name == super::DEFAULT_TASK_LANE {
-            return Err(TaskError::InvalidConfig(
+            return Err(TaskRuntimeError::InvalidConfig(
                 "bundles cannot configure the default task lane".into(),
             ));
         }
         if self.lane_defaults.contains_key(&name) {
-            return Err(TaskError::AlreadyExists(format!("task lane '{name}'")));
+            return Err(TaskRuntimeError::AlreadyExists(format!(
+                "task lane '{name}'"
+            )));
         }
         self.lane_defaults.insert(name, lane);
         Ok(())
     }
 
-    pub(crate) fn merge(&mut self, other: TaskRegistry) -> Result<(), TaskError> {
+    pub(crate) fn merge(&mut self, other: TaskRegistry) -> Result<(), TaskRuntimeError> {
         for lane in other.lane_defaults.into_values() {
             self.register_lane(lane)?;
         }
         for (name, task) in other.tasks {
             validate_task_name(&name)?;
             if self.tasks.contains_key(&name) {
-                return Err(TaskError::AlreadyExists(name));
+                return Err(TaskRuntimeError::AlreadyExists(name));
             }
             if self.typed_map.contains_key(&task.type_id) {
-                return Err(TaskError::AlreadyExists(name));
+                return Err(TaskRuntimeError::AlreadyExists(name));
             }
             self.typed_map.insert(task.type_id, name.clone());
             self.tasks.insert(name, task);
@@ -766,7 +763,7 @@ impl TaskRegistry {
     /// Produces the finalized per-handler idempotency policy shared with stores.
     pub(crate) fn idempotency_conf(
         &self,
-    ) -> Result<Vec<super::store::TaskIdempotencyConf>, TaskError> {
+    ) -> Result<Vec<super::store::TaskIdempotencyConf>, TaskRuntimeError> {
         self.tasks
             .values()
             .filter_map(|task| {
@@ -835,9 +832,9 @@ impl Default for TaskRegistry {
     }
 }
 
-fn validate_task_name(name: &str) -> Result<(), TaskError> {
+fn validate_task_name(name: &str) -> Result<(), TaskRuntimeError> {
     if name.is_empty() || name.chars().count() > 191 {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task handler names must contain between 1 and 191 characters".into(),
         ));
     }
@@ -845,20 +842,20 @@ fn validate_task_name(name: &str) -> Result<(), TaskError> {
 }
 
 /// Validates the stable identifier used to distinguish idempotency-key semantics.
-fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskError> {
+fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskRuntimeError> {
     let Some(policy) = policy else {
         return Ok(());
     };
     let revision = policy.revision;
     if revision.is_empty() || revision.len() > 64 {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task idempotency revisions must contain between 1 and 64 bytes".into(),
         ));
     }
     if !revision.bytes().all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
     }) {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task idempotency revisions use lowercase letters, digits, '-' or '_'".into(),
         ));
     }
@@ -869,22 +866,22 @@ fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskEr
 fn lane_retention(
     lanes: &[super::TaskLaneConf],
     lane: super::TaskLane,
-) -> Result<super::IdempotencyRetention, TaskError> {
+) -> Result<super::IdempotencyRetention, TaskRuntimeError> {
     lanes
         .iter()
         .find(|entry| entry.lane() == lane)
         .map(super::TaskLaneConf::idempotency_policy)
-        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
 }
 
 /// Adds task-definition context when strict lane resolution rejects site construction.
 fn missing_lane_error(
-    error: TaskError,
+    error: TaskRuntimeError,
     task: &str,
     declared: super::TaskLane,
     lanes: &[super::TaskLaneConf],
-) -> TaskError {
-    if !matches!(error, TaskError::UnknownLane(_)) {
+) -> TaskRuntimeError {
+    if !matches!(error, TaskRuntimeError::UnknownLane(_)) {
         return error;
     }
     let configured = lanes
@@ -892,7 +889,7 @@ fn missing_lane_error(
         .map(|lane| lane.lane().as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    TaskError::InvalidConfig(format!(
+    TaskRuntimeError::InvalidConfig(format!(
         "task '{task}' declares lane '{declared}', but configured lanes are: {configured}"
     ))
 }

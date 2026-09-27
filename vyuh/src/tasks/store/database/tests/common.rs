@@ -1,6 +1,9 @@
 use super::*;
 use crate::tasks::store::memory::tests::workflow_contract;
 
+#[path = "cancellation.rs"]
+mod cancellation;
+
 /// SQL backends retain and deliver the same bounded JSON results as the memory store.
 #[tokio::test]
 #[cfg_attr(
@@ -21,6 +24,21 @@ mod upgrade;
 
 #[path = "result_upgrade.rs"]
 mod result_upgrade;
+
+#[path = "flow_upgrade.rs"]
+mod flow_upgrade;
+
+/// SQL stores reject invalid capabilities without disturbing accepted sibling outcomes.
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "requires a disposable dbharness target"
+)]
+async fn database_capability_contract() -> Result<(), String> {
+    crate::tasks::store::memory::tests::capabilities::contract(&store().await?)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 /// Creates schema from the production models in an explicitly disposable target.
 async fn store() -> Result<DbTaskStore, String> {
@@ -104,7 +122,7 @@ async fn database_workflow_contract() -> Result<(), String> {
 }
 
 /// Adopting a migrated policy preserves leased work and a partially consumed rate bucket.
-async fn upgrade_adoption(store: &DbTaskStore) -> Result<(), TaskError> {
+async fn upgrade_adoption(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
     use crate::tasks::store::memory::tests::{claim, conf, record, write};
     use crate::tasks::{AbstractTaskStore, TaskRate};
     let mut conf = conf();
@@ -156,15 +174,15 @@ async fn upgrade_adoption(store: &DbTaskStore) -> Result<(), TaskError> {
         .exec(&mut pool)
         .await?;
     assert_eq!(buckets[0].tokens_micros, tokens);
-    assert!(buckets[0].policy_fingerprint.starts_with("tr-v2:"));
+    assert!(buckets[0].policy_fingerprint.starts_with("tr-v5:"));
     Ok(())
 }
 
 /// A rollback after child insertion restores the parent and removes the child together.
-async fn rollback_contract(store: &DbTaskStore) -> Result<(), TaskError> {
-    use crate::tasks::store::memory::tests::{claim, commit, conf, record, write};
+async fn rollback_contract(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
+    use crate::tasks::store::memory::tests::{claim, commit, conf, flow_record, record, write};
     use crate::tasks::{AbstractTaskStore, TaskOutcome};
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -201,7 +219,7 @@ async fn rollback_delivery(
     store: &DbTaskStore,
     child: crate::tasks::TaskId,
     parent: crate::tasks::TaskId,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     use crate::tasks::store::memory::tests::{claim, commit, conf};
     use crate::tasks::{AbstractTaskStore, TaskOutcome};
     store.claim_tasks("owner", &[claim()]).await?;

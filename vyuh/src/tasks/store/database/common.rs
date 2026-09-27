@@ -4,7 +4,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::{
     db,
-    tasks::{TaskError, TaskFilter, TaskRecord, TaskStatus},
+    tasks::{TaskFilter, TaskRecord, TaskRuntimeError, TaskStatus},
 };
 
 use super::model::{
@@ -87,16 +87,16 @@ impl DbTaskStore {
         &self,
         row: &TaskRow,
         now: DateTime<Utc>,
-    ) -> Result<DateTime<Utc>, TaskError> {
+    ) -> Result<DateTime<Utc>, TaskRuntimeError> {
         let default_milliseconds =
             i64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                TaskError::TaskExecutionError(
+                TaskRuntimeError::TaskExecutionError(
                     "task lease duration is outside the supported range".into(),
                 )
             })?;
         let milliseconds = row.lease_duration_ms.unwrap_or(default_milliseconds);
         if milliseconds < 0 {
-            return Err(TaskError::TaskExecutionError(
+            return Err(TaskRuntimeError::TaskExecutionError(
                 "task lease duration cannot be negative".into(),
             ));
         }
@@ -108,7 +108,7 @@ impl DbTaskStore {
     }
 
     /// Converts selected database rows without exposing persistence types.
-    pub(super) fn into_records(rows: Vec<TaskRow>) -> Result<Vec<TaskRecord>, TaskError> {
+    pub(super) fn into_records(rows: Vec<TaskRow>) -> Result<Vec<TaskRecord>, TaskRuntimeError> {
         rows.into_iter().map(TaskRecord::try_from).collect()
     }
 }
@@ -118,9 +118,9 @@ pub(super) fn add_time(
     now: DateTime<Utc>,
     duration: ChronoDuration,
     label: &str,
-) -> Result<DateTime<Utc>, TaskError> {
+) -> Result<DateTime<Utc>, TaskRuntimeError> {
     now.checked_add_signed(duration).ok_or_else(|| {
-        TaskError::TaskExecutionError(format!("{label} is outside the supported range"))
+        TaskRuntimeError::TaskExecutionError(format!("{label} is outside the supported range"))
     })
 }
 

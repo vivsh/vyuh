@@ -10,14 +10,14 @@ type JobBatch = Batch<Job>;
 struct QualifiedJob;
 
 #[bundles::task_batch]
-async fn macro_batch(_: Data<JobBatch>) -> Result<Batch<TaskState>, Error> {
-    Ok(Batch::new(vec![TaskState::complete(())?]))
+async fn macro_batch(_: Data<JobBatch>) -> Result<Batch<TaskState>, TaskError> {
+    Ok(Batch::new(vec![TaskState::complete(())]))
 }
 
 #[bundles::task_batch(name = "qualified_batch")]
 async fn qualified_batch(_: Data<vyuh::tasks::Batch<QualifiedJob>>) {}
 
-async fn direct_batch(_: Data<Batch<Job>>) -> Result<(), Error> {
+async fn direct_batch(_: Data<Batch<Job>>) -> Result<(), TaskError> {
     Ok(())
 }
 

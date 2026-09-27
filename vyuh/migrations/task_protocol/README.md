@@ -17,7 +17,12 @@ workers can verify it, preserve global token buckets, and recover leased tasks.
 4. Integrate `0003_result_preflight.yaml`, `0004_result_columns.yaml`, and
    `0005_persisted_results.yaml` in dependency order. Do not edit or reapply the
    earlier migration identities on installations already using resume results.
-5. Deploy handlers using `TaskState::complete(value)` and
+5. Apply `0006_cancellation_column.yaml` and `0007_cancellation_protocol.yaml`.
+   Existing rows receive `cancelled = false`. If your desired-schema migration
+   already adds the column, use it instead of 0006 and adjust the dependency of
+   0007 before first application. Existing result and resume bytes are unchanged.
+6. Apply the Work/Flow and typed-return protocol templates below.
+7. Deploy handlers using `TaskState::complete(value)` and
    `Option<Result<R, TaskFailure>>`, then start new workers.
 
 The data migration and its ledger entry must commit atomically. For MySQL-family
@@ -56,3 +61,60 @@ writers stopped throughout all three steps, including non-atomic MySQL DDL.
 Never roll back only the rename after converting data. The runtime accepts only
 the new protocol or a matching ledger-marked predecessor; it does not repair or
 upgrade task data at startup.
+
+## Store-owned cancellation
+
+The cancellation upgrade requires the preceding result protocol. The new
+ledger-tracked marker retains the predecessor policy digest, including when
+upgrading straight through from older installations. New workers reject
+unmarked predecessor policies. Run the schema and marker migrations with all
+workers and writers stopped; MySQL/MariaDB column DDL is non-atomic and separate
+from the transactional marker update. Startup never adds the column.
+
+## Work and Flow classification
+
+Apply `0008_work_flow_protocol` only after stopping all workers and writers and
+explicitly choosing which handlers become synchronous `bundles::flow` registrations.
+Continuable Work handlers may remain Work with the typed-return protocol below.
+No schema column is added. The existing kind integers remain Work=0, Flow=1.
+
+Insert an application-owned, ledger-tracked data migration before this template
+and make the template depend on it. Its explicit handler-name list identifies
+every converted Flow, across every retained status:
+
+```sql
+UPDATE vyuh_tasks SET kind = 1 WHERE name IN ('checkout', 'approve_document');
+```
+
+Do not select only suspended rows: pending, sleeping, running, and terminal
+records also retain their handler classification. Preserve all other columns,
+including checkpoint/result bytes, lineage, timestamps, leases and counters.
+Do not infer classification from checkpoint JSON or task status.
+
+Before applying, compare every retained active row with the application's
+name/kind roster. Check that Work and Flow checkpoint and resume types remain
+decodable; a checkpoint alone does not imply Flow. Report and resolve mismatches explicitly; do not clear
+state or relabel unknown handlers. Repeat this preflight after reclassification
+and before restarting any process.
+Each backend includes `flow_preflight.sql`; replace its example roster with the
+complete application registry. A zero-row result is necessary, but does not
+replace application-specific decoding of checkpoint and resume types.
+
+The template advances only recognized predecessor protocol markers and retains
+their policy digest for startup verification. New runtime fingerprints include
+registered name/kind pairs; mismatched deployments are rejected. Startup does
+not migrate or repair task rows. Never run mixed old/new workers or writers.
+Applied migration identities must not be edited or replayed.
+
+## Typed returns and continuable Work
+
+Apply `0009_typed_returns_protocol` after 0008, with workers/writers stopped.
+This advances only the protocol marker to enable Work suspension. No task column,
+result envelope, checkpoint, status, or schedule is rewritten. New workers verify
+the exact predecessor policy digest; an unmarked v4 runtime is rejected.
+
+Migrate handler signatures to `TaskState<T>` / `FlowState<T>`, infallible
+`complete(value)`, and `Result<_, TaskError>` / `Result<_, FlowError>`.
+Infrastructure APIs now return `TaskRuntimeError`. Keep input and output JSON
+representations compatible with retained tasks. Work can extract Continuation and
+suspend, but cannot sleep or spawn. No mixed-version deployment is supported.

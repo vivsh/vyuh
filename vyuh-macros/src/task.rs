@@ -18,15 +18,24 @@ struct TaskArgs {
 
 /// Unified implementation for both free functions and methods
 pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, false)
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::task })
 }
 
 /// Registers a value-only local batch handler.
 pub(crate) fn parse_task_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, true)
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::task_batch })
 }
 
-fn parse_task_as(attr: TokenStream, item: TokenStream, batch: bool) -> TokenStream {
+/// Registers synchronous orchestration; Rust bounds validate its signature.
+pub(crate) fn parse_flow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::flow })
+}
+
+fn parse_task_as(
+    attr: TokenStream,
+    item: TokenStream,
+    register: proc_macro2::TokenStream,
+) -> TokenStream {
     let args = if attr.is_empty() {
         TaskArgs::default()
     } else {
@@ -74,11 +83,6 @@ fn parse_task_as(attr: TokenStream, item: TokenStream, batch: bool) -> TokenStre
         .idempotency
         .map(|policy| quote! { .idempotency(#policy) })
         .unwrap_or_default();
-    let register = if batch {
-        quote! { ::vyuh::bundles::task_batch }
-    } else {
-        quote! { ::vyuh::bundles::task }
-    };
 
     let expanded = quote! {
         #original

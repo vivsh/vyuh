@@ -4,7 +4,7 @@ use std::{any::Any, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::{DEFAULT_TASK_LANE, TaskError, TaskLane, TaskStatus};
+use super::{DEFAULT_TASK_LANE, TaskLane, TaskRuntimeError, TaskStatus};
 
 /// Canonical identifier for one durable task execution.
 #[derive(
@@ -48,7 +48,7 @@ impl std::str::FromStr for TaskId {
     }
 }
 
-/// Durable workflow classification reserved for task orchestration.
+/// Registration-derived handler capabilities, sharing one durable task lifecycle.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
@@ -70,11 +70,11 @@ impl TaskKind {
 
     /// Converts the stable persisted representation into a task kind.
     #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskRuntimeError> {
         match value {
             0 => Ok(Self::Work),
             1 => Ok(Self::Flow),
-            _ => Err(TaskError::TaskExecutionError(format!(
+            _ => Err(TaskRuntimeError::TaskExecutionError(format!(
                 "invalid task kind value {value}"
             ))),
         }
@@ -107,9 +107,10 @@ impl<T> TaskIdempotency<T> {
         }
     }
 
-    pub(crate) fn key_for(self, input: &T) -> Result<String, TaskError> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.key)(input)))
-            .map_err(|_| TaskError::InvalidOptions("task idempotency callback panicked".into()))
+    pub(crate) fn key_for(self, input: &T) -> Result<String, TaskRuntimeError> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.key)(input))).map_err(|_| {
+            TaskRuntimeError::InvalidOptions("task idempotency callback panicked".into())
+        })
     }
 }
 
@@ -189,7 +190,7 @@ pub(crate) struct TaskDefinitionPolicy<T> {
     pub(crate) idempotency: Option<TaskIdempotency<T>>,
 }
 
-type KeyFn = Arc<dyn Fn(&dyn Any) -> Result<String, TaskError> + Send + Sync + 'static>;
+type KeyFn = Arc<dyn Fn(&dyn Any) -> Result<String, TaskRuntimeError> + Send + Sync + 'static>;
 
 /// Resolved immutable execution policy for a registered task.
 #[derive(Clone)]
@@ -214,12 +215,15 @@ impl<T: 'static> TaskDefinitionPolicy<T> {
 }
 
 impl TaskPolicy {
-    pub(crate) fn key_for<T: 'static>(&self, input: &T) -> Result<Option<String>, TaskError> {
+    pub(crate) fn key_for<T: 'static>(
+        &self,
+        input: &T,
+    ) -> Result<Option<String>, TaskRuntimeError> {
         self.key.as_ref().map(|key| key(input)).transpose()
     }
 
     /// Resolves an idempotency key from a type-erased registered task payload.
-    pub(crate) fn key_for_box(&self, input: &dyn Any) -> Result<Option<String>, TaskError> {
+    pub(crate) fn key_for_box(&self, input: &dyn Any) -> Result<Option<String>, TaskRuntimeError> {
         self.key.as_ref().map(|key| key(input)).transpose()
     }
 }
@@ -229,7 +233,9 @@ fn erased_key<T: 'static>(policy: TaskIdempotency<T>) -> KeyFn {
     Arc::new(move |input| {
         input
             .downcast_ref::<T>()
-            .ok_or_else(|| TaskError::TaskExecutionError("task key input type changed".into()))
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("task key input type changed".into())
+            })
             .and_then(|input| policy.key_for(input))
     })
 }
@@ -417,6 +423,8 @@ pub struct TaskRecord {
     pub state: Option<String>,
     pub resume_input: Option<String>,
     pub status: TaskStatus,
+    /// Durable cancellation intent; terminal status is applied by the store turn.
+    pub cancelled: bool,
     pub attempts: i32,
     pub step_attempts: i32,
     pub lane: String,
@@ -445,15 +453,15 @@ impl TaskRecord {
     }
 
     /// Deserializes the submitted task input into its application type.
-    pub fn input<T>(&self) -> Result<T, TaskError>
+    pub fn input<T>(&self) -> Result<T, TaskRuntimeError>
     where
         T: serde::de::DeserializeOwned,
     {
-        serde_json::from_str(&self.input).map_err(TaskError::from)
+        serde_json::from_str(&self.input).map_err(TaskRuntimeError::from)
     }
 
     /// Deserializes suspended task state when one is present.
-    pub fn state<T>(&self) -> Result<Option<T>, TaskError>
+    pub fn state<T>(&self) -> Result<Option<T>, TaskRuntimeError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -461,11 +469,11 @@ impl TaskRecord {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(TaskError::from)
+            .map_err(TaskRuntimeError::from)
     }
 
     /// Deserializes the payload supplied when a suspended task resumed.
-    pub fn resume_input<T>(&self) -> Result<Option<Result<T, super::TaskFailure>>, TaskError>
+    pub fn resume_input<T>(&self) -> Result<Option<Result<T, super::TaskFailure>>, TaskRuntimeError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -473,7 +481,7 @@ impl TaskRecord {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(TaskError::from)
+            .map_err(TaskRuntimeError::from)
     }
 }
 
@@ -489,6 +497,7 @@ pub struct TaskInfo {
     pub(crate) state: Option<String>,
     pub(crate) resume_input: Option<String>,
     pub(crate) status: TaskStatus,
+    pub(crate) cancelled: bool,
     pub(crate) attempts: i32,
     pub(crate) step_attempts: i32,
     pub(crate) lane: String,
@@ -504,6 +513,11 @@ pub struct TaskInfo {
 }
 
 impl TaskInfo {
+    /// Returns whether cancellation was requested, even before failure is finalized.
+    pub const fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
     /// Returns the canonical durable execution identifier.
     pub const fn id(&self) -> TaskId {
         self.id
@@ -557,7 +571,7 @@ impl TaskInfo {
     /// Decodes the latest result; malformed JSON or a mismatched success type returns an error.
     pub fn last_result<T: serde::de::DeserializeOwned>(
         &self,
-    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskError> {
+    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskRuntimeError> {
         decode_optional(&self.last_result)
     }
 
@@ -576,7 +590,8 @@ impl TaskInfo {
         self.leased_until
     }
 
-    /// Returns the next eligibility timestamp for pending work.
+    /// Returns the mutable processing timer, not an audit of the original schedule.
+    /// Cancellation may advance this timestamp without authorizing handler execution.
     pub const fn ready_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.ready_at
     }
@@ -597,19 +612,19 @@ impl TaskInfo {
     }
 
     /// Deserializes the original typed input.
-    pub fn input<T: serde::de::DeserializeOwned>(&self) -> Result<T, TaskError> {
-        serde_json::from_str(&self.input).map_err(TaskError::from)
+    pub fn input<T: serde::de::DeserializeOwned>(&self) -> Result<T, TaskRuntimeError> {
+        serde_json::from_str(&self.input).map_err(TaskRuntimeError::from)
     }
 
     /// Deserializes optional continuation state.
-    pub fn state<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, TaskError> {
+    pub fn state<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, TaskRuntimeError> {
         decode_optional(&self.state)
     }
 
     /// Deserializes optional resume input.
     pub fn resume_input<T: serde::de::DeserializeOwned>(
         &self,
-    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskError> {
+    ) -> Result<Option<Result<T, super::TaskFailure>>, TaskRuntimeError> {
         decode_optional(&self.resume_input)
     }
 }
@@ -626,6 +641,7 @@ impl From<TaskRecord> for TaskInfo {
             state: record.state,
             resume_input: record.resume_input,
             status: record.status,
+            cancelled: record.cancelled,
             attempts: record.attempts,
             step_attempts: record.step_attempts,
             lane: record.lane,
@@ -644,12 +660,12 @@ impl From<TaskRecord> for TaskInfo {
 
 fn decode_optional<T: serde::de::DeserializeOwned>(
     value: &Option<String>,
-) -> Result<Option<T>, TaskError> {
+) -> Result<Option<T>, TaskRuntimeError> {
     value
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ pub enum BundleError {
     Signal(#[from] Arc<SignalError>),
 
     #[error(transparent)]
-    Task(#[from] Arc<crate::tasks::TaskError>),
+    Task(#[from] Arc<crate::tasks::TaskRuntimeError>),
 
     #[error(transparent)]
     Emitter(#[from] Arc<crate::emitters::EmitterError>),

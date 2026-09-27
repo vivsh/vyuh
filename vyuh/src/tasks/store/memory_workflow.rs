@@ -12,7 +12,7 @@ pub(super) fn atomic_turn(
     batch_size: usize,
     lease: Duration,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<TaskTick, TaskError> {
+) -> Result<TaskTick, TaskRuntimeError> {
     let rates = state.rates.clone();
     let locks = state.lane_locks.clone();
     let mut undo = Vec::new();
@@ -42,14 +42,15 @@ fn run_turn(
     lease: Duration,
     now: chrono::DateTime<chrono::Utc>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<TaskTick, TaskError> {
+) -> Result<TaskTick, TaskRuntimeError> {
     let (children, mut deliveries) = commit_outcomes_state(state, runner, commits, now, undo)?;
     let phases = state
         .lane_locks
         .iter()
         .map(|(name, row)| (name.clone(), row.phase))
         .collect::<HashMap<_, _>>();
-    let lost = renew_leases_state(state, runner, renewals, lease, now, undo)?;
+    let (lost, cancelled) =
+        renew_leases_state(state, runner, renewals, lease, now, undo, &mut deliveries)?;
     let mut poll = claim_tasks_state(
         state,
         runner,
@@ -65,6 +66,7 @@ fn run_turn(
     Ok(TaskTick {
         poll,
         lost,
+        cancelled,
         wake_lanes,
     })
 }
@@ -81,7 +83,7 @@ pub(super) fn stage_outcomes(
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
     ),
-    TaskError,
+    TaskRuntimeError,
 > {
     let mut updates = Vec::with_capacity(commits.len());
     let mut children = Vec::new();
@@ -89,7 +91,9 @@ pub(super) fn stage_outcomes(
     let mut seen = std::collections::HashSet::with_capacity(commits.len());
     for commit in commits {
         if !seen.insert(commit.task_id) {
-            return Err(TaskError::InvalidOptions("duplicate task outcome".into()));
+            return Err(TaskRuntimeError::InvalidOptions(
+                "duplicate task outcome".into(),
+            ));
         }
         let retry = configured_retry(state, commit.lane)?;
         if !memory_commit_allowed(state, runner, commit, now)? {
@@ -103,7 +107,7 @@ pub(super) fn stage_outcomes(
             continue;
         };
         if task.lane != commit.lane.as_str() {
-            return Err(TaskError::UnknownLane(task.lane.clone()));
+            return Err(TaskRuntimeError::UnknownLane(task.lane.clone()));
         }
         let task = staged_task(
             state,
@@ -128,13 +132,21 @@ fn staged_task(
     now: chrono::DateTime<chrono::Utc>,
     children: &mut Vec<TaskRecord>,
     deliveries: &mut Vec<(TaskId, String)>,
-) -> Result<TaskRecord, TaskError> {
+) -> Result<TaskRecord, TaskRuntimeError> {
     let conf = state
         .conf
         .as_ref()
-        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task store is not initialized".into()))?;
     let mut task = task.clone();
-    let outcome = prepare_spawn(state, &task, outcome, children, now)?;
+    let outcome = if task.cancelled {
+        super::super::workflow::cancellation()
+    } else if let Some(error) =
+        super::super::workflow::capability_error(task.kind, &outcome, &conf.handlers)
+    {
+        TaskOutcome::fail(error)
+    } else {
+        prepare_spawn(state, &task, outcome, children, now)?
+    };
     apply_outcome(&mut task, outcome, retry, now)?;
     finalize_idempotency(&mut task, conf, now)?;
     queue_delivery(&task, deliveries)?;
@@ -148,7 +160,7 @@ fn prepare_spawn(
     outcome: TaskOutcome,
     children: &mut Vec<TaskRecord>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<TaskOutcome, TaskError> {
+) -> Result<TaskOutcome, TaskRuntimeError> {
     let TaskOutcome::Spawn {
         state: checkpoint,
         mut child,
@@ -158,7 +170,7 @@ fn prepare_spawn(
     };
     validate_write_lanes(state, std::slice::from_ref(&child))?;
     if child.ignore_conflicts {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "spawn cannot ignore conflicts".into(),
         ));
     }
@@ -166,7 +178,8 @@ fn prepare_spawn(
     child.record.root_id = Some(parent.root_id.unwrap_or(parent.id));
     match stage_write(&state.tasks, children, child, now) {
         Ok(TaskReceipt::Queued(_)) => Ok(TaskOutcome::Suspend { state: checkpoint }),
-        Ok(_) | Err(TaskError::IdempotencyConflict(_) | TaskError::AlreadyExists(_)) => Ok(
+        Ok(_)
+        | Err(TaskRuntimeError::IdempotencyConflict(_) | TaskRuntimeError::AlreadyExists(_)) => Ok(
             TaskOutcome::fail("Child task identity conflicts with an existing task"),
         ),
         Err(error) => Err(error),
@@ -177,7 +190,7 @@ fn prepare_spawn(
 pub(super) fn queue_delivery(
     task: &TaskRecord,
     deliveries: &mut Vec<(TaskId, String)>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if let Some(parent) = task.parent_id
         && let Some(result) =
             super::super::workflow::terminal_result(task.status, task.last_result.as_deref())?
@@ -203,7 +216,7 @@ pub(super) fn finalize_workflow(
         if let Some(parent) = state
             .tasks
             .iter_mut()
-            .find(|task| task.id == id && task.status == TaskStatus::Suspended)
+            .find(|task| task.id == id && !task.cancelled && task.status == TaskStatus::Suspended)
         {
             parent.status = TaskStatus::Pending;
             parent.resume_input = Some(result);

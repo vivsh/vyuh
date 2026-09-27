@@ -13,7 +13,7 @@ pub(super) struct PreparedWrite {
 pub(super) fn prepare_writes(
     writes: Vec<TaskWrite>,
     now: DateTime<Utc>,
-) -> Result<(Vec<PreparedWrite>, Vec<TaskIdempotencyRow>), TaskError> {
+) -> Result<(Vec<PreparedWrite>, Vec<TaskIdempotencyRow>), TaskRuntimeError> {
     let mut prepared = Vec::with_capacity(writes.len());
     let mut key_rows = Vec::new();
     let mut unique = HashSet::new();
@@ -34,7 +34,10 @@ pub(super) fn prepare_writes(
     Ok((prepared, key_rows))
 }
 
-pub(super) fn normalize_write(write: &mut TaskWrite, now: DateTime<Utc>) -> Result<(), TaskError> {
+pub(super) fn normalize_write(
+    write: &mut TaskWrite,
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
     write.record.created_at = now;
     write.record.updated_at = now;
     write.record.ready_at = Some(match write.initial_delay {
@@ -48,7 +51,7 @@ pub(super) fn normalize_write(write: &mut TaskWrite, now: DateTime<Utc>) -> Resu
 pub(super) async fn validate_write_lanes(
     store: &DbTaskStore,
     writes: &[TaskWrite],
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let conf = store.runtime_conf.read().await;
     for write in writes {
         let lane = &write.record.lane;
@@ -56,21 +59,24 @@ pub(super) async fn validate_write_lanes(
             .as_ref()
             .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
         if !configured {
-            return Err(TaskError::UnknownLane(lane.clone()));
+            return Err(TaskRuntimeError::UnknownLane(lane.clone()));
         }
         let handler = &write.record.name;
         if !conf
             .as_ref()
-            .is_some_and(|conf| conf.handlers.iter().any(|name| name == handler))
+            .is_some_and(|conf| conf.handlers.iter().any(|(name, _)| name == handler))
         {
-            return Err(TaskError::TaskNotFound(handler.clone()));
+            return Err(TaskRuntimeError::TaskNotFound(handler.clone()));
         }
     }
     Ok(())
 }
 
 /// Validates one persisted lane name against initialized durable policy.
-pub(super) async fn require_runtime_lane(store: &DbTaskStore, lane: &str) -> Result<(), TaskError> {
+pub(super) async fn require_runtime_lane(
+    store: &DbTaskStore,
+    lane: &str,
+) -> Result<(), TaskRuntimeError> {
     let configured = store
         .runtime_conf
         .read()
@@ -79,20 +85,17 @@ pub(super) async fn require_runtime_lane(store: &DbTaskStore, lane: &str) -> Res
         .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
     configured
         .then_some(())
-        .ok_or_else(|| TaskError::UnknownLane(lane.into()))
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.into()))
 }
 
 /// Holds a shared durable policy lock across one mutation transaction.
 pub(super) async fn verify_policy(
     store: &DbTaskStore,
     transaction: &mut db::DbTransaction<'_>,
-) -> Result<(), TaskError> {
-    let conf = store
-        .runtime_conf
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| TaskError::InvalidConfig("task runtime was not initialized".into()))?;
+) -> Result<(), TaskRuntimeError> {
+    let conf = store.runtime_conf.read().await.clone().ok_or_else(|| {
+        TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
+    })?;
     super::super::runtime::verify_runtime_policy(transaction, &conf).await
 }
 
@@ -101,7 +104,7 @@ pub(in super::super) async fn delete_expired_owners(
     transaction: &mut db::DbTransaction<'_>,
     now: DateTime<Utc>,
     limit: usize,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let table = DbTaskStore::idempotency_table();
     let expired = db::from(&table)
         .filter(table.expires_at.lte(db::val(Some(now))))
@@ -126,14 +129,14 @@ pub(in super::super) async fn delete_expired_owners(
 pub(super) async fn load_active_lane_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Vec<TaskRow>, TaskError> {
+) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     use crate::db::backend::RowLockExt as _;
     load_active_lane_scope(lane)
         .for_update()
         .all::<TaskRow>()
         .exec(transaction)
         .await
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
 #[cfg(feature = "sqlite")]
@@ -141,12 +144,12 @@ pub(super) async fn load_active_lane_for_update(
 pub(super) async fn load_active_lane_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Vec<TaskRow>, TaskError> {
+) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     load_active_lane_scope(lane)
         .all::<TaskRow>()
         .exec(transaction)
         .await
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
 /// Selects every non-terminal row that must move as one lane lifecycle unit.
@@ -166,7 +169,7 @@ pub(super) fn load_active_lane_scope(lane: &str) -> db::queries::QueryScope {
 pub(super) fn resolve_writes(
     prepared: Vec<PreparedWrite>,
     owners: Vec<TaskIdempotencyRow>,
-) -> Result<(Vec<TaskRow>, Vec<TaskReceipt>), TaskError> {
+) -> Result<(Vec<TaskRow>, Vec<TaskReceipt>), TaskRuntimeError> {
     let owners = owners
         .into_iter()
         .map(|owner| ((owner.task_name.clone(), owner.key_value.clone()), owner))
@@ -191,9 +194,10 @@ pub(super) fn resolve_owner(
     write: &TaskWrite,
     owner: Option<&TaskIdempotencyRow>,
     task_id: TaskId,
-) -> Result<TaskReceipt, TaskError> {
-    let owner = owner
-        .ok_or_else(|| TaskError::TaskExecutionError("idempotency owner was not stored".into()))?;
+) -> Result<TaskReceipt, TaskRuntimeError> {
+    let owner = owner.ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("idempotency owner was not stored".into())
+    })?;
     if owner.task_id == task_id.into_uuid() {
         return Ok(TaskReceipt::Queued(task_id));
     }
@@ -202,7 +206,9 @@ pub(super) fn resolve_owner(
     } else if write.ignore_conflicts {
         Ok(TaskReceipt::Ignored(TaskId::new(owner.task_id)))
     } else {
-        Err(TaskError::IdempotencyConflict(TaskId::new(owner.task_id)))
+        Err(TaskRuntimeError::IdempotencyConflict(TaskId::new(
+            owner.task_id,
+        )))
     }
 }
 
@@ -211,9 +217,9 @@ pub(super) fn key_row(
     record: &TaskRecord,
     key: String,
     now: DateTime<Utc>,
-) -> Result<TaskIdempotencyRow, TaskError> {
+) -> Result<TaskIdempotencyRow, TaskRuntimeError> {
     let fingerprint = record.idempotency_fingerprint.clone().ok_or_else(|| {
-        TaskError::TaskExecutionError("idempotent task is missing its fingerprint".into())
+        TaskRuntimeError::TaskExecutionError("idempotent task is missing its fingerprint".into())
     })?;
     Ok(TaskIdempotencyRow {
         id: uuid::Uuid::now_v7(),
@@ -232,7 +238,7 @@ pub(super) async fn upsert_key_owners(
     transaction: &mut db::DbTransaction<'_>,
     rows: &[TaskIdempotencyRow],
     batch_size: usize,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -251,7 +257,7 @@ pub(super) async fn upsert_key_owners(
 pub(super) async fn load_key_owners(
     transaction: &mut db::DbTransaction<'_>,
     rows: &[TaskIdempotencyRow],
-) -> Result<Vec<TaskIdempotencyRow>, TaskError> {
+) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
     use crate::db::backend::RowLockExt as _;
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -262,7 +268,7 @@ pub(super) async fn load_key_owners(
         .all::<TaskIdempotencyRow>()
         .exec(transaction)
         .await
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
 #[cfg(feature = "sqlite")]
@@ -270,7 +276,7 @@ pub(super) async fn load_key_owners(
 pub(super) async fn load_key_owners(
     transaction: &mut db::DbTransaction<'_>,
     rows: &[TaskIdempotencyRow],
-) -> Result<Vec<TaskIdempotencyRow>, TaskError> {
+) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
@@ -279,12 +285,12 @@ pub(super) async fn load_key_owners(
         .all::<TaskIdempotencyRow>()
         .exec(transaction)
         .await
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
 pub(super) fn owner_scope(
     rows: &[TaskIdempotencyRow],
-) -> Result<db::queries::QueryScope, TaskError> {
+) -> Result<db::queries::QueryScope, TaskRuntimeError> {
     let table = DbTaskStore::idempotency_table();
     let predicate = rows
         .iter()
@@ -295,7 +301,9 @@ pub(super) fn owner_scope(
                 .and(table.key_value.eq(db::val(row.key_value.clone())))
         })
         .reduce(db::queries::Predicate::or)
-        .ok_or_else(|| TaskError::TaskExecutionError("idempotency owner set is empty".into()))?;
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("idempotency owner set is empty".into())
+        })?;
     Ok(db::from(&table).filter(predicate))
 }
 
@@ -305,7 +313,7 @@ pub(super) async fn replace_expired_owners(
     mut owners: Vec<TaskIdempotencyRow>,
     candidates: &[TaskIdempotencyRow],
     now: DateTime<Utc>,
-) -> Result<Vec<TaskIdempotencyRow>, TaskError> {
+) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
     let expired = expired_replacements(&owners, candidates, now);
     if expired.is_empty() {
         return Ok(owners);

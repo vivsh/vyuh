@@ -3,7 +3,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use crate::tasks::{
-    IdempotencyRetention, TaskError, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt,
+    IdempotencyRetention, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt, TaskRuntimeError,
 };
 
 use super::{TaskOutcome, TaskRecord, TaskWrite};
@@ -69,7 +69,7 @@ pub enum LaneOwnerPhase {
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 impl LaneOwnerPhase {
     /// Converts one stable persisted phase value.
-    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskRuntimeError> {
         match value {
             0 => Ok(Self::Active),
             1 => Ok(Self::Idling),
@@ -77,7 +77,7 @@ impl LaneOwnerPhase {
             3 => Ok(Self::Busying),
             4 => Ok(Self::IdleFailed),
             5 => Ok(Self::BusyFailed),
-            _ => Err(TaskError::TaskExecutionError(format!(
+            _ => Err(TaskRuntimeError::TaskExecutionError(format!(
                 "invalid task lane owner phase {value}"
             ))),
         }
@@ -133,6 +133,9 @@ pub struct TaskTick {
     pub poll: TaskPoll,
     /// Running tasks that no longer belong to this runner.
     pub lost: Vec<TaskId>,
+    /// Subset of lost leases whose durable task is terminally cancelled.
+    /// Shared invocations may finish while these members' results are discarded.
+    pub cancelled: Vec<TaskId>,
 }
 
 #[cfg(test)]
@@ -173,8 +176,8 @@ pub struct TaskLease {
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct TaskStoreConf {
-    /// Stable handler names understood by this worker deployment.
-    pub handlers: Vec<String>,
+    /// Stable handler names and classifications understood by this worker deployment.
+    pub handlers: Vec<(String, crate::tasks::TaskKind)>,
     /// Validated named lanes; stores coordinate only their global rate policies.
     pub lanes: Vec<TaskLaneConf>,
     /// Immutable per-handler idempotency policies shared by all workers.
@@ -250,32 +253,38 @@ impl TaskStoreConf {
 /// Persistence and coordination boundary for durable task execution.
 #[allow(dead_code)]
 pub(crate) trait AbstractTaskStore {
+    /// Records cancellation intent only for a not-yet-cancelled nonterminal task.
+    fn cancel(
+        &self,
+        id: TaskId,
+    ) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + '_;
+
     /// Validates or initializes store-wide task-lane coordination state.
     fn initialize(
         &self,
         conf: TaskStoreConf,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + '_;
+    ) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + '_;
 
     /// Claims bounded work for every supplied lane and returns its wake hint.
     fn claim_tasks<'a>(
         &'a self,
         runner_id: &'a str,
         claims: &'a [LaneClaim],
-    ) -> impl Future<Output = Result<TaskPoll, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<TaskPoll, TaskRuntimeError>> + Send + 'a;
 
     /// Commits multiple outcomes owned by one runner.
     fn commit_outcomes<'a>(
         &'a self,
         runner_id: &'a str,
         commits: &'a [TaskCommit],
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + 'a;
 
     /// Renews leases still owned by one runner and returns ownership losses.
     fn renew_leases<'a>(
         &'a self,
         runner_id: &'a str,
         leases: &'a [TaskLease],
-    ) -> impl Future<Output = Result<Vec<TaskId>, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<Vec<TaskId>, TaskRuntimeError>> + Send + 'a;
 
     /// Runs one atomic scheduler turn for one runner.
     fn tick<'a>(
@@ -284,55 +293,59 @@ pub(crate) trait AbstractTaskStore {
         claims: &'a [LaneClaim],
         commits: &'a [TaskCommit],
         renewals: &'a [TaskLease],
-    ) -> impl Future<Output = Result<TaskTick, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<TaskTick, TaskRuntimeError>> + Send + 'a;
 
     /// Stores a batch of task intents and resolves idempotency receipts.
     fn store_tasks(
         &self,
         writes: Vec<TaskWrite>,
-    ) -> impl Future<Output = Result<Vec<TaskReceipt>, TaskError>> + Send + '_;
+    ) -> impl Future<Output = Result<Vec<TaskReceipt>, TaskRuntimeError>> + Send + '_;
 
     /// Reads durable cursors and the store-relative current time in one snapshot.
     fn schedule_snapshot<'a>(
         &'a self,
         names: &'a [String],
-    ) -> impl Future<Output = Result<TaskScheduleSnapshot, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<TaskScheduleSnapshot, TaskRuntimeError>> + Send + 'a;
 
     /// Stores one task and advances its durable schedule cursor atomically.
     fn store_scheduled(
         &self,
         write: ScheduledTaskWrite,
-    ) -> impl Future<Output = Result<Option<TaskReceipt>, TaskError>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<TaskReceipt>, TaskRuntimeError>> + Send + '_;
 
     /// Moves non-running work between configured lanes.
     fn reassign_lane<'a>(
         &'a self,
         from: &'a str,
         to: &'a str,
-    ) -> impl Future<Output = Result<u64, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<u64, TaskRuntimeError>> + Send + 'a;
 
     /// Resumes one suspended task with typed serialized input.
     fn resume<'a>(
         &'a self,
         id: TaskId,
         input: String,
-    ) -> impl Future<Output = Result<bool, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + 'a;
 
     /// Lists persisted tasks through bounded filters.
     fn list_tasks(
         &self,
         filter: TaskFilter,
-    ) -> impl Future<Output = Result<crate::routes::Page<TaskRecord>, TaskError>> + Send + '_;
+    ) -> impl Future<Output = Result<crate::routes::Page<TaskRecord>, TaskRuntimeError>> + Send + '_;
 
     /// Reads one persisted task by identifier.
     fn get_task(
         &self,
         id: TaskId,
-    ) -> impl Future<Output = Result<Option<TaskRecord>, TaskError>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<TaskRecord>, TaskRuntimeError>> + Send + '_;
 }
 
 impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
-    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskError> {
+    async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        (**self).cancel(id).await
+    }
+
+    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskRuntimeError> {
         (**self).initialize(conf).await
     }
 
@@ -340,7 +353,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         &self,
         runner_id: &str,
         claims: &[LaneClaim],
-    ) -> Result<TaskPoll, TaskError> {
+    ) -> Result<TaskPoll, TaskRuntimeError> {
         (**self).claim_tasks(runner_id, claims).await
     }
 
@@ -348,7 +361,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         &self,
         runner_id: &str,
         commits: &[TaskCommit],
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskRuntimeError> {
         (**self).commit_outcomes(runner_id, commits).await
     }
 
@@ -356,7 +369,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         &self,
         runner_id: &str,
         leases: &[TaskLease],
-    ) -> Result<Vec<TaskId>, TaskError> {
+    ) -> Result<Vec<TaskId>, TaskRuntimeError> {
         (**self).renew_leases(runner_id, leases).await
     }
 
@@ -366,61 +379,74 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
         claims: &[LaneClaim],
         commits: &[TaskCommit],
         renewals: &[TaskLease],
-    ) -> Result<TaskTick, TaskError> {
+    ) -> Result<TaskTick, TaskRuntimeError> {
         (**self).tick(runner_id, claims, commits, renewals).await
     }
 
-    async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
+    async fn store_tasks(
+        &self,
+        writes: Vec<TaskWrite>,
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         (**self).store_tasks(writes).await
     }
 
-    async fn schedule_snapshot(&self, names: &[String]) -> Result<TaskScheduleSnapshot, TaskError> {
+    async fn schedule_snapshot(
+        &self,
+        names: &[String],
+    ) -> Result<TaskScheduleSnapshot, TaskRuntimeError> {
         (**self).schedule_snapshot(names).await
     }
 
     async fn store_scheduled(
         &self,
         write: ScheduledTaskWrite,
-    ) -> Result<Option<TaskReceipt>, TaskError> {
+    ) -> Result<Option<TaskReceipt>, TaskRuntimeError> {
         (**self).store_scheduled(write).await
     }
 
-    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskRuntimeError> {
         (**self).reassign_lane(from, to).await
     }
 
-    async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskError> {
+    async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         (**self).resume(id, input).await
     }
 
     async fn list_tasks(
         &self,
         filter: TaskFilter,
-    ) -> Result<crate::routes::Page<TaskRecord>, TaskError> {
+    ) -> Result<crate::routes::Page<TaskRecord>, TaskRuntimeError> {
         (**self).list_tasks(filter).await
     }
 
-    async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskError> {
+    async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskRuntimeError> {
         (**self).get_task(id).await
     }
 }
 
 /// Produces the durable policy identity shared by every store implementation.
 pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-v2:{:.58}", policy_hash(conf, 2).to_hex())
+    format!("tr-v5:{:.58}", policy_hash(conf, 5).to_hex())
 }
+
+#[cfg(all(test, any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+#[path = "tests/contract.rs"]
+mod tests;
 
 /// Identifies the exact pre-upgrade policy so protocol migration cannot change live budgets.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) fn migration_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-r0:{:.58}", policy_hash(conf, 0).to_hex())
+    format!("tr-t0:{:.58}", policy_hash(conf, 0).to_hex())
 }
 
 /// Accepts only a ledger-marked predecessor with exactly the same runtime policy.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(crate) fn is_migrated_policy(conf: &TaskStoreConf, stored: &str) -> bool {
     stored == migration_fingerprint(conf)
-        || stored == format!("tr-r1:{:.58}", policy_hash(conf, 1).to_hex())
+        || stored == format!("tr-t1:{:.58}", policy_hash(conf, 1).to_hex())
+        || stored == format!("tr-t2:{:.58}", policy_hash(conf, 2).to_hex())
+        || stored == format!("tr-t3:{:.58}", policy_hash(conf, 3).to_hex())
+        || stored == format!("tr-t4:{:.58}", policy_hash(conf, 4).to_hex())
 }
 
 /// Hashes immutable deployment policy, optionally including the new result protocol.
@@ -432,13 +458,25 @@ fn policy_hash(conf: &TaskStoreConf, result_protocol: u8) -> blake3::Hash {
     if result_protocol >= 2 {
         hasher.update(b"task-last-result-json-32768-checkpoint-clear-v2\0");
     }
+    if result_protocol >= 3 {
+        hasher.update(b"task-store-owned-cancellation-finish-shared-v3\0");
+    }
     fingerprint_idempotency(&mut hasher, &conf.idempotency);
     fingerprint_schedules(&mut hasher, &conf.schedules);
-    let mut handlers = conf.handlers.iter().map(String::as_str).collect::<Vec<_>>();
-    handlers.sort_unstable();
-    for handler in handlers {
+    if result_protocol >= 4 {
+        hasher.update(b"task-work-flow-capabilities-v4\0");
+    }
+    if result_protocol >= 5 {
+        hasher.update(b"task-typed-returns-work-suspend-v5\0");
+    }
+    let mut handlers = conf.handlers.iter().collect::<Vec<_>>();
+    handlers.sort_unstable_by_key(|(name, _)| name);
+    for (handler, kind) in handlers {
         hasher.update(b"handler\0");
         hasher.update(handler.as_bytes());
+        if result_protocol >= 4 {
+            hasher.update(&[*kind as u8]);
+        }
         hasher.update(&[0xff]);
     }
     let mut lanes = conf.lanes.iter().collect::<Vec<_>>();

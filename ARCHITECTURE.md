@@ -68,7 +68,7 @@ The `vyuh` crate is organized around these subsystems:
 - `tasks` provides typed input, durable background task registration,
   immediate transactional submission, named concurrency lanes, batched claims
   and commits, optional process-local `Data<Batch<T>>` handler invocation,
-  store-owned parent/root lineage, storage-only kind metadata, lane-owned retry/backoff and
+  store-owned parent/root lineage, registration-derived Work/Flow kind, lane-owned retry/backoff and
   idempotency-retention policy, local
   runner and store-wide database rate limits, adaptive polling, lease renewal,
   opt-in durable lane ownership, and explicit continuation lifecycle control.
@@ -86,12 +86,28 @@ The `vyuh` crate is organized around these subsystems:
   ownership: each row retains its own attempt, rate permit, lease, fenced
   commit, and inspection history while one batch future consumes one local
   handler-concurrency slot.
-  Handlers construct `TaskState::spawn` requests without accessing the site.
+  Flow handlers construct `FlowState::spawn` requests without accessing the site.
   The returned request owns its typed child payload, serialized checkpoint, and
   options only until internal preparation resolves it through the executing
   site's registry. It becomes the existing store-facing `TaskOutcome::Spawn`;
   no unresolved payload reaches the store, and no public task-facade spawn
   operation exists. Ordinary outcomes do not perform registry preparation.
+  Work uses task-specific async callable registration and `TaskState<T>` or direct
+  serializable outputs. Flow uses synchronous registration, `FlowState<T>`, and an
+  invocation-local context containing only input and an immutable record.
+  Both kinds support continuation extraction and suspension; only Flow can sleep
+  or spawn. Site/service and identity extraction remain unavailable to Flow.
+  Task-only return conversion serializes before type erasure through the existing
+  single callable future. Work TaskError chooses retry/failure, FlowError permits
+  only failure, and TaskRuntimeError describes infrastructure/API failures.
+  Inferred sealed return categories avoid macro type detection. Typed output and
+  conversion scratch are invocation-local, never parallel durable task state. The registered handler variant owns its
+  classification; immutable store configuration contains name/kind pairs.
+  Both kinds use the same spawned invocation and scheduler. Kind validation
+  occurs before application execution and capability validation occurs after
+  store fencing, with cancellation taking precedence. Neither adds SQL or a
+  separate recovery policy. Sync signatures restrict supported capabilities,
+  not arbitrary Rust effects or blocking operations.
   Spawn outcomes checkpoint a suspended parent and prepare one child; terminal
   child outcomes deliver Serde `Result` values through the existing resume input.
   Task updates, child inserts, and narrow parent updates use bounded Mool bulk
@@ -105,6 +121,19 @@ The `vyuh` crate is organized around these subsystems:
   delivery reuses the persisted result bytes. Result envelopes require a
   coordinated schema/data upgrade and versioned runtime policy; mixed old/new
   workers or writers are unsupported.
+  Cancellation records a store-owned intent flag and advances non-running
+  eligibility where necessary. Existing claim, renewal, and fenced outcome turns
+  finalize it as failure, atomically delivering child failures to parents after
+  claim selection. Runner and handler task snapshots remain immutable; only the
+  store applies authoritative task mutations. Cancellation uses existing lane
+  gates and polling, not a separate scan or scheduler, and cannot undo effects.
+  Renewal reports terminal cancellation separately from other lost leases in the
+  transient turn response. Shared invocations continue while cancelled members
+  leave the existing renewal index; their results are discarded, and unaffected
+  members keep renewing and committing. Actual ownership loss still aborts the
+  invocation. Execution capacity and lane-idle eligibility follow the invocation
+  lifetime, even when every member has been cancelled. Cancellation protects the
+  durable terminal result, not cessation of external execution.
 - `cache` provides an immutable per-site registry of asynchronous named cache
   providers. Its typed handles own JSON serialization, canonical provider and
   namespace key scoping, and bounded metrics; providers own byte storage, TTL,
@@ -164,7 +193,7 @@ The `vyuh` crate is organized around these subsystems:
   prevents incompatible workers from claiming concurrently. Task schemas are
   migration-owned and are never created or altered during site startup. Store
   internals are framework-owned; the ordinary site facade exposes only typed
-  submission, resume, reassignment, and read-only inspection.
+  submission, cancellation, resume, reassignment, and read-only inspection.
 - Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.

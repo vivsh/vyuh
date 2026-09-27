@@ -8,6 +8,12 @@ use crate::tasks::{
 };
 
 const EMAIL: TaskLane = TaskLane::new("email");
+
+#[path = "runner_cancellation.rs"]
+mod cancellation;
+
+#[path = "runner_flow.rs"]
+mod flow_tests;
 static HOOK_GATE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
@@ -40,7 +46,7 @@ async fn panic_lane_hook() -> Result<(), crate::Error> {
     panic!("deliberate lane hook panic");
 }
 
-fn panic_record() -> Result<Arc<TaskRecord>, TaskError> {
+fn panic_record() -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(Arc::new(TaskRecord {
         id: super::super::TaskId::new(uuid::Uuid::now_v7()),
@@ -52,6 +58,7 @@ fn panic_record() -> Result<Arc<TaskRecord>, TaskError> {
         state: None,
         resume_input: None,
         status: super::super::TaskStatus::Running,
+        cancelled: false,
         attempts: 1,
         step_attempts: 1,
         lane: DEFAULT_TASK_LANE.to_string(),
@@ -70,7 +77,7 @@ fn panic_record() -> Result<Arc<TaskRecord>, TaskError> {
 }
 
 /// Builds a two-lane runner with a claim batch smaller than global capacity.
-fn lane_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn lane_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(3)
         .batch_size(2)
@@ -85,7 +92,7 @@ fn lane_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn prefetch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn prefetch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(4)
         .batch_size(4)
@@ -95,7 +102,7 @@ fn prefetch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(4)
         .batch_size(4)
@@ -110,7 +117,7 @@ fn batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn locked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn locked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(2)
         .batch_size(2)
@@ -121,7 +128,7 @@ fn locked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn locked_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn locked_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(2)
         .batch_size(2)
@@ -137,7 +144,7 @@ fn locked_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskErro
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn multi_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn multi_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(4)
         .batch_size(4)
@@ -156,7 +163,7 @@ fn multi_batch_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn locked_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn locked_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(2)
         .batch_size(2)
@@ -171,7 +178,7 @@ fn locked_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn locked_batch_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn locked_batch_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(2)
         .batch_size(2)
@@ -191,13 +198,13 @@ fn locked_batch_rate_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, Tas
     AbstractTaskRunner::new(dispatcher)
 }
 
-fn lane_record(lane: TaskLane) -> Result<Arc<TaskRecord>, TaskError> {
+fn lane_record(lane: TaskLane) -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let mut record = panic_record()?.as_ref().clone();
     record.lane = lane.to_string();
     Ok(Arc::new(record))
 }
 
-fn named_record(name: &str) -> Result<Arc<TaskRecord>, TaskError> {
+fn named_record(name: &str) -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let mut record = panic_record()?.as_ref().clone();
     record.name = name.into();
     Ok(Arc::new(record))
@@ -205,23 +212,23 @@ fn named_record(name: &str) -> Result<Arc<TaskRecord>, TaskError> {
 
 /// Verifies batch handlers drain only matching work already in the local queue.
 #[test]
-fn batch_dispatch_groups_matching_queue_rows() -> Result<(), TaskError> {
+fn batch_dispatch_groups_matching_queue_rows() -> Result<(), TaskRuntimeError> {
     let mut runner = batch_runner()?;
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.tasks.push_back(named_record("batch-job")?);
     lane.tasks.push_back(named_record("ordinary-job")?);
     lane.tasks.push_back(named_record("batch-job")?);
 
     let (_, _, records) = runner
         .pop_ready()
-        .ok_or_else(|| TaskError::TaskExecutionError("batch was not dispatched".into()))?;
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("batch was not dispatched".into()))?;
     assert_eq!(records.len(), 2);
     assert!(records.iter().all(|record| record.name() == "batch-job"));
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     assert_eq!(lane.running, 1);
     assert_eq!(
         lane.tasks.front().map(|record| record.name()),
@@ -232,30 +239,30 @@ fn batch_dispatch_groups_matching_queue_rows() -> Result<(), TaskError> {
 
 /// Verifies interleaved batch-handler names each retain their own stable local ordering.
 #[test]
-fn batch_dispatch_keeps_handler_groups_separate() -> Result<(), TaskError> {
+fn batch_dispatch_keeps_handler_groups_separate() -> Result<(), TaskRuntimeError> {
     let mut runner = multi_batch_runner()?;
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.tasks.push_back(named_record("batch-job")?);
     lane.tasks.push_back(named_record("other-batch-job")?);
     lane.tasks.push_back(named_record("ordinary-job")?);
     lane.tasks.push_back(named_record("batch-job")?);
     lane.tasks.push_back(named_record("other-batch-job")?);
 
-    let (_, _, first) = runner
-        .pop_ready()
-        .ok_or_else(|| TaskError::TaskExecutionError("first batch was not dispatched".into()))?;
+    let (_, _, first) = runner.pop_ready().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("first batch was not dispatched".into())
+    })?;
     assert_eq!(first.len(), 2);
     assert!(first.iter().all(|record| record.name() == "batch-job"));
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.running = 0;
 
-    let (_, _, second) = runner
-        .pop_ready()
-        .ok_or_else(|| TaskError::TaskExecutionError("second batch was not dispatched".into()))?;
+    let (_, _, second) = runner.pop_ready().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("second batch was not dispatched".into())
+    })?;
     assert_eq!(second.len(), 2);
     assert!(
         second
@@ -274,11 +281,11 @@ fn batch_dispatch_keeps_handler_groups_separate() -> Result<(), TaskError> {
 
 /// Verifies local handler grouping is unchanged when its lane has durable ownership.
 #[test]
-fn locked_lane_batching_remains_local() -> Result<(), TaskError> {
+fn locked_lane_batching_remains_local() -> Result<(), TaskRuntimeError> {
     let mut runner = locked_batch_runner()?;
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.owner_token = Some("owner".into());
     lane.tasks.push_back(lane_record(EMAIL).map(|record| {
         let mut record = record.as_ref().clone();
@@ -291,9 +298,9 @@ fn locked_lane_batching_remains_local() -> Result<(), TaskError> {
         Arc::new(record)
     })?);
 
-    let (claimed_lane, owner_token, records) = runner
-        .pop_ready()
-        .ok_or_else(|| TaskError::TaskExecutionError("locked batch was not dispatched".into()))?;
+    let (claimed_lane, owner_token, records) = runner.pop_ready().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("locked batch was not dispatched".into())
+    })?;
     assert_eq!(claimed_lane, EMAIL);
     assert_eq!(owner_token.as_deref(), Some("owner"));
     assert_eq!(records.len(), 2);
@@ -337,7 +344,7 @@ async fn batch_invocation_uses_one_global_slot_and_commits_every_member() -> Res
 
 /// Verifies losing one constituent lease aborts and removes the whole batch future.
 #[tokio::test]
-async fn batch_lease_loss_aborts_invocation() -> Result<(), TaskError> {
+async fn batch_lease_loss_aborts_invocation() -> Result<(), TaskRuntimeError> {
     let mut runner = batch_runner()?;
     let first = named_record("batch-job")?;
     let second = named_record("batch-job")?;
@@ -355,7 +362,7 @@ async fn batch_lease_loss_aborts_invocation() -> Result<(), TaskError> {
     runner.running_invocations.insert(invocation_id, invocation);
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.running = 1;
 
     runner.drop_lost(&[first.id()]);
@@ -369,7 +376,7 @@ async fn batch_lease_loss_aborts_invocation() -> Result<(), TaskError> {
 
 /// Verifies a completion sent after batch lease loss cannot create stale commits.
 #[tokio::test]
-async fn stale_batch_completion_is_ignored_after_lease_loss() -> Result<(), TaskError> {
+async fn stale_batch_completion_is_ignored_after_lease_loss() -> Result<(), TaskRuntimeError> {
     let mut runner = batch_runner()?;
     let first = named_record("batch-job")?;
     let second = named_record("batch-job")?;
@@ -487,7 +494,7 @@ async fn owner_loss_aborts_the_entire_batch_invocation() -> Result<(), String> {
 
 /// Verifies completed rows awaiting a bounded commit remain centrally renewable.
 #[test]
-fn pending_batch_commits_retain_leases() -> Result<(), TaskError> {
+fn pending_batch_commits_retain_leases() -> Result<(), TaskRuntimeError> {
     let mut runner = batch_runner()?;
     let record = named_record("batch-job")?;
     runner.pending_commits.push_back(TaskCommit {
@@ -502,7 +509,7 @@ fn pending_batch_commits_retain_leases() -> Result<(), TaskError> {
     Ok(())
 }
 
-fn hooked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
+fn hooked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskRuntimeError> {
     let lane_lock = super::super::TaskLaneLock::new(2)
         .on_idle(wait_lane_hook)
         .on_busy(wait_lane_hook);
@@ -518,12 +525,12 @@ fn hooked_runner() -> Result<AbstractTaskRunner<MemoryTaskStore>, TaskError> {
 
 /// Verifies lane leases join central paced polling only at work or renewal deadlines.
 #[test]
-fn lane_lease_renewal_uses_the_central_claim_turn() -> Result<(), TaskError> {
+fn lane_lease_renewal_uses_the_central_claim_turn() -> Result<(), TaskRuntimeError> {
     let mut runner = locked_runner()?;
     let now = tokio::time::Instant::now();
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.owner_token = Some("owner".into());
     lane.owner_renew_at = Some(now + Duration::from_secs(30));
     lane.poll_after = now + Duration::from_secs(60);
@@ -531,14 +538,16 @@ fn lane_lease_renewal_uses_the_central_claim_turn() -> Result<(), TaskError> {
 
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.owner_renew_at = Some(now);
     let claims = runner.claims(false);
     let renewal = claims
         .iter()
         .find(|claim| claim.lane == EMAIL)
         .and_then(|claim| claim.owner.as_ref())
-        .ok_or_else(|| TaskError::TaskExecutionError("lane renewal claim is missing".into()))?;
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("lane renewal claim is missing".into())
+        })?;
     assert!(!renewal.allow_claim);
     Ok(())
 }
@@ -583,11 +592,11 @@ async fn running_hook_keeps_lane_renewal_centrally_scheduled() -> Result<(), Str
 
 /// Verifies locked cohorts apply local start limits while retaining claimed task leases.
 #[test]
-fn locked_lane_rates_tasks_at_dispatch() -> Result<(), TaskError> {
+fn locked_lane_rates_tasks_at_dispatch() -> Result<(), TaskRuntimeError> {
     let mut runner = locked_rate_runner()?;
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.owner_token = Some("owner".into());
     lane.tasks.push_back(lane_record(EMAIL)?);
     lane.tasks.push_back(lane_record(EMAIL)?);
@@ -595,24 +604,24 @@ fn locked_lane_rates_tasks_at_dispatch() -> Result<(), TaskError> {
     assert!(runner.pop_ready().is_some());
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.running = 0;
     let before = tokio::time::Instant::now();
     assert!(runner.pop_ready().is_none());
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     assert!(lane.poll_after.duration_since(before) >= Duration::from_secs(59));
     Ok(())
 }
 
 /// Verifies local rate availability may split one locked lane's batch-handler queue.
 #[tokio::test]
-async fn locked_lane_rate_limit_splits_a_local_batch() -> Result<(), TaskError> {
+async fn locked_lane_rate_limit_splits_a_local_batch() -> Result<(), TaskRuntimeError> {
     let mut runner = locked_batch_rate_runner()?;
     let lane = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     lane.owner_token = Some("owner".into());
     lane.tasks.push_back(lane_record(EMAIL).map(|record| {
         let mut record = record.as_ref().clone();
@@ -625,16 +634,16 @@ async fn locked_lane_rate_limit_splits_a_local_batch() -> Result<(), TaskError> 
         Arc::new(record)
     })?);
     let (_, _, first) = runner.pop_ready().ok_or_else(|| {
-        TaskError::TaskExecutionError("first batch member was not dispatched".into())
+        TaskRuntimeError::TaskExecutionError("first batch member was not dispatched".into())
     })?;
     assert_eq!(first.len(), 1);
     runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?
         .running = 0;
     tokio::time::sleep(Duration::from_millis(12)).await;
     let (_, _, second) = runner.pop_ready().ok_or_else(|| {
-        TaskError::TaskExecutionError("second batch member was not dispatched".into())
+        TaskRuntimeError::TaskExecutionError("second batch member was not dispatched".into())
     })?;
     assert_eq!(second.len(), 1);
     Ok(())
@@ -765,7 +774,7 @@ async fn lane_hook_panics_are_contained() -> Result<(), String> {
 
 /// Verifies per-lane claims never reserve more than one global persistence batch.
 #[test]
-fn claims_share_global_capacity_and_batch_budget() -> Result<(), TaskError> {
+fn claims_share_global_capacity_and_batch_budget() -> Result<(), TaskRuntimeError> {
     let mut runner = lane_runner()?;
     let first = runner.claims(true);
     assert_eq!(first.iter().map(|claim| claim.limit).sum::<usize>(), 2);
@@ -783,7 +792,7 @@ fn claims_share_global_capacity_and_batch_budget() -> Result<(), TaskError> {
 
 /// Verifies a local rate bucket bounds claims before any task lease is acquired.
 #[test]
-fn local_rate_limits_lane_claim_budget() -> Result<(), TaskError> {
+fn local_rate_limits_lane_claim_budget() -> Result<(), TaskRuntimeError> {
     let mut runner = lane_runner()?;
     runner.rotate();
     let claims = runner.claims(true);
@@ -798,7 +807,7 @@ fn local_rate_limits_lane_claim_budget() -> Result<(), TaskError> {
     let now = tokio::time::Instant::now();
     let email = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     email.consume_local_rate(1, now);
     assert_eq!(email.claim_limit(1, now), 0);
     assert!(email.local_rate_wake(now).is_some());
@@ -807,11 +816,11 @@ fn local_rate_limits_lane_claim_budget() -> Result<(), TaskError> {
 
 /// Verifies a lane refills only after queued work falls below half its capacity.
 #[test]
-fn lane_prefetch_uses_a_half_capacity_low_watermark() -> Result<(), TaskError> {
+fn lane_prefetch_uses_a_half_capacity_low_watermark() -> Result<(), TaskRuntimeError> {
     let mut runner = prefetch_runner()?;
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.tasks.push_back(panic_record()?);
     lane.tasks.push_back(panic_record()?);
 
@@ -819,7 +828,7 @@ fn lane_prefetch_uses_a_half_capacity_low_watermark() -> Result<(), TaskError> {
 
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.tasks.pop_back();
     let claims = runner.claims(true);
     assert_eq!(claims.first().map(|claim| claim.limit), Some(3));
@@ -828,7 +837,7 @@ fn lane_prefetch_uses_a_half_capacity_low_watermark() -> Result<(), TaskError> {
 
 /// Verifies local wakeups move a fallback tick forward without breaking poll pacing.
 #[test]
-fn local_wake_waits_for_the_next_legal_tick() -> Result<(), TaskError> {
+fn local_wake_waits_for_the_next_legal_tick() -> Result<(), TaskRuntimeError> {
     let runner = prefetch_runner()?;
     let now = tokio::time::Instant::now();
     let mut state = RunState {
@@ -878,6 +887,7 @@ async fn workflow_wake_obeys_poll_gate() -> Result<(), String> {
             tick: super::super::TaskTick {
                 poll: super::super::TaskPoll { lanes: Vec::new() },
                 lost: Vec::new(),
+                cancelled: Vec::new(),
                 wake_lanes: vec![DEFAULT_TASK_LANE],
             },
         },
@@ -894,7 +904,7 @@ async fn workflow_wake_obeys_poll_gate() -> Result<(), String> {
 
 /// Verifies an empty local permit budget preserves its next-token wake deadline.
 #[test]
-fn local_rate_wait_does_not_fall_back_to_idle_polling() -> Result<(), TaskError> {
+fn local_rate_wait_does_not_fall_back_to_idle_polling() -> Result<(), TaskRuntimeError> {
     let conf = TaskConf::default()
         .concurrency(1)
         .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 1).rate_limit(TaskRate::per_minute(1).burst(1)));
@@ -904,7 +914,7 @@ fn local_rate_wait_does_not_fall_back_to_idle_polling() -> Result<(), TaskError>
     let now = tokio::time::Instant::now();
     let lane = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     lane.consume_local_rate(1, now);
 
     assert!(runner.claims(true).is_empty());
@@ -916,7 +926,7 @@ fn local_rate_wait_does_not_fall_back_to_idle_polling() -> Result<(), TaskError>
 
 /// Verifies saturated work uses the short interval while idle work uses the fallback.
 #[test]
-fn adaptive_deadlines_distinguish_backlog_and_idle() -> Result<(), TaskError> {
+fn adaptive_deadlines_distinguish_backlog_and_idle() -> Result<(), TaskRuntimeError> {
     let mut runner = lane_runner()?;
     let before_idle = tokio::time::Instant::now();
     let idle = runner.apply_poll(TaskPoll::empty());
@@ -939,7 +949,7 @@ fn adaptive_deadlines_distinguish_backlog_and_idle() -> Result<(), TaskError> {
 
 /// Verifies each lane retains its own rate deadline while another lane stays hot.
 #[test]
-fn adaptive_deadlines_are_isolated_by_lane() -> Result<(), TaskError> {
+fn adaptive_deadlines_are_isolated_by_lane() -> Result<(), TaskRuntimeError> {
     let mut runner = lane_runner()?;
     let now = tokio::time::Instant::now();
     let earliest = runner.apply_poll(TaskPoll {
@@ -965,24 +975,24 @@ fn adaptive_deadlines_are_isolated_by_lane() -> Result<(), TaskError> {
     assert!(earliest.duration_since(now) <= tokio::time::Duration::from_millis(1_100));
     let email = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     assert!(email.poll_after.duration_since(now) >= tokio::time::Duration::from_secs(60));
     Ok(())
 }
 
 /// Verifies a capacity-blocked lane cannot keep the scheduler in an expired poll loop.
 #[test]
-fn unavailable_lanes_do_not_control_next_poll() -> Result<(), TaskError> {
+fn unavailable_lanes_do_not_control_next_poll() -> Result<(), TaskRuntimeError> {
     let mut runner = lane_runner()?;
     let now = tokio::time::Instant::now();
     let default = runner
         .lane_mut(DEFAULT_TASK_LANE)
-        .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
     default.running = default.conf.concurrency();
     default.poll_after = now;
     let email = runner
         .lane_mut(EMAIL)
-        .ok_or_else(|| TaskError::UnknownLane(EMAIL.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(EMAIL.to_string()))?;
     email.poll_after = now + tokio::time::Duration::from_secs(60);
     let deadline = runner.next_lane_deadline(now + runner.fallback_interval);
     assert!(deadline.duration_since(now) >= tokio::time::Duration::from_secs(60));
@@ -999,7 +1009,7 @@ fn lane_poll_evidence_must_match_claims() {
     }];
     assert!(matches!(
         validate_poll(&claims, &TaskPoll::empty()),
-        Err(TaskError::TaskExecutionError(_))
+        Err(TaskRuntimeError::TaskExecutionError(_))
     ));
 }
 

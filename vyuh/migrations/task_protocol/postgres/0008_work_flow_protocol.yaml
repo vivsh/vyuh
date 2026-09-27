@@ -1,0 +1,11 @@
+# Add an application-owned dependency that reclassifies an explicit handler list.
+# Stop all workers/writers and preflight retained rows before applying this template.
+dependencies: [0007_cancellation_protocol]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-c0:' THEN 'tr-f0:' WHEN 'tr-c1:' THEN 'tr-f1:' WHEN 'tr-c2:' THEN 'tr-f2:' ELSE 'tr-f3:' END || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-c0:', 'tr-c1:', 'tr-c2:', 'tr-v3:')
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-c0:' THEN 'tr-f0:' WHEN 'tr-c1:' THEN 'tr-f1:' WHEN 'tr-c2:' THEN 'tr-f2:' ELSE 'tr-f3:' END || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-c0:', 'tr-c1:', 'tr-c2:', 'tr-v3:')

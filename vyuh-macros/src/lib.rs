@@ -423,11 +423,11 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
     signal::parse_signal(attr, item)
 }
 
-/// Registers a function as a durable task handler.
+/// Registers an asynchronous Work task handler.
 ///
 /// This macro is sugar over `vyuh::bundles::task(handler, TaskDefinition)`.
 /// Task handlers accept `Data<T>` as their submitted data argument and return
-/// `()`, `Result<(), Error>`, `TaskState`, or `Result<TaskState, Error>`.
+/// serializable values, `TaskState<T>`, or their `Result<_, TaskError>` forms.
 ///
 /// # Attributes
 ///
@@ -440,7 +440,7 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// // Free function with default name
 /// #[task]
-/// async fn send_email(Data(input): Data<EmailData>) -> Result<(), Error> {
+/// async fn send_email(Data(input): Data<EmailData>) -> Result<(), TaskError> {
 ///     deliver(input).await?;
 ///     Ok(())
 /// }
@@ -448,9 +448,9 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// // Method with custom name
 /// impl TaskHandlers {
 ///     #[task(name = "custom_task_name", lane = EMAIL)]
-///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<TaskState, Error> {
+///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<TaskState, TaskError> {
 ///         // process order
-///         Ok(TaskState::complete())
+///         Ok(TaskState::complete(()))
 ///     }
 /// }
 /// ```
@@ -459,11 +459,20 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_task(attr, item)
 }
 
+/// Registers a synchronous, pure task flow. Equivalent to `bundles::flow`.
+/// Accepts task name, lane, and idempotency attributes. Rust registration bounds
+/// reject async functions, unsupported extractors, and Work return values.
+#[proc_macro_attribute]
+pub fn flow(attr: TokenStream, item: TokenStream) -> TokenStream {
+    task::parse_flow(attr, item)
+}
+
 /// Registers a value-only local batch task handler.
 ///
 /// This macro is sugar over `vyuh::bundles::task_batch(handler, TaskDefinition)`.
-/// Batch handlers accept `Data<Batch<T>>` and return `()`, `TaskState`, an
-/// ordered `Batch<TaskState>`, or the corresponding `Result<_, Error>` form.
+/// Batch handlers accept `Data<Batch<T>>` and return unit, uniform `TaskState<O>`,
+/// ordered `Batch<TaskState<O>>` / `Batch<Result<TaskState<O>, TaskError>>`,
+/// or an outer `Result<_, TaskError>`. Suspension is rejected per item.
 /// They do not expose task identity or continuation state, and cannot suspend
 /// or sleep individual tasks.
 ///
@@ -472,7 +481,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// #[task_batch]
-/// async fn index_documents(Data(items): Data<Batch<IndexDocument>>) -> Result<(), Error> {
+/// async fn index_documents(Data(items): Data<Batch<IndexDocument>>) -> Result<(), TaskError> {
 ///     index_all(items.as_ref()).await?;
 ///     Ok(())
 /// }

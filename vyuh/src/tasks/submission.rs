@@ -4,7 +4,7 @@ use std::{fmt, time::Duration};
 
 use serde::Serialize;
 
-use super::{TaskError, TaskId, TaskRecord};
+use super::{TaskId, TaskRecord, TaskRuntimeError};
 
 /// Submission policy evaluated before one or more task records are stored.
 #[derive(Default)]
@@ -32,14 +32,14 @@ impl TaskOptions {
     }
 }
 
-pub(crate) fn canonical_json<T: Serialize>(input: &T) -> Result<String, TaskError> {
+pub(crate) fn canonical_json<T: Serialize>(input: &T) -> Result<String, TaskRuntimeError> {
     let value = serde_json::to_value(input)?;
     canonical_json_value(value)
 }
 
 /// Serializes an already type-erased JSON input with stable object-key ordering.
-pub(crate) fn canonical_json_value(value: serde_json::Value) -> Result<String, TaskError> {
-    serde_json::to_string(&canonical_value(value)).map_err(TaskError::from)
+pub(crate) fn canonical_json_value(value: serde_json::Value) -> Result<String, TaskRuntimeError> {
+    serde_json::to_string(&canonical_value(value)).map_err(TaskRuntimeError::from)
 }
 
 /// Recursively sorts object keys while retaining array order and scalar values.

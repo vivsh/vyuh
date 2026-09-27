@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::tasks::{
-    AbstractTaskStore, LaneClaim, ScheduledTaskWrite, TaskCommit, TaskError, TaskFilter, TaskId,
-    TaskLease, TaskPoll, TaskReceipt, TaskRecord, TaskStoreConf, TaskTick, TaskWrite,
+    AbstractTaskStore, LaneClaim, ScheduledTaskWrite, TaskCommit, TaskFilter, TaskId, TaskLease,
+    TaskPoll, TaskReceipt, TaskRecord, TaskRuntimeError, TaskStoreConf, TaskTick, TaskWrite,
 };
 
 use super::common::DbTaskStore;
@@ -17,11 +17,10 @@ impl DbTaskStore {
         claims: &[LaneClaim],
         commits: &[TaskCommit],
         renewals: &[TaskLease],
-    ) -> Result<TaskTick, TaskError> {
-        let conf =
-            self.runtime_conf.read().await.clone().ok_or_else(|| {
-                TaskError::InvalidConfig("task runtime was not initialized".into())
-            })?;
+    ) -> Result<TaskTick, TaskRuntimeError> {
+        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
+            TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
+        })?;
         let mut transaction = self.pool.begin().await?;
         super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
         let now = statement_now(&mut transaction).await?;
@@ -30,8 +29,15 @@ impl DbTaskStore {
         let (children, mut deliveries) = self
             .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
             .await?;
-        let lost = self
-            .renew_leases_tx(&mut transaction, runner_id, renewals, &conf, now)
+        let (lost, cancelled) = self
+            .renew_leases_tx(
+                &mut transaction,
+                runner_id,
+                renewals,
+                &conf,
+                now,
+                &mut deliveries,
+            )
             .await?;
         let (mut poll, new_idle) = self
             .claim_tasks_tx(
@@ -58,6 +64,7 @@ impl DbTaskStore {
         Ok(TaskTick {
             poll,
             lost,
+            cancelled,
             wake_lanes,
         })
     }
@@ -72,7 +79,7 @@ impl DbTaskStore {
         now: chrono::DateTime<chrono::Utc>,
         poll: &mut TaskPoll,
         new_idle: &[crate::tasks::TaskLane],
-    ) -> Result<Vec<crate::tasks::TaskLane>, TaskError> {
+    ) -> Result<Vec<crate::tasks::TaskLane>, TaskRuntimeError> {
         let wake = super::writes::finalize_workflow(
             transaction,
             children,
@@ -111,7 +118,7 @@ fn locked_turn_lanes(
 
 async fn statement_now(
     transaction: &mut crate::db::DbTransaction<'_>,
-) -> Result<chrono::DateTime<chrono::Utc>, TaskError> {
+) -> Result<chrono::DateTime<chrono::Utc>, TaskRuntimeError> {
     use crate::db::DbSession as _;
     Ok(transaction
         .fetch_scalar(crate::db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
@@ -161,7 +168,11 @@ mod tests {
 }
 
 impl AbstractTaskStore for DbTaskStore {
-    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskError> {
+    async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        self.cancel_impl(id).await
+    }
+
+    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskRuntimeError> {
         self.initialize_impl(conf).await
     }
 
@@ -169,7 +180,7 @@ impl AbstractTaskStore for DbTaskStore {
         &self,
         runner_id: &str,
         claims: &[LaneClaim],
-    ) -> Result<TaskPoll, TaskError> {
+    ) -> Result<TaskPoll, TaskRuntimeError> {
         self.claim_tasks_impl(runner_id, claims).await
     }
 
@@ -177,7 +188,7 @@ impl AbstractTaskStore for DbTaskStore {
         &self,
         runner_id: &str,
         commits: &[TaskCommit],
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskRuntimeError> {
         self.commit_outcomes_impl(runner_id, commits).await
     }
 
@@ -185,7 +196,7 @@ impl AbstractTaskStore for DbTaskStore {
         &self,
         runner_id: &str,
         leases: &[TaskLease],
-    ) -> Result<Vec<TaskId>, TaskError> {
+    ) -> Result<Vec<TaskId>, TaskRuntimeError> {
         self.renew_leases_impl(runner_id, leases).await
     }
 
@@ -195,44 +206,47 @@ impl AbstractTaskStore for DbTaskStore {
         claims: &[LaneClaim],
         commits: &[TaskCommit],
         renewals: &[TaskLease],
-    ) -> Result<TaskTick, TaskError> {
+    ) -> Result<TaskTick, TaskRuntimeError> {
         self.tick_impl(runner_id, claims, commits, renewals).await
     }
 
-    async fn store_tasks(&self, writes: Vec<TaskWrite>) -> Result<Vec<TaskReceipt>, TaskError> {
+    async fn store_tasks(
+        &self,
+        writes: Vec<TaskWrite>,
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         self.store_tasks_impl(writes).await
     }
 
     async fn schedule_snapshot(
         &self,
         names: &[String],
-    ) -> Result<crate::tasks::TaskScheduleSnapshot, TaskError> {
+    ) -> Result<crate::tasks::TaskScheduleSnapshot, TaskRuntimeError> {
         self.schedule_snapshot_impl(names).await
     }
 
     async fn store_scheduled(
         &self,
         write: ScheduledTaskWrite,
-    ) -> Result<Option<TaskReceipt>, TaskError> {
+    ) -> Result<Option<TaskReceipt>, TaskRuntimeError> {
         self.store_scheduled_impl(write).await
     }
 
-    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskError> {
+    async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskRuntimeError> {
         self.reassign_lane_impl(from, to).await
     }
 
-    async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskError> {
+    async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         self.resume_impl(id, input).await
     }
 
     async fn list_tasks(
         &self,
         filter: TaskFilter,
-    ) -> Result<crate::routes::Page<TaskRecord>, TaskError> {
+    ) -> Result<crate::routes::Page<TaskRecord>, TaskRuntimeError> {
         self.list_tasks_impl(filter).await
     }
 
-    async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskError> {
+    async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskRuntimeError> {
         self.get_task_impl(id).await
     }
 }

@@ -42,20 +42,22 @@ Each task record stores:
 - `state`: private continuation state saved by the handler.
 - `resume_input`: optional input supplied when a suspended task is resumed.
 - `parent_id` and `root_id`: nullable lineage assigned to spawned children.
-- `kind`: `work` by default, with `flow` reserved for pure synchronization work.
+- `kind`: `work` or `flow`, inferred from the registered handler.
 
 Ordinary submission leaves lineage unset. Spawn derives lineage in the accepting
-store transaction. Kind remains storage and inspection metadata, with no public
-setter or execution semantics.
+store transaction. Kind is a registration capability boundary, with no public setter or separate
+scheduling/recovery policy.
 
 Each wake runs the handler with the latest durable snapshot:
 
 ```text
-input + state + resume_input -> handler -> () | TaskState
+input + state + resume_input -> handler -> Output | TaskState<Output> | FlowState<Output>
 ```
 
-Use `()` or `Result<(), Error>` for completed work, and
-`TaskState` or `Result<TaskState, Error>` for explicit lifecycle control.
+Work can return a serializable value directly, or `TaskState<T>` for completion
+or suspension. Use `Result<_, TaskError>` for explicit failure/retry decisions.
+Flow returns unit or `FlowState<T>`, optionally in `Result<_, FlowError>`.
+Infrastructure APIs return `TaskRuntimeError`; these are not handler decisions.
 Task persistence is framework-owned; applications compose work through
 `site.tasks()` rather than implementing a scheduler store.
 
@@ -69,8 +71,8 @@ once. Use a transactional outbox or a domain-owned idempotency key around those
 effects.
 
 Vyuh tasks are durable continuations for a single unit of work. They do not
-provide a workflow DAG engine, child task orchestration, joins, branches, or
-dependency graphs.
+provide a workflow DAG interpreter, parallel joins, or dependency graphs.
+Sequential and nested child orchestration uses explicit Flow state transitions.
 
 ## Registration
 
@@ -150,44 +152,73 @@ async fn send_email(input: Data<SendEmailJob>) {
 }
 ```
 
-Fallible fire-and-forget handlers can return `Result<(), Error>`:
+Fallible fire-and-forget handlers can return `Result<(), TaskError>`:
 
 ```rust
 use vyuh::prelude::*;
 
 #[bundles::task]
-async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> {
+async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
     println!("processing {}", input.data);
     Ok(())
 }
 ```
 
-Handlers that need explicit continuation control should return
-`Result<TaskState, Error>`:
+Direct-output Work handlers declare their persisted successful type:
 
-```rust
-use std::time::Duration;
-use vyuh::prelude::*;
+```rust,ignore
+#[bundles::task]
+async fn calculate(input: Data<Input>) -> Output { calculate_output(&input) }
 
 #[bundles::task]
-async fn poll_status(input: Data<PollJob>) -> Result<TaskState, Error> {
-    if is_ready(input.id).await? {
-        return Ok(TaskState::complete(())?);
-    }
-
-    Ok(TaskState::sleep(
-        format!("waiting for {}", input.id),
-        Duration::from_secs(30),
-    )?)
+async fn charge(input: Data<Charge>) -> Result<Receipt, TaskError> {
+    Ok(payments.charge(&input).await?)
 }
 ```
+
+Output needs `Serialize + 'static`, not `Clone`, `Sync`, `Deserialize` or a schema.
+Only `Result<_, TaskError>` represents Work error decisions. A serializable
+`Result<T, E>` with another error type is an ordinary persisted value.
+Use explicit `TaskError::retry` for retries; automatic `?` conversions are terminal.
+
+## Work And Flow
+
+Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
+Flow handlers are synchronous and can complete, fail, suspend, sleep, or spawn.
+Both use the same statuses, lanes, concurrency, rates, lane locks, leases,
+attempt counters, cancellation, and atomic outcome flushes. Neither executes
+a child or resumed parent recursively; those run after a later claim.
+
+Use `#[bundles::flow]` or the equivalent
+`bundles::flow(handler, TaskDefinition::new("handler"))`. Both accept the same
+name, lane, and idempotency definition as Work. Registration uses Rust trait
+bounds, not recognition of argument type spelling. Submission remains
+`tasks.submit(input).await?` for either kind.
+
+For associated functions, use direct registration, for example
+`bundles::flow(Checkout::advance, TaskDefinition::new("checkout"))`.
+
+Flow accepts `Continuation<S, R>` and a final `Data<T>`. It does not expose
+site/services, task identity, or operation identity. Work can also extract
+`Continuation<S, R>` and suspend, but cannot sleep or spawn. There is no Flow
+batch registration.
+
+A synchronous signature is not a purity sandbox. Flow code must be short,
+deterministic, bounded, and non-blocking; put I/O and expensive computation in
+Work children. Globals and captured effects cannot be prevented by Rust's type
+system. A non-yielding function cannot be preempted mid-call.
+
+Flow cannot request retry, but an uncommitted execution is recovered with exactly
+the same lease, retry-budget, and backoff rules as Work. A returned error or panic
+is terminal for both. Shared lanes also mean shared contention; configure a
+separate lane for isolation when needed.
 
 ## Input, State, And Resume Data
 
 `Data<T>` is the immutable submitted input. It stays the same for the lifetime
 of the task.
 
-`Continuation<S, R>` is an optional handler argument for tasks that save state,
+`Continuation<S, R>` is an optional Work or Flow handler argument for tasks that save state,
 sleep, suspend, or resume. Initial execution has neither value, sleeping work
 has state only, and resumed work has state plus a `Result<R, TaskFailure>`. Its accessors
 borrow values, so continuation types do not need `Clone`.
@@ -214,17 +245,16 @@ struct PendingApproval {
     title: String,
 }
 
-#[bundles::task(name = "approve_document")]
-async fn approve_document(
+#[bundles::flow(name = "approve_document")]
+fn approve_document(
     continuation: Continuation<PendingApproval, ApprovalDecision>,
     input: Data<ApprovalRequest>,
-) -> Result<TaskState, Error> {
+) -> Result<FlowState<ApprovalDecision>, FlowError> {
     if let Some(Ok(decision)) = continuation.resume() {
-        apply_decision(&input, decision).await?;
-        return Ok(TaskState::complete(())?);
+        return Ok(FlowState::complete(decision.clone()));
     }
     if let Some(Err(failure)) = continuation.resume() {
-        return Ok(TaskState::fail(failure.message()));
+        return Err(FlowError::fail(failure.message()));
     }
 
     let state = PendingApproval {
@@ -232,7 +262,7 @@ async fn approve_document(
         title: input.title.clone(),
     };
 
-    Ok(TaskState::suspend(state)?)
+    Ok(FlowState::suspend(state)?)
 }
 ```
 
@@ -246,18 +276,15 @@ result so the next attempt sees the same input.
 Return a spawn outcome directly from the parent handler; no `Site` argument is needed:
 
 ```rust,ignore
-#[bundles::task]
-async fn build_report(
+#[bundles::flow]
+fn build_report(
     continuation: Continuation<ReportCheckpoint, ReportData>,
     input: Data<ReportRequest>,
-) -> Result<TaskState, Error> {
+) -> Result<FlowState<ReportData>, FlowError> {
     match continuation.resume() {
-        Some(Ok(data)) => {
-            save_report(data).await?;
-            Ok(TaskState::complete(())?)
-        }
-        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
-        None => Ok(TaskState::spawn(
+        Some(Ok(data)) => Ok(FlowState::complete(data.clone())),
+        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+        None => Ok(FlowState::spawn(
             FetchReport { source: input.source.clone() },
             ReportCheckpoint { report_id: input.report_id },
         )?),
@@ -265,15 +292,15 @@ async fn build_report(
 }
 
 #[bundles::task]
-async fn fetch_report(input: Data<FetchReport>) -> Result<TaskState, Error> {
-    Ok(TaskState::complete(fetch_data(&input.source).await?)?)
+async fn fetch_report(input: Data<FetchReport>) -> Result<ReportData, TaskError> {
+    Ok(fetch_data(&input.source).await?)
 }
 ```
 
-The equivalent registration remains `bundles::task(handler,
+The equivalent parent registration is `bundles::flow(handler,
 TaskDefinition::new("handler_name"))`. Spawning adds no macro syntax.
 
-`TaskState::spawn(input, state)` and `TaskState::spawn_with(input, state, options)`
+`FlowState::spawn(input, state)` and `FlowState::spawn_with(input, state, options)`
 construct an outcome, not a submission. They serialize the checkpoint and reject
 invalid options immediately. After the handler returns, the runtime resolves the
 child through the executing site's registry, serializes its input, and validates
@@ -306,7 +333,8 @@ do not receive a child's result. Value-only batch handlers cannot spawn children
 
 ## Retained Results
 
-`TaskState::complete(value)?` serializes a successful value and retains it as
+`TaskState::complete(value)` and `FlowState::complete(value)` retain typed values
+until the handler returns. The framework serializes a successful value and stores it as
 `{"Ok": value}` on the completed task. Ordinary unit-return handlers retain
 `{"Ok": null}`. Retrying and terminal failures retain `{"Err": TaskFailure}`;
 the task status distinguishes a retry from terminal failure. Successful suspend,
@@ -321,8 +349,10 @@ Results disappear when their task records are deleted.
 
 Both retained results and `resume_input` have a fixed **32 KiB (32,768 bytes)**
 limit, including the entire JSON envelope and escaping. The input/checkpoint
-payload setting does not change this limit. Oversized successful outputs return
-`TaskError::ResultTooLarge`; they are never truncated. Oversized external resume
+payload setting does not change this limit. Serialization failures and oversized
+successful outputs terminally fail the affected task; they are never truncated.
+External resume rejects oversized envelopes with `TaskRuntimeError::ResultTooLarge`.
+Oversized external resume
 requests leave the task unchanged. Error diagnostics may be shortened to fit.
 Store large artifacts elsewhere and return their identifiers.
 
@@ -339,7 +369,7 @@ queue in one call by accepting `Data<Batch<T>>`:
 use vyuh::prelude::*;
 
 #[bundles::task_batch]
-async fn index_documents(Data(documents): Data<Batch<IndexDocument>>) -> Result<(), Error> {
+async fn index_documents(Data(documents): Data<Batch<IndexDocument>>) -> Result<(), TaskError> {
     search.index_all(documents.as_ref()).await?;
     Ok(())
 }
@@ -357,12 +387,15 @@ leaving other task names in their existing relative order. One batch call uses
 one local handler-concurrency slot; rate permits and durable lifecycle remain
 per task.
 
-Return `()` to complete every input, one `TaskState` to apply `complete`,
-`retry`, or `fail` uniformly, or an ordered `Batch<TaskState>` containing
-exactly one outcome per input. Invalid historical inputs fail individually.
-Cardinality mismatches fail the valid invocation. Value-only batch handlers do
-not expose `TaskId`, `Continuation`, state, or resume input, so `sleep`,
-`suspend`, and `spawn` outcomes are rejected as terminal failures.
+Return `()` for uniform unit completion, `TaskState<T>` for uniform output, or
+`Result<_, TaskError>` for uniform failure/retry. Ordered outcomes use
+`Batch<TaskState<T>>` or `Batch<Result<TaskState<T>, TaskError>>`, with exactly one
+item per valid input. An outer `Result<_, TaskError>` remains supported.
+Uniform output is serialized once; ordered serialization failures affect only
+that item. Cardinality mismatch fails the valid invocation. Bare `Batch<T>` is
+not a shorthand for per-item outputs. Invalid historical inputs fail individually.
+Batch handlers do not expose `TaskId`, `Continuation`, state, or resume input.
+A returned suspension terminally fails that item; sleep and spawn remain unavailable.
 
 Local batching and `TaskLaneLock` are orthogonal. An ordinary lane can batch;
 a locked lane may also batch the matching task names inside a claimed cohort.
@@ -370,30 +403,33 @@ The lock controls when a cohort reaches the local queue, not the handler type.
 
 ## Complete, Suspend, Sleep, Retry, And Fail
 
-Use `TaskState` constructors for explicit outcomes:
+Use `TaskState` for Work outcomes and `FlowState` for Flow outcomes:
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
 use vyuh::tasks::TaskState;
 
-let done = TaskState::complete(())?;
-let suspended = TaskState::suspend(state)?;
-let sleeping = TaskState::sleep(state, Duration::from_secs(30))?;
-let retry = TaskState::retry("try again using the lane's backoff policy");
-let failed = TaskState::fail("permanent failure");
+let done = TaskState::complete(());
+let suspended = TaskState::<()>::suspend(state)?;
+let sleeping = FlowState::<()>::sleep(state, Duration::from_secs(30))?;
+let retry = TaskError::retry("try again using the lane's backoff policy");
+let failed = TaskError::fail("permanent failure");
 ```
 
-An `Err(vyuh::Error)` from a handler is committed as `Task handler failed`.
-Vyuh writes the native causal chain only to structured logs with task, operation,
-lane, and attempt context; it never retains that chain in task history or the
-console. Messages passed explicitly to `TaskState::retry` and `TaskState::fail`
+Use `?` to convert framework errors into the handler's `TaskError` or `FlowError`.
+These conversions log the underlying error and produce a safe terminal diagnostic;
+no raw framework/database error is copied into persisted results. A runtime error
+becomes `Task operation failed`; a framework error becomes `Task handler failed`. Messages passed explicitly to `TaskError::retry` and `TaskError::fail`
 are application-owned durable summaries and must not contain secrets.
-Retry is never inferred from `ErrorKind`; return `TaskState::retry(...)` when
+Retry is never inferred from `ErrorKind`; return `TaskError::retry(...)` when
 the task should be tried again later. Handlers cannot choose retry timing or
 attempt limits; the selected task lane owns both.
 
 ## Suspend And Resume
+
+External responses must be durably retried when `resume` returns `false` because
+suspension has not committed yet. Vyuh does not buffer early resume responses.
 
 Suspension is the lifecycle state for tasks that cannot continue until something else happens:
 approval, payment confirmation, a webhook, a file upload, or another application
@@ -430,13 +466,65 @@ There are no retained topic events in the current task model. If an application
 needs to resume multiple tasks for one external event, it should keep its own
 mapping from event keys to task IDs and call `resume` for each task.
 
+## Cancellation
+
+```rust
+let requested = site.tasks().cancel(receipt.id()).await?;
+```
+
+`cancel` records durable intent, not immediate completion. It returns `true` for
+a newly accepted request and `false` for missing, terminal, or already-cancelled
+tasks. Store errors propagate. Inspect intent with `TaskInfo::cancelled()`;
+status remains authoritative about whether finalization has happened.
+
+Suspended tasks become pending and due now. Future pending timers advance to
+now; already-due timers keep their ordering. Running tasks retain their status
+and lease until a normal store turn accepts cancellation. `ready_at` is the
+store-owned processing eligibility timer, not an audit of the original schedule.
+
+Normal polling finalizes cancellation as `Failed`, storing
+`Err(TaskFailure)` with the task ID and message `Task cancelled`. No handler is
+invoked when cancellation is observed during candidate selection. Running-task
+renewals and outcome commits also check durable intent: once accepted, a later
+success, retry, checkpoint, or spawn cannot override cancellation. Cancelled
+tasks cannot be resumed.
+
+A cancelled child delivers the same failure to its suspended parent atomically;
+the parent continues on a subsequent poll and can handle the failure normally.
+Cancelling a parent does not cancel its children, and their later results cannot
+revive it. Checkpoints remain intact when cancellation is requested.
+
+Cancellation follows normal polling, concurrency, rate, batch-threshold, and lane
+hook gates. It can remain pending while those gates block discovery. Cancellation
+protects the durable terminal result; it does not guarantee that external execution
+stops. This holds for both individual and batch tasks, even on one worker.
+
+When renewal finalizes cancellation of a member of a shared batch invocation,
+the invocation continues. Remaining members retain their leases and commit normally;
+cancelled members stop receiving renewals and their returned outcomes are discarded.
+Even if every member is cancelled, the shared invocation retains its execution slot
+until it finishes. The lane stays busy until execution and outstanding commits drain,
+then its normal `idle_after` debounce begins. A hung shared handler can therefore
+delay lane idle and graceful shutdown. A cancelled child's parent may already have
+received its failure while that external operation is still running.
+
+Cancellation of an invocation containing only one task still aborts its future as
+best-effort cleanup. Genuine task or lane ownership loss still invalidates an entire
+invocation. Crash recovery can replay work, but cancellation of a batch member no
+longer deliberately forces unaffected members through lease expiry and replay.
+
+Task snapshots held by runners and handlers remain immutable. All authoritative
+mutations, including cancellation resolution, happen inside the store. Existing
+deployments must apply the coordinated cancellation migrations with workers and
+writers stopped; see the task protocol migration instructions.
+
 ## Sleep And Continuation
 
 Sleep is for timed continuation. The handler saves state, chooses a delay, and
 Vyuh wakes the task after that delay:
 
 ```rust
-TaskState::sleep(state, Duration::from_secs(30))?
+FlowState::sleep(state, Duration::from_secs(30))?
 ```
 
 Use sleep for polling external systems, chunked imports, slow retries with
@@ -508,7 +596,7 @@ entries and returns `Ignored` for conflicts. Retention is lane policy: without
 remains unavailable from terminal completion until the configured duration.
 
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
-`TaskState::sleep`, and recurring creation belongs in emitters. A
+`FlowState::sleep`, and recurring creation belongs in emitters. A
 task-targeted cron or periodic emitter stores one durable `vyuh_schedules`
 cursor and coalesces missed occurrences after restart; it does not turn tasks
 into a general workflow or recurring-service abstraction.
@@ -690,7 +778,7 @@ store-relative database time when they are earlier. Deadlines are tracked per
 lane, so activity in one lane does not force an idle or rate-limited lane to
 query early.
 
-Local submission, resume, handler completion, and outcome commit mark the local
+Local submission, cancellation, resume, handler completion, and outcome commit mark the local
 runner for its next eligible tick; they never create an early background store
 query. Vyuh intentionally adds no distributed notification channel; work
 submitted by another process may wait until the fallback poll.
@@ -804,11 +892,11 @@ It covers:
 - Fallible task handlers.
 - Direct registration without the task macro.
 - Local `Data<Batch<T>>` handler registration and ordered outcomes.
-- Suspend/resume with `Continuation<S, R>` and `TaskState`.
+- Synchronous Flow suspend/resume with `Continuation<S, R>` and `FlowState`.
 
 ## Failure Modes
 
-- Unregistered task data types return `TaskError::TaskNotFound`.
+- Unregistered task data types return `TaskRuntimeError::TaskNotFound`.
 - Handler `Err(vyuh::Error)` values are committed as failed task outcomes.
 - Stale workers cannot overwrite tasks they no longer own.
 - Stale lane owners cannot renew tasks, commit outcomes, or apply lifecycle
@@ -830,7 +918,7 @@ It covers:
 - No exactly-once guarantee.
 - No retained topic events.
 - No durable per-attempt audit history.
-- No multi-task workflow orchestration, child tasks, joins, branches,
-  dependency graphs, or workflow execution engine.
+- No declarative workflow interpreter, parallel child joins, or dependency
+  graphs. Flow handlers can implement sequential and nested child orchestration.
 - `MemoryTaskStore` is not durable and is not for production task queues.
 - SQLite is intended for embedded, local, and single-process task execution.

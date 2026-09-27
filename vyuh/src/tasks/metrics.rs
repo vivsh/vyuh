@@ -92,7 +92,7 @@ impl TaskMetrics {
     pub(crate) fn submission(
         &self,
         handler: &str,
-        result: &Result<Vec<TaskReceipt>, super::TaskError>,
+        result: &Result<Vec<TaskReceipt>, super::TaskRuntimeError>,
     ) {
         let Some(index) = self.handlers.get(handler).copied() else {
             return;
@@ -101,7 +101,7 @@ impl TaskMetrics {
             Ok(receipts) => receipts.iter().for_each(|receipt| {
                 self.submissions[index][receipt_index(*receipt)].fetch_add(1, Ordering::Relaxed);
             }),
-            Err(super::TaskError::IdempotencyConflict(_)) => {
+            Err(super::TaskRuntimeError::IdempotencyConflict(_)) => {
                 self.idempotency_conflicts[index].fetch_add(1, Ordering::Relaxed);
                 self.submissions[index][3].fetch_add(1, Ordering::Relaxed);
             }
@@ -109,7 +109,8 @@ impl TaskMetrics {
                 self.submissions[index][3].fetch_add(1, Ordering::Relaxed);
                 if matches!(
                     error,
-                    super::TaskError::DatabaseError(_) | super::TaskError::StoreError(_)
+                    super::TaskRuntimeError::DatabaseError(_)
+                        | super::TaskRuntimeError::StoreError(_)
                 ) {
                     self.store_failure();
                 }

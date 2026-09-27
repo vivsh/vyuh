@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use crate::tasks::{FlowState, TaskOptions};
+use std::{sync::Arc, time::Duration};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,8 @@ use crate::tasks::{
     TaskConf, TaskDefinition, TaskDispatcher, TaskIdempotency, TaskLane, TaskLaneConf, TaskRecord,
     TaskRegistry, TaskStatus, TaskTick, store::MemoryTaskStore,
 };
-use crate::{Data, Error, Site, SiteConf, bundles};
+use crate::tasks::{FlowError, TaskError};
+use crate::{Data, Site, SiteConf, bundles};
 
 const CHILD_LANE: TaskLane = TaskLane::new("child");
 
@@ -24,21 +26,21 @@ struct Child {
 }
 
 /// Awaits one child using only typed continuation and input extractors.
-async fn parent(
+fn parent(
     continuation: Continuation<u32, u32>,
     input: Data<Parent>,
-) -> Result<TaskState, Error> {
+) -> Result<FlowState<u32>, FlowError> {
     match continuation.resume() {
-        None => Ok(TaskState::spawn(Child { value: input.value }, 7u32)?),
-        Some(Ok(value)) => Ok(TaskState::complete(
+        None => Ok(FlowState::spawn(Child { value: input.value }, 7u32)?),
+        Some(Ok(value)) => Ok(FlowState::complete(
             value + continuation.state().copied().unwrap_or(0),
-        )?),
-        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
+        )),
+        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
     }
 }
 
-async fn child(input: Data<Child>) -> Result<TaskState, Error> {
-    Ok(TaskState::complete(input.value * 2)?)
+async fn child(input: Data<Child>) -> Result<TaskState<u32>, TaskError> {
+    Ok(TaskState::complete(input.value * 2))
 }
 
 fn child_definition() -> TaskDefinition<Child> {
@@ -56,11 +58,11 @@ async fn fixture() -> Result<(Site, TaskDispatcher<MemoryTaskStore>), String> {
 
 /// Configures matching runtime and memory-store policy for one invocation fixture.
 async fn fixture_with(conf: TaskConf) -> Result<(Site, TaskDispatcher<MemoryTaskStore>), String> {
-    let conf = conf.lane(TaskLaneConf::new(CHILD_LANE, 2));
+    let conf = conf.lane(TaskLaneConf::new(CHILD_LANE, 1));
     let site = Site::build(
         SiteConf::default().log_init(false).tasks(conf.clone()),
         bundles::bundle([
-            bundles::task(parent, TaskDefinition::new("parent")),
+            bundles::flow(parent, TaskDefinition::new("parent")),
             bundles::task(child, child_definition()),
         ]),
     )
@@ -68,7 +70,10 @@ async fn fixture_with(conf: TaskConf) -> Result<(Site, TaskDispatcher<MemoryTask
     .map_err(|error| error.to_string())?;
     let mut registry = TaskRegistry::new();
     registry
-        .register(RegisteredTask::new(TaskDefinition::new("parent"), parent))
+        .register(RegisteredTask::new_flow(
+            TaskDefinition::new("parent"),
+            parent,
+        ))
         .map_err(|error| error.to_string())?;
     registry
         .register(RegisteredTask::new(child_definition(), child))
@@ -147,10 +152,12 @@ async fn spawn_defers_child_execution() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .id();
     let first = next_task(&dispatcher.store).await?;
+    assert_eq!(first.kind, crate::tasks::TaskKind::Flow);
     let turn = execute(&site, &dispatcher, first).await?;
     assert!(turn.poll.lanes.iter().all(|lane| lane.tasks.is_empty()));
     assert_eq!(turn.wake_lanes, [CHILD_LANE]);
     let child = next_task(&dispatcher.store).await?;
+    assert_eq!(child.kind, crate::tasks::TaskKind::Work);
     assert_eq!(child.parent_id, Some(parent_id));
     assert_eq!(child.root_id, Some(parent_id));
     let turn = execute(&site, &dispatcher, child).await?;
@@ -170,11 +177,53 @@ async fn spawn_defers_child_execution() -> Result<(), String> {
     Ok(())
 }
 
+/// The live runner shares its ordinary concurrency budget and lane rates across Flow/Work steps.
+#[tokio::test]
+async fn flow_work_live_runner() -> Result<(), String> {
+    let conf = TaskConf::default()
+        .concurrency(2)
+        .poll_interval(Duration::from_millis(10))
+        .lane(
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 1)
+                .global_rate_limit(crate::tasks::TaskRate::per_second(1)),
+        );
+    let (site, dispatcher) = fixture_with(conf).await?;
+    let id = dispatcher
+        .submit(Parent { value: 4 })
+        .await
+        .map_err(|e| e.to_string())?
+        .id();
+    let runner =
+        crate::tasks::AbstractTaskRunner::new(dispatcher.clone()).map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    let running = tokio::spawn(runner.run(site.clone()));
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = dispatcher
+                .get(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("missing parent")?;
+            if task.status == TaskStatus::Succeeded {
+                assert_eq!(task.last_result.as_deref(), Some("{\"Ok\":15}"));
+                assert_eq!(task.attempts, 2);
+                assert!(started.elapsed() >= Duration::from_millis(900));
+                return Ok::<(), String>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    running.abort();
+    let _ = running.await;
+    result.map_err(|e| e.to_string())?
+}
+
 /// Constructing, resolving, or dropping an outcome never submits any work.
 #[tokio::test]
 async fn preparation_preserves_policy() -> Result<(), String> {
     let (site, dispatcher) = fixture().await?;
-    let state = TaskState::spawn_with(
+    let state = FlowState::<()>::spawn_with(
         Child { value: 8 },
         "checkpoint",
         TaskOptions::new().delay(Duration::from_secs(60)),
@@ -217,7 +266,7 @@ async fn preparation_preserves_policy() -> Result<(), String> {
 #[test]
 fn spawn_validates_construction() {
     assert!(
-        TaskState::spawn_with(
+        FlowState::<()>::spawn_with(
             Child { value: 1 },
             (),
             TaskOptions::new().ignore_conflicts()
@@ -225,7 +274,7 @@ fn spawn_validates_construction() {
         .is_err()
     );
     assert!(
-        TaskState::spawn_with(
+        FlowState::<()>::spawn_with(
             Child { value: 1 },
             (),
             TaskOptions::new().delay(Duration::MAX)
@@ -233,7 +282,7 @@ fn spawn_validates_construction() {
         .is_err()
     );
     let invalid = std::collections::BTreeMap::from([((1, 2), 3)]);
-    assert!(TaskState::spawn(Child { value: 1 }, invalid).is_err());
+    assert!(FlowState::<()>::spawn(Child { value: 1 }, invalid).is_err());
 }
 
 /// Registry-dependent limits are enforced on both child input and parent checkpoint.
@@ -241,15 +290,15 @@ fn spawn_validates_construction() {
 async fn preparation_checks_payload_limits() -> Result<(), String> {
     let (site, dispatcher) = fixture_with(TaskConf::default().max_payload_bytes(16)).await?;
     let checkpoint =
-        TaskState::spawn(Child { value: 1 }, "x".repeat(17)).map_err(|e| e.to_string())?;
-    let input = TaskState::spawn(Child { value: u32::MAX }, ()).map_err(|e| e.to_string())?;
+        FlowState::spawn(Child { value: 1 }, "x".repeat(17)).map_err(|e| e.to_string())?;
+    let input = FlowState::spawn(Child { value: u32::MAX }, ()).map_err(|e| e.to_string())?;
     assert!(matches!(
         checkpoint.resolve(&site),
-        Err(TaskError::InvalidOptions(_))
+        Err(TaskRuntimeError::InvalidOptions(_))
     ));
     assert!(matches!(
         input.resolve(&site),
-        Err(TaskError::InvalidOptions(_))
+        Err(TaskRuntimeError::InvalidOptions(_))
     ));
     assert_eq!(dispatcher.store.task_count().await, 0);
     Ok(())
@@ -263,8 +312,8 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
         entries: std::collections::BTreeMap<(u32, u32), u32>,
     }
     async fn malformed(_: Data<Malformed>) {}
-    async fn spawn(_: Data<Parent>) -> Result<TaskState, Error> {
-        Ok(TaskState::spawn(
+    fn spawn(_: Data<Parent>) -> Result<FlowState, FlowError> {
+        Ok(FlowState::spawn(
             Malformed {
                 entries: std::collections::BTreeMap::from([((1, 2), 3)]),
             },
@@ -283,7 +332,7 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let record = next_task(&dispatcher.store).await?;
-    let handler = RegisteredTask::new(TaskDefinition::new("spawn"), spawn);
+    let handler = RegisteredTask::new_flow(TaskDefinition::new("spawn"), spawn);
     let outcome = handler.execute(site, Arc::new(record)).await;
     assert!(matches!(outcome, TaskOutcome::Fail { error } if error == "Task handler failed"));
     assert_eq!(dispatcher.store.task_count().await, 1);
@@ -293,8 +342,8 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
 /// Unregistered requests fail the parent normally instead of escaping into store commits.
 #[tokio::test]
 async fn unregistered_child_fails_parent() -> Result<(), String> {
-    async fn missing(_input: Data<Parent>) -> Result<TaskState, Error> {
-        Ok(TaskState::spawn("unregistered child".to_owned(), ())?)
+    fn missing(_input: Data<Parent>) -> Result<FlowState, FlowError> {
+        Ok(FlowState::spawn("unregistered child".to_owned(), ())?)
     }
     let (site, dispatcher) = fixture().await?;
     dispatcher
@@ -302,7 +351,7 @@ async fn unregistered_child_fails_parent() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let record = next_task(&dispatcher.store).await?;
-    let task = RegisteredTask::new(TaskDefinition::new("missing"), missing);
+    let task = RegisteredTask::new_flow(TaskDefinition::new("missing"), missing);
     let outcome = task.execute(site, Arc::new(record.clone())).await;
     assert!(matches!(&outcome, TaskOutcome::Fail { error } if error == "Task handler failed"));
     tick(
@@ -325,26 +374,5 @@ async fn unregistered_child_fails_parent() -> Result<(), String> {
             .status,
         TaskStatus::Failed
     );
-    Ok(())
-}
-
-/// A uniform batch spawn is rejected without requiring child registration or preparation.
-#[tokio::test]
-async fn uniform_batch_rejects_spawn() -> Result<(), String> {
-    async fn batch(_input: Data<crate::tasks::Batch<Parent>>) -> Result<TaskState, Error> {
-        Ok(TaskState::spawn("unregistered child".to_owned(), ())?)
-    }
-    let (site, dispatcher) = fixture().await?;
-    dispatcher
-        .submit(Parent { value: 4 })
-        .await
-        .map_err(|e| e.to_string())?;
-    let record = next_task(&dispatcher.store).await?;
-    let task = RegisteredTask::new_batch(TaskDefinition::new("batch"), batch);
-    let outcome = task.execute(site, Arc::new(record)).await;
-    assert!(
-        matches!(&outcome, TaskOutcome::Fail { error } if error.contains("cannot suspend or sleep or spawn"))
-    );
-    assert_eq!(dispatcher.store.task_count().await, 1);
     Ok(())
 }

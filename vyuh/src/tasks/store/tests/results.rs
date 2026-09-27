@@ -2,7 +2,9 @@ use super::*;
 use crate::tasks::{TaskFailure, TaskInfo};
 
 /// Shared persistence contract covers full-sized delivery, stale writes, and isolated invalid output.
-pub(crate) async fn result_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+pub(crate) async fn result_contract<S: AbstractTaskStore>(
+    store: &S,
+) -> Result<(), TaskRuntimeError> {
     store.initialize(conf()).await?;
     for output in [
         "null".into(),
@@ -19,7 +21,10 @@ pub(crate) async fn result_contract<S: AbstractTaskStore>(store: &S) -> Result<(
 }
 
 /// A child retains exactly the same bytes delivered to its parent on the next poll.
-async fn deliver_result<S: AbstractTaskStore>(store: &S, output: String) -> Result<(), TaskError> {
+async fn deliver_result<S: AbstractTaskStore>(
+    store: &S,
+    output: String,
+) -> Result<(), TaskRuntimeError> {
     let mut parent = record();
     parent.status = TaskStatus::Suspended;
     let parent_id = parent.id;
@@ -68,12 +73,12 @@ async fn deliver_result<S: AbstractTaskStore>(store: &S, output: String) -> Resu
     Ok(())
 }
 
-fn missing() -> TaskError {
-    TaskError::TaskExecutionError("missing test task".into())
+fn missing() -> TaskRuntimeError {
+    TaskRuntimeError::TaskExecutionError("missing test task".into())
 }
 
 /// Invalid low-level output fails only its own row while a valid sibling still completes.
-async fn invalid_outputs<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+async fn invalid_outputs<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
     let tasks = [record(), record(), record()];
     store
         .store_tasks(tasks.iter().cloned().map(write).collect())
@@ -115,7 +120,7 @@ async fn invalid_outputs<S: AbstractTaskStore>(store: &S) -> Result<(), TaskErro
 }
 
 /// Resume limits apply before mutation and do not confuse JSON null with absent input.
-async fn resume_limits<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+async fn resume_limits<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
     let mut task = record();
     task.status = TaskStatus::Suspended;
     let id = task.id;
@@ -146,7 +151,7 @@ async fn resume_limits<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError>
 }
 
 /// Every successful checkpoint clears a prior failure without rewriting it during claim.
-async fn checkpoints_clear<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+async fn checkpoints_clear<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
     for outcome in [
         TaskOutcome::Suspend { state: "0".into() },
         TaskOutcome::Sleep {
@@ -158,7 +163,7 @@ async fn checkpoints_clear<S: AbstractTaskStore>(store: &S) -> Result<(), TaskEr
             child: write(record()),
         },
     ] {
-        let mut task = record();
+        let mut task = flow_record();
         task.last_result = Some(crate::tasks::result::failure(task.id, "old".into()));
         let id = task.id;
         store.store_tasks(vec![write(task)]).await?;
@@ -188,13 +193,13 @@ async fn checkpoints_clear<S: AbstractTaskStore>(store: &S) -> Result<(), TaskEr
 
 /// Memory implements the same persisted JSON and checkpoint contract as SQL stores.
 #[tokio::test]
-async fn memory_results() -> Result<(), TaskError> {
+async fn memory_results() -> Result<(), TaskRuntimeError> {
     result_contract(&MemoryTaskStore::new(32)).await
 }
 
 /// Typed inspection distinguishes malformed data, wrong success types, and persisted failures.
 #[test]
-fn result_inspection_errors() -> Result<(), TaskError> {
+fn result_inspection_errors() -> Result<(), TaskRuntimeError> {
     let mut task = record();
     assert!(TaskInfo::from(task.clone()).last_result::<()>()?.is_none());
     task.last_result = Some("{".into());

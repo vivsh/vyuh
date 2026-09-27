@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use super::TaskError;
+use super::TaskRuntimeError;
 
 /// Framework-owned lane used when a submission does not select one.
 pub const DEFAULT_TASK_LANE: TaskLane = TaskLane::new("default");
@@ -138,17 +138,17 @@ impl TaskRetry {
     }
 
     /// Reports whether the completed invocation consumed the lane's attempt budget.
-    pub(crate) fn exhausted(self, attempts: i32) -> Result<bool, TaskError> {
+    pub(crate) fn exhausted(self, attempts: i32) -> Result<bool, TaskRuntimeError> {
         let attempts = u32::try_from(attempts).map_err(|_| {
-            TaskError::TaskExecutionError("task attempt count cannot be negative".into())
+            TaskRuntimeError::TaskExecutionError("task attempt count cannot be negative".into())
         })?;
         Ok(attempts >= self.max_attempts)
     }
 
     /// Calculates the bounded exponential delay after the completed invocation.
-    pub(crate) fn delay(self, attempts: i32) -> Result<Duration, TaskError> {
+    pub(crate) fn delay(self, attempts: i32) -> Result<Duration, TaskRuntimeError> {
         let attempts = u32::try_from(attempts).map_err(|_| {
-            TaskError::TaskExecutionError("task attempt count cannot be negative".into())
+            TaskRuntimeError::TaskExecutionError("task attempt count cannot be negative".into())
         })?;
         let mut delay = self.initial_delay;
         for _ in 1..attempts {
@@ -408,7 +408,7 @@ impl TaskConf {
     }
 
     /// Validates task configuration that is independent of registered bundles.
-    pub(crate) fn validate(&self) -> Result<(), TaskError> {
+    pub(crate) fn validate(&self) -> Result<(), TaskRuntimeError> {
         validate_scalars(self)?;
         validate_readiness(self.readiness)?;
         validate_overrides(&self.lanes, self.batch_size)?;
@@ -419,7 +419,7 @@ impl TaskConf {
     pub(crate) fn resolve_lanes(
         &self,
         defaults: impl IntoIterator<Item = TaskLaneConf>,
-    ) -> Result<Vec<TaskLaneConf>, TaskError> {
+    ) -> Result<Vec<TaskLaneConf>, TaskRuntimeError> {
         self.validate()?;
         let mut lanes = collect_lanes(defaults, "bundle")?;
         for lane in &self.lanes {
@@ -436,13 +436,15 @@ impl TaskConf {
         &self,
         lanes: &[TaskLaneConf],
         lane: TaskLane,
-    ) -> Result<(TaskLane, bool), TaskError> {
+    ) -> Result<(TaskLane, bool), TaskRuntimeError> {
         if lanes.iter().any(|entry| entry.lane() == lane) {
             return Ok((lane, false));
         }
         match self.missing_lane {
             TaskLanePolicy::UseDefault => Ok((DEFAULT_TASK_LANE, true)),
-            TaskLanePolicy::RequireConfigured => Err(TaskError::UnknownLane(lane.to_string())),
+            TaskLanePolicy::RequireConfigured => {
+                Err(TaskRuntimeError::UnknownLane(lane.to_string()))
+            }
         }
     }
 
@@ -480,9 +482,9 @@ impl TaskConf {
 }
 
 /// Rejects duplicate or invalid application lane overrides before merging defaults.
-fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), TaskError> {
+fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), TaskRuntimeError> {
     if lanes.len() > MAX_TASK_LANES {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lanes must contain at most {MAX_TASK_LANES} entries"
         )));
     }
@@ -498,16 +500,16 @@ fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), T
 fn collect_lanes(
     defaults: impl IntoIterator<Item = TaskLaneConf>,
     source: &str,
-) -> Result<BTreeMap<TaskLane, TaskLaneConf>, TaskError> {
+) -> Result<BTreeMap<TaskLane, TaskLaneConf>, TaskRuntimeError> {
     let mut lanes = BTreeMap::new();
     for lane in defaults {
         if lane.lane() == DEFAULT_TASK_LANE {
-            return Err(TaskError::InvalidConfig(format!(
+            return Err(TaskRuntimeError::InvalidConfig(format!(
                 "{source} task lanes cannot configure the default lane"
             )));
         }
         if lanes.insert(lane.lane(), lane).is_some() {
-            return Err(TaskError::InvalidConfig(format!(
+            return Err(TaskRuntimeError::InvalidConfig(format!(
                 "duplicate {source} task lane definition"
             )));
         }
@@ -519,19 +521,22 @@ fn collect_lanes(
 fn insert_default_lane(
     lanes: &mut BTreeMap<TaskLane, TaskLaneConf>,
     concurrency: usize,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if lanes.contains_key(&DEFAULT_TASK_LANE) {
         return Ok(());
     }
     let used = lanes.values().try_fold(0_usize, |sum, lane| {
-        sum.checked_add(lane.concurrency())
-            .ok_or_else(|| TaskError::InvalidConfig("task lane concurrency overflowed".into()))
+        sum.checked_add(lane.concurrency()).ok_or_else(|| {
+            TaskRuntimeError::InvalidConfig("task lane concurrency overflowed".into())
+        })
     })?;
     let remaining = concurrency.checked_sub(used).ok_or_else(|| {
-        TaskError::InvalidConfig("task lane concurrency exceeds global task concurrency".into())
+        TaskRuntimeError::InvalidConfig(
+            "task lane concurrency exceeds global task concurrency".into(),
+        )
     })?;
     if remaining == 0 {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "named task lanes leave no capacity for the default lane".into(),
         ));
     }
@@ -543,35 +548,35 @@ fn insert_default_lane(
 }
 
 /// Rejects scalar limits that could disable progress or exceed bounded policy.
-fn validate_scalars(conf: &TaskConf) -> Result<(), TaskError> {
+fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
     if conf.poll_interval.is_zero() || conf.fallback_poll_interval < conf.poll_interval {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task fallback interval must be at least the non-zero poll interval".into(),
         ));
     }
     if conf.concurrency == 0 || conf.batch_size == 0 {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task concurrency and batch size must be non-zero".into(),
         ));
     }
     if conf.concurrency > MAX_CONCURRENCY || conf.batch_size > MAX_BATCH_SIZE {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task concurrency cannot exceed {MAX_CONCURRENCY} and batch size cannot exceed {MAX_BATCH_SIZE}"
         )));
     }
     if conf.poll_interval > MAX_INTERVAL || conf.fallback_poll_interval > MAX_INTERVAL {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task polling intervals cannot exceed seven days".into(),
         ));
     }
     if conf.lease_duration.is_zero() || conf.max_payload_bytes == 0 || conf.max_error_bytes == 0 {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task lease and payload limits must be non-zero".into(),
         ));
     }
     let minimum_lease = conf.poll_interval.saturating_mul(3);
     if conf.lease_duration < minimum_lease {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task lease duration must be at least three poll intervals".into(),
         ));
     }
@@ -579,7 +584,7 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskError> {
         || conf.max_payload_bytes > MAX_PAYLOAD_BYTES
         || conf.max_error_bytes > MAX_ERROR_BYTES
     {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task lease or persisted payload limits exceed framework bounds".into(),
         ));
     }
@@ -587,9 +592,9 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskError> {
 }
 
 /// Rejects readiness policies that could never transition deterministically.
-fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskError> {
+fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskRuntimeError> {
     if matches!(policy, TaskReadiness::AfterFailures(0)) {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task readiness failure threshold must be greater than zero".into(),
         ));
     }
@@ -601,14 +606,14 @@ fn validate_lanes(
     lanes: &[TaskLaneConf],
     concurrency: usize,
     batch_size: usize,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if lanes.is_empty() || lanes.len() > MAX_TASK_LANES {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lanes must contain between 1 and {MAX_TASK_LANES} entries"
         )));
     }
     if !lanes.iter().any(|lane| lane.lane() == DEFAULT_TASK_LANE) {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "explicit task lanes must include the default lane".into(),
         ));
     }
@@ -617,12 +622,12 @@ fn validate_lanes(
     for lane in lanes {
         validate_lane(lane, &mut names)?;
         validate_lock(lane, batch_size)?;
-        total = total
-            .checked_add(lane.concurrency())
-            .ok_or_else(|| TaskError::InvalidConfig("task lane concurrency overflowed".into()))?;
+        total = total.checked_add(lane.concurrency()).ok_or_else(|| {
+            TaskRuntimeError::InvalidConfig("task lane concurrency overflowed".into())
+        })?;
     }
     if total > concurrency {
-        return Err(TaskError::InvalidConfig(
+        return Err(TaskRuntimeError::InvalidConfig(
             "task lane concurrency exceeds global task concurrency".into(),
         ));
     }
@@ -630,7 +635,7 @@ fn validate_lanes(
 }
 
 /// Validates one optional durable lane-owner policy.
-fn validate_lock(conf: &TaskLaneConf, maximum: usize) -> Result<(), TaskError> {
+fn validate_lock(conf: &TaskLaneConf, maximum: usize) -> Result<(), TaskRuntimeError> {
     let Some(lane_lock) = conf.lane_lock() else {
         return Ok(());
     };
@@ -644,7 +649,7 @@ fn validate_lock(conf: &TaskLaneConf, maximum: usize) -> Result<(), TaskError> {
         || lane_lock.idle_duration() > MAX_INTERVAL
         || !paired
     {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lane '{}' has an invalid lane lock policy",
             conf.lane()
         )));
@@ -653,7 +658,10 @@ fn validate_lock(conf: &TaskLaneConf, maximum: usize) -> Result<(), TaskError> {
 }
 
 /// Validates one stable lane name, quota, and optional token-bucket policy.
-fn validate_lane(conf: &TaskLaneConf, names: &mut HashSet<&'static str>) -> Result<(), TaskError> {
+fn validate_lane(
+    conf: &TaskLaneConf,
+    names: &mut HashSet<&'static str>,
+) -> Result<(), TaskRuntimeError> {
     let name = conf.lane().as_str();
     let valid_name = !name.is_empty()
         && name.len() <= 64
@@ -661,7 +669,7 @@ fn validate_lane(conf: &TaskLaneConf, names: &mut HashSet<&'static str>) -> Resu
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
     if !valid_name || !names.insert(name) || conf.concurrency() == 0 {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "invalid or duplicate task lane '{name}'"
         )));
     }
@@ -675,21 +683,21 @@ fn validate_lane(conf: &TaskLaneConf, names: &mut HashSet<&'static str>) -> Resu
         || retry.maximum_delay() < retry.initial_delay()
         || retry.maximum_delay() > MAX_INTERVAL
     {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lane '{name}' has an invalid retry policy"
         )));
     }
     if let IdempotencyRetention::RetainFor(duration) = conf.idempotency_policy()
         && (duration.is_zero() || duration > MAX_IDEMPOTENCY_RETENTION)
     {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lane '{name}' has an invalid idempotency retention"
         )));
     }
     Ok(())
 }
 
-fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), TaskError> {
+fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), TaskRuntimeError> {
     let Some(rate) = rate else { return Ok(()) };
     let period_nanos = rate.period().as_nanos();
     if rate.permits() == 0
@@ -697,7 +705,7 @@ fn validate_rate(name: &str, label: &str, rate: Option<TaskRate>) -> Result<(), 
         || rate.period().as_micros() == 0
         || period_nanos > u128::from(u64::MAX)
     {
-        return Err(TaskError::InvalidConfig(format!(
+        return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lane '{name}' has an invalid {label} rate limit"
         )));
     }
@@ -734,7 +742,7 @@ mod tests {
             .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(8).on_idle(lane_hook)));
         assert!(matches!(
             unpaired.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
 
         let oversized = TaskConf::default()
@@ -742,21 +750,21 @@ mod tests {
             .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(2)));
         assert!(matches!(
             oversized.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
 
         let zero_size =
             TaskConf::default().lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(0)));
         assert!(matches!(
             zero_size.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
 
         let zero_deadline = TaskConf::default()
             .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(1).deadline(Duration::ZERO)));
         assert!(matches!(
             zero_deadline.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
 
         let long_idle = TaskConf::default().lane(
@@ -765,7 +773,7 @@ mod tests {
         );
         assert!(matches!(
             long_idle.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
     }
 
@@ -792,7 +800,10 @@ mod tests {
             .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 0))
             .lane(TaskLaneConf::new(FAST, 3))
             .lane(TaskLaneConf::new(SLOW, 1).rate_limit(TaskRate::per_minute(60).burst(4)));
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
 
         let conf = TaskConf::default()
             .concurrency(4)
@@ -827,7 +838,7 @@ mod tests {
             .lane(TaskLaneConf::new(FAST, 1));
         assert!(matches!(
             derived_default.resolve_lanes(std::iter::empty()),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
         let duplicate = TaskConf::default()
             .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 1))
@@ -835,7 +846,7 @@ mod tests {
             .lane(TaskLaneConf::new(FAST, 1));
         assert!(matches!(
             duplicate.validate(),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
         let overcommitted = TaskConf::default()
             .concurrency(2)
@@ -844,7 +855,7 @@ mod tests {
             .lane(TaskLaneConf::new(SLOW, 1));
         assert!(matches!(
             overcommitted.resolve_lanes(std::iter::empty()),
-            Err(TaskError::InvalidConfig(_))
+            Err(TaskRuntimeError::InvalidConfig(_))
         ));
     }
 
@@ -861,7 +872,10 @@ mod tests {
             .fold(TaskConf::default().concurrency(33), |conf, name| {
                 conf.lane(TaskLaneConf::new(TaskLane::new(name), 1))
             });
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
     }
 
     /// Verifies infallible scalar builders defer invalid limits to terminal validation.
@@ -871,7 +885,10 @@ mod tests {
             .concurrency(0)
             .batch_size(0)
             .poll_interval(Duration::ZERO);
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
     }
 
     /// Verifies a lease leaves enough time for two missed paced ticks before recovery.
@@ -880,7 +897,10 @@ mod tests {
         let conf = TaskConf::default()
             .poll_interval(Duration::from_secs(2))
             .lease_duration(Duration::from_secs(5));
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
     }
 
     /// Verifies retry delays grow from the lane policy and stop at its configured cap.
@@ -911,7 +931,10 @@ mod tests {
             TaskLaneConf::new(DEFAULT_TASK_LANE, 1)
                 .retry(TaskRetry::exponential(0, Duration::ZERO)),
         );
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
     }
 
     /// Verifies a task readiness threshold must permit at least one failure.
@@ -919,12 +942,15 @@ mod tests {
     fn task_config_rejects_zero_readiness_threshold() {
         let conf = TaskConf::default().readiness(TaskReadiness::after_failures(0));
 
-        assert!(matches!(conf.validate(), Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(
+            conf.validate(),
+            Err(TaskRuntimeError::InvalidConfig(_))
+        ));
     }
 
     /// Verifies an application lane replaces a reusable bundle's complete default.
     #[test]
-    fn application_lane_replaces_bundle_default() -> Result<(), TaskError> {
+    fn application_lane_replaces_bundle_default() -> Result<(), TaskRuntimeError> {
         let conf = TaskConf::default()
             .concurrency(10)
             .lane(TaskLaneConf::new(FAST, 6));
@@ -932,11 +958,11 @@ mod tests {
         let fast = lanes
             .iter()
             .find(|lane| lane.lane() == FAST)
-            .ok_or_else(|| TaskError::UnknownLane(FAST.to_string()))?;
+            .ok_or_else(|| TaskRuntimeError::UnknownLane(FAST.to_string()))?;
         let default = lanes
             .iter()
             .find(|lane| lane.lane() == DEFAULT_TASK_LANE)
-            .ok_or_else(|| TaskError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
+            .ok_or_else(|| TaskRuntimeError::UnknownLane(DEFAULT_TASK_LANE.to_string()))?;
 
         assert_eq!(fast.concurrency(), 6);
         assert_eq!(default.concurrency(), 4);
@@ -949,18 +975,18 @@ mod tests {
         let result = TaskConf::default()
             .resolve_lanes([TaskLaneConf::new(FAST, 1), TaskLaneConf::new(FAST, 1)]);
 
-        assert!(matches!(result, Err(TaskError::InvalidConfig(_))));
+        assert!(matches!(result, Err(TaskRuntimeError::InvalidConfig(_))));
     }
 
     /// Verifies strict lane policy rejects a task declaration absent from finalized lanes.
     #[test]
-    fn strict_missing_lane_policy_rejects_unconfigured_task_lane() -> Result<(), TaskError> {
+    fn strict_missing_lane_policy_rejects_unconfigured_task_lane() -> Result<(), TaskRuntimeError> {
         let conf = TaskConf::default().missing_lane(TaskLanePolicy::RequireConfigured);
         let lanes = conf.resolve_lanes(std::iter::empty())?;
 
         assert!(matches!(
             conf.resolve_lane(&lanes, FAST),
-            Err(TaskError::UnknownLane(_))
+            Err(TaskRuntimeError::UnknownLane(_))
         ));
         Ok(())
     }

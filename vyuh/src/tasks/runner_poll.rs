@@ -310,9 +310,9 @@ pub(super) fn prior_tick(
 }
 
 /// Validates internal per-lane results before they enter scheduler queues.
-pub(super) fn validate_poll(claims: &[LaneClaim], poll: &TaskPoll) -> Result<(), TaskError> {
+pub(super) fn validate_poll(claims: &[LaneClaim], poll: &TaskPoll) -> Result<(), TaskRuntimeError> {
     if claims.len() != poll.lanes.len() {
-        return Err(TaskError::TaskExecutionError(
+        return Err(TaskRuntimeError::TaskExecutionError(
             "task store returned incomplete per-lane polling evidence".into(),
         ));
     }
@@ -335,8 +335,8 @@ pub(super) fn validate_poll(claims: &[LaneClaim], poll: &TaskPoll) -> Result<(),
     Ok(())
 }
 
-pub(super) fn invalid_lane_poll(lane: TaskLane) -> TaskError {
-    TaskError::TaskExecutionError(format!(
+pub(super) fn invalid_lane_poll(lane: TaskLane) -> TaskRuntimeError {
+    TaskRuntimeError::TaskExecutionError(format!(
         "task store returned invalid polling evidence for lane '{lane}'"
     ))
 }

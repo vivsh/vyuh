@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use super::{
     AbstractTaskStore, LaneClaim, LaneHookAction, LaneHookResult, LaneOwnerPhase, LaneOwnerRequest,
-    LanePoll, TaskCommit, TaskError, TaskLane, TaskLaneConf, TaskLaneLock, TaskLease, TaskOutcome,
-    TaskRate, TaskRecord, TaskStatus, TaskStoreConf, TaskWrite, store::MemoryTaskStore,
+    LanePoll, TaskCommit, TaskLane, TaskLaneConf, TaskLaneLock, TaskLease, TaskOutcome, TaskRate,
+    TaskRecord, TaskRuntimeError, TaskStatus, TaskStoreConf, TaskWrite, store::MemoryTaskStore,
 };
 
 const GPU: TaskLane = TaskLane::new("gpu");
@@ -23,7 +23,7 @@ fn locked_conf(size: usize, deadline: Option<Duration>, hooks: bool) -> TaskStor
         lane_lock = lane_lock.on_idle(lifecycle_hook).on_busy(lifecycle_hook);
     }
     TaskStoreConf {
-        handlers: vec!["job".into()],
+        handlers: vec![("job".into(), super::TaskKind::Work)],
         lanes: vec![TaskLaneConf::new(GPU, 1).lock(lane_lock)],
         idempotency: Vec::new(),
         schedules: Vec::new(),
@@ -33,7 +33,7 @@ fn locked_conf(size: usize, deadline: Option<Duration>, hooks: bool) -> TaskStor
 
 fn debounced_conf(delay: Duration) -> TaskStoreConf {
     TaskStoreConf {
-        handlers: vec!["job".into()],
+        handlers: vec![("job".into(), super::TaskKind::Work)],
         lanes: vec![
             TaskLaneConf::new(GPU, 1).lock(
                 TaskLaneLock::new(1)
@@ -60,6 +60,7 @@ fn task(created_at: chrono::DateTime<chrono::Utc>) -> TaskWrite {
             state: None,
             resume_input: None,
             status: TaskStatus::Pending,
+            cancelled: false,
             attempts: 0,
             step_attempts: 0,
             lane: GPU.to_string(),
@@ -106,34 +107,37 @@ async fn poll(
     store: &MemoryTaskStore,
     runner: &str,
     claim: LaneClaim,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     store
         .claim_tasks(runner, &[claim])
         .await?
         .lanes
         .into_iter()
         .next()
-        .ok_or_else(|| TaskError::TaskExecutionError("locked lane poll is missing".into()))
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("locked lane poll is missing".into()))
 }
 
-fn owner(poll: &LanePoll) -> Result<&super::LaneOwnerPoll, TaskError> {
-    poll.owner
-        .as_ref()
-        .ok_or_else(|| TaskError::TaskExecutionError("lane owner evidence is missing".into()))
+fn owner(poll: &LanePoll) -> Result<&super::LaneOwnerPoll, TaskRuntimeError> {
+    poll.owner.as_ref().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("lane owner evidence is missing".into())
+    })
 }
 
-fn token(poll: &LanePoll) -> Result<String, TaskError> {
+fn token(poll: &LanePoll) -> Result<String, TaskRuntimeError> {
     owner(poll)?
         .token
         .clone()
-        .ok_or_else(|| TaskError::TaskExecutionError("lane owner token is missing".into()))
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("lane owner token is missing".into()))
 }
 
-fn hook_result(poll: &LanePoll, result: Result<(), &str>) -> Result<LaneHookResult, TaskError> {
+fn hook_result(
+    poll: &LanePoll,
+    result: Result<(), &str>,
+) -> Result<LaneHookResult, TaskRuntimeError> {
     let owner = owner(poll)?;
-    let action = owner
-        .action
-        .ok_or_else(|| TaskError::TaskExecutionError("lane hook action is missing".into()))?;
+    let action = owner.action.ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("lane hook action is missing".into())
+    })?;
     Ok(LaneHookResult {
         generation: owner.generation,
         action,
@@ -143,7 +147,7 @@ fn hook_result(poll: &LanePoll, result: Result<(), &str>) -> Result<LaneHookResu
 
 /// Verifies a locked lane leaves candidates pending until its exact threshold is ready.
 #[tokio::test]
-async fn locked_lane_claims_only_a_complete_cohort() -> Result<(), TaskError> {
+async fn locked_lane_claims_only_a_complete_cohort() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(2, None, false)).await?;
     store.store_tasks(vec![task(chrono::Utc::now())]).await?;
@@ -160,7 +164,7 @@ async fn locked_lane_claims_only_a_complete_cohort() -> Result<(), TaskError> {
 
 /// Verifies an expired batch deadline releases a bounded partial cohort.
 #[tokio::test]
-async fn locked_lane_deadline_claims_a_partial_cohort() -> Result<(), TaskError> {
+async fn locked_lane_deadline_claims_a_partial_cohort() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store
         .initialize(locked_conf(4, Some(Duration::from_millis(1)), false))
@@ -175,7 +179,7 @@ async fn locked_lane_deadline_claims_a_partial_cohort() -> Result<(), TaskError>
 
 /// Verifies a rate-limited partial flush remains open until its ready cohort drains.
 #[tokio::test]
-async fn locked_lane_continues_a_rate_limited_flush() -> Result<(), TaskError> {
+async fn locked_lane_continues_a_rate_limited_flush() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     let mut conf = locked_conf(2, None, false);
     conf.lanes = vec![
@@ -191,10 +195,9 @@ async fn locked_lane_continues_a_rate_limited_flush() -> Result<(), TaskError> {
     let first = poll(&store, "runner-a", claim(None, None)).await?;
     assert_eq!(first.tasks.len(), 1);
     let owner_token = token(&first)?;
-    let task_id =
-        first.tasks.first().map(TaskRecord::id).ok_or_else(|| {
-            TaskError::TaskExecutionError("first rate permit claimed no task".into())
-        })?;
+    let task_id = first.tasks.first().map(TaskRecord::id).ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("first rate permit claimed no task".into())
+    })?;
     store
         .commit_outcomes(
             "runner-a",
@@ -215,7 +218,7 @@ async fn locked_lane_continues_a_rate_limited_flush() -> Result<(), TaskError> {
 
 /// Verifies contenders cannot claim while a live owner retains the durable token.
 #[tokio::test]
-async fn locked_lane_allows_only_one_live_owner() -> Result<(), TaskError> {
+async fn locked_lane_allows_only_one_live_owner() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(2, None, false)).await?;
     store.store_tasks(vec![task(chrono::Utc::now())]).await?;
@@ -230,7 +233,7 @@ async fn locked_lane_allows_only_one_live_owner() -> Result<(), TaskError> {
 
 /// Verifies simultaneous contenders can produce only one durable owner and one claimed task.
 #[tokio::test]
-async fn concurrent_locked_lane_contenders_have_one_winner() -> Result<(), TaskError> {
+async fn concurrent_locked_lane_contenders_have_one_winner() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(1, None, false)).await?;
     store.store_tasks(vec![task(chrono::Utc::now())]).await?;
@@ -257,17 +260,15 @@ async fn concurrent_locked_lane_contenders_have_one_winner() -> Result<(), TaskE
 
 /// Verifies takeover rejects stale task commits and task-lease renewals.
 #[tokio::test]
-async fn takeover_fences_stale_task_mutations() -> Result<(), TaskError> {
+async fn takeover_fences_stale_task_mutations() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::with_lease_duration(64, Duration::from_millis(10));
     store.initialize(locked_conf(1, None, false)).await?;
     store.store_tasks(vec![task(chrono::Utc::now())]).await?;
     let first = poll(&store, "runner-a", claim(None, None)).await?;
     let stale_token = token(&first)?;
-    let task_id = first
-        .tasks
-        .first()
-        .map(TaskRecord::id)
-        .ok_or_else(|| TaskError::TaskExecutionError("first owner claimed no task".into()))?;
+    let task_id = first.tasks.first().map(TaskRecord::id).ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("first owner claimed no task".into())
+    })?;
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     let takeover = poll(&store, "runner-b", claim(None, None)).await?;
@@ -305,7 +306,7 @@ async fn takeover_fences_stale_task_mutations() -> Result<(), TaskError> {
 
 /// Verifies idle and busy hooks serialize and busy success gates task claims.
 #[tokio::test]
-async fn lifecycle_hooks_gate_idle_and_busy_edges() -> Result<(), TaskError> {
+async fn lifecycle_hooks_gate_idle_and_busy_edges() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(1, None, true)).await?;
 
@@ -339,7 +340,7 @@ async fn lifecycle_hooks_gate_idle_and_busy_edges() -> Result<(), TaskError> {
 
 /// Verifies work appearing during idle reconciliation forces a serialized busy hook.
 #[tokio::test]
-async fn work_during_idle_hook_transitions_directly_to_busying() -> Result<(), TaskError> {
+async fn work_during_idle_hook_transitions_directly_to_busying() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(1, None, true)).await?;
     let idling = poll(&store, "runner-a", claim(None, None)).await?;
@@ -359,7 +360,7 @@ async fn work_during_idle_hook_transitions_directly_to_busying() -> Result<(), T
 
 /// Verifies idle failures open after activity while busy failures remain closed until retry.
 #[tokio::test]
-async fn lifecycle_failures_apply_asymmetric_safety() -> Result<(), TaskError> {
+async fn lifecycle_failures_apply_asymmetric_safety() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(1, None, true)).await?;
     let idling = poll(&store, "runner-a", claim(None, None)).await?;
@@ -379,11 +380,9 @@ async fn lifecycle_failures_apply_asymmetric_safety() -> Result<(), TaskError> {
     let active = poll(&store, "runner-b", claim(None, None)).await?;
     assert_eq!(active.tasks.len(), 1);
     let active_token = token(&active)?;
-    let task_id = active
-        .tasks
-        .first()
-        .map(TaskRecord::id)
-        .ok_or_else(|| TaskError::TaskExecutionError("active owner claimed no task".into()))?;
+    let task_id = active.tasks.first().map(TaskRecord::id).ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("active owner claimed no task".into())
+    })?;
     store
         .commit_outcomes(
             "runner-b",
@@ -432,7 +431,7 @@ async fn lifecycle_failures_apply_asymmetric_safety() -> Result<(), TaskError> {
 
 /// Verifies idle debounce requires one continuous empty interval and resets on ready work.
 #[tokio::test]
-async fn idle_debounce_resets_when_work_arrives() -> Result<(), TaskError> {
+async fn idle_debounce_resets_when_work_arrives() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store
         .initialize(debounced_conf(Duration::from_millis(20)))
@@ -444,10 +443,9 @@ async fn idle_debounce_resets_when_work_arrives() -> Result<(), TaskError> {
     store.store_tasks(vec![task(chrono::Utc::now())]).await?;
     let active = poll(&store, "runner-a", claim(Some(owner_token.clone()), None)).await?;
     assert_eq!(active.tasks.len(), 1);
-    let task_id =
-        active.tasks.first().map(TaskRecord::id).ok_or_else(|| {
-            TaskError::TaskExecutionError("debounced lane claimed no task".into())
-        })?;
+    let task_id = active.tasks.first().map(TaskRecord::id).ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("debounced lane claimed no task".into())
+    })?;
     store
         .commit_outcomes(
             "runner-a",
@@ -469,7 +467,7 @@ async fn idle_debounce_resets_when_work_arrives() -> Result<(), TaskError> {
 
 /// Verifies future scheduled tasks supply a wake deadline but do not prevent idle.
 #[tokio::test]
-async fn future_tasks_do_not_prevent_idle_transition() -> Result<(), TaskError> {
+async fn future_tasks_do_not_prevent_idle_transition() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(64);
     store.initialize(locked_conf(1, None, true)).await?;
     let mut scheduled = task(chrono::Utc::now());

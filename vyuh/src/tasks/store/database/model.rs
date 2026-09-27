@@ -2,7 +2,7 @@
 
 use crate::{
     db,
-    tasks::{TaskError, TaskRecord},
+    tasks::{TaskRecord, TaskRuntimeError},
 };
 
 /// Private persistence representation for a durable task.
@@ -25,6 +25,8 @@ pub(super) struct TaskRow {
     pub(super) state: Option<String>,
     pub(super) resume_input: Option<String>,
     pub(super) status: i16,
+    #[column(default = "false")]
+    pub(super) cancelled: bool,
     pub(super) attempts: i32,
     #[column(default = "0")]
     pub(super) step_attempts: i32,
@@ -57,6 +59,7 @@ impl From<TaskRecord> for TaskRow {
             state: record.state,
             resume_input: record.resume_input,
             status: record.status.as_i16(),
+            cancelled: record.cancelled,
             attempts: record.attempts,
             step_attempts: record.step_attempts,
             lane_name: record.lane,
@@ -76,7 +79,7 @@ impl From<TaskRecord> for TaskRow {
 }
 
 impl TryFrom<TaskRow> for TaskRecord {
-    type Error = TaskError;
+    type Error = TaskRuntimeError;
 
     fn try_from(row: TaskRow) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -89,6 +92,7 @@ impl TryFrom<TaskRow> for TaskRecord {
             state: row.state,
             resume_input: row.resume_input,
             status: crate::tasks::TaskStatus::from_i16(row.status)?,
+            cancelled: row.cancelled,
             attempts: row.attempts,
             step_attempts: row.step_attempts,
             lane: row.lane_name,

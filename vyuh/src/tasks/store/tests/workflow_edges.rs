@@ -3,7 +3,9 @@ use super::*;
 const CHILD: TaskLane = TaskLane::new("children");
 
 /// Exercises cross-lane delivery, retry input retention, and startup failure delivery.
-pub(crate) async fn cross_lane_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+pub(crate) async fn cross_lane_contract<S: AbstractTaskStore>(
+    store: &S,
+) -> Result<(), TaskRuntimeError> {
     let mut config = conf();
     config.lanes = vec![
         TaskLaneConf::new(DEFAULT_TASK_LANE, 8)
@@ -11,7 +13,8 @@ pub(crate) async fn cross_lane_contract<S: AbstractTaskStore>(store: &S) -> Resu
         TaskLaneConf::new(CHILD, 8),
     ];
     store.initialize(config.clone()).await?;
-    let parent = record();
+    let mut parent = flow_record();
+    parent.lease_duration_ms = Some(1);
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -72,15 +75,15 @@ pub(crate) async fn cross_lane_contract<S: AbstractTaskStore>(store: &S) -> Resu
             .all(|lane| lane.tasks.is_empty())
     );
     assert_eq!(delivered.wake_lanes, [DEFAULT_TASK_LANE]);
-    retry_parent(store, id).await?;
+    replay_parent(store, id).await?;
     scheduled_child(store).await?;
     ineligible_parent(store).await?;
     startup_failure(store, config).await
 }
 
 /// Spawned scheduling delays remain database-relative and cannot bypass readiness.
-async fn scheduled_child<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
-    let parent = record();
+async fn scheduled_child<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -125,8 +128,8 @@ async fn scheduled_child<S: AbstractTaskStore>(store: &S) -> Result<(), TaskErro
 }
 
 /// Missing or no-longer-suspended parents never prevent child completion or receive input.
-async fn ineligible_parent<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
-    let mut parent = record();
+async fn ineligible_parent<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
+    let mut parent = flow_record();
     parent.status = TaskStatus::Succeeded;
     let id = parent.id;
     let mut missing = record();
@@ -152,8 +155,11 @@ async fn ineligible_parent<S: AbstractTaskStore>(store: &S) -> Result<(), TaskEr
     Ok(())
 }
 
-/// Retrying a resumed step preserves its input and exhausts only its own attempt budget.
-async fn retry_parent<S: AbstractTaskStore>(store: &S, id: TaskId) -> Result<(), TaskError> {
+/// Crash replay preserves a flow's resumed input and uses the same lane attempt budget.
+async fn replay_parent<S: AbstractTaskStore>(
+    store: &S,
+    id: TaskId,
+) -> Result<(), TaskRuntimeError> {
     for attempt in 1..=2 {
         let task = store.claim_tasks("owner", &[claim()]).await?.lanes[0]
             .tasks
@@ -162,10 +168,9 @@ async fn retry_parent<S: AbstractTaskStore>(store: &S, id: TaskId) -> Result<(),
         assert_eq!(task.step_attempts, attempt);
         assert_eq!(task.resume_input::<u32>()?, Some(Ok(7)));
         assert_eq!(task.state::<u32>()?, Some(42));
-        store
-            .commit_outcomes("owner", &[commit(id, TaskOutcome::retry("again"))])
-            .await?;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
     }
+    store.claim_tasks("owner", &[claim()]).await?;
     assert_eq!(
         store.get_task(id).await?.unwrap().status,
         TaskStatus::Failed
@@ -177,8 +182,8 @@ async fn retry_parent<S: AbstractTaskStore>(store: &S, id: TaskId) -> Result<(),
 async fn startup_failure<S: AbstractTaskStore>(
     store: &S,
     config: TaskStoreConf,
-) -> Result<(), TaskError> {
-    let mut parent = record();
+) -> Result<(), TaskRuntimeError> {
+    let mut parent = flow_record();
     parent.status = TaskStatus::Suspended;
     let id = parent.id;
     let mut child = record();
@@ -198,6 +203,6 @@ async fn startup_failure<S: AbstractTaskStore>(
 
 /// Memory and database stores share cross-lane, retry, contention, and startup semantics.
 #[tokio::test]
-async fn cross_lane_retry_and_startup() -> Result<(), TaskError> {
+async fn cross_lane_retry_and_startup() -> Result<(), TaskRuntimeError> {
     cross_lane_contract(&MemoryTaskStore::new(32)).await
 }

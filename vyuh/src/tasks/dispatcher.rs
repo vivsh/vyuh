@@ -7,9 +7,9 @@ use serde::Serialize;
 use crate::callables::DataBox;
 
 use super::{
-    AbstractTaskStore, RegisteredTask, ScheduledTaskWrite, TaskError, TaskFilter, TaskId, TaskInfo,
-    TaskLane, TaskOptions, TaskReceipt, TaskRecord, TaskRegistry, TaskScheduleConf, TaskStatus,
-    TaskWrite,
+    AbstractTaskStore, RegisteredTask, ScheduledTaskWrite, TaskFilter, TaskId, TaskInfo, TaskLane,
+    TaskOptions, TaskReceipt, TaskRecord, TaskRegistry, TaskRuntimeError, TaskScheduleConf,
+    TaskStatus, TaskWrite,
     submission::{canonical_json, canonical_json_value},
 };
 
@@ -32,13 +32,19 @@ pub struct Tasks {
 }
 
 impl Tasks {
+    /// Requests cancellation without waiting for finalization through normal polling.
+    /// Returns false for missing, terminal, or already-cancelled tasks; store errors propagate.
+    pub async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        self.dispatcher.cancel(id).await
+    }
+
     /// Resolves a returned child request without submitting or waking any work.
     pub(super) fn prepare_child(
         &self,
         input: &DataBox,
         state: &str,
         options: &TaskOptions,
-    ) -> Result<super::TaskOutcome, TaskError> {
+    ) -> Result<super::TaskOutcome, TaskRuntimeError> {
         self.dispatcher.prepare_child(input, state, options)
     }
 
@@ -47,7 +53,7 @@ impl Tasks {
         &self,
         id: TaskId,
         failure: super::TaskFailure,
-    ) -> Result<bool, TaskError> {
+    ) -> Result<bool, TaskRuntimeError> {
         self.dispatcher.resume_failed(id, failure).await
     }
 
@@ -56,7 +62,10 @@ impl Tasks {
     }
 
     /// Submits one typed task with default options.
-    pub async fn submit<T: Serialize + 'static>(&self, input: T) -> Result<TaskReceipt, TaskError> {
+    pub async fn submit<T: Serialize + 'static>(
+        &self,
+        input: T,
+    ) -> Result<TaskReceipt, TaskRuntimeError> {
         self.dispatcher.submit(input).await
     }
 
@@ -65,7 +74,7 @@ impl Tasks {
         &self,
         input: T,
         options: TaskOptions,
-    ) -> Result<TaskReceipt, TaskError> {
+    ) -> Result<TaskReceipt, TaskRuntimeError> {
         self.dispatcher.submit_with(input, options).await
     }
 
@@ -73,7 +82,7 @@ impl Tasks {
     pub async fn submit_many<T: Serialize + 'static>(
         &self,
         inputs: impl IntoIterator<Item = T>,
-    ) -> Result<Vec<TaskReceipt>, TaskError> {
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         self.dispatcher.submit_many(inputs).await
     }
 
@@ -82,18 +91,26 @@ impl Tasks {
         &self,
         inputs: impl IntoIterator<Item = T>,
         options: TaskOptions,
-    ) -> Result<Vec<TaskReceipt>, TaskError> {
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         self.dispatcher.submit_many_with(inputs, options).await
     }
 
     /// Resumes an ordinary suspension with success and wakes the local runner.
     /// Do not externally resume a parent waiting for a child. Returns false if not suspended.
-    pub async fn resume<T: Serialize>(&self, id: TaskId, input: T) -> Result<bool, TaskError> {
+    pub async fn resume<T: Serialize>(
+        &self,
+        id: TaskId,
+        input: T,
+    ) -> Result<bool, TaskRuntimeError> {
         self.dispatcher.resume(id, input).await
     }
 
     /// Explicitly moves non-running work between configured lanes.
-    pub async fn reassign_lane(&self, from: TaskLane, to: TaskLane) -> Result<u64, TaskError> {
+    pub async fn reassign_lane(
+        &self,
+        from: TaskLane,
+        to: TaskLane,
+    ) -> Result<u64, TaskRuntimeError> {
         self.dispatcher.reassign_lane(from, to).await
     }
 
@@ -101,7 +118,7 @@ impl Tasks {
     pub async fn list(
         &self,
         filter: TaskFilter,
-    ) -> Result<crate::routes::Page<TaskInfo>, TaskError> {
+    ) -> Result<crate::routes::Page<TaskInfo>, TaskRuntimeError> {
         self.dispatcher
             .list(filter)
             .await
@@ -109,7 +126,7 @@ impl Tasks {
     }
 
     /// Returns one persisted task when it exists.
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskInfo>, TaskError> {
+    pub async fn get(&self, id: TaskId) -> Result<Option<TaskInfo>, TaskRuntimeError> {
         self.dispatcher
             .get(id)
             .await
@@ -130,7 +147,7 @@ impl Tasks {
     pub(crate) async fn schedule_snapshot(
         &self,
         names: &[String],
-    ) -> Result<super::TaskScheduleSnapshot, TaskError> {
+    ) -> Result<super::TaskScheduleSnapshot, TaskRuntimeError> {
         self.dispatcher.schedule_snapshot(names).await
     }
 
@@ -145,13 +162,24 @@ impl Tasks {
 }
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
+    /// Records cancellation intent and wakes local workers after commit.
+    /// Returns false for missing, terminal, or already-cancelled tasks; store errors propagate.
+    pub async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        self.ensure_initialized().await?;
+        let changed = self.store.cancel(id).await?;
+        if changed {
+            self.notifier.notify_waiters();
+        }
+        Ok(changed)
+    }
+
     /// Validates a child using ordinary submission preparation without touching storage.
     pub(super) fn prepare_child(
         &self,
         input: &DataBox,
         state: &str,
         options: &TaskOptions,
-    ) -> Result<super::TaskOutcome, TaskError> {
+    ) -> Result<super::TaskOutcome, TaskRuntimeError> {
         validate_spawn_options(options)?;
         validate_payload(state, self.registry.config.payload_limit())?;
         let service = self.task_for_payload(input)?;
@@ -168,7 +196,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         &self,
         id: TaskId,
         failure: super::TaskFailure,
-    ) -> Result<bool, TaskError> {
+    ) -> Result<bool, TaskRuntimeError> {
         let result: Result<(), _> = Err(failure.bounded(self.registry.config.error_limit()));
         self.resume_result(id, result).await
     }
@@ -179,7 +207,10 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     }
 
     /// Submits one typed task with default options.
-    pub async fn submit<T: Serialize + 'static>(&self, input: T) -> Result<TaskReceipt, TaskError> {
+    pub async fn submit<T: Serialize + 'static>(
+        &self,
+        input: T,
+    ) -> Result<TaskReceipt, TaskRuntimeError> {
         self.submit_with(input, TaskOptions::new()).await
     }
 
@@ -188,10 +219,10 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         &self,
         input: T,
         options: TaskOptions,
-    ) -> Result<TaskReceipt, TaskError> {
+    ) -> Result<TaskReceipt, TaskRuntimeError> {
         let mut receipts = self.submit_many_with([input], options).await?;
         receipts.pop().ok_or_else(|| {
-            TaskError::TaskExecutionError("task store omitted a submission receipt".into())
+            TaskRuntimeError::TaskExecutionError("task store omitted a submission receipt".into())
         })
     }
 
@@ -199,7 +230,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub async fn submit_many<T: Serialize + 'static>(
         &self,
         inputs: impl IntoIterator<Item = T>,
-    ) -> Result<Vec<TaskReceipt>, TaskError> {
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         self.submit_many_with(inputs, TaskOptions::new()).await
     }
 
@@ -208,7 +239,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         &self,
         inputs: impl IntoIterator<Item = T>,
         options: TaskOptions,
-    ) -> Result<Vec<TaskReceipt>, TaskError> {
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
         let mut inputs = inputs.into_iter().peekable();
         if inputs.peek().is_none() {
             return Ok(Vec::new());
@@ -218,7 +249,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .registry
             .tasks
             .get(name)
-            .ok_or_else(|| TaskError::TaskNotFound(name.to_string()))?;
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.to_string()))?;
         let writes = build_writes(service, name, inputs, &options, &self.registry.config)?;
         self.ensure_initialized().await?;
         let result = self.store.store_tasks(writes).await;
@@ -235,7 +266,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
 
     /// Resumes an ordinary suspension with success and wakes local workers when it changed.
     /// Do not externally resume a parent waiting for its child.
-    pub async fn resume<T: Serialize>(&self, id: TaskId, input: T) -> Result<bool, TaskError> {
+    pub async fn resume<T: Serialize>(
+        &self,
+        id: TaskId,
+        input: T,
+    ) -> Result<bool, TaskRuntimeError> {
         self.resume_result(id, Ok::<_, super::TaskFailure>(input))
             .await
     }
@@ -245,7 +280,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         &self,
         id: TaskId,
         input: Result<T, super::TaskFailure>,
-    ) -> Result<bool, TaskError> {
+    ) -> Result<bool, TaskRuntimeError> {
         let serialized = serde_json::to_string(&input)?;
         super::result::validate_size(&serialized)?;
         self.ensure_initialized().await?;
@@ -257,7 +292,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     }
 
     /// Moves pending, sleeping, and suspended work to another configured lane.
-    pub async fn reassign_lane(&self, from: TaskLane, to: TaskLane) -> Result<u64, TaskError> {
+    pub async fn reassign_lane(
+        &self,
+        from: TaskLane,
+        to: TaskLane,
+    ) -> Result<u64, TaskRuntimeError> {
         self.require_lane(to)?;
         self.ensure_initialized().await?;
         let count = self.store.reassign_lane(from.as_str(), to.as_str()).await?;
@@ -271,46 +310,46 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub async fn list(
         &self,
         filter: TaskFilter,
-    ) -> Result<crate::routes::Page<TaskRecord>, TaskError> {
+    ) -> Result<crate::routes::Page<TaskRecord>, TaskRuntimeError> {
         validate_filter(&filter)?;
         self.store.list_tasks(filter).await
     }
 
     /// Reads one persisted task record.
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskError> {
+    pub async fn get(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskRuntimeError> {
         self.store.get_task(id).await
     }
 
-    fn task_name<T: 'static>(&self) -> Result<&str, TaskError> {
+    fn task_name<T: 'static>(&self) -> Result<&str, TaskRuntimeError> {
         self.registry
             .typed_map
             .get(&TypeId::of::<T>())
             .map(String::as_str)
-            .ok_or_else(|| TaskError::TaskNotFound("Unknown task type".into()))
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound("Unknown task type".into()))
     }
 
-    fn task_for_payload(&self, payload: &DataBox) -> Result<&RegisteredTask, TaskError> {
+    fn task_for_payload(&self, payload: &DataBox) -> Result<&RegisteredTask, TaskRuntimeError> {
         let name = self
             .registry
             .typed_map
             .get(&payload.payload_type_id())
-            .ok_or_else(|| TaskError::TaskNotFound("Unknown task type".into()))?;
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound("Unknown task type".into()))?;
         self.registry
             .tasks
             .get(name)
-            .ok_or_else(|| TaskError::TaskNotFound(name.clone()))
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.clone()))
     }
 
-    fn require_lane(&self, lane: TaskLane) -> Result<(), TaskError> {
+    fn require_lane(&self, lane: TaskLane) -> Result<(), TaskRuntimeError> {
         self.registry
             .lanes()
             .iter()
             .any(|entry| entry.lane() == lane)
             .then_some(())
-            .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
+            .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
     }
 
-    pub(crate) async fn ensure_initialized(&self) -> Result<(), TaskError> {
+    pub(crate) async fn ensure_initialized(&self) -> Result<(), TaskRuntimeError> {
         let conf = self.store_conf()?;
         let result = self
             .initialized
@@ -321,9 +360,14 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         result
     }
 
-    pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskError> {
+    pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
-            handlers: self.registry.tasks.keys().cloned().collect(),
+            handlers: self
+                .registry
+                .tasks
+                .values()
+                .map(|task| (task.name.clone(), task.kind()))
+                .collect(),
             lanes: self.registry.lanes().to_vec(),
             idempotency: self.registry.idempotency_conf()?,
             schedules: self.schedules.to_vec(),
@@ -335,7 +379,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     pub(crate) async fn schedule_snapshot(
         &self,
         names: &[String],
-    ) -> Result<super::TaskScheduleSnapshot, TaskError> {
+    ) -> Result<super::TaskScheduleSnapshot, TaskRuntimeError> {
         self.ensure_initialized().await?;
         self.store.schedule_snapshot(names).await
     }
@@ -346,7 +390,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         schedule: &str,
         occurrence: chrono::DateTime<chrono::Utc>,
         payload: DataBox,
-    ) -> Result<Option<TaskReceipt>, TaskError> {
+    ) -> Result<Option<TaskReceipt>, TaskRuntimeError> {
         let service = self.task_for_payload(&payload)?;
         self.require_schedule_target(schedule, service.name())?;
         let write = build_box_write(service, &payload, &self.registry.config)?;
@@ -366,13 +410,13 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     }
 
     /// Ensures framework-owned schedule metadata still targets this task type.
-    fn require_schedule_target(&self, schedule: &str, task: &str) -> Result<(), TaskError> {
+    fn require_schedule_target(&self, schedule: &str, task: &str) -> Result<(), TaskRuntimeError> {
         match self.schedules.iter().find(|entry| entry.name == schedule) {
             Some(entry) if entry.task == task => Ok(()),
-            Some(_) => Err(TaskError::TaskExecutionError(
+            Some(_) => Err(TaskRuntimeError::TaskExecutionError(
                 "task schedule payload type does not match its configured target".into(),
             )),
-            None => Err(TaskError::TaskExecutionError(
+            None => Err(TaskRuntimeError::TaskExecutionError(
                 "task schedule is not registered by this site".into(),
             )),
         }
@@ -390,7 +434,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         self.health.snapshot()
     }
 
-    fn record_initialization(&self, result: &Result<(), TaskError>) {
+    fn record_initialization(&self, result: &Result<(), TaskRuntimeError>) {
         match result {
             Ok(()) => self.health.initialized(),
             Err(error) => {
@@ -411,19 +455,19 @@ fn build_writes<T: Serialize + 'static>(
     inputs: impl IntoIterator<Item = T>,
     options: &TaskOptions,
     config: &super::TaskConf,
-) -> Result<Vec<TaskWrite>, TaskError> {
+) -> Result<Vec<TaskWrite>, TaskRuntimeError> {
     validate_options(options)?;
     let mut writes = Vec::new();
     for input in inputs {
         if writes.len() >= config.batch_size_value() {
-            return Err(TaskError::InvalidOptions(
+            return Err(TaskRuntimeError::InvalidOptions(
                 "task submission exceeds the configured batch size".into(),
             ));
         }
         service.validate_object(&input)?;
         let key = service.idempotency_key(&input)?;
         if key.is_none() && options.ignore_conflicts {
-            return Err(TaskError::InvalidOptions(
+            return Err(TaskRuntimeError::InvalidOptions(
                 "ignore_conflicts requires an idempotent task definition".into(),
             ));
         }
@@ -439,7 +483,14 @@ fn build_writes<T: Serialize + 'static>(
             .map(|_| fingerprint(name, &serialized, service))
             .transpose()?;
         writes.push(TaskWrite {
-            record: build_record(name, serialized, key, fingerprint, service.effective_lane())?,
+            record: build_record(
+                name,
+                serialized,
+                key,
+                fingerprint,
+                service.effective_lane(),
+                service.kind(),
+            )?,
             ignore_conflicts: options.ignore_conflicts,
             initial_delay: options.initial_delay,
         });
@@ -452,12 +503,14 @@ fn build_box_write(
     service: &RegisteredTask,
     input: &DataBox,
     config: &super::TaskConf,
-) -> Result<TaskWrite, TaskError> {
+) -> Result<TaskWrite, TaskRuntimeError> {
     service.validate_box(input)?;
     let value = input
         .to_json()
-        .ok_or_else(|| TaskError::TaskExecutionError("task input cannot be serialized".into()))?
-        .map_err(TaskError::TaskExecutionError)?;
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("task input cannot be serialized".into())
+        })?
+        .map_err(TaskRuntimeError::TaskExecutionError)?;
     let key = service.idempotency_key_box(input.as_any())?;
     let serialized = if key.is_some() {
         canonical_json_value(value)?
@@ -477,6 +530,7 @@ fn build_box_write(
             key,
             fingerprint,
             service.effective_lane(),
+            service.kind(),
         )?,
         ignore_conflicts: false,
         initial_delay: None,
@@ -484,9 +538,9 @@ fn build_box_write(
 }
 
 /// Rejects incompatible conflict behavior before a child request can be returned.
-pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskError> {
+pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
     if options.ignore_conflicts {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "spawn cannot ignore idempotency conflicts".into(),
         ));
     }
@@ -494,12 +548,12 @@ pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskEr
 }
 
 /// Surfaces all accumulated builder failures at the submission terminal.
-fn validate_options(options: &TaskOptions) -> Result<(), TaskError> {
+fn validate_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
     if options
         .initial_delay
         .is_some_and(|value| value > super::config::MAX_TASK_DELAY)
     {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "task delays cannot exceed ten years".into(),
         ));
     }
@@ -514,18 +568,20 @@ fn build_record(
     key: Option<String>,
     fingerprint: Option<String>,
     lane: TaskLane,
-) -> Result<TaskRecord, TaskError> {
+    kind: super::TaskKind,
+) -> Result<TaskRecord, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(TaskRecord {
         id: TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,
-        kind: super::TaskKind::Work,
+        kind,
         name: name.into(),
         input,
         state: None,
         resume_input: None,
         status: TaskStatus::Pending,
+        cancelled: false,
         attempts: 0,
         step_attempts: 0,
         lane: lane.to_string(),
@@ -544,10 +600,16 @@ fn build_record(
 }
 
 /// Fingerprints canonical input and immutable idempotency-key semantics.
-fn fingerprint(name: &str, input: &str, service: &RegisteredTask) -> Result<String, TaskError> {
+fn fingerprint(
+    name: &str,
+    input: &str,
+    service: &RegisteredTask,
+) -> Result<String, TaskRuntimeError> {
     let revision = service
         .idempotency_policy()
-        .ok_or_else(|| TaskError::TaskExecutionError("idempotent task is missing policy".into()))?
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("idempotent task is missing policy".into())
+        })?
         .revision;
     let mut hasher = blake3::Hasher::new();
     for part in [name, revision, input] {
@@ -557,9 +619,9 @@ fn fingerprint(name: &str, input: &str, service: &RegisteredTask) -> Result<Stri
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn validate_payload(payload: &str, limit: usize) -> Result<(), TaskError> {
+fn validate_payload(payload: &str, limit: usize) -> Result<(), TaskRuntimeError> {
     if payload.len() > limit {
-        Err(TaskError::InvalidOptions(format!(
+        Err(TaskRuntimeError::InvalidOptions(format!(
             "task payload exceeds the configured {limit}-byte limit"
         )))
     } else {
@@ -567,14 +629,14 @@ fn validate_payload(payload: &str, limit: usize) -> Result<(), TaskError> {
     }
 }
 
-fn validate_filter(filter: &TaskFilter) -> Result<(), TaskError> {
+fn validate_filter(filter: &TaskFilter) -> Result<(), TaskRuntimeError> {
     if filter.page == 0 || filter.per_page == 0 || filter.per_page > 200 {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "task pages are one-indexed and contain at most 200 records".into(),
         ));
     }
     if filter.query.as_ref().is_some_and(|query| query.len() > 256) {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "task search text cannot exceed 256 bytes".into(),
         ));
     }
@@ -588,7 +650,7 @@ fn validate_filter(filter: &TaskFilter) -> Result<(), TaskError> {
         ),
     ] {
         if value.is_some_and(|value| value.len() > limit) {
-            return Err(TaskError::InvalidOptions(format!(
+            return Err(TaskRuntimeError::InvalidOptions(format!(
                 "{label} filters cannot exceed {limit} bytes"
             )));
         }
@@ -598,16 +660,16 @@ fn validate_filter(filter: &TaskFilter) -> Result<(), TaskError> {
         .zip(filter.created_to)
         .is_some_and(|(from, to)| from > to)
     {
-        return Err(TaskError::InvalidOptions(
+        return Err(TaskRuntimeError::InvalidOptions(
             "task creation range starts after it ends".into(),
         ));
     }
     Ok(())
 }
 
-fn validate_key(key: Option<&str>) -> Result<(), TaskError> {
+fn validate_key(key: Option<&str>) -> Result<(), TaskRuntimeError> {
     if key.is_some_and(|value| value.is_empty() || value.len() > 512) {
-        Err(TaskError::InvalidOptions(
+        Err(TaskRuntimeError::InvalidOptions(
             "task idempotency keys must contain between 1 and 512 bytes".into(),
         ))
     } else {
@@ -615,11 +677,11 @@ fn validate_key(key: Option<&str>) -> Result<(), TaskError> {
     }
 }
 
-fn duration_ms(duration: Option<Duration>) -> Result<Option<i64>, TaskError> {
+fn duration_ms(duration: Option<Duration>) -> Result<Option<i64>, TaskRuntimeError> {
     duration
         .map(|value| {
             i64::try_from(value.as_millis()).map_err(|_| {
-                TaskError::InvalidOptions("task duration exceeds the supported range".into())
+                TaskRuntimeError::InvalidOptions("task duration exceeds the supported range".into())
             })
         })
         .transpose()

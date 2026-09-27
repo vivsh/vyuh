@@ -3,6 +3,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+#[path = "sync_callable.rs"]
+mod synchronous;
+pub use synchronous::SyncSpecable;
+
 use super::specs::{
     CallError, CallSpec, IntoArgSpecs, IntoReturnPart, Specable, Tuple1, Tuple2, Tuple3, Tuple4,
     Tuple5, Tuple6,
@@ -297,6 +301,24 @@ where
     C: Send + 'static,
     E: From<CallError> + Send + 'static,
 {
+    /// Reuses callable erasure for subsystem-owned return conversion. The caller
+    /// supplies the sole invocation future and original handler identity.
+    pub(crate) fn from_invocation<Args>(
+        name: &str,
+        invoke: impl Fn(C) -> HandlerFuture<E> + Send + Sync + 'static,
+    ) -> Self
+    where
+        Args: FromContext<C> + IntoArgSpecs,
+    {
+        let spec = Arc::new(CallSpec::for_types::<Args, ()>(name));
+        Self {
+            type_id: spec.payload_type().unwrap_or(TypeId::of::<()>()),
+            spec,
+            deserializer: Args::deserializer(),
+            inner: Arc::new(invoke),
+        }
+    }
+
     /// Wraps typed handler into type-erased `Callable`.
     ///
     /// Captures spec, optional JSON deserializer, and type-erases input/output.

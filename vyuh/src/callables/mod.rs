@@ -47,6 +47,7 @@ pub use handler::{
     FromContextParts,
     IntoDataBox,
     IntoOutput,
+    SyncSpecable,
 };
 
 pub use patch::{ArgPatch, PatchOp, ReturnPatch};

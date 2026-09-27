@@ -2,10 +2,10 @@
 
 use std::error::Error as StdError;
 
-use super::TaskError;
+use super::TaskRuntimeError;
 
 /// Logs a native task-store chain without placing it in durable task history.
-pub(crate) fn log_runtime_error(error: &TaskError, message: &'static str) {
+pub(crate) fn log_runtime_error(error: &TaskRuntimeError, message: &'static str) {
     tracing::error!(error = %causal_chain(error), "{message}");
 }
 

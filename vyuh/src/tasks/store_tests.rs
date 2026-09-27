@@ -41,6 +41,7 @@ fn task_record(name: &str, lane: TaskLane) -> TaskRecord {
         state: None,
         resume_input: None,
         status: TaskStatus::Pending,
+        cancelled: false,
         attempts: 0,
         step_attempts: 0,
         lane: lane.to_string(),
@@ -85,7 +86,7 @@ fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
             "exhausted",
         ]
         .into_iter()
-        .map(str::to_string)
+        .map(|name| (name.to_string(), super::TaskKind::Work))
         .collect(),
         lanes: vec![
             TaskLaneConf::new(DEFAULT_TASK_LANE, 2),
@@ -107,8 +108,8 @@ fn store_conf(retention: IdempotencyRetention) -> TaskStoreConf {
 
 /// Verifies exact idempotency-key inspection is scoped before status and pagination.
 #[tokio::test]
-async fn memory_store_filters_tasks_by_exact_idempotency_key() -> Result<(), vyuh::tasks::TaskError>
-{
+async fn memory_store_filters_tasks_by_exact_idempotency_key()
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -150,7 +151,8 @@ async fn memory_store_filters_tasks_by_exact_idempotency_key() -> Result<(), vyu
 
 /// Verifies one memory schedule cursor suppresses duplicate source occurrences.
 #[tokio::test]
-async fn scheduled_submission_advances_cursor_atomically() -> Result<(), vyuh::tasks::TaskError> {
+async fn scheduled_submission_advances_cursor_atomically()
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -178,13 +180,14 @@ async fn scheduled_submission_advances_cursor_atomically() -> Result<(), vyuh::t
 
 /// Verifies mixed workers reject a changed durable schedule definition.
 #[tokio::test]
-async fn schedule_policy_changes_are_not_store_compatible() -> Result<(), vyuh::tasks::TaskError> {
+async fn schedule_policy_changes_are_not_store_compatible()
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     let conf = schedule_conf("300000");
     store.initialize(conf).await?;
     assert!(matches!(
         store.initialize(schedule_conf("600000")).await,
-        Err(vyuh::tasks::TaskError::InvalidConfig(_))
+        Err(vyuh::tasks::TaskRuntimeError::InvalidConfig(_))
     ));
     Ok(())
 }
@@ -209,7 +212,7 @@ async fn claim(
     runner: &str,
     lane: TaskLane,
     limit: usize,
-) -> Result<vyuh::tasks::store::TaskPoll, vyuh::tasks::TaskError> {
+) -> Result<vyuh::tasks::store::TaskPoll, vyuh::tasks::TaskRuntimeError> {
     store
         .claim_tasks(
             runner,
@@ -224,7 +227,7 @@ async fn claim(
 
 /// Verifies batch submission, saturation evidence, batch claiming, and batch completion.
 #[tokio::test]
-async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -241,10 +244,9 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
     );
 
     let poll = claim(&store, "runner-a", EMAIL, 2).await?;
-    let lane = poll
-        .lanes
-        .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    let lane = poll.lanes.first().ok_or_else(|| {
+        vyuh::tasks::TaskRuntimeError::TaskExecutionError("missing lane poll".into())
+    })?;
     assert_eq!(lane.tasks.len(), 2);
     assert!(lane.saturated);
     let commits = lane
@@ -269,7 +271,7 @@ async fn memory_store_batches_claims_and_outcomes() -> Result<(), vyuh::tasks::T
 
 /// Verifies ordinary submissions and claims never enter lane-owner coordination.
 #[tokio::test]
-async fn ordinary_work_avoids_lane_lock_storage() -> Result<(), vyuh::tasks::TaskError> {
+async fn ordinary_work_avoids_lane_lock_storage() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -284,7 +286,7 @@ async fn ordinary_work_avoids_lane_lock_storage() -> Result<(), vyuh::tasks::Tas
 
 /// Verifies a batch size of one remains valid and reports remaining candidate pressure.
 #[tokio::test]
-async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(1);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -297,10 +299,9 @@ async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::T
         .await?;
 
     let poll = claim(&store, "runner-a", EMAIL, 8).await?;
-    let lane = poll
-        .lanes
-        .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    let lane = poll.lanes.first().ok_or_else(|| {
+        vyuh::tasks::TaskRuntimeError::TaskExecutionError("missing lane poll".into())
+    })?;
     assert_eq!(lane.tasks.len(), 1);
     assert!(lane.saturated);
     Ok(())
@@ -308,7 +309,7 @@ async fn memory_store_supports_single_row_batches() -> Result<(), vyuh::tasks::T
 
 /// Verifies one lane never claims work belonging to another configured lane.
 #[tokio::test]
-async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -334,7 +335,8 @@ async fn memory_store_isolates_named_lanes() -> Result<(), vyuh::tasks::TaskErro
 
 /// Verifies low-level store mutations cannot bypass configured lane membership.
 #[tokio::test]
-async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks::TaskRuntimeError>
+{
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -343,20 +345,20 @@ async fn memory_store_rejects_unknown_lane_mutations() -> Result<(), vyuh::tasks
         store
             .store_tasks(vec![write(task_record("unknown", MISSING))])
             .await,
-        Err(vyuh::tasks::TaskError::UnknownLane(lane)) if lane == MISSING.as_str()
+        Err(vyuh::tasks::TaskRuntimeError::UnknownLane(lane)) if lane == MISSING.as_str()
     ));
     assert!(matches!(
         store
             .reassign_lane(EMAIL.as_str(), MISSING.as_str())
             .await,
-        Err(vyuh::tasks::TaskError::UnknownLane(lane)) if lane == MISSING.as_str()
+        Err(vyuh::tasks::TaskRuntimeError::UnknownLane(lane)) if lane == MISSING.as_str()
     ));
     Ok(())
 }
 
 /// Verifies idempotent replay, conflict rejection, and deliberate conflict ignoring.
 #[tokio::test]
-async fn memory_store_resolves_idempotency_receipts() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_resolves_idempotency_receipts() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -386,7 +388,7 @@ async fn memory_store_resolves_idempotency_receipts() -> Result<(), vyuh::tasks:
     conflict.idempotency_fingerprint = Some("intent-b".into());
     assert!(
         matches!(store.store_tasks(vec![write(conflict.clone())]).await,
-        Err(vyuh::tasks::TaskError::IdempotencyConflict(id)) if id == first_id)
+        Err(vyuh::tasks::TaskRuntimeError::IdempotencyConflict(id)) if id == first_id)
     );
     assert_eq!(
         store
@@ -404,7 +406,7 @@ async fn memory_store_resolves_idempotency_receipts() -> Result<(), vyuh::tasks:
 /// Verifies duplicate keys inside one atomic batch resolve against its first ordered intent.
 #[tokio::test]
 async fn memory_store_resolves_in_batch_idempotency_in_input_order()
--> Result<(), vyuh::tasks::TaskError> {
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -430,13 +432,14 @@ async fn memory_store_resolves_in_batch_idempotency_in_input_order()
 
 /// Verifies active-only keys release on completion while retained keys remain archived.
 #[tokio::test]
-async fn memory_store_applies_idempotency_archive_policy() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_applies_idempotency_archive_policy()
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     active_key_is_released().await?;
     retained_key_is_archived().await
 }
 
 /// Exercises key release after an active-only task completes.
-async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
+async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let active = MemoryTaskStore::new(8);
     active
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -469,7 +472,7 @@ async fn active_key_is_released() -> Result<(), vyuh::tasks::TaskError> {
 }
 
 /// Exercises conflict retention after a task reaches a terminal state.
-async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
+async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let retained = MemoryTaskStore::new(8);
     retained
         .initialize(store_conf(TestRetention::retain_for(Duration::from_secs(
@@ -497,13 +500,14 @@ async fn retained_key_is_archived() -> Result<(), vyuh::tasks::TaskError> {
     conflict.idempotency_key = Some("key".into());
     conflict.idempotency_fingerprint = Some("two".into());
     assert!(matches!(retained.store_tasks(vec![write(conflict)]).await,
-        Err(vyuh::tasks::TaskError::IdempotencyConflict(id)) if id == archived_id));
+        Err(vyuh::tasks::TaskRuntimeError::IdempotencyConflict(id)) if id == archived_id));
     Ok(())
 }
 
 /// Verifies a store-wide bucket reserves starts in a batch and reports its next permit deadline.
 #[tokio::test]
-async fn memory_store_global_rate_limits_lane_starts() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_global_rate_limits_lane_starts() -> Result<(), vyuh::tasks::TaskRuntimeError>
+{
     let store = MemoryTaskStore::new(8);
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
@@ -545,7 +549,8 @@ async fn memory_store_global_rate_limits_lane_starts() -> Result<(), vyuh::tasks
 
 /// Verifies concurrent runners share one rate bucket rather than enforcing local limits.
 #[tokio::test]
-async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::tasks::TaskRuntimeError>
+{
     let store = MemoryTaskStore::new(8);
     let rate = TaskRate::per_minute(1).burst(1);
     let conf = TaskStoreConf {
@@ -577,7 +582,7 @@ async fn memory_store_global_rate_limit_is_store_wide() -> Result<(), vyuh::task
 
 /// Verifies future readiness is returned as a bounded store-relative wake hint.
 #[tokio::test]
-async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -600,25 +605,27 @@ async fn memory_store_reports_future_readiness() -> Result<(), vyuh::tasks::Task
 
 /// Verifies removed lanes remain explicit and can be reassigned only after running work drains.
 #[tokio::test]
-async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
         .await?;
-    store
-        .store_tasks(vec![write(task_record("email", EMAIL))])
-        .await?;
+    let mut flow = task_record("email", EMAIL);
+    flow.kind = super::TaskKind::Flow;
+    store.store_tasks(vec![write(flow)]).await?;
     let claimed = claim(&store, "runner-a", EMAIL, 1).await?;
     assert!(
         matches!(store.reassign_lane(EMAIL.as_str(), DEFAULT_TASK_LANE.as_str()).await,
-        Err(vyuh::tasks::TaskError::LaneBusy(lane)) if lane == EMAIL.as_str())
+        Err(vyuh::tasks::TaskRuntimeError::LaneBusy(lane)) if lane == EMAIL.as_str())
     );
     let task_id = claimed
         .lanes
         .first()
         .and_then(|lane| lane.tasks.first())
         .map(|task| task.id)
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("task was not claimed".into()))?;
+        .ok_or_else(|| {
+            vyuh::tasks::TaskRuntimeError::TaskExecutionError("task was not claimed".into())
+        })?;
     store
         .commit_outcomes(
             "runner-a",
@@ -641,7 +648,7 @@ async fn memory_store_reassigns_only_drained_lanes() -> Result<(), vyuh::tasks::
 
 /// Verifies incompatible worker lane or rate policies fail runtime initialization.
 #[tokio::test]
-async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -652,14 +659,15 @@ async fn memory_store_rejects_policy_mismatch() -> Result<(), vyuh::tasks::TaskE
     };
     assert!(matches!(
         store.initialize(incompatible).await,
-        Err(vyuh::tasks::TaskError::InvalidConfig(_))
+        Err(vyuh::tasks::TaskRuntimeError::InvalidConfig(_))
     ));
     Ok(())
 }
 
 /// Verifies local rate tuning is not persisted while global rate policy is store-compatible.
 #[tokio::test]
-async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_fingerprints_only_global_rate_policy()
+-> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -680,14 +688,14 @@ async fn memory_store_fingerprints_only_global_rate_policy() -> Result<(), vyuh:
     ];
     assert!(matches!(
         store.initialize(global).await,
-        Err(vyuh::tasks::TaskError::InvalidConfig(_))
+        Err(vyuh::tasks::TaskRuntimeError::InvalidConfig(_))
     ));
     Ok(())
 }
 
 /// Verifies lane retry configuration participates in the durable worker policy identity.
 #[tokio::test]
-async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -699,14 +707,14 @@ async fn memory_store_rejects_retry_policy_mismatch() -> Result<(), vyuh::tasks:
     ];
     assert!(matches!(
         store.initialize(incompatible).await,
-        Err(vyuh::tasks::TaskError::InvalidConfig(_))
+        Err(vyuh::tasks::TaskRuntimeError::InvalidConfig(_))
     ));
     Ok(())
 }
 
 /// Verifies a retry outcome uses the selected lane's exponential delay.
 #[tokio::test]
-async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     let mut conf = store_conf(TestRetention::ACTIVE_ONLY);
     conf.lanes = vec![
@@ -719,14 +727,18 @@ async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::Task
         .await?
         .into_iter()
         .next()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing task receipt".into()))?;
+        .ok_or_else(|| {
+            vyuh::tasks::TaskRuntimeError::TaskExecutionError("missing task receipt".into())
+        })?;
     let claimed = claim(&store, "runner-a", EMAIL, 1).await?;
     let task_id = claimed
         .lanes
         .first()
         .and_then(|lane| lane.tasks.first())
         .map(|task| task.id)
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("task was not claimed".into()))?;
+        .ok_or_else(|| {
+            vyuh::tasks::TaskRuntimeError::TaskExecutionError("task was not claimed".into())
+        })?;
     assert_eq!(task_id, receipt.id());
     store
         .commit_outcomes(
@@ -740,7 +752,7 @@ async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::Task
         )
         .await?;
     let retried = store.get_task(task_id).await?.ok_or_else(|| {
-        vyuh::tasks::TaskError::TaskExecutionError("retried task disappeared".into())
+        vyuh::tasks::TaskRuntimeError::TaskExecutionError("retried task disappeared".into())
     })?;
     assert_eq!(retried.status, TaskStatus::Pending);
     assert_eq!(retried.attempts, 1);
@@ -753,7 +765,7 @@ async fn memory_store_applies_lane_retry_delay() -> Result<(), vyuh::tasks::Task
 
 /// Verifies an expired lease at its attempt limit becomes terminal without another invocation.
 #[tokio::test]
-async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     let mut conf = store_conf(TestRetention::ACTIVE_ONLY);
     conf.lanes = vec![
@@ -771,7 +783,7 @@ async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::T
     let poll = claim(&store, "runner-b", EMAIL, 1).await?;
     assert!(poll.lanes.first().is_some_and(|lane| lane.tasks.is_empty()));
     let failed = store.get_task(id).await?.ok_or_else(|| {
-        vyuh::tasks::TaskError::TaskExecutionError("exhausted task disappeared".into())
+        vyuh::tasks::TaskRuntimeError::TaskExecutionError("exhausted task disappeared".into())
     })?;
     assert_eq!(failed.status, TaskStatus::Failed);
     assert_eq!(failed.attempts, 1);
@@ -780,7 +792,7 @@ async fn memory_store_enforces_lane_attempt_limit() -> Result<(), vyuh::tasks::T
 
 /// Verifies reclaiming an expired lease is reported and consumes another invocation attempt.
 #[tokio::test]
-async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -793,10 +805,9 @@ async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::Task
     store.store_tasks(vec![write(record)]).await?;
 
     let poll = claim(&store, "runner-b", EMAIL, 1).await?;
-    let lane = poll
-        .lanes
-        .first()
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing lane poll".into()))?;
+    let lane = poll.lanes.first().ok_or_else(|| {
+        vyuh::tasks::TaskRuntimeError::TaskExecutionError("missing lane poll".into())
+    })?;
     assert_eq!(lane.reclaimed, 1);
     assert_eq!(lane.tasks.first().map(|task| task.attempts), Some(2));
     Ok(())
@@ -804,7 +815,7 @@ async fn memory_store_reports_reclaimed_leases() -> Result<(), vyuh::tasks::Task
 
 /// Verifies lease renewal extends owned work and reports ownership loss after completion.
 #[tokio::test]
-async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -842,7 +853,7 @@ async fn memory_store_renews_only_owned_leases() -> Result<(), vyuh::tasks::Task
 
 /// Verifies an unleased historical running row becomes a safe terminal failure at startup.
 #[tokio::test]
-async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     let conf = store_conf(TestRetention::ACTIVE_ONLY);
     store.initialize(conf.clone()).await?;
@@ -856,7 +867,9 @@ async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::T
         .await
         .into_iter()
         .find(|task| task.status == TaskStatus::Failed)
-        .ok_or_else(|| vyuh::tasks::TaskError::TaskExecutionError("missing failure".into()))?;
+        .ok_or_else(|| {
+            vyuh::tasks::TaskRuntimeError::TaskExecutionError("missing failure".into())
+        })?;
     assert!(
         record
             .last_result
@@ -867,7 +880,7 @@ async fn memory_store_fails_unleased_running_rows() -> Result<(), vyuh::tasks::T
 
 /// Verifies a conflicting bulk submission rolls back earlier writes in the same batch.
 #[tokio::test]
-async fn memory_store_rolls_back_conflicting_batch() -> Result<(), vyuh::tasks::TaskError> {
+async fn memory_store_rolls_back_conflicting_batch() -> Result<(), vyuh::tasks::TaskRuntimeError> {
     let store = MemoryTaskStore::new(8);
     store
         .initialize(store_conf(TestRetention::ACTIVE_ONLY))
@@ -883,7 +896,7 @@ async fn memory_store_rolls_back_conflicting_batch() -> Result<(), vyuh::tasks::
     conflict.idempotency_fingerprint = Some("different".into());
     assert!(matches!(
         store.store_tasks(vec![plain, write(conflict)]).await,
-        Err(vyuh::tasks::TaskError::IdempotencyConflict(_))
+        Err(vyuh::tasks::TaskRuntimeError::IdempotencyConflict(_))
     ));
     assert_eq!(store.task_count().await, before);
     Ok(())

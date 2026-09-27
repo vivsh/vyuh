@@ -206,7 +206,7 @@ pub enum SiteError {
     CommandError(#[from] crate::commands::CommandError),
 
     #[error(transparent)]
-    TaskError(#[from] crate::tasks::TaskError),
+    TaskRuntimeError(#[from] crate::tasks::TaskRuntimeError),
 }
 
 impl fmt::Debug for SiteError {
@@ -1555,7 +1555,7 @@ mod tests {
         let site = Site::build(crate::SiteConf::default().log_init(false), bundle).await?;
         let receipt = site.tasks().submit(RuntimeTask).await?;
         let task = site.tasks().get(receipt.id()).await?.ok_or_else(|| {
-            SiteError::TaskError(crate::tasks::TaskError::TaskNotFound(
+            SiteError::TaskRuntimeError(crate::tasks::TaskRuntimeError::TaskNotFound(
                 receipt.id().to_string(),
             ))
         })?;
@@ -2027,7 +2027,7 @@ mod tests {
                 emit_runtime_signal,
                 PeriodicConf::new(Duration::from_millis(1)),
             ),
-            bundles::task::<RuntimeTask, _, _>(
+            bundles::task::<RuntimeTask, _, _, _>(
                 count_runtime_task,
                 TaskDefinition::new("runtime-task-probe"),
             ),
@@ -2051,7 +2051,7 @@ mod tests {
     /// Verifies task readiness changes from in-memory runtime state without a second store probe.
     #[tokio::test]
     async fn task_readiness_waits_for_runtime_initialization() -> Result<(), SiteError> {
-        let bundle = bundles::bundle([bundles::task::<RuntimeTask, _, _>(
+        let bundle = bundles::bundle([bundles::task::<RuntimeTask, _, _, _>(
             count_runtime_task,
             TaskDefinition::new("readiness-task"),
         )]);

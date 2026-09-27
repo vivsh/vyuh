@@ -1,6 +1,12 @@
 use super::*;
 use crate::tasks::{DEFAULT_TASK_LANE, TaskKind, TaskLaneConf};
 
+#[path = "cancellation.rs"]
+pub(crate) mod cancellation;
+
+#[path = "capabilities.rs"]
+pub(crate) mod capabilities;
+
 #[path = "results.rs"]
 mod results;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
@@ -23,6 +29,7 @@ pub(crate) fn record() -> TaskRecord {
         state: None,
         resume_input: None,
         status: TaskStatus::Pending,
+        cancelled: false,
         attempts: 0,
         step_attempts: 0,
         lane: DEFAULT_TASK_LANE.to_string(),
@@ -48,9 +55,21 @@ pub(crate) fn write(record: TaskRecord) -> TaskWrite {
     }
 }
 
+/// Builds orchestration fixtures without changing ordinary work fixture defaults.
+pub(crate) fn flow_record() -> TaskRecord {
+    TaskRecord {
+        name: "flow".into(),
+        kind: TaskKind::Flow,
+        ..record()
+    }
+}
+
 pub(crate) fn conf() -> TaskStoreConf {
     TaskStoreConf {
-        handlers: vec!["workflow".into()],
+        handlers: vec![
+            ("workflow".into(), TaskKind::Work),
+            ("flow".into(), TaskKind::Flow),
+        ],
         lanes: vec![TaskLaneConf::new(DEFAULT_TASK_LANE, 8)],
         idempotency: vec![crate::tasks::store::TaskIdempotencyConf {
             handler: "workflow".into(),
@@ -81,9 +100,11 @@ pub(crate) fn commit(id: TaskId, outcome: TaskOutcome) -> TaskCommit {
 }
 
 /// Runs the same spawn/checkpoint/next-poll contract against every store backend.
-pub(crate) async fn workflow_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+pub(crate) async fn workflow_contract<S: AbstractTaskStore>(
+    store: &S,
+) -> Result<(), TaskRuntimeError> {
     store.initialize(conf()).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     assert_eq!(
@@ -141,16 +162,16 @@ pub(crate) async fn workflow_contract<S: AbstractTaskStore>(store: &S) -> Result
 
 /// Sequential checkpoints exceed the lifetime retry bound without same-turn claims.
 #[tokio::test]
-async fn sequential_children_resume_only_next_poll() -> Result<(), TaskError> {
+async fn sequential_children_resume_only_next_poll() -> Result<(), TaskRuntimeError> {
     workflow_contract(&MemoryTaskStore::new(32)).await
 }
 
 /// Terminal child failures become structured resume errors, not parent failures.
 #[tokio::test]
-async fn child_failure_resumes_parent_with_identity() -> Result<(), TaskError> {
+async fn child_failure_resumes_parent_with_identity() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(32);
     store.initialize(conf()).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -184,13 +205,13 @@ async fn child_failure_resumes_parent_with_identity() -> Result<(), TaskError> {
 }
 
 /// Shared recovery, retry, stale completion, and nested lineage behavior.
-pub(crate) async fn edge_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+pub(crate) async fn edge_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
     store.initialize(conf()).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
-    let child = record();
+    let child = flow_record();
     let child_id = child.id;
     let spawn = commit(
         id,
@@ -256,13 +277,13 @@ pub(crate) async fn edge_contract<S: AbstractTaskStore>(store: &S) -> Result<(),
 }
 
 /// Child-key collisions fail their parent and do not discard unrelated outcomes.
-async fn conflict_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
+async fn conflict_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
     let mut existing = record();
     existing.status = TaskStatus::Suspended;
     existing.idempotency_key = Some("child-key".into());
     existing.idempotency_fingerprint = Some("same".into());
     let existing_id = existing.id;
-    let parent = record();
+    let parent = flow_record();
     let parent_id = parent.id;
     let sibling = record();
     let sibling_id = sibling.id;
@@ -303,8 +324,8 @@ async fn conflict_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskEr
 }
 
 /// Lease exhaustion delivers the result after selection, never during the same claim.
-async fn recovery_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskError> {
-    let mut parent = record();
+async fn recovery_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskRuntimeError> {
+    let mut parent = flow_record();
     parent.status = TaskStatus::Suspended;
     parent.state = Some("9".into());
     let id = parent.id;
@@ -333,16 +354,16 @@ async fn recovery_contract<S: AbstractTaskStore>(store: &S) -> Result<(), TaskEr
 
 /// Nested workflows and crash exhaustion deliver exactly one result per accepted child.
 #[tokio::test]
-async fn nested_and_recovery_contract() -> Result<(), TaskError> {
+async fn nested_and_recovery_contract() -> Result<(), TaskRuntimeError> {
     edge_contract(&MemoryTaskStore::new(32)).await
 }
 
 /// An invalid sibling outcome cannot leave the accepted spawn partially applied.
 #[tokio::test]
-async fn invalid_flush_preserves_parent_and_has_no_child() -> Result<(), TaskError> {
+async fn invalid_flush_preserves_parent_and_has_no_child() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(32);
     store.initialize(conf()).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -371,10 +392,10 @@ async fn invalid_flush_preserves_parent_and_has_no_child() -> Result<(), TaskErr
 
 /// A claim failure after outcome staging restores every task and workflow write.
 #[tokio::test]
-async fn later_claim_failure_rolls_back_spawn() -> Result<(), TaskError> {
+async fn later_claim_failure_rolls_back_spawn() -> Result<(), TaskRuntimeError> {
     let store = MemoryTaskStore::new(32);
     store.initialize(conf()).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     store.claim_tasks("owner", &[claim()]).await?;
@@ -416,7 +437,7 @@ async fn lifecycle() -> Result<(), crate::Error> {
 /// Newly generated same-lane work cancels an idle edge before the hook is exposed.
 pub(crate) async fn locked_workflow_contract<S: AbstractTaskStore>(
     store: &S,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     use crate::tasks::{LaneOwnerRequest, TaskLaneLock};
     let mut config = conf();
     config.lanes = vec![
@@ -428,7 +449,7 @@ pub(crate) async fn locked_workflow_contract<S: AbstractTaskStore>(
         ),
     ];
     store.initialize(config).await?;
-    let parent = record();
+    let parent = flow_record();
     let id = parent.id;
     store.store_tasks(vec![write(parent)]).await?;
     let mut lane = claim();
@@ -483,6 +504,6 @@ pub(crate) async fn locked_workflow_contract<S: AbstractTaskStore>(
 
 /// Durable lane ownership remains independent of workflow next-poll delivery.
 #[tokio::test]
-async fn locked_lane_finalization_defers_idle() -> Result<(), TaskError> {
+async fn locked_lane_finalization_defers_idle() -> Result<(), TaskRuntimeError> {
     locked_workflow_contract(&MemoryTaskStore::new(32)).await
 }

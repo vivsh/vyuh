@@ -2,9 +2,9 @@
 ///
 /// Covers:
 ///   1. Fire-and-forget                (no return)
-///   2. Fallible fire-and-forget       (Result<(), Error>)
+///   2. Fallible fire-and-forget       (Result<(), TaskError>)
 ///   3. Method-based registration      (no #[bundles::task] macro)
-///   4. Suspend/resume with enum state (Result<TaskState, Error>)
+///   4. Synchronous Flow with enum state (Result<FlowState<u32>, FlowError>)
 ///   5. Atomic child spawning with a typed result
 use schemars::JsonSchema;
 use std::time::Duration;
@@ -37,25 +37,22 @@ struct DoubleJob {
 }
 
 /// Suspends atomically with child creation and receives its result on a later poll.
-#[bundles::task]
-async fn parent_job(
+#[bundles::flow]
+fn parent_job(
     continuation: Continuation<(), u32>,
     input: Data<ParentJob>,
-) -> Result<TaskState, Error> {
+) -> Result<FlowState<u32>, FlowError> {
     match continuation.resume() {
-        None => Ok(TaskState::spawn(DoubleJob { value: input.value }, ())?),
-        Some(Ok(value)) => {
-            println!("Child returned {value}");
-            Ok(TaskState::complete(())?)
-        }
-        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
+        None => Ok(FlowState::spawn(DoubleJob { value: input.value }, ())?),
+        Some(Ok(value)) => Ok(FlowState::complete(*value)),
+        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
     }
 }
 
 /// Returns a typed output to a waiting parent without retaining an output archive.
 #[bundles::task]
-async fn double_job(input: Data<DoubleJob>) -> Result<TaskState, Error> {
-    Ok(TaskState::complete(input.value.saturating_mul(2))?)
+async fn double_job(input: Data<DoubleJob>) -> Result<TaskState<u32>, TaskError> {
+    Ok(TaskState::complete(input.value.saturating_mul(2)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -96,7 +93,7 @@ async fn send_email(input: Data<SendEmailJob>) {
 
 // Pattern 2: Fallible — macro without explicit name (derives from fn name).
 #[bundles::task]
-async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> {
+async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
     println!("⚙️  Processing: {}", input.data);
     Ok(())
 }
@@ -114,38 +111,23 @@ fn email_key(job: &SendEmailJob) -> String {
 }
 
 // Pattern 4: Suspend/resume with typed continuation state and input.
-#[bundles::task(name = "approve_document")]
-async fn approve_document(
+#[bundles::flow(name = "approve_document")]
+fn approve_document(
     continuation: Continuation<PendingApproval, ApprovalDecision>,
     input: Data<ApprovalRequest>,
-) -> Result<TaskState, Error> {
+) -> Result<FlowState<ApprovalDecision>, FlowError> {
     match continuation.resume() {
         // ── Resumed: approver has responded ──────────────────────────────
-        Some(Ok(decision)) => {
-            match &decision {
-                ApprovalDecision::Approved { approver } => {
-                    println!("✅ '{}' approved by {}", input.title, approver);
-                }
-                ApprovalDecision::Rejected { approver, reason } => {
-                    println!("❌ '{}' rejected by {} — {}", input.title, approver, reason);
-                }
-            }
-            Ok(TaskState::complete(())?)
-        }
+        Some(Ok(decision)) => Ok(FlowState::complete(decision.clone())),
 
         // ── First run: suspend and wait ───────────────────────────────────
-        Some(Err(failure)) => Ok(TaskState::fail(failure.message())),
+        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
         None => {
-            println!(
-                "⏳ '{}' (id={}) by {} — waiting for approval",
-                input.title, input.document_id, input.submitter
-            );
-
             let state = PendingApproval {
                 document_id: input.document_id,
                 title: input.title.clone(),
             };
-            Ok(TaskState::suspend(state)?)
+            Ok(FlowState::suspend(state)?)
         }
     }
 }

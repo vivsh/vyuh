@@ -1,0 +1,24 @@
+warning: unused import: `tasks::TaskDefinition`
+ --> tests/ui/tasks/work_invalid_sync.rs:1:33
+  |
+1 | use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
+  |                                 ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `fn(vyuh::Data<Job>) {handler}: vyuh::tasks::TaskCallable<_>` is not satisfied
+ --> tests/ui/tasks/work_invalid_sync.rs:5:4
+  |
+4 | #[bundles::task]
+  | ---------------- required by a bound introduced by this call
+5 | fn handler(_: Data<Job>) {}
+  |    ^^^^^^^ the trait `vyuh::tasks::TaskCallable<_>` is not implemented for fn item `fn(vyuh::Data<Job>) {handler}`
+  |
+note: required by a bound in `task`
+ --> src/bundles/part.rs
+  |
+  | pub fn task<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  |        ---- required by a bound in this function
+...
+  |     H: crate::tasks::TaskCallable<Args> + 'static,
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `task`

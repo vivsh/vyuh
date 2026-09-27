@@ -107,7 +107,7 @@ async fn send_receipt(Data(job): Data<ReceiptJob>) {
 }
 
 #[bundles::task(name = "rebuild_projection")]
-async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<(), Error> {
+async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<(), vyuh::tasks::TaskError> {
     println!("rebuild projection '{}' full={}", job.name, job.full);
     Ok(())
 }

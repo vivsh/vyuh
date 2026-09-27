@@ -1,18 +1,18 @@
 //! Shared JSON result encoding for persistence and continuation delivery.
 
-use super::{TaskError, TaskFailure, TaskId};
+use super::{TaskFailure, TaskId, TaskRuntimeError};
 
 pub(crate) const RESULT_LIMIT: usize = 32_768;
 pub(crate) const UNIT_RESULT: &str = "{\"Ok\":null}";
 
 /// Checks the complete serialized envelope, including JSON escaping overhead.
-pub(crate) fn validate_size(value: &str) -> Result<(), TaskError> {
+pub(crate) fn validate_size(value: &str) -> Result<(), TaskRuntimeError> {
     check_size(value.len())
 }
 
-fn check_size(actual: usize) -> Result<(), TaskError> {
+fn check_size(actual: usize) -> Result<(), TaskRuntimeError> {
     if actual > RESULT_LIMIT {
-        return Err(TaskError::ResultTooLarge {
+        return Err(TaskRuntimeError::ResultTooLarge {
             actual,
             limit: RESULT_LIMIT,
         });
@@ -21,14 +21,14 @@ fn check_size(actual: usize) -> Result<(), TaskError> {
 }
 
 /// Validates a successful JSON value before adding its seven-byte envelope.
-pub(crate) fn validate_output(output: &str) -> Result<(), TaskError> {
+pub(crate) fn validate_output(output: &str) -> Result<(), TaskRuntimeError> {
     check_size(output.len().saturating_add(7))?;
     serde_json::from_str::<&serde_json::value::RawValue>(output)?;
     Ok(())
 }
 
 /// Validates a low-level resume request without interpreting its success type.
-pub(crate) fn validate_resume(value: &str) -> Result<(), TaskError> {
+pub(crate) fn validate_resume(value: &str) -> Result<(), TaskRuntimeError> {
     validate_size(value)?;
     let _ = serde_json::from_str::<Result<&serde_json::value::RawValue, TaskFailure>>(value)?;
     Ok(())

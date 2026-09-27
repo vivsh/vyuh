@@ -12,14 +12,14 @@ pub(super) fn claim_owned_state(
     now: chrono::DateTime<chrono::Utc>,
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     #[cfg(test)]
     {
         state.lane_lock_turns = state.lane_lock_turns.saturating_add(1);
     }
     let name = claim.lane.to_string();
     let mut owner = state.lane_locks.remove(&name).ok_or_else(|| {
-        TaskError::InvalidConfig(format!(
+        TaskRuntimeError::InvalidConfig(format!(
             "task lane lock '{}' is not initialized",
             claim.lane
         ))
@@ -67,7 +67,7 @@ pub(super) fn claim_owned_inner(
     now: chrono::DateTime<chrono::Utc>,
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     if !memory_owner(owner, runner_id, claim, lease_duration, now)? {
         let wake = owner
             .leased_until
@@ -104,7 +104,7 @@ pub(super) fn memory_owner(
     claim: &LaneClaim,
     duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, TaskError> {
+) -> Result<bool, TaskRuntimeError> {
     let requested = claim
         .owner
         .as_ref()
@@ -137,7 +137,7 @@ pub(super) fn memory_phase_poll(
     now: chrono::DateTime<chrono::Utc>,
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     let quiescent = claim
         .owner
         .as_ref()
@@ -202,7 +202,7 @@ pub(super) fn memory_flush_poll(
     turn: &MemoryOwnerTurn<'_>,
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     if !owner.flushing && !memory_flush(&state.tasks, &candidates, turn.lane, turn.now)? {
         return memory_poll(
             turn.claim.lane,
@@ -238,7 +238,7 @@ pub(super) fn memory_empty(
     claim: &LaneClaim,
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     if matches!(
         owner.phase,
         LaneOwnerPhase::Idle | LaneOwnerPhase::IdleFailed | LaneOwnerPhase::BusyFailed
@@ -273,7 +273,7 @@ pub(super) fn memory_start_idle(
     owner: &mut MemoryLaneLock,
     lane_name: TaskLane,
     lane: &crate::tasks::TaskLaneConf,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     if lane.lane_lock().and_then(|lock| lock.idle_hook()).is_some() {
         memory_transition(owner, LaneOwnerPhase::Idling)?;
         return memory_poll_action(lane_name, owner, LaneHookAction::Idle, None);
@@ -287,7 +287,7 @@ pub(super) fn memory_start_busy(
     lane_name: TaskLane,
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     if owner.hook_retry_at.is_some_and(|retry| retry > now) {
         let wake = owner
             .hook_retry_at
@@ -313,7 +313,7 @@ pub(super) fn memory_claim(
     now: chrono::DateTime<chrono::Utc>,
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     let size = lane
         .lane_lock()
         .map_or(1, crate::tasks::TaskLaneLock::batch_size);
@@ -321,10 +321,11 @@ pub(super) fn memory_claim(
     let conf = state
         .conf
         .clone()
-        .ok_or_else(|| TaskError::InvalidConfig("task store is not initialized".into()))?;
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task store is not initialized".into()))?;
     fail_exhausted(
         &mut state.tasks,
         claim.lane.as_str(),
+        size,
         now,
         &conf,
         retry,
@@ -356,7 +357,7 @@ pub(super) fn apply_memory_hook(
     lane_name: TaskLane,
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if owner.generation != hook.generation || memory_action(owner.phase) != Some(hook.action) {
         return Ok(());
     }
@@ -375,7 +376,7 @@ pub(super) fn finish_memory_idle(
     lane_name: TaskLane,
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if due_indices(&state.tasks, lane_name.as_str(), now).is_empty() {
         memory_release(owner, LaneOwnerPhase::Idle);
     } else if lane.lane_lock().and_then(|lock| lock.busy_hook()).is_some() {
@@ -396,7 +397,7 @@ pub(super) fn memory_fail_busy(
     owner: &mut MemoryLaneLock,
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let delay = state
         .conf
         .as_ref()
@@ -412,10 +413,10 @@ pub(super) fn memory_flush(
     candidates: &[usize],
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, TaskError> {
+) -> Result<bool, TaskRuntimeError> {
     let lock = lane
         .lane_lock()
-        .ok_or_else(|| TaskError::InvalidConfig("locked lane lost its policy".into()))?;
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("locked lane lost its policy".into()))?;
     Ok(candidates.len() >= lock.batch_size()
         || memory_flush_wake(tasks, candidates, lane, now)? == Some(Duration::ZERO))
 }
@@ -425,7 +426,7 @@ pub(super) fn memory_flush_wake(
     candidates: &[usize],
     lane: &crate::tasks::TaskLaneConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<Duration>, TaskError> {
+) -> Result<Option<Duration>, TaskRuntimeError> {
     let Some(deadline) = lane.lane_lock().and_then(|lock| lock.batch_deadline()) else {
         return Ok(None);
     };
@@ -439,7 +440,7 @@ pub(super) fn memory_flush_wake(
     let due = oldest
         .checked_add_signed(chrono_duration(deadline)?)
         .ok_or_else(|| {
-            TaskError::InvalidConfig("lane lock deadline exceeds timestamp range".into())
+            TaskRuntimeError::InvalidConfig("lane lock deadline exceeds timestamp range".into())
         })?;
     Ok(Some((due - now).to_std().unwrap_or(Duration::ZERO)))
 }
@@ -462,9 +463,9 @@ pub(super) fn memory_action(phase: LaneOwnerPhase) -> Option<LaneHookAction> {
 pub(super) fn memory_transition(
     owner: &mut MemoryLaneLock,
     phase: LaneOwnerPhase,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     owner.generation = owner.generation.checked_add(1).ok_or_else(|| {
-        TaskError::TaskExecutionError("lane lifecycle generation overflowed".into())
+        TaskRuntimeError::TaskExecutionError("lane lifecycle generation overflowed".into())
     })?;
     owner.phase = phase;
     owner.hook_retry_at = None;
@@ -505,7 +506,7 @@ pub(super) fn memory_poll_action(
     owner: &MemoryLaneLock,
     action: LaneHookAction,
     wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     memory_poll_with(lane, owner, Some(action), wake)
 }
 
@@ -513,7 +514,7 @@ pub(super) fn memory_poll(
     lane: TaskLane,
     owner: &MemoryLaneLock,
     wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     memory_poll_with(lane, owner, None, wake)
 }
 
@@ -521,7 +522,7 @@ pub(super) fn memory_wait_poll(
     lane: TaskLane,
     owner: &MemoryLaneLock,
     wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     let mut poll = memory_poll(lane, owner, wake)?;
     if let Some(owner) = &mut poll.owner {
         owner.token = None;
@@ -535,7 +536,7 @@ pub(super) fn memory_poll_with(
     owner: &MemoryLaneLock,
     action: Option<LaneHookAction>,
     wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     Ok(LanePoll {
         lane,
         tasks: Vec::new(),

@@ -1,0 +1,9 @@
+dependencies: [0006_cancellation_column]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = CONCAT(CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-r0:' THEN 'tr-c0:' WHEN 'tr-r1:' THEN 'tr-c1:' ELSE 'tr-c2:' END, SUBSTR(policy_fingerprint, 7)) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-r0:', 'tr-r1:', 'tr-v2:')
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = CONCAT(CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-r0:' THEN 'tr-c0:' WHEN 'tr-r1:' THEN 'tr-c1:' ELSE 'tr-c2:' END, SUBSTR(policy_fingerprint, 7)) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-r0:', 'tr-r1:', 'tr-v2:')

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::callables;
 
-use super::{TaskError, TaskOutcome, TaskState};
+use super::{TaskOutcome, TaskRuntimeError, TaskState};
 
 /// Ordered values supplied to or returned from one local task invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -74,98 +74,88 @@ impl<'a, T> IntoIterator for &'a Batch<T> {
     }
 }
 
-impl<E: From<TaskError>> callables::IntoOutput<E> for Batch<TaskState> {
-    fn into_output(self) -> Result<callables::DataBox, E> {
+mod sealed {
+    pub trait Return {}
+}
+
+/// Sealed supported return forms for value-only Work batches.
+#[doc(hidden)]
+pub trait IntoTaskBatchOutcomePart: sealed::Return {
+    /// Converts typed items before erasure; never clones application output values.
+    fn into_batch_return(self) -> callables::DataBox;
+}
+
+impl sealed::Return for () {}
+impl IntoTaskBatchOutcomePart for () {
+    fn into_batch_return(self) -> callables::DataBox {
+        super::returns::erase_outcome(TaskOutcome::Complete)
+    }
+}
+impl<T: Serialize + 'static> sealed::Return for TaskState<T> {}
+impl<T: Serialize + 'static> IntoTaskBatchOutcomePart for TaskState<T> {
+    fn into_batch_return(self) -> callables::DataBox {
+        super::returns::erase_outcome(batch_safe(self.into_outcome()))
+    }
+}
+impl<T: Serialize + 'static> sealed::Return for Batch<TaskState<T>> {}
+impl<T: Serialize + 'static> IntoTaskBatchOutcomePart for Batch<TaskState<T>> {
+    fn into_batch_return(self) -> callables::DataBox {
+        callables::DataBox::new(
+            self.into_iter()
+                .map(|v| batch_safe(v.into_outcome()))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+impl<T: Serialize + 'static> sealed::Return for Batch<Result<TaskState<T>, super::TaskError>> {}
+impl<T: Serialize + 'static> IntoTaskBatchOutcomePart
+    for Batch<Result<TaskState<T>, super::TaskError>>
+{
+    fn into_batch_return(self) -> callables::DataBox {
         let outcomes = self
             .into_iter()
-            .map(TaskState::into_outcome)
+            .map(|item| {
+                batch_safe(match item {
+                    Ok(value) => value.into_outcome(),
+                    Err(error) => error.into_outcome(),
+                })
+            })
             .collect::<Vec<_>>();
-        Ok(callables::DataBox::new(outcomes))
+        callables::DataBox::new(outcomes)
     }
 }
-
-impl callables::IntoReturnPart for Batch<TaskState> {
-    fn into_return_part() -> callables::ReturnPart {
-        callables::ReturnPart::Empty
-    }
-}
-
-mod batch_return {
-    pub trait Sealed {}
-}
-
-/// Internal marker for task-batch handler return forms.
-#[doc(hidden)]
-pub trait IntoTaskBatchOutcomePart: batch_return::Sealed {
-    /// Converts one handler return into exactly one durable outcome per input.
-    fn into_task_outcomes(
-        data: callables::DataBox,
-        expected: usize,
-    ) -> Result<Vec<TaskOutcome>, TaskError>;
-}
-
-impl batch_return::Sealed for () {}
-
-impl IntoTaskBatchOutcomePart for () {
-    fn into_task_outcomes(
-        data: callables::DataBox,
-        expected: usize,
-    ) -> Result<Vec<TaskOutcome>, TaskError> {
-        if data.downcast_ref::<()>().is_none() {
-            return Err(unsupported_return());
+impl<T: IntoTaskBatchOutcomePart> sealed::Return for Result<T, super::TaskError> {}
+impl<T: IntoTaskBatchOutcomePart> IntoTaskBatchOutcomePart for Result<T, super::TaskError> {
+    fn into_batch_return(self) -> callables::DataBox {
+        match self {
+            Ok(value) => value.into_batch_return(),
+            Err(error) => super::returns::erase_outcome(error.into_outcome()),
         }
-        Ok(vec![TaskOutcome::Complete; expected])
     }
 }
 
-impl batch_return::Sealed for TaskState {}
-
-impl IntoTaskBatchOutcomePart for TaskState {
-    fn into_task_outcomes(
-        data: callables::DataBox,
-        expected: usize,
-    ) -> Result<Vec<TaskOutcome>, TaskError> {
-        let outcome = data
-            .downcast_ref::<TaskState>()
-            .map(TaskState::batch_outcome)
-            .ok_or_else(unsupported_return)?;
-        Ok(vec![batch_safe(outcome); expected])
+/// Validates cardinality before any per-task outcome reaches the common commit path.
+pub(super) fn resolve_batch(
+    data: callables::DataBox,
+    expected: usize,
+) -> Result<Vec<TaskOutcome>, TaskRuntimeError> {
+    if data.downcast_ref::<()>().is_some() {
+        return Ok(vec![TaskOutcome::Complete; expected]);
     }
-}
-
-impl batch_return::Sealed for Batch<TaskState> {}
-
-impl IntoTaskBatchOutcomePart for Batch<TaskState> {
-    fn into_task_outcomes(
-        data: callables::DataBox,
-        expected: usize,
-    ) -> Result<Vec<TaskOutcome>, TaskError> {
-        let outcomes = data
-            .downcast_ref::<Vec<TaskOutcome>>()
-            .cloned()
-            .ok_or_else(unsupported_return)?;
-        if outcomes.len() != expected {
-            return Err(TaskError::TaskExecutionError(format!(
-                "batch handler returned {} outcomes for {expected} inputs",
-                outcomes.len()
-            )));
-        }
-        Ok(outcomes.into_iter().map(batch_safe).collect())
+    if let Some(outcome) = data.downcast_ref::<TaskOutcome>() {
+        return Ok(vec![outcome.clone(); expected]);
     }
-}
-
-impl<T, E> batch_return::Sealed for Result<T, E> where T: IntoTaskBatchOutcomePart {}
-
-impl<T, E> IntoTaskBatchOutcomePart for Result<T, E>
-where
-    T: IntoTaskBatchOutcomePart,
-{
-    fn into_task_outcomes(
-        data: callables::DataBox,
-        expected: usize,
-    ) -> Result<Vec<TaskOutcome>, TaskError> {
-        T::into_task_outcomes(data, expected)
+    let shared = data.downcast_arc::<Vec<TaskOutcome>>().ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("Invalid prepared batch outcome".into())
+    })?;
+    let outcomes = std::sync::Arc::try_unwrap(shared).unwrap_or_else(|shared| (*shared).clone());
+    if outcomes.len() != expected {
+        return Err(TaskRuntimeError::TaskExecutionError(format!(
+            "batch handler returned {} outcomes for {expected} inputs",
+            outcomes.len()
+        )));
     }
+    Ok(outcomes)
 }
 
 fn batch_safe(outcome: TaskOutcome) -> TaskOutcome {
@@ -177,21 +167,6 @@ fn batch_safe(outcome: TaskOutcome) -> TaskOutcome {
     }
 }
 
-fn unsupported_return() -> TaskError {
-    TaskError::TaskExecutionError("batch handler returned an unsupported task state".into())
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verifies batch collection and iteration preserve insertion order.
-    #[test]
-    fn batch_collection_preserves_order() {
-        let batch = [1, 2, 3].into_iter().collect::<Batch<_>>();
-        assert_eq!(batch.len(), 3);
-        assert!(!batch.is_empty());
-        assert_eq!(batch.as_ref(), &[1, 2, 3]);
-        assert_eq!(batch.into_vec(), vec![1, 2, 3]);
-    }
-}
+#[path = "tests/batch.rs"]
+mod tests;

@@ -1,0 +1,31 @@
+warning: unused import: `tasks::TaskDefinition`
+ --> tests/ui/tasks/work_invalid_continuation.rs:1:33
+  |
+1 | use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
+  |                                 ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `vyuh::prelude::Continuation<()>: FromSite` is not satisfied
+ --> tests/ui/tasks/work_invalid_continuation.rs:4:1
+  |
+4 | #[bundles::task_batch]
+  | ^^^^^^^^^^^^^^^^^^^^^^ the trait `FromSite` is not implemented for `vyuh::prelude::Continuation<()>`
+  |
+  = help: the following other types implement trait `FromSite`:
+            Channels
+            ServiceRef<T>
+            Site
+            SiteConfig
+            Templates
+  = note: required for `vyuh::prelude::Continuation<()>` to implement `FromContextParts<vyuh::tasks::BatchTaskContext>`
+  = note: required for `callables::specs::Tuple2<vyuh::prelude::Continuation<()>, vyuh::Data<vyuh::prelude::Batch<Job>>>` to implement `FromContext<vyuh::tasks::BatchTaskContext>`
+note: required by a bound in `task_batch`
+ --> src/bundles/part.rs
+  |
+  | pub fn task_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  |        ---------- required by a bound in this function
+...
+  |     Args: callables::FromContext<crate::tasks::BatchTaskContext>
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `task_batch`
+  = note: this error originates in the attribute macro `bundles::task_batch` (in Nightly builds, run with -Z macro-backtrace for more info)

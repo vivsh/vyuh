@@ -1,5 +1,6 @@
 use super::*;
-use crate::tasks::store::memory::tests::{claim, commit, conf, record, write};
+
+use crate::tasks::store::memory::tests::{claim, commit, conf, flow_record, record, write};
 use crate::tasks::{AbstractTaskStore, TaskCommit, TaskOutcome};
 
 /// Reports ordinary and workflow flush costs at fixed bounded sizes, outside setup time.
@@ -40,7 +41,7 @@ async fn flush_sample(
     store: &DbTaskStore,
     size: usize,
     workflow: &str,
-) -> Result<std::time::Duration, TaskError> {
+) -> Result<std::time::Duration, TaskRuntimeError> {
     let mut commits = prepare_flush(store, size, workflow.starts_with("delivery")).await?;
     for commit in &mut commits {
         commit.outcome = match workflow {
@@ -71,7 +72,7 @@ async fn prepare_flush(
     store: &DbTaskStore,
     size: usize,
     workflow: bool,
-) -> Result<Vec<TaskCommit>, TaskError> {
+) -> Result<Vec<TaskCommit>, TaskRuntimeError> {
     let mut writes = Vec::with_capacity(size * 2);
     let mut commits = Vec::<TaskCommit>::with_capacity(size);
     for _ in 0..size {
@@ -115,6 +116,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Queries {
 
 #[derive(Default)]
 struct Sql(String);
+
+#[path = "cancellation_queries.rs"]
+mod cancellation;
 
 impl tracing::field::Visit for Sql {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
@@ -182,9 +186,23 @@ async fn flush_query_counts() -> Result<(), String> {
 
 /// Spawn insertion scales by bounded chunks without a per-parent lookup or write.
 async fn spawn_queries(store: &DbTaskStore, queries: &Queries, size: usize) -> Result<(), String> {
-    let mut commits = prepare_flush(store, size, false)
+    let parents = (0..size).map(|_| flow_record()).collect::<Vec<_>>();
+    let mut commits = parents
+        .iter()
+        .map(|parent| commit(parent.id, TaskOutcome::Complete))
+        .collect::<Vec<_>>();
+    store
+        .store_tasks(parents.into_iter().map(write).collect())
         .await
         .map_err(|e| e.to_string())?;
+    let mut claims = claim();
+    claims.limit = size;
+    for _ in 0..size.div_ceil(store.batch_size) {
+        store
+            .claim_tasks("benchmark", std::slice::from_ref(&claims))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     for commit in &mut commits {
         commit.outcome = TaskOutcome::Spawn {
             state: "null".into(),
@@ -215,7 +233,11 @@ async fn spawn_queries(store: &DbTaskStore, queries: &Queries, size: usize) -> R
     drop(sql);
     let table = DbTaskStore::table();
     db::from(&table)
-        .filter(table.name.eq(db::val("workflow".to_owned())))
+        .filter(
+            table
+                .name
+                .in_values(["workflow".to_owned(), "flow".to_owned()]),
+        )
         .delete()
         .exec(&mut store.pool.clone())
         .await

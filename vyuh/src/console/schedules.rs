@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{Site, emitters::next_task_schedule, tasks::TaskError};
+use crate::{Site, emitters::next_task_schedule, tasks::TaskRuntimeError};
 
 /// Bounded filters accepted by the console schedule views.
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -55,7 +55,7 @@ pub(crate) async fn page(
     query: &ScheduleQuery,
     default_size: usize,
     max_size: usize,
-) -> Result<SchedulePage, TaskError> {
+) -> Result<SchedulePage, TaskRuntimeError> {
     let names = schedule_names(site);
     let snapshot = schedule_snapshot(site, &names).await?;
     let mut schedules = schedule_entries(site, &snapshot.cursors, snapshot.now)?;
@@ -88,7 +88,7 @@ fn schedule_names(site: &Site) -> Vec<String> {
 async fn schedule_snapshot(
     site: &Site,
     names: &[String],
-) -> Result<crate::tasks::TaskScheduleSnapshot, TaskError> {
+) -> Result<crate::tasks::TaskScheduleSnapshot, TaskRuntimeError> {
     if names.is_empty() {
         return Ok(crate::tasks::TaskScheduleSnapshot {
             now: Utc::now(),
@@ -103,7 +103,7 @@ fn schedule_entries(
     site: &Site,
     cursors: &HashMap<String, DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<Vec<ScheduleOut>, TaskError> {
+) -> Result<Vec<ScheduleOut>, TaskRuntimeError> {
     site.tasks()
         .schedule_configs()
         .iter()
@@ -117,7 +117,7 @@ fn schedule_entry(
     schedule: &crate::tasks::TaskScheduleConf,
     cursors: &HashMap<String, DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<ScheduleOut, TaskError> {
+) -> Result<ScheduleOut, TaskRuntimeError> {
     let last_submitted_at = cursors.get(&schedule.name).copied();
     let next_expected_at = next_expected(schedule, last_submitted_at, now)?;
     let lane = site
@@ -125,7 +125,7 @@ fn schedule_entry(
         .task_lane(&schedule.task)
         .map(str::to_owned)
         .ok_or_else(|| {
-            TaskError::InvalidConfig("task schedule target has no finalized lane".into())
+            TaskRuntimeError::InvalidConfig("task schedule target has no finalized lane".into())
         })?;
     Ok(ScheduleOut {
         name: schedule.name.clone(),
@@ -144,12 +144,12 @@ fn next_expected(
     schedule: &crate::tasks::TaskScheduleConf,
     last_submitted_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, TaskError> {
+) -> Result<DateTime<Utc>, TaskRuntimeError> {
     if last_submitted_at.is_none() && schedule.start == "immediately" {
         return Ok(now);
     }
     next_task_schedule(schedule, last_submitted_at.unwrap_or(now))
-        .map_err(|error| TaskError::InvalidConfig(error.to_string()))
+        .map_err(|error| TaskRuntimeError::InvalidConfig(error.to_string()))
 }
 
 /// Keeps schedule filtering in memory because definitions are immutable site metadata.

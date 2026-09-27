@@ -4,6 +4,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::tasks::TaskError;
+
+#[path = "flow_handler.rs"]
+mod flow_tests;
+#[path = "typed_returns.rs"]
+mod typed_returns;
 use crate::{
     Data, SiteError,
     tasks::{
@@ -17,30 +23,30 @@ struct DirectJob {
     id: i64,
 }
 
-async fn direct_job(_input: Data<DirectJob>) -> Result<TaskState, crate::Error> {
-    Ok(TaskState::complete(())?)
+async fn direct_job(_input: Data<DirectJob>) -> Result<TaskState, TaskError> {
+    Ok(TaskState::complete(()))
 }
 
 async fn unit_job(_input: Data<DirectJob>) {}
 
-async fn result_unit_job(_input: Data<DirectJob>) -> Result<(), crate::Error> {
+async fn result_unit_job(_input: Data<DirectJob>) -> Result<(), TaskError> {
     Ok(())
 }
 
-async fn failed_job(_input: Data<DirectJob>) -> Result<(), crate::Error> {
-    Err(crate::Error::invalid("secret task detail"))
+async fn failed_job(_input: Data<DirectJob>) -> Result<(), TaskError> {
+    Err(crate::Error::invalid("secret task detail").into())
 }
 
 async fn batch_job(
     input: Data<super::super::Batch<DirectJob>>,
-) -> Result<super::super::Batch<TaskState>, crate::Error> {
+) -> super::super::Batch<Result<TaskState, TaskError>> {
     input
         .iter()
         .map(|job| {
             if job.id % 2 == 0 {
-                TaskState::complete(()).map_err(Into::into)
+                Ok(TaskState::complete(()))
             } else {
-                Ok(TaskState::retry("odd job"))
+                Err(TaskError::retry("odd job"))
             }
         })
         .collect()
@@ -52,33 +58,25 @@ async fn short_batch(
     super::super::Batch::new(Vec::new())
 }
 
-async fn sleeping_batch(
-    _input: Data<super::super::Batch<DirectJob>>,
-) -> Result<TaskState, crate::Error> {
-    Ok(TaskState::sleep("state", Duration::from_secs(1))?)
-}
-
-async fn suspended_batch(
-    _input: Data<super::super::Batch<DirectJob>>,
-) -> Result<TaskState, crate::Error> {
-    Ok(TaskState::suspend("state")?)
-}
-
 async fn unit_batch(_input: Data<super::super::Batch<DirectJob>>) {}
 
-async fn retrying_batch(_input: Data<super::super::Batch<DirectJob>>) -> TaskState {
-    TaskState::retry("try again")
+async fn retrying_batch(
+    _input: Data<super::super::Batch<DirectJob>>,
+) -> Result<TaskState, TaskError> {
+    Err(TaskError::retry("try again"))
 }
 
-async fn failing_batch(_input: Data<super::super::Batch<DirectJob>>) -> TaskState {
-    TaskState::fail("permanent failure")
+async fn failing_batch(
+    _input: Data<super::super::Batch<DirectJob>>,
+) -> Result<TaskState, TaskError> {
+    Err(TaskError::fail("permanent failure"))
 }
 
-async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(), crate::Error> {
-    Err(crate::Error::invalid("batch handler failed"))
+async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(), TaskError> {
+    Err(crate::Error::invalid("batch handler failed").into())
 }
 
-fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskError> {
+fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(Arc::new(TaskRecord {
         id: TaskId::new(uuid::Uuid::now_v7()),
@@ -90,6 +88,7 @@ fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskEr
         state: None,
         resume_input: None,
         status: TaskStatus::Running,
+        cancelled: false,
         attempts: 0,
         step_attempts: 0,
         lane: DEFAULT_TASK_LANE.to_string(),
@@ -192,26 +191,6 @@ async fn batch_cardinality_mismatch_fails_all() -> Result<(), String> {
     Ok(())
 }
 
-/// Verifies value-only batches reject continuation lifecycle outcomes.
-#[tokio::test]
-async fn batch_sleep_is_rejected() -> Result<(), String> {
-    let task = RegisteredTask::new_batch(TaskDefinition::new("sleeping_batch"), sleeping_batch);
-    let results = task
-        .execute_many(
-            test_site().await.map_err(|error| error.to_string())?,
-            vec![
-                record("sleeping_batch", &DirectJob { id: 1 })
-                    .map_err(|error| error.to_string())?,
-            ],
-        )
-        .await;
-    assert!(matches!(
-        results.first().map(|result| &result.outcome),
-        Some(TaskOutcome::Fail { error }) if error.contains("cannot suspend or sleep")
-    ));
-    Ok(())
-}
-
 /// Verifies unit and uniform task-state returns map independently to every batch member.
 #[tokio::test]
 async fn batch_uniform_returns_apply_to_every_member() -> Result<(), String> {
@@ -293,29 +272,9 @@ async fn batch_all_invalid_inputs_skip_the_handler() -> Result<(), String> {
     Ok(())
 }
 
-/// Verifies value-only batches reject both continuation lifecycle variants.
-#[tokio::test]
-async fn batch_suspend_is_rejected() -> Result<(), String> {
-    let task = RegisteredTask::new_batch(TaskDefinition::new("suspended_batch"), suspended_batch);
-    let results = task
-        .execute_many(
-            test_site().await.map_err(|error| error.to_string())?,
-            vec![
-                record("suspended_batch", &DirectJob { id: 1 })
-                    .map_err(|error| error.to_string())?,
-            ],
-        )
-        .await;
-    assert!(matches!(
-        results.first().map(|result| &result.outcome),
-        Some(TaskOutcome::Fail { error }) if error.contains("cannot suspend or sleep")
-    ));
-    Ok(())
-}
-
 /// Verifies direct task registration retains typed task submission without result storage.
 #[tokio::test]
-async fn direct_registration_supports_typed_submit() -> Result<(), TaskError> {
+async fn direct_registration_supports_typed_submit() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
@@ -339,7 +298,7 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TaskError> {
         .lanes
         .first()
         .and_then(|lane| lane.tasks.first())
-        .ok_or_else(|| TaskError::TaskExecutionError("task was not claimed".into()))?;
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("task was not claimed".into()))?;
 
     assert_eq!(task.id, task_id);
     assert_eq!(task.name, "direct_job");
@@ -364,24 +323,24 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TaskError> {
 
 /// Verifies invalid submission delay values surface only from submission terminals.
 #[tokio::test]
-async fn task_options_defer_errors_to_submission() -> Result<(), TaskError> {
+async fn task_options_defer_errors_to_submission() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new(
+    registry.register(RegisteredTask::new_flow(
         TaskDefinition::new("direct_job"),
-        direct_job,
+        |_: Data<DirectJob>| (),
     ))?;
     let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
     let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
     assert!(matches!(
         dispatcher.submit_with(DirectJob { id: 1 }, oversized).await,
-        Err(TaskError::InvalidOptions(_))
+        Err(TaskRuntimeError::InvalidOptions(_))
     ));
     Ok(())
 }
 
 /// Verifies typed bulk key derivation preserves ordered queued and existing receipts.
 #[tokio::test]
-async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskError> {
+async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job")
@@ -408,7 +367,7 @@ async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskErro
 
 /// Verifies a task's static key rule inherits retention from its finalized lane.
 #[test]
-fn static_idempotency_inherits_lane_retention() -> Result<(), TaskError> {
+fn static_idempotency_inherits_lane_retention() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new();
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job")
@@ -427,7 +386,7 @@ fn static_idempotency_inherits_lane_retention() -> Result<(), TaskError> {
         .idempotency_conf()?
         .into_iter()
         .next()
-        .ok_or_else(|| TaskError::TaskNotFound("direct_job".into()))?;
+        .ok_or_else(|| TaskRuntimeError::TaskNotFound("direct_job".into()))?;
 
     assert_eq!(policy.handler, "direct_job");
     assert_eq!(policy.lane, DEFAULT_TASK_LANE.as_str());
@@ -441,11 +400,11 @@ fn static_idempotency_inherits_lane_retention() -> Result<(), TaskError> {
 
 /// Verifies an empty typed batch succeeds without touching durable storage.
 #[tokio::test]
-async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TaskError> {
+async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new(
+    registry.register(RegisteredTask::new_flow(
         TaskDefinition::new("direct_job"),
-        direct_job,
+        |_: Data<DirectJob>| (),
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
@@ -552,11 +511,9 @@ async fn continuation_decodes_state_and_resume_input() -> Result<(), String> {
         serde_json::to_string(&Ok::<_, super::super::TaskFailure>(42_u32))
             .map_err(|e| e.to_string())?,
     );
-    let context = TaskContext {
-        site: test_site().await.map_err(|error| error.to_string())?,
+    let context = FlowContext {
         payload: callables::DataBox::new(DirectJob { id: 7 }),
         record,
-        operation_id: crate::OperationId::new(),
     };
     let continuation =
         <Continuation<String, u32> as callables::FromContextParts<_>>::from_context_parts(&context)
@@ -568,36 +525,39 @@ async fn continuation_decodes_state_and_resume_input() -> Result<(), String> {
 
 /// Verifies every lifecycle control maps to a payload-free store outcome.
 #[tokio::test]
-async fn task_state_encodes_only_lifecycle() -> Result<(), TaskError> {
+async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
+    let site = test_site()
+        .await
+        .map_err(|error| TaskRuntimeError::TaskExecutionError(error.to_string()))?;
     assert!(matches!(
-        TaskState::complete(())?.into_outcome(),
+        TaskState::complete(()).into_outcome(),
         TaskOutcome::Complete
     ));
     assert!(matches!(
-        TaskState::suspend("approval")?.into_outcome(),
+        crate::tasks::FlowState::suspend("approval")?.resolve(&site)?,
         TaskOutcome::Suspend { .. }
     ));
     assert!(matches!(
-        TaskState::sleep("retry", Duration::ZERO)?.into_outcome(),
+        crate::tasks::FlowState::sleep("retry", Duration::ZERO)?.resolve(&site)?,
         TaskOutcome::Sleep { .. }
     ));
     assert!(matches!(
-        TaskState::retry("temporary").into_outcome(),
+        TaskError::retry("temporary").into_outcome(),
         TaskOutcome::Retry { .. }
     ));
     assert!(matches!(
-        TaskState::fail("permanent").into_outcome(),
+        TaskError::fail("permanent").into_outcome(),
         TaskOutcome::Fail { .. }
     ));
     Ok(())
 }
 /// External success and failure resumes share the result envelope.
 #[tokio::test]
-async fn external_results_share_envelope() -> Result<(), TaskError> {
+async fn external_results_share_envelope() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new(
+    registry.register(RegisteredTask::new_flow(
         TaskDefinition::new("direct_job"),
-        direct_job,
+        |_: Data<DirectJob>| (),
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
@@ -634,7 +594,7 @@ async fn external_results_share_envelope() -> Result<(), TaskError> {
         let result = store
             .get_task(id)
             .await?
-            .ok_or_else(|| TaskError::TaskExecutionError("missing task".into()))?
+            .ok_or_else(|| TaskRuntimeError::TaskExecutionError("missing task".into()))?
             .resume_input::<u32>()?;
         assert_eq!(result.as_ref().map(Result::is_err), Some(failed));
         assert!(!dispatcher.resume(id, 99u32).await?);
@@ -644,14 +604,14 @@ async fn external_results_share_envelope() -> Result<(), TaskError> {
 
 /// External result limits are independent of checkpoint limits and reject before mutation.
 #[tokio::test]
-async fn external_result_limit_is_independent() -> Result<(), TaskError> {
+async fn external_result_limit_is_independent() -> Result<(), TaskRuntimeError> {
     let config = TaskConf::default()
         .max_payload_bytes(32)
         .max_error_bytes(64 * 1024);
     let mut registry = TaskRegistry::new().with_config(config)?;
-    registry.register(RegisteredTask::new(
+    registry.register(RegisteredTask::new_flow(
         TaskDefinition::new("direct_job"),
-        direct_job,
+        |_: Data<DirectJob>| (),
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
@@ -659,7 +619,7 @@ async fn external_result_limit_is_independent() -> Result<(), TaskError> {
     suspend_fixture(&store, id).await?;
     assert!(matches!(
         dispatcher.resume(id, "x".repeat(32_760)).await,
-        Err(TaskError::ResultTooLarge { .. })
+        Err(TaskRuntimeError::ResultTooLarge { .. })
     ));
     assert!(matches!(
         dispatcher
@@ -668,12 +628,12 @@ async fn external_result_limit_is_independent() -> Result<(), TaskError> {
                 crate::tasks::TaskFailure::new(None, "\u{0}".repeat(10_000))
             )
             .await,
-        Err(TaskError::ResultTooLarge { .. })
+        Err(TaskRuntimeError::ResultTooLarge { .. })
     ));
     let record = store
         .get_task(id)
         .await?
-        .ok_or_else(|| TaskError::TaskNotFound(id.to_string()))?;
+        .ok_or_else(|| TaskRuntimeError::TaskNotFound(id.to_string()))?;
     assert_eq!(record.status, crate::tasks::TaskStatus::Suspended);
     assert!(record.resume_input.is_none());
     assert!(dispatcher.resume(id, "x".repeat(32_759)).await?);
@@ -681,7 +641,7 @@ async fn external_result_limit_is_independent() -> Result<(), TaskError> {
 }
 
 /// Suspends a claimed fixture before testing the public resume validation boundary.
-async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), TaskError> {
+async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), TaskRuntimeError> {
     store
         .claim_tasks(
             "owner",
@@ -706,17 +666,17 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Task
     Ok(())
 }
 
-/// Batch values can supply ordered outputs but cannot initiate continuation checkpoints.
+/// Batch values retain independent ordered completion and failure outcomes.
 #[tokio::test]
-async fn batch_outputs_and_spawn_rejection() -> Result<(), String> {
+async fn batch_outputs_and_failure() -> Result<(), String> {
     async fn outcomes(
         Data(_): Data<crate::tasks::Batch<DirectJob>>,
-    ) -> Result<crate::tasks::Batch<TaskState>, crate::Error> {
-        Ok(vec![
-            TaskState::complete(42)?,
-            TaskState::spawn(DirectJob { id: 3 }, ())?,
+    ) -> crate::tasks::Batch<Result<TaskState<u32>, TaskError>> {
+        vec![
+            Ok(TaskState::complete(42)),
+            Err(TaskError::fail("intentional failure")),
         ]
-        .into())
+        .into()
     }
     let task = RegisteredTask::new_batch(TaskDefinition::new("outputs"), outcomes);
     let records = [1, 2]
@@ -728,7 +688,9 @@ async fn batch_outputs_and_spawn_rejection() -> Result<(), String> {
         .execute_many(test_site().await.map_err(|e| e.to_string())?, records)
         .await;
     assert!(matches!(&results[0].outcome, TaskOutcome::CompleteWith { output } if output == "42"));
-    assert!(matches!(&results[1].outcome, TaskOutcome::Fail { error } if error.contains("spawn")));
+    assert!(
+        matches!(&results[1].outcome, TaskOutcome::Fail { error } if error == "intentional failure")
+    );
     Ok(())
 }
 

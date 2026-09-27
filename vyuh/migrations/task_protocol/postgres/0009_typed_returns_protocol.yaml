@@ -1,0 +1,10 @@
+# Stop workers and writers. No task-row or output-format changes.
+dependencies: [0008_work_flow_protocol]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-f0:' THEN 'tr-t0:' WHEN 'tr-f1:' THEN 'tr-t1:' WHEN 'tr-f2:' THEN 'tr-t2:' WHEN 'tr-f3:' THEN 'tr-t3:' ELSE 'tr-t4:' END || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-f0:', 'tr-f1:', 'tr-f2:', 'tr-f3:', 'tr-v4:')
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = CASE SUBSTR(policy_fingerprint, 1, 6) WHEN 'tr-f0:' THEN 'tr-t0:' WHEN 'tr-f1:' THEN 'tr-t1:' WHEN 'tr-f2:' THEN 'tr-t2:' WHEN 'tr-f3:' THEN 'tr-t3:' ELSE 'tr-t4:' END || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) IN ('tr-f0:', 'tr-f1:', 'tr-f2:', 'tr-f3:', 'tr-v4:')

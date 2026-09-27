@@ -1,0 +1,40 @@
+warning: unused imports: `bundles` and `tasks::TaskDefinition`
+ --> tests/ui/tasks/flow_invalid_retry.rs:1:12
+  |
+1 | use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
+  |            ^^^^^^^              ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no associated function or constant named `retry` found for struct `vyuh::prelude::FlowState<T>` in the current scope
+ --> tests/ui/tasks/flow_invalid_retry.rs:4:32
+  |
+4 | fn main() { let _ = FlowState::retry("no"); }
+  |                                ^^^^^ associated function or constant not found in `vyuh::prelude::FlowState<_>`
+  |
+note: if you're trying to build a new `vyuh::prelude::FlowState<_>` consider using one of the following associated functions:
+      vyuh::prelude::FlowState::<T>::spawn
+      vyuh::prelude::FlowState::<T>::spawn_with
+      vyuh::prelude::FlowState::<T>::complete
+      vyuh::prelude::FlowState::<T>::suspend
+      vyuh::prelude::FlowState::<T>::sleep
+ --> src/tasks/flow_state.rs
+  |
+  |       pub fn spawn<I: DataValue, S: Serialize>(input: I, state: S) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  | /     pub fn spawn_with<I: DataValue, S: Serialize>(
+  | |         input: I,
+  | |         state: S,
+  | |         options: TaskOptions,
+  | |     ) -> Result<Self, TaskRuntimeError> {
+  | |_______________________________________^
+...
+  |       pub fn complete(output: T) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |       pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |       pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

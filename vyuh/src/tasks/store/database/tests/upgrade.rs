@@ -4,7 +4,7 @@ use gaman_core::{BoxFuture, Migration, MigrationStore, StoreError};
 
 #[derive(db::Model)]
 #[table(name = "vyuh_tasks")]
-struct LegacyTask {
+pub(super) struct LegacyTask {
     #[column(primary_key)]
     id: i32,
     status: i16,

@@ -2,6 +2,47 @@
 use super::*;
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
+    /// Stops renewal for cancelled shared members without discarding unaffected execution.
+    pub(super) fn detach_cancelled(&mut self, ids: &[crate::tasks::TaskId]) {
+        for id in ids {
+            let shared = self
+                .running_tasks
+                .get(id)
+                .and_then(|invocation| self.running_invocations.get(invocation))
+                .is_some_and(|invocation| invocation.task_ids.len() > 1);
+            if shared {
+                self.running_tasks.remove(id);
+            }
+        }
+    }
+
+    /// Accepts only results still owned locally; cancelled shared members have been detached.
+    pub(super) fn accept_completion(
+        &mut self,
+        mut completion: Completion,
+        commits: &mut Vec<TaskCommit>,
+    ) {
+        let Some(invocation) = self.running_invocations.remove(&completion.invocation_id) else {
+            return;
+        };
+        if invocation.task_ids.len() > 1 {
+            completion.commits.retain(|commit| {
+                self.running_tasks.get(&commit.task_id) == Some(&completion.invocation_id)
+            });
+        }
+        for task_id in invocation.task_ids {
+            self.running_tasks.remove(&task_id);
+        }
+        self.running = self.running.saturating_sub(1);
+        if let Some(lane) = self.lane_mut(completion.lane) {
+            lane.running = lane.running.saturating_sub(1);
+            lane.uncommitted = lane.uncommitted.saturating_add(completion.commits.len());
+            lane.completed_work = true;
+            lane.poll_after = tokio::time::Instant::now();
+        }
+        self.queue_commits(completion.commits, commits);
+    }
+
     pub(super) fn dispatch_ready(
         &mut self,
         site: &Site,

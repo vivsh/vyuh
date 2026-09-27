@@ -8,7 +8,7 @@ use crate::{
     db,
     tasks::{
         LaneClaim, LaneHookAction, LaneHookResult, LaneOwnerPhase, LaneOwnerPoll, LanePoll,
-        TaskError, TaskLaneConf,
+        TaskLaneConf, TaskRuntimeError,
     },
 };
 
@@ -38,11 +38,11 @@ impl DbTaskStore {
         now: DateTime<Utc>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
         new_idle: &mut Vec<crate::tasks::TaskLane>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         let mut row = load_for_update(transaction, claim.lane.as_str())
             .await?
             .ok_or_else(|| {
-                TaskError::InvalidConfig(format!(
+                TaskRuntimeError::InvalidConfig(format!(
                     "task lane lock '{}' is not initialized",
                     claim.lane
                 ))
@@ -91,7 +91,7 @@ impl DbTaskStore {
         &self,
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-    ) -> Result<bool, TaskError> {
+    ) -> Result<bool, TaskRuntimeError> {
         let requested = turn
             .claim
             .owner
@@ -118,7 +118,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         result: &LaneHookResult,
         turn: &OwnerTurn<'_>,
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskRuntimeError> {
         let phase = LaneOwnerPhase::from_i16(row.phase)?;
         if row.generation != result.generation || !hook_matches(phase, result.action) {
             return Ok(());
@@ -137,7 +137,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskRuntimeError> {
         let candidates = self.candidates(transaction, turn).await?;
         if candidates.is_empty() {
             release(row, LaneOwnerPhase::Idle, turn.now);
@@ -160,7 +160,7 @@ impl DbTaskStore {
         mut row: TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         let phase = LaneOwnerPhase::from_i16(row.phase)?;
         if let Some(action) = phase_action(phase) {
             persist(transaction, &row).await?;
@@ -190,7 +190,7 @@ impl DbTaskStore {
         candidates: Vec<TaskRow>,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         let mut phase = LaneOwnerPhase::from_i16(row.phase)?;
         let completed_work = turn
             .claim
@@ -231,7 +231,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         phase: LaneOwnerPhase,
         turn: &OwnerTurn<'_>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         if matches!(
             phase,
             LaneOwnerPhase::Idle | LaneOwnerPhase::IdleFailed | LaneOwnerPhase::BusyFailed
@@ -272,7 +272,7 @@ impl DbTaskStore {
         &self,
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         if turn
             .lane
             .lane_lock()
@@ -297,7 +297,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         if row.hook_retry_at.is_some_and(|retry| retry > turn.now) {
             release(row, LaneOwnerPhase::BusyFailed, turn.now);
             persist(transaction, row).await?;
@@ -333,11 +333,11 @@ impl DbTaskStore {
         row: &TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         let lock = turn
             .lane
             .lane_lock()
-            .ok_or_else(|| TaskError::InvalidConfig("locked lane lost its policy".into()))?;
+            .ok_or_else(|| TaskRuntimeError::InvalidConfig("locked lane lost its policy".into()))?;
         let claim = LaneClaim {
             lane: turn.claim.lane,
             limit: lock.batch_size(),
@@ -360,7 +360,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: &OwnerTurn<'_>,
-    ) -> Result<Vec<TaskRow>, TaskError> {
+    ) -> Result<Vec<TaskRow>, TaskRuntimeError> {
         let size = turn.lane.lane_lock().map_or(1, |lock| lock.batch_size());
         probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), size).await
     }
@@ -373,7 +373,7 @@ pub(super) async fn reconcile_workflow(
     wake: &[crate::tasks::TaskLane],
     new_idle: &[crate::tasks::TaskLane],
     now: DateTime<Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     for lane in &mut poll.lanes {
         if !wake.contains(&lane.lane) {
             continue;
@@ -420,10 +420,10 @@ fn should_flush(
     rows: &[TaskRow],
     lane: &TaskLaneConf,
     now: DateTime<Utc>,
-) -> Result<bool, TaskError> {
+) -> Result<bool, TaskRuntimeError> {
     let lane_lock = lane
         .lane_lock()
-        .ok_or_else(|| TaskError::InvalidConfig("locked lane lost its policy".into()))?;
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("locked lane lost its policy".into()))?;
     Ok(
         rows.len() >= lane_lock.batch_size()
             || flush_wake(rows, lane, now)? == Some(Duration::ZERO),
@@ -434,7 +434,7 @@ fn flush_wake(
     rows: &[TaskRow],
     lane: &TaskLaneConf,
     now: DateTime<Utc>,
-) -> Result<Option<Duration>, TaskError> {
+) -> Result<Option<Duration>, TaskRuntimeError> {
     let Some(deadline) = lane.lane_lock().and_then(|lock| lock.batch_deadline()) else {
         return Ok(None);
     };
@@ -447,7 +447,7 @@ fn flush_wake(
     let due = add_time(
         oldest,
         ChronoDuration::from_std(deadline).map_err(|_| {
-            TaskError::InvalidConfig("lane lock deadline is outside chrono bounds".into())
+            TaskRuntimeError::InvalidConfig("lane lock deadline is outside chrono bounds".into())
         })?,
         "lane lock deadline",
     )?;
@@ -457,7 +457,7 @@ fn flush_wake(
 fn owner_poll(
     row: &TaskLaneLockRow,
     action: Option<LaneHookAction>,
-) -> Result<LaneOwnerPoll, TaskError> {
+) -> Result<LaneOwnerPoll, TaskRuntimeError> {
     Ok(LaneOwnerPoll {
         token: row.owner_token.clone(),
         generation: row.generation,
@@ -472,7 +472,7 @@ fn owned_poll(
     row: TaskLaneLockRow,
     action: impl Into<Option<LaneHookAction>>,
     wake: Option<Duration>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     Ok(LanePoll {
         lane,
         tasks: Vec::new(),
@@ -487,7 +487,7 @@ async fn wait_poll(
     transaction: &mut db::DbTransaction<'_>,
     row: TaskLaneLockRow,
     turn: &OwnerTurn<'_>,
-) -> Result<LanePoll, TaskError> {
+) -> Result<LanePoll, TaskRuntimeError> {
     let wake = row
         .leased_until
         .and_then(|at| (at - turn.now).to_std().ok())
@@ -538,9 +538,9 @@ fn transition(
     row: &mut TaskLaneLockRow,
     phase: LaneOwnerPhase,
     now: DateTime<Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     row.generation = row.generation.checked_add(1).ok_or_else(|| {
-        TaskError::TaskExecutionError("lane lifecycle generation overflowed".into())
+        TaskRuntimeError::TaskExecutionError("lane lifecycle generation overflowed".into())
     })?;
     row.phase = phase as i16;
     row.last_hook_error = None;
@@ -575,7 +575,7 @@ fn fail_busy(
     row: &mut TaskLaneLockRow,
     error: &str,
     turn: &OwnerTurn<'_>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     row.last_hook_error = Some(error.into());
     row.hook_retry_at = Some(owner_deadline(turn.now, turn.conf.poll_interval)?);
     release(row, LaneOwnerPhase::BusyFailed, turn.now);
@@ -586,9 +586,12 @@ fn elapsed(started: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
     (now - started).to_std().unwrap_or(Duration::ZERO)
 }
 
-fn owner_deadline(now: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc>, TaskError> {
+fn owner_deadline(
+    now: DateTime<Utc>,
+    duration: Duration,
+) -> Result<DateTime<Utc>, TaskRuntimeError> {
     let duration = ChronoDuration::from_std(duration).map_err(|_| {
-        TaskError::InvalidConfig("lane owner duration is outside chrono bounds".into())
+        TaskRuntimeError::InvalidConfig("lane owner duration is outside chrono bounds".into())
     })?;
     add_time(now, duration, "lane owner duration")
 }
@@ -596,7 +599,7 @@ fn owner_deadline(now: DateTime<Utc>, duration: Duration) -> Result<DateTime<Utc
 async fn persist(
     transaction: &mut db::DbTransaction<'_>,
     row: &TaskLaneLockRow,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let table = DbTaskStore::lane_lock_table();
     let patch = TaskLaneLockPatch {
         owner_id: row.owner_id.clone(),
@@ -622,7 +625,7 @@ async fn persist(
 async fn load_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Option<TaskLaneLockRow>, TaskError> {
+) -> Result<Option<TaskLaneLockRow>, TaskRuntimeError> {
     use crate::db::backend::RowLockExt as _;
     let table = DbTaskStore::lane_lock_table();
     Ok(db::from(&table)
@@ -637,7 +640,7 @@ async fn load_for_update(
 async fn load_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Option<TaskLaneLockRow>, TaskError> {
+) -> Result<Option<TaskLaneLockRow>, TaskRuntimeError> {
     let table = DbTaskStore::lane_lock_table();
     Ok(db::from(&table)
         .filter(table.lane_name.eq(db::val(lane.to_string())))

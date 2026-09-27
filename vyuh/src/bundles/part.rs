@@ -410,22 +410,18 @@ where
 }
 
 /// Creates a durable task part.
-pub fn task<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+pub fn task<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
 where
     T: callables::DataValue,
-    H: callables::Specable<Args> + Send + Sync + 'static,
-    H::Output: callables::IntoOutput<Error>
-        + callables::IntoReturnPart
-        + crate::tasks::IntoTaskOutcomePart
-        + Send
-        + 'static,
+    H: crate::tasks::TaskCallable<Args> + 'static,
+    H::Output: crate::tasks::IntoTaskOutcomePart<K>,
     Args: callables::FromContext<crate::tasks::TaskContext>
         + callables::IntoArgSpecs
         + callables::HasData<T>
         + Send
         + 'static,
 {
-    let task = crate::tasks::RegisteredTask::new::<T, H, Args>(definition, handler);
+    let task = crate::tasks::RegisteredTask::new::<T, H, Args, K>(definition, handler);
     let op = task.operation();
     BundlePart {
         operation: Some(op),
@@ -434,15 +430,13 @@ where
 }
 
 /// Creates a durable handler that receives matching local work as `Data<Batch<T>>`.
+///
+/// Only work outcomes are supported; orchestration uses `flow`.
 pub fn task_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
 where
     T: callables::DataValue,
-    H: callables::Specable<Args> + Send + Sync + 'static,
-    H::Output: callables::IntoOutput<Error>
-        + callables::IntoReturnPart
-        + crate::tasks::IntoTaskBatchOutcomePart
-        + Send
-        + 'static,
+    H: crate::tasks::TaskCallable<Args> + 'static,
+    H::Output: crate::tasks::IntoTaskBatchOutcomePart,
     Args: callables::FromContext<crate::tasks::BatchTaskContext>
         + callables::IntoArgSpecs
         + callables::HasData<crate::tasks::Batch<T>>
@@ -457,7 +451,28 @@ where
     }
 }
 
-/// Creates a background service part.
+/// Registers synchronous orchestration with input and continuation extraction only.
+/// Future returns and work outcomes are rejected at compile time. Handler failures
+/// become normal terminal task failures; the function must be pure and non-blocking.
+pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+where
+    T: callables::DataValue,
+    H: crate::tasks::FlowCallable<Args> + 'static,
+    H::Output: crate::tasks::IntoFlowOutcomePart,
+    Args: callables::FromContext<crate::tasks::FlowContext>
+        + callables::IntoArgSpecs
+        + callables::HasData<T>
+        + Send
+        + 'static,
+{
+    let task = crate::tasks::RegisteredTask::new_flow::<T, H, Args>(definition, handler);
+    let op = task.operation();
+    BundlePart {
+        operation: Some(op),
+        part: BundlePartInner::Task(task),
+    }
+}
+
 pub fn service<T, H, Args>(handler: H) -> BundlePart
 where
     T: Service,

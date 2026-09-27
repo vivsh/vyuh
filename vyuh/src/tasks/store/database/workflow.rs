@@ -24,7 +24,7 @@ pub(super) async fn prepare_children(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     batch_size: usize,
-) -> Result<(Vec<TaskRow>, HashSet<TaskId>), TaskError> {
+) -> Result<(Vec<TaskRow>, HashSet<TaskId>), TaskRuntimeError> {
     if !outcomes
         .values()
         .any(|outcome| matches!(outcome, TaskOutcome::Spawn { .. }))
@@ -33,21 +33,7 @@ pub(super) async fn prepare_children(
     }
     let mut writes = Vec::new();
     for row in rows {
-        if let Some(TaskOutcome::Spawn { child, .. }) = outcomes.get(&TaskId::new(row.id)).copied()
-        {
-            if child.ignore_conflicts {
-                return Err(TaskError::InvalidOptions(
-                    "spawn cannot ignore conflicts".into(),
-                ));
-            }
-            if !conf.handlers.contains(&child.record.name) {
-                return Err(TaskError::TaskNotFound(child.record.name.clone()));
-            }
-            lane_retry(&conf.lanes, &child.record.lane)?;
-            let mut child = child.clone();
-            child.record.parent_id = Some(TaskId::new(row.id));
-            child.record.root_id = Some(TaskId::new(row.root_id.unwrap_or(row.id)));
-            child.ignore_conflicts = true;
+        if let Some(child) = prepare_child(row, outcomes, conf)? {
             writes.push(child);
         }
     }
@@ -61,11 +47,42 @@ pub(super) async fn prepare_children(
     resolve_children(prepared, owners)
 }
 
+/// Validates one fenced spawn and derives lineage before reserving any child identity.
+fn prepare_child(
+    row: &TaskRow,
+    outcomes: &HashMap<TaskId, &TaskOutcome>,
+    conf: &crate::tasks::TaskStoreConf,
+) -> Result<Option<crate::tasks::TaskWrite>, TaskRuntimeError> {
+    if row.cancelled {
+        return Ok(None);
+    }
+    let Some(outcome @ TaskOutcome::Spawn { child, .. }) =
+        outcomes.get(&TaskId::new(row.id)).copied()
+    else {
+        return Ok(None);
+    };
+    let kind = crate::tasks::TaskKind::from_i16(row.kind)?;
+    if crate::tasks::store::workflow::capability_error(kind, outcome, &conf.handlers).is_some() {
+        return Ok(None);
+    }
+    if child.ignore_conflicts {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "spawn cannot ignore conflicts".into(),
+        ));
+    }
+    lane_retry(&conf.lanes, &child.record.lane)?;
+    let mut child = child.clone();
+    child.record.parent_id = Some(TaskId::new(row.id));
+    child.record.root_id = Some(TaskId::new(row.root_id.unwrap_or(row.id)));
+    child.ignore_conflicts = true;
+    Ok(Some(child))
+}
+
 /// Accepts only newly allocated child identities, never idempotent existing receipts.
 fn resolve_children(
     prepared: Vec<PreparedWrite>,
     owners: Vec<TaskIdempotencyRow>,
-) -> Result<(Vec<TaskRow>, HashSet<TaskId>), TaskError> {
+) -> Result<(Vec<TaskRow>, HashSet<TaskId>), TaskRuntimeError> {
     let owners = owners
         .into_iter()
         .map(|owner| ((owner.task_name.clone(), owner.key_value.clone()), owner))
@@ -91,7 +108,7 @@ fn resolve_children(
 pub(in super::super) fn queue_delivery(
     row: &TaskRow,
     deliveries: &mut Vec<(TaskId, String)>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if let Some(parent) = row.parent_id
         && let Some(result) = crate::tasks::store::workflow::terminal_result(
             TaskStatus::from_i16(row.status)?,
@@ -111,7 +128,7 @@ pub(in super::super) async fn finalize_workflow(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     batch_size: usize,
-) -> Result<Vec<crate::tasks::TaskLane>, TaskError> {
+) -> Result<Vec<crate::tasks::TaskLane>, TaskRuntimeError> {
     let mut lanes = children
         .iter()
         .map(|child| child.lane_name.clone())
@@ -138,7 +155,7 @@ async fn resume_parents(
     now: DateTime<Utc>,
     batch_size: usize,
     lanes: &mut HashSet<String>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let mut results = deliveries
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -176,11 +193,12 @@ async fn resume_parents(
 async fn load_parents(
     tx: &mut db::DbTransaction<'_>,
     ids: &[uuid::Uuid],
-) -> Result<Vec<ParentWrite>, TaskError> {
-    let table = ParentWrite::table();
+) -> Result<Vec<ParentWrite>, TaskRuntimeError> {
+    let table = DbTaskStore::table();
     let query = db::from(&table)
         .filter(table.id.in_values(ids.to_vec()))
         .filter(table.status.eq(db::val(TaskStatus::Suspended.as_i16())))
+        .filter(table.cancelled.eq(db::val(false)))
         .sort(table.id.asc());
     #[cfg(any(feature = "postgres", feature = "mysql"))]
     let query = {

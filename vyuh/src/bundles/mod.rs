@@ -36,7 +36,7 @@ pub use config::{BundleConf, conf};
 pub use error::BundleError;
 pub use openapi::{OpenApiConf, OpenApiViewerConf};
 pub use part::{
-    BundlePart, asset_dir, beacon, bundle, command, cron, periodic, pgnotify, route, service,
+    BundlePart, asset_dir, beacon, bundle, command, cron, flow, periodic, pgnotify, route, service,
     signal, task, task_batch, url_info,
 };
 #[cfg(feature = "mcp")]
@@ -45,8 +45,8 @@ pub use part::{mcp_resource, mcp_tool};
 pub use part::{migrations, schema};
 
 pub use vyuh_macros::{
-    asset_dir, beacon, bundle, cron, periodic, pgnotify, route, service, signal, task, task_batch,
-    url_info,
+    asset_dir, beacon, bundle, cron, flow, periodic, pgnotify, route, service, signal, task,
+    task_batch, url_info,
 };
 #[cfg(feature = "mcp")]
 pub use vyuh_macros::{mcp_resource, mcp_tool};

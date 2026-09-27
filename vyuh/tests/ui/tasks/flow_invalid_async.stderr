@@ -1,0 +1,55 @@
+error[E0277]: the trait bound `impl std::future::Future<Output = ()>: vyuh::tasks::IntoFlowOutcomePart` is not satisfied
+ --> tests/ui/tasks/flow_invalid_async.rs:5:10
+  |
+4 | #[bundles::flow]
+  | ---------------- required by a bound introduced by this call
+5 | async fn handler(_: Data<Job>) {}
+  |          ^^^^^^^ the trait `vyuh::tasks::IntoFlowOutcomePart` is not implemented for `impl std::future::Future<Output = ()>`
+  |
+help: the following other types implement trait `vyuh::tasks::IntoFlowOutcomePart`
+ --> src/tasks/returns.rs
+  |
+  | impl IntoFlowOutcomePart for () {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()`
+...
+  | impl<T: Serialize + 'static> IntoFlowOutcomePart for FlowState<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FlowState<T>`
+...
+  | impl<T: IntoFlowOutcomePart> IntoFlowOutcomePart for Result<T, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<T, FlowError>`
+note: required by a bound in `flow`
+ --> src/bundles/part.rs
+  |
+  | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  |        ---- required by a bound in this function
+...
+  |     H::Output: crate::tasks::IntoFlowOutcomePart,
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+
+error[E0277]: the trait bound `impl std::future::Future<Output = ()>: vyuh::tasks::IntoFlowOutcomePart` is not satisfied
+ --> tests/ui/tasks/flow_invalid_async.rs:7:35
+  |
+7 | fn main() { let _ = bundles::flow(future, TaskDefinition::new("future")); }
+  |                     ------------- ^^^^^^ the trait `vyuh::tasks::IntoFlowOutcomePart` is not implemented for `impl std::future::Future<Output = ()>`
+  |                     |
+  |                     required by a bound introduced by this call
+  |
+help: the following other types implement trait `vyuh::tasks::IntoFlowOutcomePart`
+ --> src/tasks/returns.rs
+  |
+  | impl IntoFlowOutcomePart for () {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `()`
+...
+  | impl<T: Serialize + 'static> IntoFlowOutcomePart for FlowState<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FlowState<T>`
+...
+  | impl<T: IntoFlowOutcomePart> IntoFlowOutcomePart for Result<T, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<T, FlowError>`
+note: required by a bound in `flow`
+ --> src/bundles/part.rs
+  |
+  | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  |        ---- required by a bound in this function
+...
+  |     H::Output: crate::tasks::IntoFlowOutcomePart,
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`

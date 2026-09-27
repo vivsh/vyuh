@@ -4,10 +4,10 @@ use super::*;
 pub(super) fn checked_deadline(
     now: chrono::DateTime<chrono::Utc>,
     delay: Duration,
-) -> Result<Option<chrono::DateTime<chrono::Utc>>, TaskError> {
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, TaskRuntimeError> {
     now.checked_add_signed(chrono_duration(delay)?)
         .map(Some)
-        .ok_or_else(|| TaskError::InvalidConfig("task delay exceeds timestamp range".into()))
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task delay exceeds timestamp range".into()))
 }
 
 /// Releases or archives a key when its task reaches a terminal status.
@@ -15,7 +15,7 @@ pub(super) fn finalize_idempotency(
     task: &mut TaskRecord,
     conf: &TaskStoreConf,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     if !matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed) {
         return Ok(());
     }
@@ -23,7 +23,7 @@ pub(super) fn finalize_idempotency(
         return Ok(());
     }
     let policy = conf.idempotency_for(&task.name).ok_or_else(|| {
-        TaskError::InvalidConfig(format!("task '{}' has no idempotency policy", task.name))
+        TaskRuntimeError::InvalidConfig(format!("task '{}' has no idempotency policy", task.name))
     })?;
     task.idempotency_expires_at = match policy {
         IdempotencyRetention::ActiveOnly => None,
@@ -166,7 +166,7 @@ pub(super) fn initialize_lane_locks(state: &mut MemoryState, conf: &TaskStoreCon
 pub(super) fn reject_orphaned_tasks(
     tasks: &[TaskRecord],
     conf: &TaskStoreConf,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let configured = conf
         .lanes
         .iter()
@@ -176,18 +176,18 @@ pub(super) fn reject_orphaned_tasks(
         .iter()
         .find(|task| is_active(task.status) && !configured.contains(task.lane.as_str()))
     {
-        return Err(TaskError::UnknownLane(task.lane.clone()));
+        return Err(TaskRuntimeError::UnknownLane(task.lane.clone()));
     }
     let handlers = conf
         .handlers
         .iter()
-        .map(String::as_str)
+        .map(|(name, _)| name.as_str())
         .collect::<std::collections::HashSet<_>>();
     if let Some(task) = tasks
         .iter()
         .find(|task| is_active(task.status) && !handlers.contains(task.name.as_str()))
     {
-        return Err(TaskError::TaskNotFound(task.name.clone()));
+        return Err(TaskRuntimeError::TaskNotFound(task.name.clone()));
     }
     Ok(())
 }
@@ -203,8 +203,24 @@ pub(super) fn is_reassignable(status: TaskStatus) -> bool {
     matches!(status, TaskStatus::Pending | TaskStatus::Suspended)
 }
 
-pub(super) fn chrono_duration(duration: Duration) -> Result<chrono::Duration, TaskError> {
+pub(super) fn chrono_duration(duration: Duration) -> Result<chrono::Duration, TaskRuntimeError> {
     chrono::Duration::from_std(duration).map_err(|_| {
-        TaskError::InvalidConfig("task duration exceeds supported timestamp range".into())
+        TaskRuntimeError::InvalidConfig("task duration exceeds supported timestamp range".into())
     })
+}
+
+/// Uses the same record-specific lease duration for claiming and renewing.
+pub(super) fn lease_deadline(
+    task: &TaskRecord,
+    default: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, TaskRuntimeError> {
+    let lease = match task.lease_duration_ms {
+        Some(value) => Duration::from_millis(u64::try_from(value).map_err(|_| {
+            TaskRuntimeError::InvalidConfig("task lease duration cannot be negative".into())
+        })?),
+        None => default,
+    };
+    now.checked_add_signed(chrono_duration(lease)?)
+        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task lease exceeds timestamp range".into()))
 }

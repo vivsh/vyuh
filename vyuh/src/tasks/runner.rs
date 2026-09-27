@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 use crate::Site;
 
 use super::{
-    AbstractTaskStore, LaneClaim, TaskCommit, TaskDispatcher, TaskError, TaskLane, TaskLaneConf,
-    TaskPoll, TaskRecord, TaskRegistry, TaskTick,
+    AbstractTaskStore, LaneClaim, TaskCommit, TaskDispatcher, TaskLane, TaskLaneConf, TaskPoll,
+    TaskRecord, TaskRegistry, TaskRuntimeError, TaskTick,
 };
 
 struct RunningInvocation {
@@ -199,7 +199,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> std::fmt::Debug for AbstractT
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
     /// Creates a runner from one validated task dispatcher.
-    pub fn new(dispatcher: TaskDispatcher<S>) -> Result<Self, TaskError> {
+    pub fn new(dispatcher: TaskDispatcher<S>) -> Result<Self, TaskRuntimeError> {
         let config = &dispatcher.registry.config;
         let lanes = dispatcher
             .registry
@@ -359,7 +359,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
             self.fail_tick(state, error);
             return;
         }
-        self.record_renewals(&result.renewals, &result.tick.lost);
+        self.record_renewals(&result.renewals, &result.tick.lost, &result.tick.cancelled);
         self.health.succeeded();
         if !state.commits.is_empty() {
             self.metrics.commit(result.started.elapsed(), false);
@@ -384,7 +384,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
     }
 
     /// Retains pending work and applies bounded backoff after one failed store turn.
-    fn fail_tick(&self, state: &mut RunState, error: TaskError) {
+    fn fail_tick(&self, state: &mut RunState, error: TaskRuntimeError) {
         self.metrics.store_failure();
         self.health.store_failed();
         super::diagnostics::log_runtime_error(&error, "durable task scheduler turn failed");
@@ -397,7 +397,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
     }
 
     /// Validates persistent lane, rate, and orphan state before workers start.
-    pub async fn initialize(&self) -> Result<(), TaskError> {
+    pub async fn initialize(&self) -> Result<(), TaskRuntimeError> {
         let conf = self.store_conf()?;
         let result = self
             .initialized
@@ -419,7 +419,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
 
     fn finished(&self, state: &RunState) -> bool {
         state.shutting_down
-            && self.running_tasks.is_empty()
+            && self.running_invocations.is_empty()
             && self.running_hooks.is_empty()
             && self.queued() == 0
             && self.pending_commits.is_empty()
@@ -510,7 +510,12 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         leases
     }
 
-    fn record_renewals(&mut self, leases: &[super::TaskLease], lost: &[super::TaskId]) {
+    fn record_renewals(
+        &mut self,
+        leases: &[super::TaskLease],
+        lost: &[super::TaskId],
+        cancelled: &[super::TaskId],
+    ) {
         for lease in leases {
             if let Some(invocation) = self
                 .running_tasks
@@ -528,6 +533,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
                     .renewed(lease.lane.as_str(), lost.contains(&lease.task_id));
             }
         }
+        self.detach_cancelled(cancelled);
         self.drop_lost(lost);
     }
 
@@ -585,7 +591,8 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
 
     fn fill_commits(&mut self, commits: &mut Vec<TaskCommit>) {
         let remaining = self.batch_size.saturating_sub(commits.len());
-        commits.extend(self.pending_commits.drain(..remaining));
+        let available = remaining.min(self.pending_commits.len());
+        commits.extend(self.pending_commits.drain(..available));
     }
 
     /// Allocates one global claim budget fairly from the current lane cursor.
@@ -784,23 +791,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         }
     }
 
-    fn accept_completion(&mut self, completion: Completion, commits: &mut Vec<TaskCommit>) {
-        let Some(invocation) = self.running_invocations.remove(&completion.invocation_id) else {
-            return;
-        };
-        for task_id in invocation.task_ids {
-            self.running_tasks.remove(&task_id);
-        }
-        self.running = self.running.saturating_sub(1);
-        if let Some(lane) = self.lane_mut(completion.lane) {
-            lane.running = lane.running.saturating_sub(1);
-            lane.uncommitted = lane.uncommitted.saturating_add(completion.commits.len());
-            lane.completed_work = true;
-            lane.poll_after = tokio::time::Instant::now();
-        }
-        self.queue_commits(completion.commits, commits);
-    }
-
     fn queue_commits(&mut self, values: Vec<TaskCommit>, commits: &mut Vec<TaskCommit>) {
         let remaining = self.batch_size.saturating_sub(commits.len());
         let mut values = values.into_iter();
@@ -968,9 +958,14 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         }
     }
 
-    fn store_conf(&self) -> Result<super::TaskStoreConf, TaskError> {
+    fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
-            handlers: self.registry.tasks.keys().cloned().collect(),
+            handlers: self
+                .registry
+                .tasks
+                .values()
+                .map(|task| (task.name.clone(), task.kind()))
+                .collect(),
             lanes: self.lanes.iter().map(|lane| lane.conf.clone()).collect(),
             idempotency: self.registry.idempotency_conf()?,
             schedules: self.schedules.to_vec(),

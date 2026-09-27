@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use crate::{
     db,
     tasks::{
-        LaneClaim, LanePoll, TaskError, TaskPoll, TaskRate, TaskRecord, TaskRetry, TaskStatus,
+        LaneClaim, LanePoll, TaskPoll, TaskRate, TaskRecord, TaskRetry, TaskRuntimeError,
+        TaskStatus,
     },
 };
 
@@ -35,12 +36,11 @@ impl DbTaskStore {
         &self,
         runner_id: &str,
         claims: &[LaneClaim],
-    ) -> Result<TaskPoll, TaskError> {
+    ) -> Result<TaskPoll, TaskRuntimeError> {
         let mut transaction = self.pool.begin().await?;
-        let conf =
-            self.runtime_conf.read().await.clone().ok_or_else(|| {
-                TaskError::InvalidConfig("task runtime was not initialized".into())
-            })?;
+        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
+            TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
+        })?;
         super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
         let now = statement_now(&mut transaction).await?;
         let mut deliveries = Vec::new();
@@ -78,7 +78,7 @@ impl DbTaskStore {
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskError> {
+    ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskRuntimeError> {
         let mut new_idle = Vec::new();
         let mut ordered = claims.iter().collect::<Vec<_>>();
         ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
@@ -126,7 +126,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
-    ) -> Result<LanePoll, TaskError> {
+    ) -> Result<LanePoll, TaskRuntimeError> {
         let limit = turn.claim.limit.min(self.batch_size);
         let probed =
             probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
@@ -176,17 +176,17 @@ impl DbTaskStore {
         rows: &mut [TaskRow],
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
-    ) -> Result<(), TaskError> {
+    ) -> Result<(), TaskRuntimeError> {
         if rows.is_empty() {
             return Ok(());
         }
         for row in rows.iter_mut() {
-            super::writes::finish(
+            super::writes::apply_outcome(
                 row,
-                TaskStatus::Failed,
-                Some("Maximum task attempts exhausted".into()),
+                &crate::tasks::TaskOutcome::fail("Maximum task attempts exhausted"),
+                TaskRetry::default(),
                 now,
-            );
+            )?;
             row.locked_by = None;
             row.leased_until = None;
             row.updated_at = now;
@@ -202,13 +202,13 @@ impl DbTaskStore {
         mut candidates: Vec<TaskRow>,
         runner_id: &str,
         now: DateTime<Utc>,
-    ) -> Result<Vec<TaskRecord>, TaskError> {
+    ) -> Result<Vec<TaskRecord>, TaskRuntimeError> {
         for row in &mut candidates {
             row.attempts = row.attempts.checked_add(1).ok_or_else(|| {
-                TaskError::TaskExecutionError("task attempt count overflowed".into())
+                TaskRuntimeError::TaskExecutionError("task attempt count overflowed".into())
             })?;
             row.step_attempts = row.step_attempts.checked_add(1).ok_or_else(|| {
-                TaskError::TaskExecutionError("task step attempt count overflowed".into())
+                TaskRuntimeError::TaskExecutionError("task step attempt count overflowed".into())
             })?;
             row.status = TaskStatus::Running.as_i16();
             row.locked_by = Some(runner_id.into());
@@ -235,7 +235,7 @@ impl DbTaskStore {
             .exec(transaction)
             .await?;
         if changed != candidates.len() as u64 {
-            return Err(TaskError::TaskExecutionError(
+            return Err(TaskRuntimeError::TaskExecutionError(
                 "task claim batch changed an unexpected number of rows".into(),
             ));
         }
@@ -250,7 +250,7 @@ impl DbTaskStore {
         rate: Option<TaskRate>,
         requested: usize,
         now: DateTime<Utc>,
-    ) -> Result<(usize, Option<Duration>), TaskError> {
+    ) -> Result<(usize, Option<Duration>), TaskRuntimeError> {
         if requested == 0 {
             return Ok((0, None));
         }
@@ -260,7 +260,7 @@ impl DbTaskStore {
         let mut row = load_rate_for_update(transaction, lane.as_str())
             .await?
             .ok_or_else(|| {
-                TaskError::InvalidConfig(format!(
+                TaskRuntimeError::InvalidConfig(format!(
                     "task rate state for lane '{}' is not initialized",
                     lane
                 ))
@@ -287,7 +287,7 @@ pub(super) async fn probe_candidates(
     now: DateTime<Utc>,
     lane: &str,
     limit: usize,
-) -> Result<Vec<TaskRow>, TaskError> {
+) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -301,13 +301,13 @@ pub(super) async fn probe_candidates(
         .slice::<TaskRow>(0, limit)
         .exec(transaction)
         .await
-        .map_err(TaskError::from)
+        .map_err(TaskRuntimeError::from)
 }
 
-fn runnable_count(rows: &[TaskRow], retry: TaskRetry) -> Result<usize, TaskError> {
+fn runnable_count(rows: &[TaskRow], retry: TaskRetry) -> Result<usize, TaskRuntimeError> {
     let mut count = 0;
     for row in rows {
-        if !retry.exhausted(row.step_attempts)? {
+        if !row.cancelled && !retry.exhausted(row.step_attempts)? {
             count += 1;
         }
     }
@@ -317,11 +317,11 @@ fn runnable_count(rows: &[TaskRow], retry: TaskRetry) -> Result<usize, TaskError
 fn split_exhausted(
     rows: Vec<TaskRow>,
     retry: TaskRetry,
-) -> Result<(Vec<TaskRow>, Vec<TaskRow>), TaskError> {
+) -> Result<(Vec<TaskRow>, Vec<TaskRow>), TaskRuntimeError> {
     let mut exhausted = Vec::new();
     let mut runnable = Vec::new();
     for row in rows {
-        if retry.exhausted(row.step_attempts)? {
+        if row.cancelled || retry.exhausted(row.step_attempts)? {
             exhausted.push(row);
         } else {
             runnable.push(row);
@@ -333,18 +333,18 @@ fn split_exhausted(
 fn configured_lane(
     conf: &crate::tasks::TaskStoreConf,
     lane: crate::tasks::TaskLane,
-) -> Result<&crate::tasks::TaskLaneConf, TaskError> {
+) -> Result<&crate::tasks::TaskLaneConf, TaskRuntimeError> {
     conf.lanes
         .iter()
         .find(|entry| entry.lane() == lane)
-        .ok_or_else(|| TaskError::UnknownLane(lane.to_string()))
+        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
 }
 
 /// Writes one lane's reserved fixed-point balance while its row is locked.
 async fn persist_rate(
     transaction: &mut db::DbTransaction<'_>,
     row: &TaskRateRow,
-) -> Result<(), TaskError> {
+) -> Result<(), TaskRuntimeError> {
     let table = DbTaskStore::rate_table();
     let patch = RatePatch {
         tokens_micros: row.tokens_micros,
@@ -361,7 +361,7 @@ async fn persist_rate(
 #[allow(dead_code)]
 async fn statement_now(
     transaction: &mut db::DbTransaction<'_>,
-) -> Result<DateTime<Utc>, TaskError> {
+) -> Result<DateTime<Utc>, TaskRuntimeError> {
     use db::DbSession as _;
     Ok(transaction
         .fetch_scalar(db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
@@ -373,7 +373,7 @@ pub(super) async fn next_task_deadline(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
     now: DateTime<Utc>,
-) -> Result<Option<Duration>, TaskError> {
+) -> Result<Option<Duration>, TaskRuntimeError> {
     let table = DbTaskStore::table();
     let pending = db::from(&table)
         .filter(table.lane_name.eq(db::val(lane.to_string())))
@@ -420,7 +420,7 @@ async fn select_candidates(
     now: DateTime<Utc>,
     lane: &str,
     limit: usize,
-) -> Result<Vec<TaskRow>, TaskError> {
+) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -446,7 +446,7 @@ async fn select_candidates(
     now: DateTime<Utc>,
     lane: &str,
     limit: usize,
-) -> Result<Vec<TaskRow>, TaskError> {
+) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -467,7 +467,7 @@ async fn select_candidates(
 async fn load_rate_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Option<TaskRateRow>, TaskError> {
+) -> Result<Option<TaskRateRow>, TaskRuntimeError> {
     use crate::db::backend::RowLockExt as _;
     let table = DbTaskStore::rate_table();
     Ok(db::from(&table)
@@ -483,7 +483,7 @@ async fn load_rate_for_update(
 async fn load_rate_for_update(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
-) -> Result<Option<TaskRateRow>, TaskError> {
+) -> Result<Option<TaskRateRow>, TaskRuntimeError> {
     let table = DbTaskStore::rate_table();
     Ok(db::from(&table)
         .filter(table.lane_name.eq(db::val(lane.to_string())))
@@ -498,7 +498,7 @@ mod tests {
 
     /// Verifies quantized refill accounting retains elapsed time below one micro-token.
     #[test]
-    fn slow_rate_refill_preserves_fractional_elapsed_time() -> Result<(), TaskError> {
+    fn slow_rate_refill_preserves_fractional_elapsed_time() -> Result<(), TaskRuntimeError> {
         let rate = TaskRate::new(1, Duration::from_secs(365 * 24 * 60 * 60));
         let started = Utc::now();
         let now = started + chrono::Duration::seconds(1);
@@ -512,8 +512,9 @@ mod tests {
         refill(&mut row.tokens_micros, &mut row.updated_at, rate, now)?;
         assert_eq!(row.tokens_micros, 0);
         assert_eq!(row.updated_at, started);
-        let wake = next_permit(row.tokens_micros, rate, row.updated_at, now)
-            .ok_or_else(|| TaskError::TaskExecutionError("missing permit deadline".into()))?;
+        let wake = next_permit(row.tokens_micros, rate, row.updated_at, now).ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("missing permit deadline".into())
+        })?;
         assert!(wake < rate.period());
         Ok(())
     }

@@ -31,6 +31,10 @@ impl TaskFailure {
         &self.message
     }
 
+    pub(super) fn into_message(self) -> String {
+        self.message
+    }
+
     pub(crate) fn bounded(self, limit: usize) -> Self {
         Self {
             task_id: self.task_id,
@@ -41,7 +45,7 @@ impl TaskFailure {
 
 /// Failure produced while configuring, submitting, storing, or executing a task.
 #[derive(Debug, thiserror::Error)]
-pub enum TaskError {
+pub enum TaskRuntimeError {
     /// The complete JSON result envelope exceeded the fixed storage limit.
     #[error("Task result is {actual} bytes; the limit is {limit} bytes")]
     ResultTooLarge { actual: usize, limit: usize },
@@ -120,14 +124,14 @@ impl TaskStatus {
     /// Invalid values indicate a corrupted or incompatible task row and are
     /// returned as a structured task error.
     #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskError> {
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskRuntimeError> {
         match value {
             0 => Ok(Self::Pending),
             1 => Ok(Self::Running),
             2 => Ok(Self::Suspended),
             3 => Ok(Self::Succeeded),
             4 => Ok(Self::Failed),
-            _ => Err(TaskError::TaskExecutionError(format!(
+            _ => Err(TaskRuntimeError::TaskExecutionError(format!(
                 "invalid task status value {value}"
             ))),
         }

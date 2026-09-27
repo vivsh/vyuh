@@ -740,17 +740,22 @@ impl CallSpec {
         H: Specable<Args>,
         Args: IntoArgSpecs,
     {
-        let _ = handler; // Use the handler to infer types but don't actually need it
+        let _ = handler;
+        Self::for_types::<Args, H::Output>(std::any::type_name::<H>())
+    }
+
+    /// Shares signature metadata without changing the registered function identity.
+    pub(crate) fn for_types<Args: IntoArgSpecs, O: IntoReturnPart>(name: &str) -> Self {
         Self {
             description: None,
-            name: std::any::type_name::<H>().to_string(),
+            name: name.to_string(),
             is_method: false,
             receiver: None,
             args: Args::into_arg_specs(),
             returns: vec![ReturnSpec {
                 description: None,
                 status_code: None,
-                part: H::Output::into_return_part(),
+                part: O::into_return_part(),
                 headers: Vec::new(),
                 examples: Vec::new(),
                 schema_name: None,

@@ -41,8 +41,8 @@ pub use crate::routes::{
 // ── Tasks ───────────────────────────────────────────────────────────────────
 
 pub use crate::tasks::{
-    Batch, Continuation, DEFAULT_TASK_LANE, TaskFailure, TaskId, TaskKind, TaskLane, TaskOptions,
-    TaskReceipt, TaskState,
+    Batch, Continuation, DEFAULT_TASK_LANE, FlowError, FlowState, TaskError, TaskFailure, TaskId,
+    TaskKind, TaskLane, TaskOptions, TaskReceipt, TaskRuntimeError, TaskState,
 };
 
 // ── Services ─────────────────────────────────────────────────────────────────

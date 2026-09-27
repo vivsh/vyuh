@@ -382,6 +382,8 @@ pub struct TaskOut {
     pub kind: TaskKind,
     pub name: String,
     pub status: TaskStatus,
+    /// Whether cancellation has been requested, including before terminal failure.
+    pub cancelled: bool,
     pub attempts: i32,
     pub step_attempts: i32,
     pub lane: String,
@@ -404,6 +406,7 @@ impl From<&TaskInfo> for TaskOut {
             kind: record.kind,
             name: record.name.clone(),
             status: record.status,
+            cancelled: record.cancelled,
             attempts: record.attempts,
             step_attempts: record.step_attempts,
             lane: record.lane.clone(),

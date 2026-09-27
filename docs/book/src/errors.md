@@ -1,15 +1,17 @@
 # Errors
 
 Vyuh uses different error shapes for different jobs. Application handlers should
-usually return `vyuh::Error`. Subsystems still keep their own error types for
+usually return `vyuh::Error`; task handlers use `TaskError` or `FlowError` instead.
+Subsystems still keep their own error types for
 framework machinery, and rendered output is transport-specific.
 
 ## Mental Model
 
 | Layer | Type | Use |
 | --- | --- | --- |
-| Application error | `vyuh::Error` | normal handler failure from routes, commands, tasks, signals, and emitters |
-| Subsystem error | `CommandError`, `TaskError`, `SignalError`, `EmitterError`, `SiteError` | parsing, registration, storage, dispatch, startup, and other framework machinery |
+| Application error | `vyuh::Error` | normal handler failure from routes, commands, signals, and emitters |
+| Task decision | `TaskError`, `FlowError` | explicit Work retry/failure or Flow terminal failure |
+| Subsystem error | `CommandError`, `TaskRuntimeError`, `SignalError`, `EmitterError`, `SiteError` | parsing, registration, storage, dispatch, startup, and other framework machinery |
 | Render input | `ErrorView` | transport-neutral error data passed to JSON, HTML, and command renderers |
 | HTTP JSON body | `ErrorReport` | default JSON response body for routes and middleware |
 | CLI output | command renderer | human-readable stderr output for command failures |
@@ -112,12 +114,12 @@ Subsystem errors describe framework mechanics:
 
 - `CommandError`: unknown commands, unknown flags, help rendering, unsupported
   command schemas, command argument parsing, and command rendering.
-- `TaskError`: task store, lease, migration, serialization, and retry machinery.
+- `TaskRuntimeError`: task store, lease, migration, serialization, and API machinery.
 - `SignalError` and `EmitterError`: registration, dispatch, source setup, and
   source execution machinery.
 - `SiteError`: configuration, build, startup, and shutdown lifecycle failures.
 
-Application code inside those handlers should still return `Error`:
+Application code inside non-task handlers should still return `Error`:
 
 ```rust
 use vyuh::prelude::*;
@@ -273,19 +275,20 @@ Commands do not render `ErrorReport`; command output is terminal text.
 
 ## Task Errors And Retry
 
-Task retry is explicit. A task handler returning `Err(Error)` marks the task as
-failed terminally. Vyuh does not infer retry behavior from `ErrorKind`.
+Task retry is explicit. Work handlers return `Result<_, TaskError>`; Flow handlers
+return `Result<_, FlowError>`. Framework/runtime errors converted with `?` become
+safe terminal failures. Vyuh does not infer retry behavior from `ErrorKind`.
 
-Return `TaskState::retry(...)` when work should be retried:
+Return `Err(TaskError::retry(...))` when work should be retried:
 
 ```rust
 use vyuh::prelude::*;
 
-async fn send_email(Data(job): Data<EmailJob>) -> Result<TaskState, Error> {
+async fn send_email(Data(job): Data<EmailJob>) -> Result<(), TaskError> {
     match deliver(&job).await {
-        Ok(()) => Ok(TaskState::complete(())?),
-        Err(err) if err.is_transient() => Ok(TaskState::retry(err.to_string())),
-        Err(err) => Err(Error::unavailable(err.to_string())),
+        Ok(()) => Ok(()),
+        Err(err) if err.is_transient() => Err(TaskError::retry("Email provider temporarily unavailable")),
+        Err(_) => Err(TaskError::fail("Email delivery rejected")),
     }
 }
 ```
@@ -313,4 +316,5 @@ codes when converting into `ErrorReport`:
 | `Other` | `500` |
 
 Commands do not render `ErrorReport`; they render terminal text. Tasks do not
-retry from `ErrorKind`; they use `TaskState::retry(...)`.
+retry from `ErrorKind`; Work handlers use `TaskError::retry(...)`. Flow handlers
+cannot request retry. Both still use the same crash-recovery rules.
