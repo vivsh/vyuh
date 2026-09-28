@@ -15,6 +15,13 @@ fn task_batch_handlers_compile() {
     tests.pass("tests/ui/tasks/batch_handlers.rs");
 }
 
+/// Work-specific legacy names are removed rather than retained as competing aliases.
+#[test]
+fn removed_work_api_names() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/tasks/removed_work_names.rs");
+}
+
 /// Verifies spawn requests are constructed by handlers, not the site task facade.
 #[test]
 fn task_spawn_is_outcome_only() {

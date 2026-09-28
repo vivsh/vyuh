@@ -23,7 +23,7 @@ workers can verify it, preserve global token buckets, and recover leased tasks.
    0007 before first application. Existing result and resume bytes are unchanged.
 6. Apply the Work/Flow and typed-return protocol templates below.
 7. Apply the durable `all` templates below.
-8. Deploy handlers using `TaskState::complete(value)` and
+8. Deploy handlers using `WorkState::complete(value)` and
    `Option<Result<R, TaskFailure>>`, then start new workers.
 
 The data migration and its ledger entry must commit atomically. For MySQL-family
@@ -114,8 +114,8 @@ This advances only the protocol marker to enable Work suspension. No task column
 result envelope, checkpoint, status, or schedule is rewritten. New workers verify
 the exact predecessor policy digest; an unmarked v4 runtime is rejected.
 
-Migrate handler signatures to `TaskState<T>` / `FlowState<T>`, infallible
-`complete(value)`, and `Result<_, TaskError>` / `Result<_, FlowError>`.
+Migrate handler signatures to `WorkState<T>` / `FlowState<T>`, infallible
+`complete(value)`, and `Result<_, WorkError>` / `Result<_, FlowError>`.
 Infrastructure APIs now return `TaskRuntimeError`. Keep input and output JSON
 representations compatible with retained tasks. Work can extract Continuation and
 suspend, but cannot sleep or spawn. No mixed-version deployment is supported.

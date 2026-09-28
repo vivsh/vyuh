@@ -2,8 +2,8 @@
 ///
 /// Covers:
 ///   1. Fire-and-forget                (no return)
-///   2. Fallible fire-and-forget       (Result<(), TaskError>)
-///   3. Method-based registration      (no #[bundles::task] macro)
+///   2. Fallible fire-and-forget       (Result<(), WorkError>)
+///   3. Method-based registration      (no #[bundles::work] macro)
 ///   4. Synchronous Flow with enum state (Result<FlowState<u32>, FlowError>)
 ///   5. Atomic child spawning with a typed result
 use schemars::JsonSchema;
@@ -50,9 +50,9 @@ fn parent_job(
 }
 
 /// Returns a typed output to a waiting parent without retaining an output archive.
-#[bundles::task]
-async fn double_job(input: Data<DoubleJob>) -> Result<TaskState<u32>, TaskError> {
-    Ok(TaskState::complete(input.value.saturating_mul(2)))
+#[bundles::work]
+async fn double_job(input: Data<DoubleJob>) -> Result<WorkState<u32>, WorkError> {
+    Ok(WorkState::complete(input.value.saturating_mul(2)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -79,7 +79,7 @@ struct PendingApproval {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 // Pattern 1: Fire-and-forget — macro with explicit name.
-#[bundles::task(
+#[bundles::work(
     name = "send_email",
     lane = EMAIL,
     idempotency = TaskIdempotency::new("send-email-v1", email_key)
@@ -92,8 +92,8 @@ async fn send_email(input: Data<SendEmailJob>) {
 }
 
 // Pattern 2: Fallible — macro without explicit name (derives from fn name).
-#[bundles::task]
-async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
+#[bundles::work]
+async fn process_data(input: Data<ProcessingJob>) -> Result<(), WorkError> {
     println!("⚙️  Processing: {}", input.data);
     Ok(())
 }
@@ -101,7 +101,7 @@ async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
 // Without the macro, register manually:
 //   async fn process_data(input: Data<ProcessingJob>) -> Result<(), Error> { ... }
 // Then pass to Site::build via a separate bundle:
-//   let extra = bundles::bundle([bundles::task(
+//   let extra = bundles::bundle([bundles::work(
 //       process_data,
 //       tasks::TaskDefinition::new("process_data"),
 //   )]);

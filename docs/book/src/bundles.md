@@ -25,7 +25,7 @@ bundle. `Site` construction validates the final composed bundle before startup.
 ## BundlePart
 
 `BundlePart` is the common registration unit for framework features. Route,
-signal, emitter, task, service, command, asset, URL info, migration, and schema helpers
+signal, emitter, work, work-batch, flow, service, command, asset, URL info, migration, and schema helpers
 all return a `BundlePart`.
 
 The direct constructor is `bundles::bundle([...])`:

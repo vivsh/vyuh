@@ -101,18 +101,18 @@ async fn create_order(site: Site, Json(order): Json<CreateOrder>) -> Result<Json
     Ok(Json(created))
 }
 
-#[bundles::task(name = "send_receipt")]
+#[bundles::work(name = "send_receipt")]
 async fn send_receipt(Data(job): Data<ReceiptJob>) {
     println!("send receipt for order {} to {}", job.order_id, job.email);
 }
 
-#[bundles::task(name = "rebuild_projection")]
-async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<(), vyuh::tasks::TaskError> {
+#[bundles::work(name = "rebuild_projection")]
+async fn rebuild_projection(Data(job): Data<ProjectionJob>) -> Result<(), vyuh::tasks::WorkError> {
     println!("rebuild projection '{}' full={}", job.name, job.full);
     Ok(())
 }
 
-#[bundles::task(name = "print_console_tick")]
+#[bundles::work(name = "print_console_tick")]
 async fn print_console_tick(Data(job): Data<PrintTickJob>) {
     println!("console periodic task fired at tick {}", job.tick);
 }

@@ -13,48 +13,48 @@ use crate::{
 
 use super::TaskRuntimeError;
 #[cfg(test)]
-use super::TaskState;
-#[cfg(test)]
 use super::TaskStatus;
+#[cfg(test)]
+use super::WorkState;
 use super::diagnostics::causal_chain as error_chain;
 use super::models::{IdempotencyPolicy, TaskPolicy};
 use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord};
 
 #[path = "flow_handler.rs"]
 mod flow;
-use super::{IntoTaskBatchOutcomePart, IntoTaskOutcomePart};
+use super::{IntoWorkBatchOutcomePart, IntoWorkOutcomePart};
 pub use flow::FlowContext;
 
-/// Invocation context used internally to extract task data and runtime identity.
+/// Work invocation context used internally to extract task data and runtime identity.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct TaskContext {
+pub struct WorkContext {
     site: Site,
     payload: callables::DataBox,
     record: Arc<TaskRecord>,
     operation_id: crate::OperationId,
 }
 
-impl callables::IntoDataBox for TaskContext {
+impl callables::IntoDataBox for WorkContext {
     fn into_data_box(self) -> callables::DataBox {
         self.payload
     }
 }
 
-impl callables::HasSite for TaskContext {
+impl callables::HasSite for WorkContext {
     fn site(&self) -> &Site {
         &self.site
     }
 }
 
-impl callables::FromContextParts<TaskContext> for crate::OperationId {
-    fn from_context_parts(context: &TaskContext) -> Result<Self, callables::CallError> {
+impl callables::FromContextParts<WorkContext> for crate::OperationId {
+    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
         Ok(context.operation_id)
     }
 }
 
-impl callables::FromContextParts<TaskContext> for super::TaskId {
-    fn from_context_parts(context: &TaskContext) -> Result<Self, callables::CallError> {
+impl callables::FromContextParts<WorkContext> for super::TaskId {
+    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
         Ok(context.record.id())
     }
 }
@@ -65,41 +65,41 @@ impl callables::IntoArgPart for super::TaskId {
     }
 }
 
-type TaskHandler = Callable<TaskContext, Error>;
+type WorkHandler = Callable<WorkContext, Error>;
 
 #[derive(Clone)]
 #[doc(hidden)]
-pub struct BatchTaskContext {
+pub struct BatchWorkContext {
     site: Site,
     payload: callables::DataBox,
     operation_id: crate::OperationId,
 }
 
-impl callables::IntoDataBox for BatchTaskContext {
+impl callables::IntoDataBox for BatchWorkContext {
     fn into_data_box(self) -> callables::DataBox {
         self.payload
     }
 }
 
-impl callables::HasSite for BatchTaskContext {
+impl callables::HasSite for BatchWorkContext {
     fn site(&self) -> &Site {
         &self.site
     }
 }
 
-impl callables::FromContextParts<BatchTaskContext> for crate::OperationId {
-    fn from_context_parts(context: &BatchTaskContext) -> Result<Self, callables::CallError> {
+impl callables::FromContextParts<BatchWorkContext> for crate::OperationId {
+    fn from_context_parts(context: &BatchWorkContext) -> Result<Self, callables::CallError> {
         Ok(context.operation_id)
     }
 }
 
-type BatchHandler = Callable<BatchTaskContext, Error>;
+type BatchHandler = Callable<BatchWorkContext, Error>;
 type BatchDecoder = fn(Vec<Arc<TaskRecord>>, crate::OperationId) -> DecodedBatch;
 type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, TaskRuntimeError>;
 
 /// Prepared lifecycle outcome committed by Vyuh's internal task store.
 ///
-/// Work returns [`TaskState`] and Flow returns [`super::FlowState`], not this store contract.
+/// Work returns [`WorkState`] and Flow returns [`super::FlowState`], not this store contract.
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
     /// Suspends this flow until every atomically created child becomes terminal.
@@ -199,12 +199,12 @@ where
     }
 }
 
-impl<S, R> callables::FromContextParts<TaskContext> for Continuation<S, R>
+impl<S, R> callables::FromContextParts<WorkContext> for Continuation<S, R>
 where
     S: serde::de::DeserializeOwned + Send,
     R: serde::de::DeserializeOwned + Send,
 {
-    fn from_context_parts(ctx: &TaskContext) -> Result<Self, callables::CallError> {
+    fn from_context_parts(ctx: &WorkContext) -> Result<Self, callables::CallError> {
         Ok(Self {
             state: decode_optional(ctx.record.state.as_deref())?,
             resume: decode_optional(ctx.record.resume_input.as_deref())?,
@@ -261,7 +261,7 @@ enum RegisteredHandler {
         outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
     },
     Single {
-        handler: TaskHandler,
+        handler: WorkHandler,
         outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
     },
     Batch {
@@ -380,7 +380,7 @@ impl RegisteredTask {
 
     /// Invokes a handler and contains errors from both execution and child preparation.
     async fn execute_single(
-        handler: &TaskHandler,
+        handler: &WorkHandler,
         outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
         site: &Site,
         record: Arc<TaskRecord>,
@@ -397,7 +397,7 @@ impl RegisteredTask {
             }
         };
 
-        let ctx = TaskContext {
+        let ctx = WorkContext {
             site: site.clone(),
             payload,
             record: record.clone(),
@@ -424,9 +424,9 @@ impl RegisteredTask {
     pub fn new<T, H, Args, K>(definition: TaskDefinition<T>, handler: H) -> Self
     where
         T: callables::DataValue,
-        H: super::TaskCallable<Args> + 'static,
-        H::Output: IntoTaskOutcomePart<K>,
-        Args: callables::FromContext<TaskContext>
+        H: super::WorkCallable<Args> + 'static,
+        H::Output: IntoWorkOutcomePart<K>,
+        Args: callables::FromContext<WorkContext>
             + callables::IntoArgSpecs
             + callables::HasData<T>
             + Send
@@ -434,7 +434,7 @@ impl RegisteredTask {
     {
         let (name, policy) = definition.into_parts();
         let callable = super::callable::work(handler, |value: H::Output| {
-            super::returns::erase_outcome(value.into_task_outcome())
+            super::returns::erase_outcome(value.into_work_outcome())
         });
         let mut operation =
             callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
@@ -455,9 +455,9 @@ impl RegisteredTask {
     pub fn new_batch<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
     where
         T: callables::DataValue,
-        H: super::TaskCallable<Args> + 'static,
-        H::Output: super::IntoTaskBatchOutcomePart,
-        Args: callables::FromContext<BatchTaskContext>
+        H: super::WorkCallable<Args> + 'static,
+        H::Output: super::IntoWorkBatchOutcomePart,
+        Args: callables::FromContext<BatchWorkContext>
             + callables::IntoArgSpecs
             + callables::HasData<super::Batch<T>>
             + Send
@@ -485,7 +485,7 @@ impl RegisteredTask {
 
 /// Converts queued records to independently prepared outcomes without mutating storage.
 async fn execute_singles(
-    handler: &TaskHandler,
+    handler: &WorkHandler,
     outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
     site: Site,
     records: Vec<Arc<TaskRecord>>,
@@ -514,7 +514,7 @@ async fn execute_batch(
 ) -> Vec<TaskExecutionResult> {
     let mut batch = decode(records, operation_id);
     if !batch.positions.is_empty() {
-        let context = BatchTaskContext {
+        let context = BatchWorkContext {
             site,
             payload: batch.payload.clone(),
             operation_id,
@@ -535,7 +535,7 @@ async fn execute_batch(
 async fn call_batch(
     handler: &BatchHandler,
     outcome: BatchOutcome,
-    context: BatchTaskContext,
+    context: BatchWorkContext,
     expected: usize,
     record: Option<&TaskRecord>,
 ) -> Vec<TaskOutcome> {
@@ -910,3 +910,7 @@ impl std::fmt::Debug for TaskRegistry {
 #[cfg(test)]
 #[path = "tests/handler.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/work_registration.rs"]
+mod work_registration_tests;

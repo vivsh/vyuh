@@ -1,6 +1,6 @@
 //! Sealed task-only return categories; markers resolve Serialize/Result coherence.
 
-use super::{FlowError, FlowState, TaskError, TaskOutcome, TaskState};
+use super::{FlowError, FlowState, TaskOutcome, WorkError, WorkState};
 use serde::Serialize;
 
 /// Keeps the existing tiny unit-return allocation rather than boxing a full outcome enum.
@@ -28,28 +28,28 @@ pub struct Fallible<K>(std::marker::PhantomData<K>);
 
 /// Sealed conversion of Work returns, performed before callable type erasure.
 #[doc(hidden)]
-pub trait IntoTaskOutcomePart<K>: sealed::Work<K> {
+pub trait IntoWorkOutcomePart<K>: sealed::Work<K> {
     /// Produces the existing store-facing outcome without mutating any task.
-    fn into_task_outcome(self) -> TaskOutcome;
+    fn into_work_outcome(self) -> TaskOutcome;
 }
 
 impl<T: Serialize + 'static> sealed::Work<Value> for T {}
-impl<T: Serialize + 'static> IntoTaskOutcomePart<Value> for T {
-    fn into_task_outcome(self) -> TaskOutcome {
+impl<T: Serialize + 'static> IntoWorkOutcomePart<Value> for T {
+    fn into_work_outcome(self) -> TaskOutcome {
         super::state::completion(self)
     }
 }
-impl<T: Serialize + 'static> sealed::Work<State> for TaskState<T> {}
-impl<T: Serialize + 'static> IntoTaskOutcomePart<State> for TaskState<T> {
-    fn into_task_outcome(self) -> TaskOutcome {
+impl<T: Serialize + 'static> sealed::Work<State> for WorkState<T> {}
+impl<T: Serialize + 'static> IntoWorkOutcomePart<State> for WorkState<T> {
+    fn into_work_outcome(self) -> TaskOutcome {
         self.into_outcome()
     }
 }
-impl<T: IntoTaskOutcomePart<K>, K> sealed::Work<Fallible<K>> for Result<T, TaskError> {}
-impl<T: IntoTaskOutcomePart<K>, K> IntoTaskOutcomePart<Fallible<K>> for Result<T, TaskError> {
-    fn into_task_outcome(self) -> TaskOutcome {
+impl<T: IntoWorkOutcomePart<K>, K> sealed::Work<Fallible<K>> for Result<T, WorkError> {}
+impl<T: IntoWorkOutcomePart<K>, K> IntoWorkOutcomePart<Fallible<K>> for Result<T, WorkError> {
+    fn into_work_outcome(self) -> TaskOutcome {
         match self {
-            Ok(value) => value.into_task_outcome(),
+            Ok(value) => value.into_work_outcome(),
             Err(error) => error.into_outcome(),
         }
     }

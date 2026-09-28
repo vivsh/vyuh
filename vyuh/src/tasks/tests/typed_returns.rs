@@ -17,10 +17,10 @@ impl Serialize for Counted {
 /// Work Result decisions are decoded as outcomes rather than serialized as successful data.
 #[tokio::test]
 async fn work_result_decisions() -> Result<(), String> {
-    async fn handler(input: Data<DirectJob>) -> Result<u32, TaskError> {
+    async fn handler(input: Data<DirectJob>) -> Result<u32, WorkError> {
         match input.id {
-            1 => Err(TaskError::retry("later")),
-            2 => Err(TaskError::fail("stop")),
+            1 => Err(WorkError::retry("later")),
+            2 => Err(WorkError::fail("stop")),
             _ => Ok(42),
         }
     }
@@ -85,7 +85,7 @@ async fn deferred_non_sync_output() -> Result<(), String> {
     let handler = move |_: Data<DirectJob>| {
         let calls = captured.clone();
         async move {
-            let state = TaskState::complete(Counted {
+            let state = WorkState::complete(Counted {
                 calls: calls.clone(),
                 value: 42.into(),
             });
@@ -109,12 +109,12 @@ async fn deferred_non_sync_output() -> Result<(), String> {
 #[test]
 fn handler_error_contract() {
     assert!(
-        matches!(TaskError::retry("later").into_outcome(), TaskOutcome::Retry { error } if error == "later")
+        matches!(WorkError::retry("later").into_outcome(), TaskOutcome::Retry { error } if error == "later")
     );
     assert!(
-        matches!(TaskError::fail("stop").into_outcome(), TaskOutcome::Fail { error } if error == "stop")
+        matches!(WorkError::fail("stop").into_outcome(), TaskOutcome::Fail { error } if error == "stop")
     );
-    let error = TaskError::from(TaskRuntimeError::TaskExecutionError("secret".into()));
+    let error = WorkError::from(TaskRuntimeError::TaskExecutionError("secret".into()));
     assert!(
         matches!(error.into_outcome(), TaskOutcome::Fail { error } if !error.contains("secret"))
     );
@@ -127,12 +127,12 @@ fn handler_error_contract() {
 /// Ordered batch serialization and suspension rejection affect only the corresponding item.
 #[tokio::test]
 async fn batch_serialization_isolation() -> Result<(), String> {
-    async fn handler(_: Data<Batch<DirectJob>>) -> Batch<Result<TaskState<String>, TaskError>> {
+    async fn handler(_: Data<Batch<DirectJob>>) -> Batch<Result<WorkState<String>, WorkError>> {
         vec![
-            Ok(TaskState::complete("x".repeat(32_759))),
-            Ok(TaskState::complete("x".repeat(32_760))),
-            TaskState::suspend(7u32).map_err(TaskError::from),
-            Err(TaskError::retry("later")),
+            Ok(WorkState::complete("x".repeat(32_759))),
+            Ok(WorkState::complete("x".repeat(32_760))),
+            WorkState::suspend(7u32).map_err(WorkError::from),
+            Err(WorkError::retry("later")),
         ]
         .into()
     }
@@ -168,7 +168,7 @@ async fn batch_serialization_isolation() -> Result<(), String> {
 async fn serialization_errors_are_terminal() -> Result<(), String> {
     let invalid = std::collections::BTreeMap::from([((1, 2), 3)]);
     assert!(matches!(
-        TaskState::complete(invalid.clone()).into_outcome(),
+        WorkState::complete(invalid.clone()).into_outcome(),
         TaskOutcome::Fail { .. }
     ));
     let state = FlowState::complete(invalid).prepare();
@@ -180,7 +180,7 @@ async fn serialization_errors_are_terminal() -> Result<(), String> {
     ));
     for value in ["\u{0}".repeat(6000), "é".repeat(20_000)] {
         assert!(matches!(
-            TaskState::complete(value).into_outcome(),
+            WorkState::complete(value).into_outcome(),
             TaskOutcome::Fail { .. }
         ));
     }
@@ -195,7 +195,7 @@ async fn uniform_output_serializes_once() -> Result<(), String> {
     let handler = move |_: Data<Batch<DirectJob>>| {
         let calls = captured.clone();
         async move {
-            TaskState::complete(Counted {
+            WorkState::complete(Counted {
                 calls,
                 value: 42.into(),
             })

@@ -113,8 +113,8 @@ async fn me(user: AuthUser) -> Result<Data<String>, Error> {
 // ANCHOR_END: routes
 
 // ANCHOR: runtime_paths
-#[bundles::task]
-async fn build_report(Data(job): Data<BuildReportJob>) -> Result<(), TaskError> {
+#[bundles::work]
+async fn build_report(Data(job): Data<BuildReportJob>) -> Result<(), WorkError> {
     println!(
         "write report for account {} to application storage",
         job.account_id

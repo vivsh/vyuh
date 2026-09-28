@@ -9,5 +9,5 @@ async fn invalid_task(_: Data<Job>) -> Result<Data<String>, Error> {
 }
 
 fn main() {
-    let _ = bundles::task(invalid_task, TaskDefinition::new("invalid_task"));
+    let _ = bundles::work(invalid_task, TaskDefinition::new("invalid_task"));
 }

@@ -43,7 +43,7 @@ pub trait FromContext<C>: Sized + Send {
 
 /// Provides type-erased data from context.
 /// Implement for context types that carry handler data, such as `SignalContext`
-/// and `TaskContext`.
+/// and `WorkContext`.
 pub trait IntoDataBox {
     fn into_data_box(self) -> DataBox;
 }

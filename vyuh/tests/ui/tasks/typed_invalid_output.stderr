@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
  --> tests/ui/tasks/typed_invalid_output.rs:2:57
   |
-2 | fn wrong_work() -> TaskState<u32> { TaskState::complete("wrong") }
+2 | fn wrong_work() -> WorkState<u32> { WorkState::complete("wrong") }
   |                                     ------------------- ^^^^^^^ expected `u32`, found `&str`
   |                                     |
   |                                     arguments to this function are incorrect

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::tasks::TaskError;
+use crate::tasks::WorkError;
 
 #[path = "flow_handler.rs"]
 mod flow_tests;
@@ -23,30 +23,30 @@ struct DirectJob {
     id: i64,
 }
 
-async fn direct_job(_input: Data<DirectJob>) -> Result<TaskState, TaskError> {
-    Ok(TaskState::complete(()))
+async fn direct_job(_input: Data<DirectJob>) -> Result<WorkState, WorkError> {
+    Ok(WorkState::complete(()))
 }
 
 async fn unit_job(_input: Data<DirectJob>) {}
 
-async fn result_unit_job(_input: Data<DirectJob>) -> Result<(), TaskError> {
+async fn result_unit_job(_input: Data<DirectJob>) -> Result<(), WorkError> {
     Ok(())
 }
 
-async fn failed_job(_input: Data<DirectJob>) -> Result<(), TaskError> {
+async fn failed_job(_input: Data<DirectJob>) -> Result<(), WorkError> {
     Err(crate::Error::invalid("secret task detail").into())
 }
 
 async fn batch_job(
     input: Data<super::super::Batch<DirectJob>>,
-) -> super::super::Batch<Result<TaskState, TaskError>> {
+) -> super::super::Batch<Result<WorkState, WorkError>> {
     input
         .iter()
         .map(|job| {
             if job.id % 2 == 0 {
-                Ok(TaskState::complete(()))
+                Ok(WorkState::complete(()))
             } else {
-                Err(TaskError::retry("odd job"))
+                Err(WorkError::retry("odd job"))
             }
         })
         .collect()
@@ -54,7 +54,7 @@ async fn batch_job(
 
 async fn short_batch(
     _input: Data<super::super::Batch<DirectJob>>,
-) -> super::super::Batch<TaskState> {
+) -> super::super::Batch<WorkState> {
     super::super::Batch::new(Vec::new())
 }
 
@@ -62,17 +62,17 @@ async fn unit_batch(_input: Data<super::super::Batch<DirectJob>>) {}
 
 async fn retrying_batch(
     _input: Data<super::super::Batch<DirectJob>>,
-) -> Result<TaskState, TaskError> {
-    Err(TaskError::retry("try again"))
+) -> Result<WorkState, WorkError> {
+    Err(WorkError::retry("try again"))
 }
 
 async fn failing_batch(
     _input: Data<super::super::Batch<DirectJob>>,
-) -> Result<TaskState, TaskError> {
-    Err(TaskError::fail("permanent failure"))
+) -> Result<WorkState, WorkError> {
+    Err(WorkError::fail("permanent failure"))
 }
 
-async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(), TaskError> {
+async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(), WorkError> {
     Err(crate::Error::invalid("batch handler failed").into())
 }
 
@@ -530,7 +530,7 @@ async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
         .await
         .map_err(|error| TaskRuntimeError::TaskExecutionError(error.to_string()))?;
     assert!(matches!(
-        TaskState::complete(()).into_outcome(),
+        WorkState::complete(()).into_outcome(),
         TaskOutcome::Complete
     ));
     assert!(matches!(
@@ -542,11 +542,11 @@ async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
         TaskOutcome::Sleep { .. }
     ));
     assert!(matches!(
-        TaskError::retry("temporary").into_outcome(),
+        WorkError::retry("temporary").into_outcome(),
         TaskOutcome::Retry { .. }
     ));
     assert!(matches!(
-        TaskError::fail("permanent").into_outcome(),
+        WorkError::fail("permanent").into_outcome(),
         TaskOutcome::Fail { .. }
     ));
     Ok(())
@@ -671,10 +671,10 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Task
 async fn batch_outputs_and_failure() -> Result<(), String> {
     async fn outcomes(
         Data(_): Data<crate::tasks::Batch<DirectJob>>,
-    ) -> crate::tasks::Batch<Result<TaskState<u32>, TaskError>> {
+    ) -> crate::tasks::Batch<Result<WorkState<u32>, WorkError>> {
         vec![
-            Ok(TaskState::complete(42)),
-            Err(TaskError::fail("intentional failure")),
+            Ok(WorkState::complete(42)),
+            Err(WorkError::fail("intentional failure")),
         ]
         .into()
     }

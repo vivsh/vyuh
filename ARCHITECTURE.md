@@ -97,13 +97,16 @@ The `vyuh` crate is organized around these subsystems:
   site's registry. It becomes the existing store-facing `TaskOutcome::Spawn`;
   no unresolved payload reaches the store, and no public task-facade spawn
   operation exists. Ordinary outcomes do not perform registry preparation.
-  Work uses task-specific async callable registration and `TaskState<T>` or direct
+  Work registers through `work`/`work_batch` and Flow through `flow`; task remains
+  the shared submission, storage, and runtime concept. These registration names
+  do not change persisted handler identities or the deployment policy fingerprint.
+  Work uses task-specific async callable registration and `WorkState<T>` or direct
   serializable outputs. Flow uses synchronous registration, `FlowState<T>`, and an
   invocation-local context containing only input and an immutable record.
   Both kinds support continuation extraction and suspension; only Flow can sleep
   or spawn children (one child or an `all` group). Site/service and identity extraction remain unavailable to Flow.
   Task-only return conversion serializes before type erasure through the existing
-  single callable future. Work TaskError chooses retry/failure, FlowError permits
+  single callable future. Work WorkError chooses retry/failure, FlowError permits
   only failure, and TaskRuntimeError describes infrastructure/API failures.
   Inferred sealed return categories avoid macro type detection. Typed output and
   conversion scratch are invocation-local, never parallel durable task state. The registered handler variant owns its
@@ -239,7 +242,7 @@ The `vyuh` crate is organized around these subsystems:
 The `vyuh-macros` crate exposes derive and attribute macros that keep user code
 compact while feeding metadata into the runtime:
 
-- Route, command, signal, emitter, task, cron, periodic, and asset macros
+- Route, signal, work, work-batch, flow, cron, periodic, and asset macros
   generate bundle parts.
 - `embed_asset!` delegates directory discovery and force-mode expansion to Rust
   Silos' shared macro implementation while emitting Vyuh's asset facade types.

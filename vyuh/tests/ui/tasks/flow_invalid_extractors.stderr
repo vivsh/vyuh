@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfied
+error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
   --> tests/ui/tasks/flow_invalid_extractors.rs:10:10
    |
 10 |  let _ = bundles::flow(site, TaskDefinition::new("site"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `vyuh::tasks::FlowContext`
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
    |
    = help: the following other types implement trait `HasSite`:
              CommandContext
@@ -11,8 +11,8 @@ error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfi
              SignalContext
              collectors::provider::UrlInfoContext
              tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::Site` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::Site, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `vyuh::Site` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<vyuh::Site, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -22,11 +22,11 @@ note: required by a bound in `flow`
    |     Args: callables::FromContext<crate::tasks::FlowContext>
    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
 
-error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfied
+error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
   --> tests/ui/tasks/flow_invalid_extractors.rs:11:10
    |
 11 |  let _ = bundles::flow(service, TaskDefinition::new("service"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `vyuh::tasks::FlowContext`
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
    |
    = help: the following other types implement trait `HasSite`:
              CommandContext
@@ -35,8 +35,8 @@ error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfi
              SignalContext
              collectors::provider::UrlInfoContext
              tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::prelude::ServiceRef<std::string::String>` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::ServiceRef<std::string::String>, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `vyuh::prelude::ServiceRef<std::string::String>` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<vyuh::prelude::ServiceRef<std::string::String>, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -46,11 +46,11 @@ note: required by a bound in `flow`
    |     Args: callables::FromContext<crate::tasks::FlowContext>
    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
 
-error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfied
+error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
   --> tests/ui/tasks/flow_invalid_extractors.rs:12:10
    |
 12 |  let _ = bundles::flow(identity, TaskDefinition::new("id"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `vyuh::tasks::FlowContext`
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
    |
    = help: the following other types implement trait `HasSite`:
              CommandContext
@@ -59,8 +59,8 @@ error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfi
              SignalContext
              collectors::provider::UrlInfoContext
              tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -82,8 +82,8 @@ error[E0277]: the trait bound `vyuh::prelude::TaskId: FromSite` is not satisfied
              Templates
              vyuh::Site
              vyuh::prelude::ServiceRef<T>
-   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -93,11 +93,11 @@ note: required by a bound in `flow`
    |     Args: callables::FromContext<crate::tasks::FlowContext>
    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
 
-error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfied
+error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
   --> tests/ui/tasks/flow_invalid_extractors.rs:13:10
    |
 13 |  let _ = bundles::flow(operation, TaskDefinition::new("operation"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `vyuh::tasks::FlowContext`
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
    |
    = help: the following other types implement trait `HasSite`:
              CommandContext
@@ -106,8 +106,8 @@ error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfi
              SignalContext
              collectors::provider::UrlInfoContext
              tasks::lane_lock::LaneHookContext
-   = note: required for `OperationId` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `OperationId` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -129,8 +129,8 @@ error[E0277]: the trait bound `OperationId: FromSite` is not satisfied
              Templates
              vyuh::Site
              vyuh::prelude::ServiceRef<T>
-   = note: required for `OperationId` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+   = note: required for `OperationId` to implement `FromContextParts<FlowContext>`
+   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |

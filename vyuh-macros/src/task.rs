@@ -17,13 +17,13 @@ struct TaskArgs {
 }
 
 /// Unified implementation for both free functions and methods
-pub(crate) fn parse_task(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, quote! { ::vyuh::bundles::task })
+pub(crate) fn parse_work(attr: TokenStream, item: TokenStream) -> TokenStream {
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::work })
 }
 
 /// Registers a value-only local batch handler.
-pub(crate) fn parse_task_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, quote! { ::vyuh::bundles::task_batch })
+pub(crate) fn parse_work_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::work_batch })
 }
 
 /// Registers synchronous orchestration; Rust bounds validate its signature.

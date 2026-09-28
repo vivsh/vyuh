@@ -4,7 +4,7 @@ use super::{TaskFailure, TaskOutcome, TaskRuntimeError};
 
 /// A Work handler's retry or terminal failure decision. Deliberately not serializable.
 #[derive(Debug, thiserror::Error)]
-pub enum TaskError {
+pub enum WorkError {
     /// Requests the lane's normal retry/backoff policy.
     #[error("{0}")]
     Retry(TaskFailure),
@@ -13,7 +13,7 @@ pub enum TaskError {
     Fail(TaskFailure),
 }
 
-impl TaskError {
+impl WorkError {
     /// Requests retry with application-safe diagnostic text that will be persisted.
     pub fn retry(message: impl Into<String>) -> Self {
         Self::Retry(TaskFailure::new(None, message))
@@ -72,5 +72,5 @@ macro_rules! terminal_conversions {
     };
 }
 
-terminal_conversions!(TaskError, TaskError::Fail);
+terminal_conversions!(WorkError, WorkError::Fail);
 terminal_conversions!(FlowError, |failure| FlowError { failure });

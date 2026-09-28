@@ -22,7 +22,7 @@ async fn runtime_route(
     Json(operation_id == extension_id)
 }
 
-#[bundles::task(name = "runtime_task")]
+#[bundles::work(name = "runtime_task")]
 async fn runtime_task(_operation_id: OperationId, _input: Data<RuntimeInput>) {}
 
 #[bundles::signal]

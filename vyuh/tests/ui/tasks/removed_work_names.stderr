@@ -1,0 +1,85 @@
+error[E0432]: unresolved imports `vyuh::tasks::TaskState`, `vyuh::tasks::TaskError`, `vyuh::tasks::TaskContext`, `vyuh::tasks::BatchTaskContext`, `vyuh::tasks::TaskCallable`, `vyuh::tasks::IntoTaskOutcomePart`, `vyuh::tasks::IntoTaskBatchOutcomePart`
+ --> tests/ui/tasks/removed_work_names.rs:1:19
+  |
+1 | use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+  |                   ^^^^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^ no `TaskCallable` in `tasks`
+  |                   |          |          |            |
+  |                   |          |          |            no `BatchTaskContext` in `tasks`
+  |                   |          |          no `TaskContext` in `tasks`
+  |                   |          no `TaskError` in `tasks`
+  |                   no `TaskState` in `tasks`
+2 |     IntoTaskOutcomePart, IntoTaskBatchOutcomePart};
+  |     ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^ no `IntoTaskBatchOutcomePart` in `tasks`
+  |     |
+  |     no `IntoTaskOutcomePart` in `tasks`
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskStore, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskState, WorkError, TaskContext, BatchTaskContext, TaskCallable,
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskState, TaskError, WorkContext, BatchTaskContext, TaskCallable,
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchWorkContext, TaskCallable,
+  |
+help: a similar name exists in the module
+  |
+1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, WorkCallable,
+  |
+help: a similar name exists in the module
+  |
+2 -     IntoTaskOutcomePart, IntoTaskBatchOutcomePart};
+2 +     IntoWorkOutcomePart, IntoTaskBatchOutcomePart};
+  |
+help: a similar name exists in the module
+  |
+2 -     IntoTaskOutcomePart, IntoTaskBatchOutcomePart};
+2 +     IntoTaskOutcomePart, IntoWorkBatchOutcomePart};
+  |
+
+error[E0433]: failed to resolve: could not find `task` in `bundles`
+ --> tests/ui/tasks/removed_work_names.rs:4:18
+  |
+4 | #[vyuh::bundles::task]
+  |                  ^^^^ could not find `task` in `bundles`
+
+error[E0433]: failed to resolve: could not find `task_batch` in `bundles`
+ --> tests/ui/tasks/removed_work_names.rs:7:18
+  |
+7 | #[vyuh::bundles::task_batch]
+  |                  ^^^^^^^^^^ could not find `task_batch` in `bundles`
+
+error[E0425]: cannot find value `task` in module `vyuh::bundles`
+  --> tests/ui/tasks/removed_work_names.rs:11:28
+   |
+11 |     let _ = vyuh::bundles::task;
+   |                            ^^^^ not found in `vyuh::bundles`
+
+error[E0425]: cannot find value `task_batch` in module `vyuh::bundles`
+  --> tests/ui/tasks/removed_work_names.rs:12:28
+   |
+12 |       let _ = vyuh::bundles::task_batch;
+   |                              ^^^^^^^^^^ help: a function with a similar name exists: `work_batch`
+   |
+  ::: src/bundles/part.rs
+   |
+   | / pub fn work_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | | where
+   | |     T: callables::DataValue,
+   | |     H: crate::tasks::WorkCallable<Args> + 'static,
+...  |
+   | |         + Send
+   | |         + 'static,
+   | |__________________- similarly named function `work_batch` defined here

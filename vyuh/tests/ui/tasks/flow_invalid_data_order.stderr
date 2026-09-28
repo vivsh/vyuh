@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `vyuh::prelude::Continuation<()>: FromContext<vyuh::tasks::FlowContext>` is not satisfied
+error[E0277]: the trait bound `vyuh::prelude::Continuation<()>: FromContext<FlowContext>` is not satisfied
  --> tests/ui/tasks/flow_invalid_data_order.rs:5:21
   |
 5 | fn main() { let _ = bundles::flow(handler, TaskDefinition::new("bad")); }
-  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromContext<vyuh::tasks::FlowContext>` is not implemented for `vyuh::prelude::Continuation<()>`
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromContext<FlowContext>` is not implemented for `vyuh::prelude::Continuation<()>`
   |
   = help: the following other types implement trait `FromContext<C>`:
             `()` implements `FromContext<C>`
@@ -14,7 +14,7 @@ error[E0277]: the trait bound `vyuh::prelude::Continuation<()>: FromContext<vyuh
             `Site` implements `FromContext<C>`
             `TaskLaneContext` implements `FromContext<tasks::lane_lock::LaneHookContext>`
           and $N others
-  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |
@@ -24,11 +24,11 @@ note: required by a bound in `flow`
   |     Args: callables::FromContext<crate::tasks::FlowContext>
   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
 
-error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfied
+error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
  --> tests/ui/tasks/flow_invalid_data_order.rs:5:21
   |
 5 | fn main() { let _ = bundles::flow(handler, TaskDefinition::new("bad")); }
-  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `vyuh::tasks::FlowContext`
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
   |
   = help: the following other types implement trait `HasSite`:
             CommandContext
@@ -37,8 +37,8 @@ error[E0277]: the trait bound `vyuh::tasks::FlowContext: HasSite` is not satisfi
             SignalContext
             collectors::provider::UrlInfoContext
             tasks::lane_lock::LaneHookContext
-  = note: required for `vyuh::Data<Job>` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+  = note: required for `vyuh::Data<Job>` to implement `FromContextParts<FlowContext>`
+  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |
@@ -60,8 +60,8 @@ error[E0277]: the trait bound `vyuh::Data<Job>: FromSite` is not satisfied
             Site
             SiteConfig
             Templates
-  = note: required for `vyuh::Data<Job>` to implement `FromContextParts<vyuh::tasks::FlowContext>`
-  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<vyuh::tasks::FlowContext>`
+  = note: required for `vyuh::Data<Job>` to implement `FromContextParts<FlowContext>`
+  = note: required for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>` to implement `FromContext<FlowContext>`
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |
@@ -77,15 +77,9 @@ error[E0277]: the trait bound `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::p
 5 | fn main() { let _ = bundles::flow(handler, TaskDefinition::new("bad")); }
   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasData<_>` is not implemented for `callables::specs::Tuple2<vyuh::Data<Job>, vyuh::prelude::Continuation<()>>`
   |
-help: the following other types implement trait `HasData<T>`
- --> src/callables/specs.rs
-  |
-  |   impl<T: crate::callables::DataValue, A1> HasData<T> for Tuple2<A1, crate::callables::Data<T>> {}
-  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `callables::specs::Tuple2<A1, vyuh::Data<T>>`
-...
-  | / impl<T: crate::callables::DataValue + crate::validation::Validate, A1> HasData<T>
-  | |     for Tuple2<A1, crate::validation::Valid<crate::callables::Data<T>>>
-  | |_______________________________________________________________________^ `callables::specs::Tuple2<A1, Valid<vyuh::Data<T>>>`
+  = help: the following other types implement trait `HasData<T>`:
+            callables::specs::Tuple2<A1, Valid<vyuh::Data<T>>>
+            callables::specs::Tuple2<A1, vyuh::Data<T>>
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |

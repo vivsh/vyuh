@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::callables;
 
-use super::{TaskOutcome, TaskRuntimeError, TaskState};
+use super::{TaskOutcome, TaskRuntimeError, WorkState};
 
 /// Ordered values supplied to or returned from one local task invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -80,25 +80,25 @@ mod sealed {
 
 /// Sealed supported return forms for value-only Work batches.
 #[doc(hidden)]
-pub trait IntoTaskBatchOutcomePart: sealed::Return {
+pub trait IntoWorkBatchOutcomePart: sealed::Return {
     /// Converts typed items before erasure; never clones application output values.
     fn into_batch_return(self) -> callables::DataBox;
 }
 
 impl sealed::Return for () {}
-impl IntoTaskBatchOutcomePart for () {
+impl IntoWorkBatchOutcomePart for () {
     fn into_batch_return(self) -> callables::DataBox {
         super::returns::erase_outcome(TaskOutcome::Complete)
     }
 }
-impl<T: Serialize + 'static> sealed::Return for TaskState<T> {}
-impl<T: Serialize + 'static> IntoTaskBatchOutcomePart for TaskState<T> {
+impl<T: Serialize + 'static> sealed::Return for WorkState<T> {}
+impl<T: Serialize + 'static> IntoWorkBatchOutcomePart for WorkState<T> {
     fn into_batch_return(self) -> callables::DataBox {
         super::returns::erase_outcome(batch_safe(self.into_outcome()))
     }
 }
-impl<T: Serialize + 'static> sealed::Return for Batch<TaskState<T>> {}
-impl<T: Serialize + 'static> IntoTaskBatchOutcomePart for Batch<TaskState<T>> {
+impl<T: Serialize + 'static> sealed::Return for Batch<WorkState<T>> {}
+impl<T: Serialize + 'static> IntoWorkBatchOutcomePart for Batch<WorkState<T>> {
     fn into_batch_return(self) -> callables::DataBox {
         callables::DataBox::new(
             self.into_iter()
@@ -107,9 +107,9 @@ impl<T: Serialize + 'static> IntoTaskBatchOutcomePart for Batch<TaskState<T>> {
         )
     }
 }
-impl<T: Serialize + 'static> sealed::Return for Batch<Result<TaskState<T>, super::TaskError>> {}
-impl<T: Serialize + 'static> IntoTaskBatchOutcomePart
-    for Batch<Result<TaskState<T>, super::TaskError>>
+impl<T: Serialize + 'static> sealed::Return for Batch<Result<WorkState<T>, super::WorkError>> {}
+impl<T: Serialize + 'static> IntoWorkBatchOutcomePart
+    for Batch<Result<WorkState<T>, super::WorkError>>
 {
     fn into_batch_return(self) -> callables::DataBox {
         let outcomes = self
@@ -124,8 +124,8 @@ impl<T: Serialize + 'static> IntoTaskBatchOutcomePart
         callables::DataBox::new(outcomes)
     }
 }
-impl<T: IntoTaskBatchOutcomePart> sealed::Return for Result<T, super::TaskError> {}
-impl<T: IntoTaskBatchOutcomePart> IntoTaskBatchOutcomePart for Result<T, super::TaskError> {
+impl<T: IntoWorkBatchOutcomePart> sealed::Return for Result<T, super::WorkError> {}
+impl<T: IntoWorkBatchOutcomePart> IntoWorkBatchOutcomePart for Result<T, super::WorkError> {
     fn into_batch_return(self) -> callables::DataBox {
         match self {
             Ok(value) => value.into_batch_return(),

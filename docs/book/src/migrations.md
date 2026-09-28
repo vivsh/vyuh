@@ -184,21 +184,38 @@ task-runtime schema to migration planning. Task tables are never created or
 changed by worker startup. Generate the normal application migration, inspect
 its SQL for the selected backend, and commit it with the application.
 
-For the value-less grouped runtime, the generated migration should remove the
-historical priority, identity, output, and result columns; assign existing
-active rows to the `default` lane; add idempotency, rate-bucket, and runtime
-policy storage; and add the grouped readiness, lease, history, and ownership
-indexes.
+Current tasks retain JSON results in `last_result`, resume values in
+`resume_input`, lineage in `parent_id`/`root_id`, Work/Flow classification, per-step
+attempt counts, cancellation intent, and private `all`-join metadata. Do not use
+old value-less-task migration advice to delete current result or continuation
+data. Schema generation alone does not migrate the persisted task protocol.
 
-Because this changes the worker persistence contract, deploy in this order:
+For existing deployments, use the backend-specific
+[task-protocol migration templates](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol)
+and their predecessor checks:
 
-1. Stop old task workers.
-2. Apply the reviewed migration.
-3. Deploy the new binary.
-4. Restart task workers.
+1. Stop **all old workers and writers**, including submit/resume-only processes,
+   and back up the database. Mixed-version operation is unsupported.
+2. Preflight retained inputs, checkpoints, handler name/kind assignments, and JSON
+   envelopes. Resolve incompatible data explicitly; never truncate resume values.
+3. Integrate the required schema and data templates into the application's Gaman
+   history in dependency order. Avoid adding columns twice when a generated schema
+   migration already adds them. Keep applied migration identities unchanged.
+4. Apply the migrations through the ledger. Data changes and their ledger entries
+   must commit atomically; MySQL/MariaDB DDL is separate and non-atomic. Keep lane,
+   rate, retry, and idempotency configuration unchanged through the protocol upgrade.
+5. Deploy compatible handler signatures and checkpoint/result types, then restart
+   workers and writers. Startup validates the protocol; it never repairs it.
 
-Pending, sleeping, and suspended inputs and continuation state remain usable.
-Historical task output values are deliberately discarded.
+The templates cover result envelopes and per-step attempts, persisted results,
+cancellation, Work/Flow classification, typed returns, and durable `all` joins.
+Legacy resume values are wrapped once, even when already shaped like a result
+object. Existing error text becomes `Err(TaskFailure)`; historical successful
+outputs cannot be reconstructed and remain absent. Already-migrated result bytes
+are preserved. Use the templates' preflights for the **32,768-byte** envelope limit
+and an explicit application-owned handler-name list when reclassifying rows as Flow.
+
+See [Tasks](tasks.md) for current handler APIs and runtime guarantees.
 
 ## SQLite
 

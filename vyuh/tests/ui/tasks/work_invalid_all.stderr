@@ -1,17 +1,17 @@
-error[E0599]: `TaskState` is not an iterator
+error[E0599]: `WorkState` is not an iterator
  --> tests/ui/tasks/work_invalid_all.rs:4:30
   |
-4 |     let _ = TaskState::<()>::all(Vec::<()>::new(), ());
-  |                              ^^^ `TaskState` is not an iterator
+4 |     let _ = WorkState::<()>::all(Vec::<()>::new(), ());
+  |                              ^^^ `WorkState` is not an iterator
   |
  ::: src/tasks/state.rs
   |
-  | pub struct TaskState<T = ()> {
-  | ---------------------------- doesn't satisfy `TaskState: Iterator`
+  | pub struct WorkState<T = ()> {
+  | ---------------------------- doesn't satisfy `WorkState: Iterator`
   |
-note: if you're trying to build a new `TaskState` consider using one of the following associated functions:
-      TaskState::<T>::complete
-      TaskState::<T>::suspend
+note: if you're trying to build a new `WorkState` consider using one of the following associated functions:
+      WorkState::<T>::complete
+      WorkState::<T>::suspend
  --> src/tasks/state.rs
   |
   |     pub fn complete(output: T) -> Self {
@@ -20,5 +20,5 @@ note: if you're trying to build a new `TaskState` consider using one of the foll
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: the following trait bounds were not satisfied:
-          `TaskState: Iterator`
-          which is required by `&mut TaskState: Iterator`
+          `WorkState: Iterator`
+          which is required by `&mut WorkState: Iterator`

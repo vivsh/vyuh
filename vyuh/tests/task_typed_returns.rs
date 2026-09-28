@@ -10,20 +10,20 @@ struct Calculate(u32);
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct AwaitResponse;
 
-#[bundles::task]
+#[bundles::work]
 async fn calculate(input: Data<Calculate>) -> u32 {
     input.0.0 * 2
 }
 
-#[bundles::task]
+#[bundles::work]
 async fn await_response(
     continuation: Continuation<u32, u32>,
     _: Data<AwaitResponse>,
-) -> Result<TaskState<u32>, TaskError> {
+) -> Result<WorkState<u32>, WorkError> {
     match continuation.into_parts() {
-        (None, _) => Ok(TaskState::suspend(7u32)?),
-        (Some(checkpoint), Some(response)) => Ok(TaskState::complete(checkpoint + response?)),
-        _ => Err(TaskError::fail("Missing response")),
+        (None, _) => Ok(WorkState::suspend(7u32)?),
+        (Some(checkpoint), Some(response)) => Ok(WorkState::complete(checkpoint + response?)),
+        _ => Err(WorkError::fail("Missing response")),
     }
 }
 

@@ -1,7 +1,7 @@
-error[E0277]: the trait bound `vyuh::Data<std::string::String>: vyuh::tasks::IntoTaskOutcomePart<tasks::returns::Value>` is not satisfied
+error[E0277]: the trait bound `vyuh::Data<std::string::String>: IntoWorkOutcomePart<tasks::returns::Value>` is not satisfied
   --> tests/ui/tasks/direct_data_return.rs:12:27
    |
-12 |     let _ = bundles::task(invalid_task, TaskDefinition::new("invalid_task"));
+12 |     let _ = bundles::work(invalid_task, TaskDefinition::new("invalid_task"));
    |             ------------- ^^^^^^^^^^^^ the trait `_::_serde::Serialize` is not implemented for `vyuh::Data<std::string::String>`
    |             |
    |             required by a bound introduced by this call
@@ -16,12 +16,12 @@ error[E0277]: the trait bound `vyuh::Data<std::string::String>: vyuh::tasks::Int
              (T0, T1, T2, T3)
              (T0, T1, T2, T3, T4)
            and $N others
-   = note: required for `vyuh::Data<std::string::String>` to implement `vyuh::tasks::IntoTaskOutcomePart<tasks::returns::Value>`
-note: required by a bound in `task`
+   = note: required for `vyuh::Data<std::string::String>` to implement `IntoWorkOutcomePart<tasks::returns::Value>`
+note: required by a bound in `work`
   --> src/bundles/part.rs
    |
-   | pub fn task<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn work<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     H::Output: crate::tasks::IntoTaskOutcomePart<K>,
-   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `task`
+   |     H::Output: crate::tasks::IntoWorkOutcomePart<K>,
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `work`

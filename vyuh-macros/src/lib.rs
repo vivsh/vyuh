@@ -425,9 +425,9 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Registers an asynchronous Work task handler.
 ///
-/// This macro is sugar over `vyuh::bundles::task(handler, TaskDefinition)`.
-/// Task handlers accept `Data<T>` as their submitted data argument and return
-/// serializable values, `TaskState<T>`, or their `Result<_, TaskError>` forms.
+/// This macro is sugar over `vyuh::bundles::work(handler, TaskDefinition)`.
+/// Work handlers accept `Data<T>` as their submitted data argument and return
+/// serializable values, `WorkState<T>`, or their `Result<_, WorkError>` forms.
 ///
 /// # Attributes
 ///
@@ -439,24 +439,27 @@ pub fn signal(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// // Free function with default name
-/// #[task]
-/// async fn send_email(Data(input): Data<EmailData>) -> Result<(), TaskError> {
+/// #[work]
+/// async fn send_email(Data(input): Data<EmailData>) -> Result<(), WorkError> {
 ///     deliver(input).await?;
 ///     Ok(())
 /// }
 ///
-/// // Method with custom name
+/// // Register associated functions through the direct API.
 /// impl TaskHandlers {
-///     #[task(name = "custom_task_name", lane = EMAIL)]
-///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<TaskState, TaskError> {
+///     async fn process_order(site: Site, Data(input): Data<Order>) -> Result<WorkState, WorkError> {
 ///         // process order
-///         Ok(TaskState::complete(()))
+///         Ok(WorkState::complete(()))
 ///     }
 /// }
+/// let part = vyuh::bundles::work(
+///     TaskHandlers::process_order,
+///     TaskDefinition::new("custom_task_name").lane(EMAIL),
+/// );
 /// ```
 #[proc_macro_attribute]
-pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
-    task::parse_task(attr, item)
+pub fn work(attr: TokenStream, item: TokenStream) -> TokenStream {
+    task::parse_work(attr, item)
 }
 
 /// Registers a synchronous, pure task flow. Equivalent to `bundles::flow`.
@@ -467,28 +470,28 @@ pub fn flow(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_flow(attr, item)
 }
 
-/// Registers a value-only local batch task handler.
+/// Registers a value-only local Work batch handler.
 ///
-/// This macro is sugar over `vyuh::bundles::task_batch(handler, TaskDefinition)`.
-/// Batch handlers accept `Data<Batch<T>>` and return unit, uniform `TaskState<O>`,
-/// ordered `Batch<TaskState<O>>` / `Batch<Result<TaskState<O>, TaskError>>`,
-/// or an outer `Result<_, TaskError>`. Suspension is rejected per item.
+/// This macro is sugar over `vyuh::bundles::work_batch(handler, TaskDefinition)`.
+/// Batch handlers accept `Data<Batch<T>>` and return unit, uniform `WorkState<O>`,
+/// ordered `Batch<WorkState<O>>` / `Batch<Result<WorkState<O>, WorkError>>`,
+/// or an outer `Result<_, WorkError>`. Suspension is rejected per item.
 /// They do not expose task identity or continuation state, and cannot suspend
 /// or sleep individual tasks.
 ///
 /// The supported attributes are `name`, `lane`, and `idempotency`, matching
-/// [`task`].
+/// [`work`].
 ///
 /// ```ignore
-/// #[task_batch]
-/// async fn index_documents(Data(items): Data<Batch<IndexDocument>>) -> Result<(), TaskError> {
+/// #[work_batch]
+/// async fn index_documents(Data(items): Data<Batch<IndexDocument>>) -> Result<(), WorkError> {
 ///     index_all(items.as_ref()).await?;
 ///     Ok(())
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn task_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
-    task::parse_task_batch(attr, item)
+pub fn work_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
+    task::parse_work_batch(attr, item)
 }
 
 /// Builds an isolated `TestSite` around an async integration-test body.

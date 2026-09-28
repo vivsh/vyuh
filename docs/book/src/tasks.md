@@ -1,18 +1,25 @@
 # Tasks
 
-Vyuh tasks are durable, typed background handlers for work that must survive
-process restarts, worker crashes, retries, timed delays, and delayed external
-decisions. Use them for emails, imports, report generation, webhook retries,
-approvals, chunked processing, polling loops, and long-running business work
-where fire-and-forget signals are not enough.
+Vyuh tasks combine typed background work and durable workflow orchestration in
+one runtime. A task has one of two kinds: **Work** handlers are asynchronous and perform effects; **Flow**
+handlers are synchronous and describe the next durable transition. Both return
+typed results and use the same task records, lanes, leases, recovery, and
+cancellation mechanisms.
+
+Use them for emails, imports, report generation, webhook retries, approvals,
+sequential or nested child workflows, and parallel work joined with `all`.
+Database-backed stores preserve committed progress across process restarts;
+the in-memory store is for development and tests.
 
 Tasks are part of the same runtime model as routes, commands, signals, emitters,
 and services. They are registered through bundles, submitted by input type, and
 inspected through the task store and console APIs.
 
-Use tasks for work that needs persistence, retry, sleep, leases, or external
-resume. Do not use tasks for in-process fanout, site-lifetime loops, or
-interactive CLI tools.
+Start with [registration](#registration) and [Work and Flow](#work-and-flow).
+For orchestration, see [spawn](#spawning-and-waiting-for-a-child),
+[`all`](#parallel-children-with-all), and [external resume](#suspend-and-resume).
+[Handler batching](#local-handler-batching) and [lane ownership](#durable-lane-ownership)
+are independent execution controls, not requirements for workflows.
 
 ## When To Use Tasks
 
@@ -23,6 +30,7 @@ Use tasks when work needs one or more of these properties:
 - Delayed execution.
 - Continuation over multiple attempts.
 - Waiting for an external decision before continuing.
+- Waiting for one child or all children, with typed success/failure results.
 - Controlled background concurrency.
 
 Use [signals](signals.md) for in-process notifications. Use
@@ -41,29 +49,32 @@ Each task record stores:
 - `input`: immutable submitted data.
 - `state`: private continuation state saved by the handler.
 - `resume_input`: optional input supplied when a suspended task is resumed.
+- `last_result`: the latest JSON success or failure envelope, not an attempt log.
+- `status` and `cancelled`: lifecycle status and durable cancellation intent.
+- `attempts` and `step_attempts`: lifetime and current-step invocation counts.
 - `parent_id` and `root_id`: nullable lineage assigned to spawned children.
 - `kind`: `work` or `flow`, inferred from the registered handler.
 
-Ordinary submission leaves lineage unset. Spawn derives lineage in the accepting
-store transaction. Kind is a registration capability boundary, with no public setter or separate
-scheduling/recovery policy.
+Ordinary submission leaves lineage unset. `spawn` and `all` derive lineage in the
+accepting store transaction. Kind is a registration capability boundary, with no
+public setter or separate scheduling/recovery policy.
 
 Each wake runs the handler with the latest durable snapshot:
 
 ```text
-input + state + resume_input -> handler -> Output | TaskState<Output> | FlowState<Output>
+input + state + resume_input -> handler -> Output | WorkState<Output> | FlowState<Output>
 ```
 
-Work can return a serializable value directly, or `TaskState<T>` for completion
-or suspension. Use `Result<_, TaskError>` for explicit failure/retry decisions.
+Work can return a serializable value directly, or `WorkState<T>` for completion
+or suspension. Use `Result<_, WorkError>` for explicit failure/retry decisions.
 Flow returns unit or `FlowState<T>`, optionally in `Result<_, FlowError>`.
 Infrastructure APIs return `TaskRuntimeError`; these are not handler decisions.
 Task persistence is framework-owned; applications compose work through
 `site.tasks()` rather than implementing a scheduler store.
 
-Persist durable artifacts in application records or object storage. Submit
-follow-on work explicitly from domain state, signals, or another task submission,
-using idempotency and an outbox where retries cross external boundaries.
+Use Flow outcomes for dependent work: `spawn` waits for one child and `all` waits
+for a homogeneous group. Use ordinary submission for independent work. Keep
+large artifacts in application records or object storage and return references.
 
 Execution is at least once. Submission idempotency prevents duplicate durable
 intents; it cannot make an external email, payment, or HTTP request exactly
@@ -74,9 +85,22 @@ Vyuh tasks are durable continuations, not a workflow DAG interpreter.
 Sequential, nested, and homogeneous parallel child orchestration use explicit
 Flow state transitions; `all` waits for every member rather than selecting a winner.
 
+The durable execution boundary is always:
+
+```text
+claim -> immutable handler snapshot -> outcome -> atomic store commit -> later claim
+```
+
+Returning a value or constructing an outcome is not a commit. Only the store
+mutates authoritative task state. New children and resumed parents are finalized
+after that turn's claim selection; they never execute synchronously from the
+parent or child handler. Another worker may claim the committed work afterward;
+there is no cluster-wide poll counter. Crashes before commit can replay a step.
+
 ## Registration
 
-The task macro is sugar over direct bundle registration. It does not unlock
+The `work`, `work_batch`, and `flow` macros are sugar over their corresponding
+direct bundle registration functions. They do not unlock
 capabilities that direct registration cannot express.
 
 Macro registration:
@@ -91,7 +115,7 @@ struct SendEmailJob {
     subject: String,
 }
 
-#[bundles::task(name = "send_email")]
+#[bundles::work(name = "send_email")]
 async fn send_email(input: Data<SendEmailJob>) {
     println!("sending email to {}", input.to);
 }
@@ -110,7 +134,7 @@ use vyuh::bundles;
 use vyuh::bundles::IntoBundle;
 use vyuh::tasks::TaskDefinition;
 
-let bundle = bundles::bundle([bundles::task(
+let bundle = bundles::bundle([bundles::work(
     send_email,
     TaskDefinition::new("send_email"),
 )]);
@@ -124,7 +148,7 @@ type.
 Task handlers may extract their canonical operation identity before `Data<T>`:
 
 ```rust
-#[bundles::task]
+#[bundles::work]
 async fn send_email(
     operation_id: OperationId,
     site: Site,
@@ -140,25 +164,25 @@ as part of the task record.
 
 ## Handler Shapes
 
-Fire-and-forget handlers can return nothing:
+Unit-completion Work handlers can return nothing:
 
 ```rust
 use schemars::JsonSchema;
 use vyuh::prelude::*;
 
-#[bundles::task]
+#[bundles::work]
 async fn send_email(input: Data<SendEmailJob>) {
     println!("sending email to {}", input.to);
 }
 ```
 
-Fallible fire-and-forget handlers can return `Result<(), TaskError>`:
+Fallible unit-completion handlers can return `Result<(), WorkError>`:
 
 ```rust
 use vyuh::prelude::*;
 
-#[bundles::task]
-async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
+#[bundles::work]
+async fn process_data(input: Data<ProcessingJob>) -> Result<(), WorkError> {
     println!("processing {}", input.data);
     Ok(())
 }
@@ -167,19 +191,19 @@ async fn process_data(input: Data<ProcessingJob>) -> Result<(), TaskError> {
 Direct-output Work handlers declare their persisted successful type:
 
 ```rust,ignore
-#[bundles::task]
+#[bundles::work]
 async fn calculate(input: Data<Input>) -> Output { calculate_output(&input) }
 
-#[bundles::task]
-async fn charge(input: Data<Charge>) -> Result<Receipt, TaskError> {
+#[bundles::work]
+async fn charge(input: Data<Charge>) -> Result<Receipt, WorkError> {
     Ok(payments.charge(&input).await?)
 }
 ```
 
 Output needs `Serialize + 'static`, not `Clone`, `Sync`, `Deserialize` or a schema.
-Only `Result<_, TaskError>` represents Work error decisions. A serializable
+Only `Result<_, WorkError>` represents Work error decisions. A serializable
 `Result<T, E>` with another error type is an ordinary persisted value.
-Use explicit `TaskError::retry` for retries; automatic `?` conversions are terminal.
+Use explicit `WorkError::retry` for retries; automatic `?` conversions are terminal.
 
 ## Work And Flow
 
@@ -189,6 +213,22 @@ join a homogeneous group with `all`.
 Both use the same statuses, lanes, concurrency, rates, lane locks, leases,
 attempt counters, cancellation, and atomic outcome flushes. Neither executes
 a child or resumed parent recursively; those run after a later claim.
+
+| Capability | Work | Flow | Work batch |
+|---|---|---|---|
+| Registration | `work` | `flow` | `work_batch` |
+| Function | `async fn` | synchronous `fn` | `async fn` |
+| Success | Direct `T` or `WorkState<T>` | `()` or `FlowState<T>` | Unit, uniform state, or ordered states |
+| Handler error | `WorkError` (`Retry` or `Fail`) | `FlowError` (terminal) | `WorkError`, uniform or per item |
+| External suspension | Yes, with `Continuation<S, R>` | Yes, with `Continuation<S, R>` | No |
+| Sleep, spawn, `all` | No | Yes | No |
+| Site/service extraction | Yes | No | Yes |
+
+Use `Result<Success, HandlerError>` for fallible forms. `WorkState<T>` and
+`FlowState<T>` default `T` to `()`. Their `complete(value)` accepts exactly `T`
+and returns the state directly, without `?`; the framework validates serialization
+and result size after the handler returns. `suspend`, `sleep`, `spawn`, and `all`
+can fail during request preparation and therefore still use `?`.
 
 Use `#[bundles::flow]` or the equivalent
 `bundles::flow(handler, TaskDefinition::new("handler"))`. Both accept the same
@@ -211,8 +251,8 @@ system. A non-yielding function cannot be preempted mid-call.
 
 Flow cannot request retry, but an uncommitted execution is recovered with exactly
 the same lease, retry-budget, and backoff rules as Work. A returned error or panic
-is terminal for both. Shared lanes also mean shared contention; configure a
-separate lane for isolation when needed.
+is terminal, except an explicit Work `WorkError::Retry`. Shared lanes also mean
+shared contention; configure a separate lane for isolation when needed.
 
 ## Input, State, And Resume Data
 
@@ -292,8 +332,8 @@ fn build_report(
     }
 }
 
-#[bundles::task]
-async fn fetch_report(input: Data<FetchReport>) -> Result<ReportData, TaskError> {
+#[bundles::work]
+async fn fetch_report(input: Data<FetchReport>) -> Result<ReportData, WorkError> {
     Ok(fetch_data(&input.source).await?)
 }
 ```
@@ -327,7 +367,8 @@ transaction as the originating outcome. New children and resumed parents are
 eligible only through a subsequent poll, never synchronous invocation or that
 turn's claim selection. Another process may claim them after transaction commit.
 
-One outstanding child per parent supports sequential and nested workflows.
+Single-child `spawn` supports sequential and nested workflows; use `all` below
+when a parent needs to wait for several children at once.
 **Do not externally resume a parent waiting for its child.** This is a caller
 contract, not a runtime waiting-on guard. Missing or no-longer-suspended parents
 do not receive a child's result. Value-only batch handlers cannot spawn children.
@@ -337,21 +378,45 @@ do not receive a child's result. Value-only batch handlers cannot spawn children
 `FlowState::all(children, checkpoint)` atomically checkpoints a Flow and creates
 a group of children of one registered input type. It never submits work while
 constructing the outcome. Use the same `#[bundles::flow]` registration, or the
-equivalent `bundles::flow(handler, TaskDefinition::new("collect"))`:
+equivalent direct registration shown after this example:
 
-```rust,ignore
+```rust
+use schemars::JsonSchema;
+use vyuh::prelude::*;
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct Item { value: u32 }
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Collection { items: Vec<Item> }
+
+#[bundles::work]
+async fn process_item(input: Data<Item>) -> u32 {
+    input.value.saturating_mul(2)
+}
+
 #[bundles::flow]
 fn collect(
-    continuation: Continuation<(), Vec<Result<ItemOutput, TaskFailure>>>,
-    input: Data<CollectInput>,
-) -> Result<FlowState<Vec<ItemOutput>>, FlowError> {
+    continuation: Continuation<(), Vec<Result<u32, TaskFailure>>>,
+    input: Data<Collection>,
+) -> Result<FlowState<Vec<u32>>, FlowError> {
     if let (_, Some(results)) = continuation.into_parts() {
         let values = results?.into_iter().collect::<Result<Vec<_>, _>>()?;
         return Ok(FlowState::complete(values));
     }
     Ok(FlowState::all(input.items.clone(), ())?)
 }
+
+let bundle = bundles::bundle! { process_item, collect };
 ```
+
+The equivalent direct bundle uses `bundles::work(process_item,
+TaskDefinition::new("process_item"))` and `bundles::flow(collect,
+TaskDefinition::new("collect"))`; import `TaskDefinition` from `vyuh::tasks`.
+Submit `Collection { items: vec![Item { value: 2 }, Item { value: 5 }] }`
+through `site.tasks().submit(...)`. Its successful result is `[4, 10]`.
+This handler chooses to fail the Flow if any child failed; it could instead
+inspect every inner `Result` and retain partial successes.
 
 Results are in **input order**, not completion order. The outer result describes
 whether the join could be assembled; each inner result describes one child.
@@ -364,7 +429,7 @@ This is separate from concurrency and claim/commit `batch_size`. The full combin
 resume JSON envelope must fit **32,768 bytes**, even when individual child results
 fit. Overflow or missing/malformed member results become an outer failure for
 the parent; children keep their own results. Prefer application-owned artifact
-references for large outputs. Decoding into `ItemOutput` still happens through
+references for large outputs. Decoding into the requested child output type still happens through
 the normal continuation extractor.
 
 The store decrements a durable counter when children finish. It collects results
@@ -384,7 +449,7 @@ the coordinated task-protocol templates before starting new workers or writers.
 
 ## Retained Results
 
-`TaskState::complete(value)` and `FlowState::complete(value)` retain typed values
+`WorkState::complete(value)` and `FlowState::complete(value)` retain typed values
 until the handler returns. The framework serializes a successful value and stores it as
 `{"Ok": value}` on the completed task. Ordinary unit-return handlers retain
 `{"Ok": null}`. Retrying and terminal failures retain `{"Err": TaskFailure}`;
@@ -398,13 +463,19 @@ Inspect results with `task.last_result::<Output>()?`, which returns
 failure. Old rows without retained outputs have no result, even if succeeded.
 Results disappear when their task records are deleted.
 
+Fetch the read-only `TaskInfo` through `site.tasks().get(receipt.id()).await?`.
+`None` from `get` means the task is absent; `None` from `last_result` means it
+has no recorded result. Inspect `status()` as well: a pending retry may still
+carry its last failure. `list(TaskFilter::new().idempotency_key(key))` provides
+bounded lookup by idempotency key; submission receipts are identities, not
+futures awaiting handler output.
+
 Both retained results and `resume_input` have a fixed **32 KiB (32,768 bytes)**
 limit, including the entire JSON envelope and escaping. The input/checkpoint
 payload setting does not change this limit. Serialization failures and oversized
 successful outputs terminally fail the affected task; they are never truncated.
-External resume rejects oversized envelopes with `TaskRuntimeError::ResultTooLarge`.
-Oversized external resume
-requests leave the task unchanged. Error diagnostics may be shortened to fit.
+External resume rejects oversized envelopes with `TaskRuntimeError::ResultTooLarge`
+and leaves the task unchanged. Error diagnostics may be shortened to fit.
 Store large artifacts elsewhere and return their identifiers.
 
 The console exposes results in task details, not routine list responses. Task
@@ -417,18 +488,25 @@ A handler can consume matching tasks already present in its process-local lane
 queue in one call by accepting `Data<Batch<T>>`:
 
 ```rust
+use schemars::JsonSchema;
 use vyuh::prelude::*;
 
-#[bundles::task_batch]
-async fn index_documents(Data(documents): Data<Batch<IndexDocument>>) -> Result<(), TaskError> {
-    search.index_all(documents.as_ref()).await?;
-    Ok(())
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct NormalizeText { text: String }
+
+#[bundles::work_batch]
+async fn normalize_texts(Data(items): Data<Batch<NormalizeText>>) -> Batch<WorkState<String>> {
+    items.iter()
+        .map(|item| WorkState::complete(item.text.trim().to_owned()))
+        .collect()
 }
+
+let bundle = bundles::bundle! { normalize_texts };
 ```
 
 The distinct macro selects the reduced value-only batch contract without inspecting
 or resolving the handler's argument syntax. The equivalent direct registration is
-`bundles::task_batch(index_documents, TaskDefinition::new("index_documents"))`.
+`bundles::work_batch(normalize_texts, TaskDefinition::new("normalize_texts"))`.
 The submitted type remains `T`: every call to `submit(T)` creates its own
 durable task row, attempt count, lease, retry policy, and terminal outcome.
 
@@ -438,10 +516,10 @@ leaving other task names in their existing relative order. One batch call uses
 one local handler-concurrency slot; rate permits and durable lifecycle remain
 per task.
 
-Return `()` for uniform unit completion, `TaskState<T>` for uniform output, or
-`Result<_, TaskError>` for uniform failure/retry. Ordered outcomes use
-`Batch<TaskState<T>>` or `Batch<Result<TaskState<T>, TaskError>>`, with exactly one
-item per valid input. An outer `Result<_, TaskError>` remains supported.
+Return `()` for uniform unit completion, `WorkState<T>` for uniform output, or
+`Result<_, WorkError>` for uniform failure/retry. Ordered outcomes use
+`Batch<WorkState<T>>` or `Batch<Result<WorkState<T>, WorkError>>`, with exactly one
+item per valid input. An outer `Result<_, WorkError>` remains supported.
 Uniform output is serialized once; ordered serialization failures affect only
 that item. Cardinality mismatch fails the valid invocation. Bare `Batch<T>` is
 not a shorthand for per-item outputs. Invalid historical inputs fail individually.
@@ -454,26 +532,26 @@ The lock controls when a cohort reaches the local queue, not the handler type.
 
 ## Complete, Suspend, Sleep, Retry, And Fail
 
-Use `TaskState` for Work outcomes and `FlowState` for Flow outcomes:
+Use `WorkState` for Work outcomes and `FlowState` for Flow outcomes:
 
 ```rust
 use vyuh::prelude::*;
 use std::time::Duration;
-use vyuh::tasks::TaskState;
+use vyuh::tasks::WorkState;
 
-let done = TaskState::complete(());
-let suspended = TaskState::<()>::suspend(state)?;
+let done = WorkState::complete(());
+let suspended = WorkState::<()>::suspend(state)?;
 let sleeping = FlowState::<()>::sleep(state, Duration::from_secs(30))?;
-let retry = TaskError::retry("try again using the lane's backoff policy");
-let failed = TaskError::fail("permanent failure");
+let retry = WorkError::retry("try again using the lane's backoff policy");
+let failed = WorkError::fail("permanent failure");
 ```
 
-Use `?` to convert framework errors into the handler's `TaskError` or `FlowError`.
+Use `?` to convert framework errors into the handler's `WorkError` or `FlowError`.
 These conversions log the underlying error and produce a safe terminal diagnostic;
 no raw framework/database error is copied into persisted results. A runtime error
-becomes `Task operation failed`; a framework error becomes `Task handler failed`. Messages passed explicitly to `TaskError::retry` and `TaskError::fail`
+becomes `Task operation failed`; a framework error becomes `Task handler failed`. Messages passed explicitly to `WorkError::retry` and `WorkError::fail`
 are application-owned durable summaries and must not contain secrets.
-Retry is never inferred from `ErrorKind`; return `TaskError::retry(...)` when
+Retry is never inferred from `ErrorKind`; return `WorkError::retry(...)` when
 the task should be tried again later. Handlers cannot choose retry timing or
 attempt limits; the selected task lane owns both.
 
@@ -507,7 +585,7 @@ let resumed = site
 
 `resume` stores the input inside `{"Ok": value}`, moves the suspended task back to
 pending, notifies the local worker, and returns `true` when it changed the task.
-It returns `false` when the ID is absent or no longer suspended.
+It returns `false` when the ID is absent, cancelled, or no longer suspended.
 
 Use `resume_failed(id, TaskFailure::new(None, "safe explanation"))` to deliver an
 external failure instead. These remain independent operations; child completion
@@ -540,8 +618,10 @@ renewals and outcome commits also check durable intent: once accepted, a later
 success, retry, checkpoint, or spawn cannot override cancellation. Cancelled
 tasks cannot be resumed.
 
-A cancelled child delivers the same failure to its suspended parent atomically;
-the parent continues on a subsequent poll and can handle the failure normally.
+A cancelled single child delivers its failure to its suspended `spawn` parent
+atomically; the parent continues on a subsequent poll. Within `all`, cancellation
+counts as one terminal child, but the parent still waits for every other member
+before receiving the ordered results.
 Cancelling a parent does not cancel its children, and their later results cannot
 revive it. Checkpoints remain intact when cancellation is requested.
 
@@ -571,16 +651,18 @@ writers stopped; see the task protocol migration instructions.
 
 ## Sleep And Continuation
 
-Sleep is for timed continuation. The handler saves state, chooses a delay, and
+Sleep is for timed Flow continuation. The handler saves state, chooses a delay, and
 Vyuh wakes the task after that delay:
 
 ```rust
 FlowState::sleep(state, Duration::from_secs(30))?
 ```
 
-Use sleep for polling external systems, chunked imports, slow retries with
-progress, and staged work where the next step is time-based rather than
-event-based.
+Use sleep between Work children for polling an external system, processing
+another chunk, or staged work where the next step is time-based rather than
+event-based. Keep I/O in Work handlers; Flow only chooses the next transition.
+For transient failures within one Work step, use `WorkError::retry` and the
+lane's backoff policy instead of treating sleep as a Work retry API.
 
 Sleep is durable. If the process exits while a task is sleeping, the task
 remains pending with a future `ready_at` time and can be claimed after that
@@ -624,8 +706,8 @@ submission is atomic and its receipts preserve input order; a non-ignored
 conflict or store failure rolls back the whole batch. An empty batch succeeds
 with no receipts.
 
-All option builders are infallible. Invalid state serialization, generated
-keys, or durations are reported only by the terminal submission call.
+Option builders are infallible. Invalid input serialization, generated keys,
+or durations are reported by the terminal submission call.
 
 Idempotency belongs to the static task definition, not a particular submission:
 
@@ -649,8 +731,8 @@ remains unavailable from terminal completion until the configured duration.
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
 `FlowState::sleep`, and recurring creation belongs in emitters. A
 task-targeted cron or periodic emitter stores one durable `vyuh_schedules`
-cursor and coalesces missed occurrences after restart; it does not turn tasks
-into a general workflow or recurring-service abstraction.
+cursor and coalesces missed occurrences after restart. Recurring creation belongs
+to that emitter; orchestration within each occurrence belongs to Flow.
 
 ## Lanes, Throughput, And Rate Limits
 
@@ -658,6 +740,22 @@ Named lanes isolate slow work without introducing priority. Each lane owns a
 bounded local queue and per-worker concurrency quota. One dispatcher rotates
 the lanes fairly, while one global concurrency limit and one common outcome
 buffer bound the whole runner.
+
+These controls have different jobs:
+
+| Control | What it bounds or groups |
+|---|---|
+| `TaskConf::concurrency(n)` | Running handler invocations across the local runner |
+| `TaskLaneConf::new(lane, n)` | Per-runner lane handler concurrency and refill capacity |
+| `TaskConf::batch_size(n)` | Store claim/commit batch bound, not handler batch size |
+| `#[bundles::work_batch]` | Matching, eligible inputs already queued locally; never waits |
+| `TaskLaneLock::new(n).deadline(duration)` | Owner-held accumulation threshold before claiming a cohort |
+| `TaskConf::max_all_children(n)` | Maximum fan-out per `all`, not execution concurrency |
+
+Increasing the store batch size does not override concurrency, rates, poll gates,
+or the availability of ready work. Ordinary lanes keep independent input queues;
+all lanes share the outcome buffer. Fan-out flushes additionally bound expanded
+child writes without splitting an `all` group across transactions.
 
 Queue prefetch uses a fixed hysteresis rule: Vyuh refills a lane only when its
 queued work is below half of that lane's concurrency quota, then claims up to
@@ -705,7 +803,7 @@ five handler attempts per continuation step, beginning at one second and capped 
 minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
 by `max_delay`. This policy cannot be overridden by a submission or handler.
 `attempts()` reports lifetime invocations; `step_attempts()` reports the current
-step's retry budget. A committed `suspend`, `sleep`, or `spawn` resets the step
+step's retry budget. A committed `suspend`, `sleep`, `spawn`, or `all` resets the step
 counter. Retries and lease reclaims do not reset it.
 `rate_limit` is an inexpensive in-memory token bucket owned by the local site
 runner. `global_rate_limit` coordinates starts across workers sharing a durable
@@ -901,8 +999,10 @@ indexes.
 Database work is batched without changing polling or lease timing. Ordinary
 lanes never consult lane-lock storage. Optional rates, lane ownership, recovery,
 and workflow transitions can require additional bounded statements in the same
-transaction. PostgreSQL and SQLite combine ordinary claim evidence, while
-mixed turns still apply outcomes and renewals before selecting more work.
+transaction. PostgreSQL and SQLite combine ordinary claim evidence. PostgreSQL
+also shares ordinary outcome/renewal observations; SQLite retains separate reads.
+Mixed turns still apply outcomes and renewals before selecting more work. Batched
+database access does not imply a fixed one- or two-query budget for every turn.
 Recovery eligibility is checked from current database evidence, not a cache or
 a slower recovery schedule. Expired idempotency reservations are physically cleaned up
 periodically; this does not extend their logical retention window or prevent
@@ -913,19 +1013,37 @@ migrations before starting task workers; `Site::build` never creates or alters
 task tables. This makes schema changes reviewable and prevents a replica from
 changing production DDL during startup.
 
-The resume-result protocol is a coordinated breaking upgrade. Stop old workers
-and writers, integrate the backend-specific templates from
-`vyuh/migrations/task_protocol/` into the application's Gaman migration history,
-and apply them through its ledger before starting new workers. Keep runtime
-policy unchanged during this upgrade. Schema creation alone is insufficient:
-every legacy non-null resume value must be wrapped once as `Ok(value)` and retry
-counters must be backfilled. Never infer migration state from a JSON object's
-shape. New workers reject an unmarked legacy policy. Existing running leases
-remain recoverable; global rate buckets are preserved. There is still no
-separate task output/result archive.
+### Upgrading Existing Task Stores
+
+These APIs and persisted protocols require a coordinated upgrade. Stop all old
+workers and writers, back up the database, and integrate the backend-specific
+[task-protocol templates](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol)
+into the application's Gaman migration history. Apply them through its ledger
+before starting new workers. See [task schema migrations](migrations.md#durable-task-schema-changes)
+for deployment order and preflight requirements. Mixed-version operation and
+startup schema repair are unsupported.
+
+For applications using older task APIs:
+
+| Earlier API | Current API |
+|---|---|
+| `complete()` / fallible `complete_with(value)` | Infallible `WorkState::complete(())` / `WorkState::complete(value)`; declare `WorkState<T>` |
+| `WorkState::retry` / `WorkState::fail` | Return `Err(WorkError::retry(...))` / `Err(WorkError::fail(...))` |
+| Work sleep or child spawn | Synchronous `flow` registration with `FlowState<T>` and `FlowError` |
+| Infrastructure `WorkError` | `TaskRuntimeError`; `WorkError` now describes Work decisions |
+| Raw resume value `R` | `Result<R, TaskFailure>` inside the continuation |
+| `last_error()` inspection | `last_result::<T>()?` and `last_result_json()` |
+
+Continuable Work remains supported for external suspension. Preserve registered
+names and JSON types where possible; reclassify existing rows only for handlers
+actually converted to Flow. New successful outputs are retained, but migrations
+cannot reconstruct historical successful values. Never infer whether resume
+data was migrated by inspecting its JSON shape or reapply ledger-tracked wrapping.
+
+### Runtime And Backend Selection
 
 Claims, commits, runner queues, and persistence records remain internal. The
-ordinary task API exposes only typed submission, resumption, reassignment, and
+ordinary task API exposes typed submission, cancellation, resumption, reassignment, and
 read-only inspection.
 
 Task workers start only in the serving runtime. Commands can submit durable
@@ -940,9 +1058,10 @@ them only within its process. `rate_limit` always remains local to one site
 runner regardless of backend.
 
 Use Postgres for production multi-worker deployments by default. SQLite is for
-embedded, local, and single-process durable execution. MySQL is compile
-supported but experimental until its migration and concurrent-claimer evidence
-matches the Postgres and SQLite release gates.
+embedded, local, and single-process durable execution. MySQL/MariaDB implement
+the same task-store contract and have backend-specific migration templates, but
+remain experimental; validate migration and concurrent-worker behavior against
+your application's workload before production use.
 
 ## Examples
 
@@ -954,16 +1073,21 @@ cargo run -p vyuh --example tasks
 
 It covers:
 
-- Fire-and-forget task handlers.
-- Fallible task handlers.
-- Direct registration without the task macro.
-- Local `Data<Batch<T>>` handler registration and ordered outcomes.
+- Unit and typed-output Work handlers.
+- Fallible task handlers, lane retry/rate configuration, and bulk submission.
+- Atomic single-child spawning and result delivery to a Flow.
 - Synchronous Flow suspend/resume with `Continuation<S, R>` and `FlowState`.
+
+This chapter also shows equivalent direct registration, ordered batch outcomes,
+and a complete `all` handler pair above.
 
 ## Failure Modes
 
 - Unregistered task data types return `TaskRuntimeError::TaskNotFound`.
-- Handler `Err(vyuh::Error)` values are committed as failed task outcomes.
+- Work `WorkError::Fail`, Flow `FlowError`, and panics become terminal failures.
+  Work `WorkError::Retry` requests lane-controlled retry. Using `?` on a
+  `vyuh::Error` or `TaskRuntimeError` converts it to the handler's terminal error;
+  `Result<_, vyuh::Error>` is not the task-handler decision contract.
 - Stale workers cannot overwrite tasks they no longer own.
 - Stale lane owners cannot renew tasks, commit outcomes, or apply lifecycle
   results after another owner takes over.
@@ -973,18 +1097,27 @@ It covers:
   the replacement invocation consumes another attempt and may repeat effects.
 - A malformed historical running row without a lease deadline is marked failed
   during task-runtime initialization rather than being retried unsafely.
-- Retried tasks become failed when their lane's maximum attempt count is reached.
+- Retried tasks become failed when their lane's per-step attempt budget is exhausted;
+  lifetime invocation count is not that budget.
 - Conflicting idempotency intents reject the submission batch unless conflict
   ignoring was explicitly selected.
-- Unknown or orphaned lanes fail explicitly and never fall back to `default`.
-- `resume` returns `false` when the task ID does not identify a suspended task.
+- An unavailable declared lane falls back to `default` with a warning unless
+  `RequireConfigured` is selected. Persisted nonterminal work in a removed lane
+  blocks startup until it is explicitly reassigned.
+- `resume` returns `false` for absent, non-suspended, or cancelled tasks. Responses
+  arriving before suspension commits must be retried by the application.
 
 ## Current Limitations
 
 - No exactly-once guarantee.
 - No retained topic events.
 - No durable per-attempt audit history.
-- No declarative workflow interpreter, parallel child joins, or dependency
-  graphs. Flow handlers can implement sequential and nested child orchestration.
+- No declarative workflow interpreter or arbitrary dependency graph API. Explicit
+  Flow handlers support sequential, nested, and homogeneous parallel `all` joins.
+- No first-completion `select`, heterogeneous `all`, or per-child `all` options.
+- Child input types are registered, but their output types are not associated at
+  compile time; a mismatched continuation result type fails decoding at runtime.
+- Result and resume envelopes are bounded to 32 KiB, including all joined results.
+- External resume cannot safely interrupt a parent waiting for its children.
 - `MemoryTaskStore` is not durable and is not for production task queues.
 - SQLite is intended for embedded, local, and single-process task execution.

@@ -1547,7 +1547,7 @@ mod tests {
     /// Verifies a bundle can contribute the static lane used by its task definition.
     #[tokio::test]
     async fn bundle_task_lane_resolves_static_task_definition() -> Result<(), SiteError> {
-        let bundle = bundles::bundle([bundles::task(
+        let bundle = bundles::bundle([bundles::work(
             count_runtime_task,
             TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
         )])
@@ -1567,7 +1567,7 @@ mod tests {
     /// Verifies strict lane policy reports the task and unavailable static lane at site build.
     #[tokio::test]
     async fn strict_task_lane_policy_rejects_unconfigured_bundle_task() {
-        let bundle = bundles::bundle([bundles::task(
+        let bundle = bundles::bundle([bundles::work(
             count_runtime_task,
             TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
         )]);
@@ -2027,7 +2027,7 @@ mod tests {
                 emit_runtime_signal,
                 PeriodicConf::new(Duration::from_millis(1)),
             ),
-            bundles::task::<RuntimeTask, _, _, _>(
+            bundles::work::<RuntimeTask, _, _, _>(
                 count_runtime_task,
                 TaskDefinition::new("runtime-task-probe"),
             ),
@@ -2051,7 +2051,7 @@ mod tests {
     /// Verifies task readiness changes from in-memory runtime state without a second store probe.
     #[tokio::test]
     async fn task_readiness_waits_for_runtime_initialization() -> Result<(), SiteError> {
-        let bundle = bundles::bundle([bundles::task::<RuntimeTask, _, _, _>(
+        let bundle = bundles::bundle([bundles::work::<RuntimeTask, _, _, _>(
             count_runtime_task,
             TaskDefinition::new("readiness-task"),
         )]);

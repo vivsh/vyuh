@@ -8,5 +8,5 @@ async fn invalid(_: Data<Batch<Input>>) -> Result<FlowState, FlowError> {
 }
 
 fn main() {
-    let _ = bundles::task_batch(invalid, TaskDefinition::new("invalid"));
+    let _ = bundles::work_batch(invalid, TaskDefinition::new("invalid"));
 }

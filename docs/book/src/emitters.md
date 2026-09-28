@@ -136,10 +136,14 @@ Cron and periodic producers can submit their `Data<T>` to a registered task
 whose input type is `T`. The producer must only construct deterministic input:
 the durable task handler owns every side effect.
 
+Keep `executor = "task"` for both Work and Flow targets: it selects the shared
+durable runtime, not a handler kind. Register the target with `work` or `flow`.
+
 ```rust
-#[bundles::task]
-async fn rebuild(Data(input): Data<RebuildIndex>) -> Result<(), Error> {
-    rebuild_search_index(input).await
+#[bundles::work]
+async fn rebuild(Data(input): Data<RebuildIndex>) -> Result<(), WorkError> {
+    rebuild_search_index(input).await?;
+    Ok(())
 }
 
 #[bundles::cron(

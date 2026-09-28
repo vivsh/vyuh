@@ -12,7 +12,7 @@ struct Item(u32);
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct Group(u32);
 
-#[bundles::task(lane = WORK)]
+#[bundles::work(lane = WORK)]
 async fn item(input: Data<Item>) -> u32 {
     input.0.0 * 2
 }
@@ -40,7 +40,7 @@ async fn all_registration_parity() -> Result<(), TestError> {
     for direct in [false, true] {
         let bundle = if direct {
             bundles::bundle([
-                bundles::task(item, TaskDefinition::new("item").lane(WORK)),
+                bundles::work(item, TaskDefinition::new("item").lane(WORK)),
                 bundles::flow(group, TaskDefinition::new("group")),
             ])
         } else {

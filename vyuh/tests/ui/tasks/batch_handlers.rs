@@ -9,19 +9,19 @@ type JobBatch = Batch<Job>;
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 struct QualifiedJob;
 
-#[bundles::task_batch]
-async fn macro_batch(_: Data<JobBatch>) -> Result<Batch<TaskState>, TaskError> {
-    Ok(Batch::new(vec![TaskState::complete(())]))
+#[bundles::work_batch]
+async fn macro_batch(_: Data<JobBatch>) -> Result<Batch<WorkState>, WorkError> {
+    Ok(Batch::new(vec![WorkState::complete(())]))
 }
 
-#[bundles::task_batch(name = "qualified_batch")]
+#[bundles::work_batch(name = "qualified_batch")]
 async fn qualified_batch(_: Data<vyuh::tasks::Batch<QualifiedJob>>) {}
 
-async fn direct_batch(_: Data<Batch<Job>>) -> Result<(), TaskError> {
+async fn direct_batch(_: Data<Batch<Job>>) -> Result<(), WorkError> {
     Ok(())
 }
 
 fn main() {
     let _ = bundles::bundle! { macro_batch, qualified_batch };
-    let _ = bundles::task_batch(direct_batch, TaskDefinition::new("direct_batch"));
+    let _ = bundles::work_batch(direct_batch, TaskDefinition::new("direct_batch"));
 }

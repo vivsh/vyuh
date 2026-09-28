@@ -4,228 +4,139 @@
 [![docs.rs](https://img.shields.io/docsrs/vyuh)](https://docs.rs/vyuh)
 [![License](https://img.shields.io/crates/l/vyuh)](LICENSE)
 
-_Vyuh_ (व्यूह, _vyoo-huh_) means "formation" or "arrangement".
+**Build the application, not just its HTTP endpoints.**
 
-Vyuh is a handler-first Rust web framework for building typed APIs and
-application runtimes on top of Axum and SQLx.
+Vyuh is a Rust application framework on Axum and SQLx. Typed APIs,
+authentication, durable workflows, live updates, and MCP tools fit into one
+composable application model.
 
-It is built for applications that need more than routing. Routes, OpenAPI,
-durable tasks, live channels, scheduled emitters, commands, services, and
-operational introspection all live in one coherent model instead of feeling
-like unrelated add-ons.
+Organize by feature: a bundle brings its handlers, services, templates, assets,
+and schema registrations together. Merge bundles, mount them under prefixes, or
+ship them as reusable Rust crates.
 
-Vyuh keeps that model explicit. Handler signatures stay meaningful. Validation
-is opt-in. Auth is opt-in. Retry is explicit. Bundles compose features without
-hiding how the application is wired.
+[Book](https://vivsh.github.io/vyuh/docs/) ·
+[API reference](https://docs.rs/vyuh) ·
+[Examples](vyuh/examples)
 
-Website: [vivsh.github.io/vyuh](https://vivsh.github.io/vyuh/)
-Docs: [vivsh.github.io/vyuh/docs](https://vivsh.github.io/vyuh/docs/)
+**Rust 1.92+ · Pre-1.0: breaking changes are still expected.**
 
-Vyuh is usable today, but it is not API-stable yet. Expect breaking changes
-before `1.0`.
+## Why Vyuh?
 
-## Highlights
+- **One API contract.** Typed inputs, responses, validation, and auth metadata
+  drive [OpenAPI](docs/book/src/openapi.md). Documentation follows your handlers
+  and bundle structure, with explicit overrides where needed.
 
-- Typed handlers across subsystems: `Data<T>` is used consistently across
-  routes, commands, tasks, signals, emitters, and live channel delivery.
-- OpenAPI from real application code: request data, responses, validation, and
-  auth metadata come from handler shapes and route metadata, with no per-route
-  schema wiring.
-- OpenAPI and console are effectively free: enable them once, and they follow
-  the same bundle tree, prefixes, and nesting as the rest of the application.
-- Durable tasks as continuations: value-less tasks can complete, sleep, suspend,
-  resume, and request retry, with named isolation lanes owning retry/backoff
-  policy, batched persistence, idempotency retention, and optional local or
-  store-wide start-rate limits.
-- Built-in live delivery: channels let clients subscribe to typed signal
-  payloads over SSE, WebSocket, or long polling.
-- Read-only operations console: inspect routes, operations, config, tasks, and
-  runtime status from the same application.
-- Bundle-based composition: keep routes, assets, tasks, services, signals, and
-  docs together as one feature unit.
-- Crate-level feature packaging: a bundle can be exported from another Rust
-  crate and bring its handlers, services, assets, and metadata with it.
+- **Auth that fits your application.** Password, MFA, passwordless, and optional
+  federated login feed a common `AuthUser`. Typed permits and audiences express
+  access boundaries. You retain ownership of accounts, login routes, storage,
+  and domain-specific authorization. [Auth →](docs/book/src/auth.md)
 
-## How It Works
+- **Persistence that composes.** Mool provides typed queries, bulk operations,
+  and transactions; Gaman powers generated, reviewable migrations. Reusable
+  crates ship their own migration histories, composed in dependency order.
+  Apply reviewed migrations before deployment—not silently at startup.
+  [Database →](docs/book/src/db.md) · [Migrations →](docs/book/src/migrations.md)
 
-Two ideas drive the framework.
+- **Workflows that survive restarts.** Async Work handles effects, retries, and
+  external suspension. Synchronous Flow adds checkpoints, sleep, child spawning,
+  and ordered all-settled joins. Lanes, rates, batching, and leased lane ownership
+  control execution. Durable cron/periodic scheduling atomically records schedule
+  progress and task creation, coalescing missed runs.
+  [Tasks →](docs/book/src/tasks.md) · [Schedules →](docs/book/src/emitters.md)
 
-`Handler uniformity`
+- **Live applications and AI-facing tools.** Typed, scoped subscriptions deliver
+  updates over WebSocket, SSE, or long polling with bounded process-local replay.
+  Optional MCP exposes explicitly registered tools and static resources through
+  the same auth model, with UI attachments for compatible clients.
+  [Channels →](docs/book/src/channels.md) · [MCP →](docs/book/src/mcp.md)
 
-The same typed wrapper, `Data<T>`, appears across the major execution paths.
-That keeps the framework mentally small.
+For browser-facing applications, Vyuh also includes MiniJinja templates, embedded
+assets, typed uploads, local file storage, optional SMTP mail, named caches, and
+static page export. Explore the [web platform](docs/book/src/SUMMARY.md#web-platform).
 
-- Routes parse request data into handler input.
-- Commands receive typed input.
-- Tasks receive typed input and perform durable value-less work with optional
-  `TaskState` lifecycle control.
-- Signals and emitters exchange typed data. Channels can expose emitted
-  signal payloads to clients.
+## What the code looks like
 
-Uniformity here is practical, not forced. Services remain separate because they
-represent site-lifetime components, not handler data. Validation stays explicit
-through `Valid<E>`. Auth stays explicit through auth extractors.
-
-`Bundles as composition`
-
-A bundle is Vyuh's feature unit. A feature can own its routes, tasks, services,
-signals, emitters, assets, templates, and OpenAPI declaration together, then be
-merged or prefixed into a larger application.
-
-That keeps application structure visible. Instead of scattering feature wiring
-across several registries and config surfaces, Vyuh keeps the moving parts near
-the code that defines them.
-
-Bundles are also the packaging boundary. A crate can export a `Bundle`, and an
-application can import it like any other Rust dependency. That imported feature
-can still participate in routing, OpenAPI, console inspection, assets,
-templates, and the rest of the site.
-
-From that model, the framework gives you typed APIs, generated OpenAPI, durable
-tasks, channels, emitters, commands, services, and the built-in console without
-forcing each subsystem into a different programming style.
-
-## Getting Started
-
-Vyuh requires Rust 1.92 or newer.
-
-Add the crate with one backend feature for production work:
-
-```toml
-vyuh = { version = "0.2", features = ["postgres"] }
-schemars = "1"
-```
-
-For local experiments or documentation examples, Vyuh can run without a backend
-feature with no live database pool and in-memory tasks.
-
-Start with one route, one cron emitter, and one OpenAPI declaration:
+An authenticated, validated endpoint from the [blog example](vyuh/examples/blog.rs):
 
 ```rust
-use schemars::JsonSchema;
-use vyuh::prelude::*;
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, Validate)]
-struct Signup {
-    #[validate(email)]
-    email: String,
-
-    #[validate(min_length = 3, max_length = 80)]
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct UserCreated {
-    id: i64,
-    email: String,
-    name: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-struct SystemPulse {
-    source: String,
-}
-
-#[bundles::route(path = "/users", method = "POST")]
-async fn signup(Valid(Data(input)): Valid<Data<Signup>>) -> Result<Data<UserCreated>, Error> {
-    Ok(Data::new(UserCreated {
-        id: 1,
-        email: input.email.clone(),
-        name: input.name.clone(),
-    }))
-}
-
-#[bundles::cron(expr = "0 */5 * * * *")]
-async fn heartbeat() -> Data<SystemPulse> {
-    Data::new(SystemPulse {
-        source: "signup-service".into(),
-    })
-}
-
-#[tokio::main]
-async fn main() -> Result<(), SiteError> {
-    let app = bundles::bundle! {
-        signup,
-        heartbeat,
-    }
-    .with_conf(bundles::conf().openapi(
-        bundles::OpenApiConf::default()
-            .title("Vyuh Example")
-            .version("0.1.0")
-            .description("A route, a cron emitter, and generated OpenAPI.")
-            .spec("/openapi.json")
-            .viewer("/docs"),
-    ));
-
-    Site::run(SiteConf::from_env_with_files()?, app).await
+#[bundles::route(path = "/api/users", method = "POST")]
+async fn create_user(
+    site: Site,
+    user: AdminUser,
+    Valid(Json(input)): Valid<Json<UserInput>>,
+) -> Result<Json<UserOut>, Error> {
+    let mut db = site.db();
+    let _admin = user.into_user();
+    let user = insert_user(
+        &mut db,
+        &input.username,
+        &input.display_name,
+        &input.password,
+        input.is_admin,
+    )
+    .await?;
+    Ok(Json(UserOut::from(user)))
 }
 ```
 
-The route handles HTTP input. The cron handler runs on a schedule. Both are
-ordinary async functions, both return typed `Data<T>`, and both are registered
-through the same bundle.
+`AdminUser` is a `Permit<AdminAccess>`; `Valid` enforces input validation.
+The application's `insert_user` hashes the password and persists the user.
+Models, policies, helpers, and configuration live in the linked example.
 
-`Valid<Data<Signup>>` parses and validates request data at the handler
-boundary. `Data<UserCreated>` becomes the JSON response body and response
-schema. `with_conf(bundles::conf().openapi(...))` exposes the generated spec and docs page without
-adding per-route OpenAPI code. `Site::run(...)` is the standard application
-entrypoint.
+Macros are sugar over [direct registration](docs/book/src/routes.md#macro-sugar-and-direct-api).
+The same [bundle](docs/book/src/bundles.md) can own this endpoint, management
+commands, background work, and resources.
 
-Tasks, commands, signals, channels, and services follow the same bundle-driven
-model. See the getting started book for the full walkthrough.
+## Built to be operated
 
-As the application grows, keep adding features as bundles instead of widening
-one central setup file.
+Inspect routes, operations, tasks, and runtime status in the **read-only console**.
+Use structured logs, readiness probes, and Prometheus metrics. Run typed
+management commands against the same configured application. Test HTTP handlers
+without binding a port, with auth helpers and isolated database fixtures.
 
-## Common Paths
+[Testing and lifecycle](docs/book/src/site.md) ·
+[Commands](docs/book/src/commands.md) ·
+[Console](docs/book/src/console.md) ·
+[Deployment](docs/book/src/production.md)
 
-- Build an API: routes, request wrappers, response wrappers, validation,
-  errors, and OpenAPI.
-- Add durable background work: tasks plus a database-backed task store.
-- Add live updates: signals, emitters, and channels.
-- Add operations tooling: site-aware commands and the optional console.
-- Compose features cleanly: define one bundle per domain area and merge them at
-  the top level.
+Database-backed tasks atomically commit checkpoints with child creation, and
+child results with parent readiness. Execution resumes through later claims.
+It is **at least once**: external effects need idempotency, and cancellation
+cannot undo them. Signals, live replay, and service workers remain process-local;
+they do not inherit task durability.
 
-## Documentation
+## Try it
 
-- [Website](https://vivsh.github.io/vyuh/)
-- [Full docs](https://vivsh.github.io/vyuh/docs/)
-- [Source docs](docs/book/src/SUMMARY.md)
-- [Site and lifecycle](docs/book/src/site.md)
-- [Bundles](docs/book/src/bundles.md)
-- [OpenAPI](docs/book/src/openapi.md)
-- [Tasks](docs/book/src/tasks.md)
-- [Channels](docs/book/src/channels.md)
-- [Console](docs/book/src/console.md)
+The blog includes login, a browser UI, post/comment APIs, uploads, migrations,
+and OpenAPI. With Rust 1.92+, local PostgreSQL, and permission to create a
+database:
 
-## Backend Support
+```sh
+git clone https://github.com/vivsh/vyuh.git
+cd vyuh
 
-Vyuh supports Postgres, MySQL, and SQLite through Mool, with Postgres as the
-preferred production backend where concurrency and notification features matter
-most.
+createdb vyuh_blog
+export DATABASE_URL=postgres://localhost/vyuh_blog
+export VYUH_SECRET_KEY="$(openssl rand -hex 32)"
 
-Enable exactly one backend feature in production:
-
-```toml
-vyuh = { version = "0.2", features = ["postgres"] }
-vyuh = { version = "0.2", features = ["mysql"] }
-vyuh = { version = "0.2", features = ["sqlite"] }
+cargo run -p vyuh --features postgres,migrations --example blog -- migrate
+cargo run -p vyuh --features postgres,migrations --example blog -- users:create-admin \
+  --username admin --display-name Admin --password change-me
+cargo run -p vyuh --features postgres,migrations --example blog -- serve
 ```
 
-With no backend feature enabled, Vyuh uses SQLite-compatible aliases and an
-in-memory task store. That mode is useful for quick starts, docs, and tests,
-not for durable production workloads.
+Adjust database credentials as needed. Open [the blog](http://127.0.0.1:8080/),
+sign in, and explore the protected API docs at `/docs`.
+This is local development only: replace example credentials and configure access
+before deployment. The debug console permits anonymous access by default.
 
-## Current Caveats
+For your own application, follow [Getting Started](docs/book/src/getting-started.md).
 
-- Vyuh is not API-stable yet.
-- Services are in-process and not durable.
-- Tasks are durable single-task continuations, not workflow orchestration.
-- `MemoryTaskStore` is the no-backend default and is not durable.
-- Some features remain intentionally Postgres-only, such as `LISTEN`/`NOTIFY`
-  and selected SQL helpers.
+## Backend support
 
-## License
+Choose one backend: **PostgreSQL** for clustered deployments, **SQLite** for
+durable local single-process applications, or **MySQL** for experimental support.
+Backend-specific capabilities remain explicit. Without a backend, development
+builds use non-durable in-memory task storage.
 
-Vyuh is licensed under the [MIT License](LICENSE).
+[Contributing](CONTRIBUTING.md) · [MIT License](LICENSE)

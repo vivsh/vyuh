@@ -1,5 +1,5 @@
-use vyuh::tasks::TaskState;
+use vyuh::tasks::WorkState;
 
 fn main() {
-    let _ = TaskState::<()>::all(Vec::<()>::new(), ());
+    let _ = WorkState::<()>::all(Vec::<()>::new(), ());
 }

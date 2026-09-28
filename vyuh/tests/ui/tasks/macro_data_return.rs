@@ -4,7 +4,7 @@ use vyuh::prelude::*;
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
 struct Job;
 
-#[bundles::task]
+#[bundles::work]
 async fn invalid_task(_: Data<Job>) -> Data<String> {
     Data::new("result".to_string())
 }

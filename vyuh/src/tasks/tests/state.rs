@@ -10,7 +10,7 @@ use crate::tasks::{
     TaskConf, TaskDefinition, TaskDispatcher, TaskIdempotency, TaskLane, TaskLaneConf, TaskRecord,
     TaskRegistry, TaskStatus, TaskTick, store::MemoryTaskStore,
 };
-use crate::tasks::{FlowError, TaskError};
+use crate::tasks::{FlowError, WorkError};
 use crate::{Data, Site, SiteConf, bundles};
 
 const CHILD_LANE: TaskLane = TaskLane::new("child");
@@ -39,8 +39,8 @@ fn parent(
     }
 }
 
-async fn child(input: Data<Child>) -> Result<TaskState<u32>, TaskError> {
-    Ok(TaskState::complete(input.value * 2))
+async fn child(input: Data<Child>) -> Result<WorkState<u32>, WorkError> {
+    Ok(WorkState::complete(input.value * 2))
 }
 
 fn child_definition() -> TaskDefinition<Child> {
@@ -63,7 +63,7 @@ async fn fixture_with(conf: TaskConf) -> Result<(Site, TaskDispatcher<MemoryTask
         SiteConf::default().log_init(false).tasks(conf.clone()),
         bundles::bundle([
             bundles::flow(parent, TaskDefinition::new("parent")),
-            bundles::task(child, child_definition()),
+            bundles::work(child, child_definition()),
         ]),
     )
     .await
@@ -322,7 +322,7 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
     }
     let site = Site::build(
         SiteConf::default().log_init(false),
-        bundles::bundle([bundles::task(malformed, TaskDefinition::new("malformed"))]),
+        bundles::bundle([bundles::work(malformed, TaskDefinition::new("malformed"))]),
     )
     .await
     .map_err(|e| e.to_string())?;

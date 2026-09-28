@@ -17,18 +17,11 @@ help: the trait `tasks::returns::sealed::Flow` is not implemented for `Bypass`
   |
 5 | struct Bypass;
   | ^^^^^^^^^^^^^
-help: the following other types implement trait `tasks::returns::sealed::Flow`
- --> src/tasks/returns.rs
-  |
-  | impl sealed::Flow for () {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^ `()`
-...
-  | impl<T: Serialize + 'static> sealed::Flow for FlowState<T> {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `vyuh::prelude::FlowState<T>`
-...
-  | impl<T: IntoFlowOutcomePart> sealed::Flow for Result<T, FlowError> {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Result<T, FlowError>`
-note: required by a bound in `vyuh::tasks::IntoFlowOutcomePart`
+  = help: the following other types implement trait `tasks::returns::sealed::Flow`:
+            ()
+            Result<T, FlowError>
+            vyuh::prelude::FlowState<T>
+note: required by a bound in `IntoFlowOutcomePart`
  --> src/tasks/returns.rs
   |
   | pub trait IntoFlowOutcomePart: sealed::Flow {

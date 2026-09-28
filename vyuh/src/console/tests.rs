@@ -88,7 +88,7 @@ struct ConsoleTaskJob {
     message: String,
 }
 
-#[bundles::task(name = "console_test_task")]
+#[bundles::work(name = "console_test_task")]
 async fn console_test_task(Data(job): Data<ConsoleTaskJob>) {
     println!("console task test: {}", job.message);
 }

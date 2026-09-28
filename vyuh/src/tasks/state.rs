@@ -4,8 +4,8 @@ use super::{TaskOutcome, TaskRuntimeError};
 use serde::Serialize;
 
 /// Successful output or suspension returned by an asynchronous Work handler.
-/// Retry and failure decisions use TaskError instead.
-pub struct TaskState<T = ()> {
+/// Retry and failure decisions use WorkError instead.
+pub struct WorkState<T = ()> {
     inner: WorkValue<T>,
 }
 
@@ -14,7 +14,7 @@ enum WorkValue<T> {
     Suspend(String),
 }
 
-impl<T> TaskState<T> {
+impl<T> WorkState<T> {
     /// Retains output until framework conversion. Serialization and the 32 KiB
     /// envelope limit are checked after return; failures terminally fail this task.
     pub fn complete(output: T) -> Self {
@@ -32,7 +32,7 @@ impl<T> TaskState<T> {
     }
 }
 
-impl<T: Serialize + 'static> TaskState<T> {
+impl<T: Serialize + 'static> WorkState<T> {
     pub(super) fn into_outcome(self) -> TaskOutcome {
         match self.inner {
             WorkValue::Complete(output) => completion(output),

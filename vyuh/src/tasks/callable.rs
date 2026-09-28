@@ -4,9 +4,9 @@ use crate::callables::specs::{Tuple1, Tuple2, Tuple3, Tuple4, Tuple5, Tuple6};
 use crate::callables::{self, Callable, DataBox, IntoArgPart, IntoArgSpecs};
 use std::{future::Future, sync::Arc};
 
-/// Async task signature without unrelated transport return metadata requirements.
+/// Async Work signature without unrelated transport return metadata requirements.
 #[doc(hidden)]
-pub trait TaskCallable<Args: IntoArgSpecs>: Send + Sync {
+pub trait WorkCallable<Args: IntoArgSpecs>: Send + Sync {
     /// Typed return consumed immediately after handler completion.
     type Output;
     /// The original handler future; no extra boxed adapter future is required.
@@ -27,7 +27,7 @@ pub trait FlowCallable<Args: IntoArgSpecs>: Send + Sync {
 macro_rules! task_callable {
     ($tuple:ident; $($ty:ident),+) => {
         #[allow(non_snake_case)]
-        impl<H, F, R, $($ty: IntoArgPart),+> TaskCallable<$tuple<$($ty),+>> for H
+        impl<H, F, R, $($ty: IntoArgPart),+> WorkCallable<$tuple<$($ty),+>> for H
         where H: Fn($($ty),+) -> F + Send + Sync, F: Future<Output = R> + Send {
             type Output = R;
             type Future = F;
@@ -55,7 +55,7 @@ pub(super) fn work<C, H, Args>(
 ) -> Callable<C, crate::Error>
 where
     C: Send + 'static,
-    H: TaskCallable<Args> + 'static,
+    H: WorkCallable<Args> + 'static,
     Args: callables::FromContext<C> + IntoArgSpecs + 'static,
 {
     let handler = Arc::new(handler);

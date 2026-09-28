@@ -409,13 +409,13 @@ where
     }
 }
 
-/// Creates a durable task part.
-pub fn task<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+/// Registers an asynchronous Work handler using the shared task definition.
+pub fn work<T, H, Args, K>(handler: H, definition: TaskDefinition<T>) -> BundlePart
 where
     T: callables::DataValue,
-    H: crate::tasks::TaskCallable<Args> + 'static,
-    H::Output: crate::tasks::IntoTaskOutcomePart<K>,
-    Args: callables::FromContext<crate::tasks::TaskContext>
+    H: crate::tasks::WorkCallable<Args> + 'static,
+    H::Output: crate::tasks::IntoWorkOutcomePart<K>,
+    Args: callables::FromContext<crate::tasks::WorkContext>
         + callables::IntoArgSpecs
         + callables::HasData<T>
         + Send
@@ -429,15 +429,15 @@ where
     }
 }
 
-/// Creates a durable handler that receives matching local work as `Data<Batch<T>>`.
+/// Registers an asynchronous Work batch handler receiving local `Data<Batch<T>>`.
 ///
 /// Only work outcomes are supported; orchestration uses `flow`.
-pub fn task_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+pub fn work_batch<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
 where
     T: callables::DataValue,
-    H: crate::tasks::TaskCallable<Args> + 'static,
-    H::Output: crate::tasks::IntoTaskBatchOutcomePart,
-    Args: callables::FromContext<crate::tasks::BatchTaskContext>
+    H: crate::tasks::WorkCallable<Args> + 'static,
+    H::Output: crate::tasks::IntoWorkBatchOutcomePart,
+    Args: callables::FromContext<crate::tasks::BatchWorkContext>
         + callables::IntoArgSpecs
         + callables::HasData<crate::tasks::Batch<T>>
         + Send

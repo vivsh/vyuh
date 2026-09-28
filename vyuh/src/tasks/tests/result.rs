@@ -5,11 +5,11 @@ use super::*;
 fn exact_result_limit() -> Result<(), TaskRuntimeError> {
     let value = "x".repeat(RESULT_LIMIT - 9);
     assert!(matches!(
-        super::super::TaskState::complete(value.clone()).into_outcome(),
+        super::super::WorkState::complete(value.clone()).into_outcome(),
         super::super::TaskOutcome::CompleteWith { .. }
     ));
     assert!(matches!(
-        super::super::TaskState::complete(format!("{value}x")).into_outcome(),
+        super::super::WorkState::complete(format!("{value}x")).into_outcome(),
         super::super::TaskOutcome::Fail { .. }
     ));
     let json = success(&serde_json::to_string(&value)?);

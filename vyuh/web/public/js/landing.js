@@ -53,11 +53,11 @@ struct ReceiptJob {
     order_id: i64,
 }
 
-#[bundles::task(name = "send_receipt")]
+#[bundles::work(name = "send_receipt")]
 async fn send_receipt(
     site: Site,
     Valid(Data(input)): Valid<Data<ReceiptJob>>,
-) -> Result<(), Error> {
+) -> Result<(), WorkError> {
     let mail = site.service::<Mailer>()?;
     mail.send_receipt(input.order_id, &input.to).await?;
     Ok(())

@@ -3,7 +3,7 @@ use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
 struct Job;
 
 fn main() {
- let _ = TaskState::sleep((), std::time::Duration::ZERO);
- let _ = TaskState::spawn(Job, ());
- let _ = TaskState::spawn_with(Job, (), vyuh::tasks::TaskOptions::new());
+ let _ = WorkState::sleep((), std::time::Duration::ZERO);
+ let _ = WorkState::spawn(Job, ());
+ let _ = WorkState::spawn_with(Job, (), vyuh::tasks::TaskOptions::new());
 }

@@ -20,7 +20,7 @@ use vyuh::{
 struct DurableJob;
 
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-#[bundles::task]
+#[bundles::work]
 async fn durable_job(_: vyuh::Data<DurableJob>) {}
 
 #[bundles::route(path = "/echo", method = "POST")]

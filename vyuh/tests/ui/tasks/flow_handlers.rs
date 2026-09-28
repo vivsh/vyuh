@@ -20,5 +20,5 @@ fn main() {
     let _ = bundles::flow(state, TaskDefinition::new("state"));
     let _ = bundles::flow(Methods::flow, TaskDefinition::new("method"));
     let _ = bundles::flow(|_: Input| (), TaskDefinition::new("closure"));
-    let _ = bundles::task(|_: Input| async {}, TaskDefinition::new("work"));
+    let _ = bundles::work(|_: Input| async {}, TaskDefinition::new("work"));
 }

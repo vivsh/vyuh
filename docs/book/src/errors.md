@@ -1,7 +1,7 @@
 # Errors
 
 Vyuh uses different error shapes for different jobs. Application handlers should
-usually return `vyuh::Error`; task handlers use `TaskError` or `FlowError` instead.
+usually return `vyuh::Error`; task handlers use `WorkError` or `FlowError` instead.
 Subsystems still keep their own error types for
 framework machinery, and rendered output is transport-specific.
 
@@ -10,7 +10,7 @@ framework machinery, and rendered output is transport-specific.
 | Layer | Type | Use |
 | --- | --- | --- |
 | Application error | `vyuh::Error` | normal handler failure from routes, commands, signals, and emitters |
-| Task decision | `TaskError`, `FlowError` | explicit Work retry/failure or Flow terminal failure |
+| Task decision | `WorkError`, `FlowError` | explicit Work retry/failure or Flow terminal failure |
 | Subsystem error | `CommandError`, `TaskRuntimeError`, `SignalError`, `EmitterError`, `SiteError` | parsing, registration, storage, dispatch, startup, and other framework machinery |
 | Render input | `ErrorView` | transport-neutral error data passed to JSON, HTML, and command renderers |
 | HTTP JSON body | `ErrorReport` | default JSON response body for routes and middleware |
@@ -275,20 +275,20 @@ Commands do not render `ErrorReport`; command output is terminal text.
 
 ## Task Errors And Retry
 
-Task retry is explicit. Work handlers return `Result<_, TaskError>`; Flow handlers
+Task retry is explicit. Work handlers return `Result<_, WorkError>`; Flow handlers
 return `Result<_, FlowError>`. Framework/runtime errors converted with `?` become
 safe terminal failures. Vyuh does not infer retry behavior from `ErrorKind`.
 
-Return `Err(TaskError::retry(...))` when work should be retried:
+Return `Err(WorkError::retry(...))` when work should be retried:
 
 ```rust
 use vyuh::prelude::*;
 
-async fn send_email(Data(job): Data<EmailJob>) -> Result<(), TaskError> {
+async fn send_email(Data(job): Data<EmailJob>) -> Result<(), WorkError> {
     match deliver(&job).await {
         Ok(()) => Ok(()),
-        Err(err) if err.is_transient() => Err(TaskError::retry("Email provider temporarily unavailable")),
-        Err(_) => Err(TaskError::fail("Email delivery rejected")),
+        Err(err) if err.is_transient() => Err(WorkError::retry("Email provider temporarily unavailable")),
+        Err(_) => Err(WorkError::fail("Email delivery rejected")),
     }
 }
 ```
@@ -316,5 +316,5 @@ codes when converting into `ErrorReport`:
 | `Other` | `500` |
 
 Commands do not render `ErrorReport`; they render terminal text. Tasks do not
-retry from `ErrorKind`; Work handlers use `TaskError::retry(...)`. Flow handlers
+retry from `ErrorKind`; Work handlers use `WorkError::retry(...)`. Flow handlers
 cannot request retry. Both still use the same crash-recovery rules.
