@@ -16,6 +16,8 @@ mod cancellation;
 mod all_tests;
 #[path = "runner_flow.rs"]
 mod flow_tests;
+#[path = "runner_refill.rs"]
+mod refill;
 static HOOK_GATE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Clone, serde::Deserialize, schemars::JsonSchema, serde::Serialize)]
@@ -483,6 +485,7 @@ async fn owner_loss_aborts_the_entire_batch_invocation() -> Result<(), String> {
                 }),
             }],
         },
+        false,
         false,
     );
     assert!(runner.running_invocations.is_empty());

@@ -2,6 +2,19 @@
 use super::*;
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
+    /// Releases per-task refill capacity only after the store acknowledges its outcomes.
+    pub(super) fn acknowledge_commits(&mut self, commits: &[TaskCommit]) {
+        let mut committed = HashMap::<TaskLane, usize>::new();
+        for commit in commits {
+            *committed.entry(commit.lane).or_default() += 1;
+        }
+        for (lane, count) in committed {
+            if let Some(queue) = self.lane_mut(lane) {
+                queue.uncommitted = queue.uncommitted.saturating_sub(count);
+            }
+        }
+    }
+
     /// Stops renewal for cancelled shared members without discarding unaffected execution.
     pub(super) fn detach_cancelled(&mut self, ids: &[crate::tasks::TaskId]) {
         for id in ids {

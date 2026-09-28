@@ -13,7 +13,7 @@ use super::{
     writes::{batch_update_rows, update_idempotency_batch},
 };
 
-const RUNTIME_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
+pub(super) const RUNTIME_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
 const TOKEN_SCALE: i64 = 1_000_000;
 
 impl DbTaskStore {
@@ -32,7 +32,7 @@ impl DbTaskStore {
         initialize_rate_rows(&mut transaction, &conf, &fingerprint, now).await?;
         initialize_lock_rows(&mut transaction, &conf, now).await?;
         transaction.commit().await?;
-        *self.runtime_conf.write().await = Some(conf);
+        *self.runtime_conf.write().await = Some((conf.into(), fingerprint.into()));
         Ok(())
     }
 }
@@ -257,18 +257,46 @@ async fn initialize_rate_rows(
 
 pub(super) async fn verify_runtime_policy(
     transaction: &mut db::DbTransaction<'_>,
-    conf: &TaskStoreConf,
-) -> Result<(), TaskRuntimeError> {
-    let expected = crate::tasks::store::policy_fingerprint(conf);
-    let stored = load_runtime_for_share(transaction).await?.ok_or_else(|| {
-        TaskRuntimeError::InvalidConfig("task runtime policy has not been initialized".into())
-    })?;
-    if stored.policy_fingerprint != expected {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task worker policy changed after this worker initialized".into(),
-        ));
+    expected: &str,
+) -> Result<chrono::DateTime<Utc>, TaskRuntimeError> {
+    use db::DbSession as _;
+    #[cfg(feature = "postgres")]
+    let sql = "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = $1 FOR SHARE";
+    #[cfg(feature = "mysql")]
+    let sql = "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = ? LOCK IN SHARE MODE";
+    #[cfg(feature = "sqlite")]
+    let sql =
+        "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = ?";
+    let stored: Option<RuntimeTurnRow> = transaction
+        .fetch_optional(db::Statement::raw(sql).bind(RUNTIME_ID))
+        .await?;
+    let stored = stored.ok_or_else(missing_policy)?;
+    stored.verify(expected)?;
+    Ok(stored.now)
+}
+
+/// Transaction-local policy evidence and the database clock from one locked read.
+#[derive(db::Record)]
+pub(super) struct RuntimeTurnRow {
+    policy_fingerprint: String,
+    pub(super) now: chrono::DateTime<Utc>,
+}
+
+impl RuntimeTurnRow {
+    /// Rejects a replaced policy before accepting any row mutations.
+    pub(super) fn verify(&self, expected: &str) -> Result<(), TaskRuntimeError> {
+        if self.policy_fingerprint != expected {
+            return Err(TaskRuntimeError::InvalidConfig(
+                "task worker policy changed after this worker initialized".into(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+/// Missing metadata is an initialization error, never an empty successful poll.
+pub(super) fn missing_policy() -> TaskRuntimeError {
+    TaskRuntimeError::InvalidConfig("task runtime policy has not been initialized".into())
 }
 
 /// Replaces an idle policy and discards buckets that belong to its old shape.
@@ -353,41 +381,8 @@ async fn load_runtime_for_update(
         .await?)
 }
 
-#[cfg(feature = "postgres")]
-/// Holds a shared policy lock across each persistent runtime mutation.
-async fn load_runtime_for_share(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    use crate::db::backend::RowLockExt as _;
-    let table = DbTaskStore::runtime_table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(RUNTIME_ID)))
-        .for_share()
-        .first::<TaskRuntimeRow>()
-        .exec(transaction)
-        .await?)
-}
-
-#[cfg(feature = "mysql")]
-/// Uses the shared-lock spelling supported by both MySQL and MariaDB.
-async fn load_runtime_for_share(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    use db::DbSession as _;
-    Ok(transaction.fetch_optional(db::Statement::raw(
-        "SELECT id, policy_fingerprint, updated_at FROM vyuh_task_runtime WHERE id = ? LOCK IN SHARE MODE"
-    ).bind(RUNTIME_ID)).await?)
-}
-
 #[cfg(feature = "sqlite")]
 async fn load_runtime_for_update(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    load_runtime(transaction).await
-}
-
-#[cfg(feature = "sqlite")]
-async fn load_runtime_for_share(
     transaction: &mut db::DbTransaction<'_>,
 ) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
     load_runtime(transaction).await

@@ -22,7 +22,12 @@ async fn cancellation_query_counts() -> Result<(), String> {
         .claim_tasks("owner", &[claim()])
         .await
         .map_err(|e| e.to_string())?;
-    assert_queries(&queries, 4, 1, false)?;
+    assert_queries(
+        &queries,
+        if cfg!(feature = "mysql") { 3 } else { 1 },
+        1,
+        false,
+    )?;
     let leases = [crate::tasks::TaskLease {
         task_id: id,
         lane: crate::tasks::DEFAULT_TASK_LANE,
@@ -40,7 +45,7 @@ async fn cancellation_query_counts() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     assert_eq!(lost, vec![id]);
-    assert_queries(&queries, 1, 1, false)?;
+    assert_queries(&queries, 2, 1, false)?;
     Ok(())
 }
 
@@ -59,7 +64,8 @@ fn assert_queries(
     assert_eq!(
         task_queries
             .iter()
-            .filter(|sql| sql.starts_with("\"SELECT "))
+            .filter(|sql| sql.starts_with("\"SELECT ")
+                || (sql.starts_with("\"WITH ") && !sql.contains("UPDATE vyuh_tasks")))
             .count(),
         selects,
         "{sql:?}"

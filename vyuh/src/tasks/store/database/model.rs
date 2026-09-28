@@ -66,6 +66,38 @@ pub(super) struct TaskClaimRow {
     remaining_completions: i32,
 }
 
+/// Renewal-only projection; payloads, checkpoints, results and join metadata stay in storage.
+#[derive(db::Model)]
+#[table(name = "vyuh_tasks")]
+pub(super) struct TaskLeaseRow {
+    #[column(primary_key)]
+    pub(super) id: uuid::Uuid,
+    pub(super) lane_name: String,
+    pub(super) status: i16,
+    pub(super) cancelled: bool,
+    pub(super) locked_by: Option<String>,
+    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) lease_duration_ms: Option<i64>,
+    /// Write-only timestamp populated from this transaction's database clock.
+    #[column(selectable = false)]
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&TaskRow> for TaskLeaseRow {
+    fn from(row: &TaskRow) -> Self {
+        Self {
+            id: row.id,
+            lane_name: row.lane_name.clone(),
+            status: row.status,
+            cancelled: row.cancelled,
+            locked_by: row.locked_by.clone(),
+            leased_until: row.leased_until,
+            lease_duration_ms: row.lease_duration_ms,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 impl From<TaskClaimRow> for TaskRow {
     fn from(claim: TaskClaimRow) -> Self {
         Self {

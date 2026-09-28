@@ -81,6 +81,11 @@ The `vyuh` crate is organized around these subsystems:
   lane and optional key rule; reusable bundles may contribute complete lane
   defaults, while site configuration resolves or strictly rejects missing
   lanes.
+  Ordinary lane refill capacity subtracts running invocations, queued tasks, and
+  all completed-but-uncommitted task outcomes, regardless of outcome kind.
+  This uses existing lane accounting without scanning the commit queue. Commit
+  acknowledgements release refill capacity on a later poll; handler concurrency
+  remains invocation-based. Owned lanes already drain a cohort before refilling.
   Local handler batching groups matching rows already held by a lane queue and
   never adds a store query or waiting policy. It is independent of durable lane
   ownership: each row retains its own attempt, rate permit, lease, fenced
@@ -205,6 +210,21 @@ The `vyuh` crate is organized around these subsystems:
   migration-owned and are never created or altered during site startup. Store
   internals are framework-owned; the ordinary site facade exposes only typed
   submission, cancellation, resume, reassignment, and read-only inspection.
+  Initialized configuration and its expected fingerprint are shared immutably;
+  every mutation transaction still verifies the stored policy. Ordinary
+  PostgreSQL/SQLite claim-only reads combine policy, bounded candidates and wake
+  evidence without moving transition logic out of Rust. Statement-local recovery
+  evidence selects an ordered pending-index path when no expired lease is due;
+  recovery retains the shared readiness ordering and transition engine. Mixed
+  turns combine candidate/wake reads only after outcome and renewal writes.
+  PostgreSQL mixed observations lock requested task identities in deterministic
+  order and project payload fields only for owned outcomes. SQLite keeps separate
+  outcome and renewal reads. Renewal reads omit
+  payload/checkpoint/result fields and reuse accepted rows only within the same
+  transaction. A clone-shared turn counter spaces bounded physical idempotency
+  archive cleanup; logical expiry and all lease/lifecycle decisions remain
+  store-owned and are never deferred by that counter. Mixed turns retain
+  commit-before-renew-before-claim ordering.
 - Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.
@@ -362,6 +382,9 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
    workers before accepting HTTP work. One task dispatcher rotates configured
    lanes fairly, fills bounded per-lane queues through batched lane claims,
    renews active leases, and commits handler outcomes through one common batch.
+   Input queues remain isolated by lane for admission, rates, concurrency, and
+   ownership. The shared outcome queue batches completed work across lanes;
+   completion writes are not subject to handler rate permits.
    Submission bypasses the runner and commits immediately. Saturated lanes use
    the short poll interval; future readiness, lease, and rate deadlines use
    database time; otherwise the runner uses the bounded fallback interval.

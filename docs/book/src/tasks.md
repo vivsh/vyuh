@@ -661,9 +661,14 @@ buffer bound the whole runner.
 
 Queue prefetch uses a fixed hysteresis rule: Vyuh refills a lane only when its
 queued work is below half of that lane's concurrency quota, then claims up to
-the lane's normal free capacity. The paced store tick still runs for commits,
-lease renewal, and other lanes; a well-buffered lane is simply skipped rather
-than queried again.
+the lane's normal free capacity. Refill capacity subtracts running invocations,
+queued tasks, and completed-but-uncommitted task outcomes from the lane quota.
+This applies to every outcome, not just fan-out. Batch completion counts every
+item until its outcome is acknowledged, although execution uses one handler slot.
+The paced store tick still runs for commits, lease renewal, and other lanes; a
+full lane is simply skipped rather than queried again. Claims are calculated
+before commit acknowledgement, so a fully occupied fast-handler lane may alternate
+commit-only and refill polls. Already queued work continues executing normally.
 
 ```rust
 use vyuh::prelude::*;
@@ -892,6 +897,16 @@ fingerprint prevents workers with incompatible lane, retry, rate, ownership,
 hook, or idempotency policies from sharing one store. The lane-owner table has
 one primary-key row per configured locked lane and no foreign keys or secondary
 indexes.
+
+Database work is batched without changing polling or lease timing. Ordinary
+lanes never consult lane-lock storage. Optional rates, lane ownership, recovery,
+and workflow transitions can require additional bounded statements in the same
+transaction. PostgreSQL and SQLite combine ordinary claim evidence, while
+mixed turns still apply outcomes and renewals before selecting more work.
+Recovery eligibility is checked from current database evidence, not a cache or
+a slower recovery schedule. Expired idempotency reservations are physically cleaned up
+periodically; this does not extend their logical retention window or prevent
+reuse of an expired key.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
 migrations before starting task workers; `Site::build` never creates or alters

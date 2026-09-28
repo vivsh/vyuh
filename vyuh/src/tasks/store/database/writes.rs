@@ -32,8 +32,7 @@ impl DbTaskStore {
         }
         validate_write_lanes(self, &writes).await?;
         let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
+        let now = verify_policy(self, &mut transaction).await?;
         let receipts = self.store_writes_tx(&mut transaction, writes, now).await?;
         transaction.commit().await?;
         Ok(receipts)
@@ -46,8 +45,7 @@ impl DbTaskStore {
     ) -> Result<Option<TaskReceipt>, TaskRuntimeError> {
         validate_write_lanes(self, std::slice::from_ref(&scheduled.write)).await?;
         let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
+        let now = verify_policy(self, &mut transaction).await?;
         let row = schedule_row(&scheduled.name, scheduled.occurrence, now)?;
         insert_schedule_if_missing(&mut transaction, &row).await?;
         let cursor = load_schedule_for_update(&mut transaction, &scheduled.name).await?;
@@ -78,8 +76,7 @@ impl DbTaskStore {
         names: &[String],
     ) -> Result<crate::tasks::TaskScheduleSnapshot, TaskRuntimeError> {
         let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
+        let now = verify_policy(self, &mut transaction).await?;
         if names.is_empty() {
             transaction.commit().await?;
             return Ok(crate::tasks::TaskScheduleSnapshot {
@@ -136,14 +133,32 @@ impl DbTaskStore {
         if commits.is_empty() {
             return Ok(());
         }
-        let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
-        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
+        let (conf, fingerprint) = self.runtime_conf.read().await.clone().ok_or_else(|| {
             TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
         })?;
-        let (children, deliveries, waits) = self
-            .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
+        crate::tasks::store::all::validate_turn(commits, self.batch_size, conf.max_all_children)?;
+        let mut transaction = self.pool.begin().await?;
+        let (now, loaded) = if commits
+            .iter()
+            .all(|commit| !locked_lane(&conf, commit.lane.as_str()))
+        {
+            let (now, rows) = super::turn_read::outcomes(
+                &mut transaction,
+                runner_id,
+                commits,
+                &fingerprint,
+                self.batch_size,
+            )
+            .await?;
+            (now, Some(rows))
+        } else {
+            (
+                super::runtime::verify_runtime_policy(&mut transaction, &fingerprint).await?,
+                None,
+            )
+        };
+        let (children, deliveries, waits, _) = self
+            .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now, loaded)
             .await?;
         finalize_workflow(
             &mut transaction,
@@ -167,22 +182,27 @@ impl DbTaskStore {
         commits: &[TaskCommit],
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
+        loaded: Option<Vec<TaskRow>>,
     ) -> Result<
         (
             Vec<TaskRow>,
             Vec<(TaskId, String)>,
             Vec<super::all::WaitWrite>,
+            Vec<super::model::TaskLeaseRow>,
         ),
         TaskRuntimeError,
     > {
         crate::tasks::store::all::validate_turn(commits, self.batch_size, conf.max_all_children)?;
         if commits.is_empty() {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
         }
         let mut outcomes = collect_outcomes(commits)?;
         let allowed = fenced_commits(transaction, runner_id, commits, conf, now).await?;
         let ids = outcomes.keys().map(|id| id.into_uuid()).collect::<Vec<_>>();
-        let mut rows = load_owned_batch(transaction, ids, runner_id).await?;
+        let mut rows = match loaded {
+            Some(rows) => rows,
+            None => load_owned_batch(transaction, ids, runner_id).await?,
+        };
         rows.retain(|row| allowed.contains(&TaskId::new(row.id)));
         let (children, conflicts, waits) =
             workflow::prepare_children(transaction, &rows, &outcomes, conf, now, self.batch_size)
@@ -191,7 +211,8 @@ impl DbTaskStore {
         warn_unowned_outcomes(&outcomes, runner_id);
         update_idempotency_batch(transaction, &mut rows, conf, now).await?;
         batch_update_rows(transaction, &rows, self.batch_size).await?;
-        Ok((children, deliveries, waits))
+        let settled = rows.iter().map(super::model::TaskLeaseRow::from).collect();
+        Ok((children, deliveries, waits, settled))
     }
 
     /// Resumes a suspended task only while it remains suspended.
@@ -202,8 +223,7 @@ impl DbTaskStore {
     ) -> Result<bool, TaskRuntimeError> {
         crate::tasks::result::validate_resume(&input)?;
         let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
+        let now = verify_policy(self, &mut transaction).await?;
         let table = Self::table();
         let patch = ResumePatch {
             status: TaskStatus::Pending.as_i16(),
@@ -220,88 +240,6 @@ impl DbTaskStore {
             .await?;
         transaction.commit().await?;
         Ok(changed > 0)
-    }
-
-    /// Extends leases still owned by this runner and reports lost ownership.
-    #[allow(dead_code)]
-    pub(super) async fn renew_leases_impl(
-        &self,
-        runner_id: &str,
-        leases: &[TaskLease],
-    ) -> Result<Vec<TaskId>, TaskRuntimeError> {
-        if leases.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut transaction = self.pool.begin().await?;
-        verify_policy(self, &mut transaction).await?;
-        let now = statement_now(&mut transaction).await?;
-        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
-            TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
-        })?;
-        let mut deliveries = Vec::new();
-        let (lost, _) = self
-            .renew_leases_tx(
-                &mut transaction,
-                runner_id,
-                leases,
-                &conf,
-                now,
-                &mut deliveries,
-            )
-            .await?;
-        finalize_workflow(
-            &mut transaction,
-            &[],
-            deliveries,
-            &[],
-            &conf,
-            now,
-            self.batch_size,
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(lost)
-    }
-
-    /// Renews still-owned leases inside an already-authorized scheduler transaction.
-    pub(super) async fn renew_leases_tx(
-        &self,
-        transaction: &mut db::DbTransaction<'_>,
-        runner_id: &str,
-        leases: &[TaskLease],
-        conf: &crate::tasks::TaskStoreConf,
-        now: DateTime<Utc>,
-        deliveries: &mut Vec<(TaskId, String)>,
-    ) -> Result<(Vec<TaskId>, Vec<TaskId>), TaskRuntimeError> {
-        if leases.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let allowed = fenced_leases(transaction, runner_id, leases, conf, now).await?;
-        let ids = leases
-            .iter()
-            .filter(|lease| allowed.contains(&lease.task_id))
-            .map(|lease| lease.task_id.into_uuid())
-            .collect::<Vec<_>>();
-        let mut rows = super::cancellation::load_renewals(transaction, ids).await?;
-        let lanes = leases
-            .iter()
-            .map(|lease| (lease.task_id, lease.lane))
-            .collect::<std::collections::HashMap<_, _>>();
-        rows.retain(|row| {
-            lanes
-                .get(&TaskId::new(row.id))
-                .is_some_and(|lane| lane.as_str() == row.lane_name)
-        });
-        let cancelled = super::cancellation::classify_renewals(&mut rows, runner_id);
-        self.cancel_renewals(transaction, &mut rows, conf, now, deliveries)
-            .await?;
-        for row in &mut rows {
-            row.leased_until = Some(self.lease_until(row, now)?);
-            row.updated_at = now;
-        }
-        batch_renew(transaction, &rows, self.batch_size).await?;
-        let task_ids = leases.iter().map(|lease| lease.task_id).collect::<Vec<_>>();
-        Ok((lost_ids(&task_ids, &rows), cancelled))
     }
 
     /// Reassigns non-running work after verifying the source lane has drained.
@@ -512,14 +450,18 @@ async fn load_lane_lock(
         .await?)
 }
 
+#[path = "writes_renewals.rs"]
+mod renewals;
 #[path = "writes_submissions.rs"]
 mod submissions;
+#[cfg(test)]
+pub(super) use submissions::delete_expired_owner_ids;
 pub(super) use submissions::delete_expired_owners;
 use submissions::*;
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 /// Locks every still-owned task in one outcome batch before mutation.
-async fn load_owned_batch(
+pub(super) async fn load_owned_batch(
     transaction: &mut db::DbTransaction<'_>,
     task_ids: Vec<uuid::Uuid>,
     runner_id: &str,
@@ -539,7 +481,7 @@ async fn load_owned_batch(
 
 #[cfg(feature = "sqlite")]
 /// Loads every still-owned task inside SQLite's serial write transaction.
-async fn load_owned_batch(
+pub(super) async fn load_owned_batch(
     transaction: &mut db::DbTransaction<'_>,
     task_ids: Vec<uuid::Uuid>,
     runner_id: &str,
@@ -831,32 +773,6 @@ pub(super) async fn batch_update_rows(
         .collect::<Vec<_>>();
     super::all::clear(transaction, &terminal_waits, batch_size).await?;
     Ok(())
-}
-
-/// Persists renewed ownership deadlines without touching lifecycle fields.
-async fn batch_renew(
-    transaction: &mut db::DbTransaction<'_>,
-    rows: &[TaskRow],
-    batch_size: usize,
-) -> Result<(), TaskRuntimeError> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let table = DbTaskStore::table();
-    db::from(&table)
-        .update_many(rows, (&table.leased_until, &table.updated_at))
-        .batch_size(batch_size)
-        .exec(transaction)
-        .await?;
-    Ok(())
-}
-
-fn lost_ids(requested: &[TaskId], rows: &[TaskRow]) -> Vec<TaskId> {
-    requested
-        .iter()
-        .copied()
-        .filter(|id| !rows.iter().any(|row| row.id == id.into_uuid()))
-        .collect()
 }
 
 fn chrono_duration(duration: Duration) -> Result<chrono::Duration, TaskRuntimeError> {

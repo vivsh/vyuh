@@ -17,8 +17,17 @@ pub struct DbTaskStore {
     pub(super) pool: db::DbPool,
     pub(super) batch_size: usize,
     pub(super) lease_duration: std::time::Duration,
-    pub(super) runtime_conf:
-        std::sync::Arc<tokio::sync::RwLock<Option<crate::tasks::TaskStoreConf>>>,
+    #[allow(clippy::type_complexity)]
+    // Publish configuration and its identity as one immutable unit.
+    pub(super) runtime_conf: std::sync::Arc<
+        tokio::sync::RwLock<
+            Option<(
+                std::sync::Arc<crate::tasks::TaskStoreConf>,
+                std::sync::Arc<str>,
+            )>,
+        >,
+    >,
+    pub(super) maintenance_turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DbTaskStore {
@@ -29,7 +38,16 @@ impl DbTaskStore {
             batch_size: batch_size.max(1),
             lease_duration,
             runtime_conf: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            maintenance_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Runs bounded archival cleanup on the first and every thirty-second claim turn.
+    /// Failed turns may advance this housekeeping cadence; correctness never depends on it.
+    pub(super) fn maintenance_due(&self) -> bool {
+        self.maintenance_turn
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(32)
     }
 
     /// Returns the selected backend's typed task table handle.
@@ -85,7 +103,7 @@ impl DbTaskStore {
     /// Calculates an absolute lease deadline while rejecting invalid durations.
     pub(super) fn lease_until(
         &self,
-        row: &TaskRow,
+        lease_duration_ms: Option<i64>,
         now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>, TaskRuntimeError> {
         let default_milliseconds =
@@ -94,7 +112,7 @@ impl DbTaskStore {
                     "task lease duration is outside the supported range".into(),
                 )
             })?;
-        let milliseconds = row.lease_duration_ms.unwrap_or(default_milliseconds);
+        let milliseconds = lease_duration_ms.unwrap_or(default_milliseconds);
         if milliseconds < 0 {
             return Err(TaskRuntimeError::TaskExecutionError(
                 "task lease duration cannot be negative".into(),
@@ -208,4 +226,4 @@ where
 }
 #[cfg(all(test, feature = "migrations"))]
 #[path = "tests/common.rs"]
-mod tests;
+pub(super) mod tests;

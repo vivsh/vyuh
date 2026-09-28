@@ -18,17 +18,29 @@ impl DbTaskStore {
         commits: &[TaskCommit],
         renewals: &[TaskLease],
     ) -> Result<TaskTick, TaskRuntimeError> {
-        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
+        let (conf, fingerprint) = self.runtime_conf.read().await.clone().ok_or_else(|| {
             TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
         })?;
-        let mut transaction = self.pool.begin().await?;
-        super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
-        let now = statement_now(&mut transaction).await?;
         let lanes = locked_turn_lanes(&conf, claims, commits, renewals);
-        super::writes::lock_lane_rows(&mut transaction, lanes).await?;
-        let (children, mut deliveries, waits) = self
-            .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now)
+        crate::tasks::store::all::validate_turn(commits, self.batch_size, conf.max_all_children)?;
+        let mut transaction = self.pool.begin().await?;
+        let (now, loaded, observations, preloaded) = self
+            .read_turn(
+                &mut transaction,
+                runner_id,
+                &conf,
+                &fingerprint,
+                claims,
+                commits,
+                renewals,
+                lanes.is_empty(),
+            )
             .await?;
+        super::writes::lock_lane_rows(&mut transaction, lanes).await?;
+        let (children, mut deliveries, waits, mut settled) = self
+            .commit_outcomes_tx(&mut transaction, runner_id, commits, &conf, now, loaded)
+            .await?;
+        settled.extend(observations);
         let (lost, cancelled) = self
             .renew_leases_tx(
                 &mut transaction,
@@ -37,6 +49,7 @@ impl DbTaskStore {
                 &conf,
                 now,
                 &mut deliveries,
+                settled,
             )
             .await?;
         let (mut poll, new_idle) = self
@@ -47,6 +60,7 @@ impl DbTaskStore {
                 &conf,
                 now,
                 &mut deliveries,
+                preloaded,
             )
             .await?;
         let wake_lanes = self
@@ -67,6 +81,60 @@ impl DbTaskStore {
             lost,
             cancelled,
             wake_lanes,
+        })
+    }
+
+    /// Reads only transaction-local evidence, preserving lane-before-task lock ordering.
+    async fn read_turn(
+        &self,
+        transaction: &mut crate::db::DbTransaction<'_>,
+        runner_id: &str,
+        conf: &TaskStoreConf,
+        fingerprint: &str,
+        claims: &[LaneClaim],
+        commits: &[TaskCommit],
+        renewals: &[TaskLease],
+        ordinary: bool,
+    ) -> Result<
+        (
+            chrono::DateTime<chrono::Utc>,
+            Option<Vec<super::model::TaskRow>>,
+            Vec<super::model::TaskLeaseRow>,
+            Option<(
+                Vec<super::model::TaskRow>,
+                Vec<super::model::TaskRow>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            )>,
+        ),
+        TaskRuntimeError,
+    > {
+        let early_claim = if commits.is_empty() && renewals.is_empty() {
+            super::claim_read::eligible(conf, claims)
+        } else {
+            None
+        };
+        Ok(if let Some(claim) = early_claim {
+            let (now, probe, selected, deadline) =
+                super::claim_read::read(transaction, claim, fingerprint, self.batch_size).await?;
+            (now, None, Vec::new(), Some((probe, selected, deadline)))
+        } else if ordinary {
+            let (now, rows, leases) = super::turn_read::observations(
+                transaction,
+                runner_id,
+                commits,
+                renewals,
+                fingerprint,
+                self.batch_size,
+            )
+            .await?;
+            (now, rows, leases, None)
+        } else {
+            (
+                super::runtime::verify_runtime_policy(transaction, fingerprint).await?,
+                None,
+                Vec::new(),
+                None,
+            )
         })
     }
 
@@ -117,15 +185,6 @@ fn locked_turn_lanes(
         .chain(renewals.iter().map(|lease| lease.lane))
         .filter(|lane| configured(*lane))
         .collect()
-}
-
-async fn statement_now(
-    transaction: &mut crate::db::DbTransaction<'_>,
-) -> Result<chrono::DateTime<chrono::Utc>, TaskRuntimeError> {
-    use crate::db::DbSession as _;
-    Ok(transaction
-        .fetch_scalar(crate::db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
-        .await?)
 }
 
 #[cfg(test)]

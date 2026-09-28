@@ -67,8 +67,8 @@ async fn rollback(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
     let commits = [commit(child, TaskOutcome::Complete)];
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries, waits) = store
-        .commit_outcomes_tx(&mut tx, "children", &commits, &conf(), now)
+    let (children, deliveries, waits, _) = store
+        .commit_outcomes_tx(&mut tx, "children", &commits, &conf(), now, None)
         .await?;
     crate::tasks::store::database::writes::finalize_workflow(
         &mut tx,
@@ -95,7 +95,15 @@ async fn rollback(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
         .fetch_scalar(db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
         .await?;
     let (poll, _) = store
-        .claim_tasks_tx(&mut tx, "parent", &[claim()], &conf(), now, &mut Vec::new())
+        .claim_tasks_tx(
+            &mut tx,
+            "parent",
+            &[claim()],
+            &conf(),
+            now,
+            &mut Vec::new(),
+            None,
+        )
         .await?;
     assert!(
         poll.lanes

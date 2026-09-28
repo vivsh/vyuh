@@ -51,11 +51,13 @@ impl LaneQueue {
         self.tasks.len().saturating_mul(2) < self.conf.concurrency()
     }
 
+    /// Bounds refills by executing, queued, and completed-but-uncommitted work.
     fn available(&self, batch_size: usize) -> usize {
         if self.needs_refill() {
             self.conf
                 .concurrency()
                 .saturating_sub(self.running + self.tasks.len())
+                .saturating_sub(self.uncommitted)
                 .min(batch_size)
         } else {
             0
@@ -362,14 +364,20 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         }
         self.record_renewals(&result.renewals, &result.tick.lost, &result.tick.cancelled);
         self.health.succeeded();
-        if !state.commits.is_empty() {
+        let committed = !state.commits.is_empty();
+        if committed {
             self.metrics.commit(result.started.elapsed(), false);
             self.wake_committed_lanes(&state.commits);
             self.acknowledge_commits(&state.commits);
             state.commits.clear();
         }
-        let mut deadline =
-            self.apply_poll_with_hooks(site, hook_sender, result.tick.poll, !state.shutting_down);
+        let mut deadline = self.apply_poll_with_hooks(
+            site,
+            hook_sender,
+            result.tick.poll,
+            !state.shutting_down,
+            committed,
+        );
         let next_poll = state.last_tick + self.poll_interval;
         for lane in result.tick.wake_lanes {
             if let Some(queue) = self.lane_mut(lane) {
@@ -627,7 +635,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
                 continue;
             }
             let available = lane.available(self.batch_size).min(capacity).min(batch);
-            let available = all::claim_capacity(lane, &self.pending_commits, available);
             let limit = lane.claim_limit(available, now);
             if limit > 0 {
                 claims.push(LaneClaim {
@@ -661,6 +668,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         hook_sender: &mpsc::Sender<HookCompletion>,
         poll: TaskPoll,
         spawn_hooks: bool,
+        committed: bool,
     ) -> tokio::time::Instant {
         let now = tokio::time::Instant::now();
         let fallback = now + self.fallback_interval;
@@ -688,7 +696,8 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
             );
         }
         self.apply_poll_effects(site, hook_sender, effects, spawn_hooks);
-        if !saw_lane {
+        // A commit-only turn already woke its lanes; it is not an idle scan.
+        if !saw_lane && !committed {
             self.lanes
                 .iter_mut()
                 .filter(|lane| lane.available(batch_size) > 0)
@@ -949,18 +958,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
         for commit in commits {
             if let Some(lane) = self.lane_mut(commit.lane) {
                 lane.poll_after = now;
-            }
-        }
-    }
-
-    fn acknowledge_commits(&mut self, commits: &[TaskCommit]) {
-        let mut committed = HashMap::<TaskLane, usize>::new();
-        for commit in commits {
-            *committed.entry(commit.lane).or_default() += 1;
-        }
-        for (lane, count) in committed {
-            if let Some(queue) = self.lane_mut(lane) {
-                queue.uncommitted = queue.uncommitted.saturating_sub(count);
             }
         }
     }

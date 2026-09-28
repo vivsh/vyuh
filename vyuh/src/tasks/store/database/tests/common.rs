@@ -4,6 +4,9 @@ use crate::tasks::store::memory::tests::workflow_contract;
 #[path = "cancellation.rs"]
 mod cancellation;
 
+#[path = "throughput.rs"]
+mod throughput;
+
 /// Database joins match the memory ordering and claim-time persistence contract.
 #[tokio::test]
 #[cfg_attr(not(feature = "sqlite"), ignore = "requires disposable dbharness")]
@@ -82,7 +85,7 @@ async fn database_capability_contract() -> Result<(), String> {
 }
 
 /// Creates schema from the production models in an explicitly disposable target.
-async fn store() -> Result<DbTaskStore, String> {
+pub(in super::super) async fn store() -> Result<DbTaskStore, String> {
     #[cfg(feature = "sqlite")]
     let (url, dialect) = ("sqlite::memory:".to_owned(), db::Dialect::Sqlite);
     #[cfg(feature = "postgres")]
@@ -238,8 +241,15 @@ async fn rollback_contract(store: &DbTaskStore) -> Result<(), TaskRuntimeError> 
     );
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries, waits) = store
-        .commit_outcomes_tx(&mut tx, "owner", std::slice::from_ref(&spawn), &conf(), now)
+    let (children, deliveries, waits, _) = store
+        .commit_outcomes_tx(
+            &mut tx,
+            "owner",
+            std::slice::from_ref(&spawn),
+            &conf(),
+            now,
+            None,
+        )
         .await?;
     super::super::writes::finalize_workflow(
         &mut tx,
@@ -275,13 +285,14 @@ async fn rollback_delivery(
     let terminal = commit(child, TaskOutcome::Complete);
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries, waits) = store
+    let (children, deliveries, waits, _) = store
         .commit_outcomes_tx(
             &mut tx,
             "owner",
             std::slice::from_ref(&terminal),
             &conf(),
             now,
+            None,
         )
         .await?;
     super::super::writes::finalize_workflow(

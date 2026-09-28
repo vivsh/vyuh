@@ -38,11 +38,20 @@ impl DbTaskStore {
         claims: &[LaneClaim],
     ) -> Result<TaskPoll, TaskRuntimeError> {
         let mut transaction = self.pool.begin().await?;
-        let conf = self.runtime_conf.read().await.clone().ok_or_else(|| {
+        let (conf, fingerprint) = self.runtime_conf.read().await.clone().ok_or_else(|| {
             TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
         })?;
-        super::runtime::verify_runtime_policy(&mut transaction, &conf).await?;
-        let now = statement_now(&mut transaction).await?;
+        let (now, preloaded) = if let Some(claim) = super::claim_read::eligible(&conf, claims) {
+            let (now, probe, selected, deadline) =
+                super::claim_read::read(&mut transaction, claim, &fingerprint, self.batch_size)
+                    .await?;
+            (now, Some((probe, selected, deadline)))
+        } else {
+            (
+                super::runtime::verify_runtime_policy(&mut transaction, &fingerprint).await?,
+                None,
+            )
+        };
         let mut deliveries = Vec::new();
         let (mut poll, new_idle) = self
             .claim_tasks_tx(
@@ -52,6 +61,7 @@ impl DbTaskStore {
                 &conf,
                 now,
                 &mut deliveries,
+                preloaded,
             )
             .await?;
         let wake = super::writes::finalize_workflow(
@@ -79,6 +89,7 @@ impl DbTaskStore {
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        mut preloaded: Option<(Vec<TaskRow>, Vec<TaskRow>, Option<DateTime<Utc>>)>,
     ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskRuntimeError> {
         let mut new_idle = Vec::new();
         let mut waits = Vec::new();
@@ -109,12 +120,27 @@ impl DbTaskStore {
                     conf,
                     now,
                 };
-                self.claim_lane(transaction, turn, deliveries, &mut waits)
+                if let Some((probe, selected, deadline)) = preloaded.take() {
+                    self.claim_preloaded(
+                        transaction,
+                        turn,
+                        probe,
+                        selected,
+                        deadline,
+                        deliveries,
+                        &mut waits,
+                    )
                     .await?
+                } else {
+                    self.claim_lane(transaction, turn, deliveries, &mut waits)
+                        .await?
+                }
             };
             lanes.push(lane);
         }
-        super::writes::delete_expired_owners(transaction, now, self.batch_size).await?;
+        if self.maintenance_due() {
+            super::writes::delete_expired_owners(transaction, now, self.batch_size).await?;
+        }
         lanes.sort_by_key(|lane| {
             claims
                 .iter()
@@ -128,6 +154,34 @@ impl DbTaskStore {
 
     /// Claims one lane's bounded candidates and reserves its durable permits.
     pub(super) async fn claim_lane(
+        &self,
+        transaction: &mut db::DbTransaction<'_>,
+        turn: ClaimTurn<'_>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
+    ) -> Result<LanePoll, TaskRuntimeError> {
+        if super::claim_read::eligible(turn.conf, std::slice::from_ref(turn.claim)).is_some() {
+            let (probe, selected, deadline) =
+                super::claim_read::read_after(transaction, turn.claim, turn.now, self.batch_size)
+                    .await?;
+            return self
+                .claim_preloaded(
+                    transaction,
+                    turn,
+                    probe,
+                    selected,
+                    deadline,
+                    deliveries,
+                    waits,
+                )
+                .await;
+        }
+        self.claim_sequential(transaction, turn, deliveries, waits)
+            .await
+    }
+
+    /// Keeps the established sequence for coordinated lanes and unsupported SQL backends.
+    async fn claim_sequential(
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
@@ -150,21 +204,10 @@ impl DbTaskStore {
             .await?;
         let selected =
             select_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
-        let (mut exhausted, mut candidates) = split_exhausted(selected, turn.retry)?;
-        self.fail_exhausted(transaction, &mut exhausted, turn.conf, turn.now)
+        let (tasks, reclaimed) = self
+            .finish_claim(transaction, &turn, selected, permits, deliveries, waits)
             .await?;
-        for row in &exhausted {
-            super::writes::queue_delivery(row, deliveries)?;
-        }
-        candidates.truncate(permits);
         let rate_blocked = permits < runnable_count;
-        let reclaimed = candidates
-            .iter()
-            .filter(|row| row.status == TaskStatus::Running.as_i16())
-            .count();
-        let tasks = self
-            .claim_candidates(transaction, candidates, turn.runner_id, turn.now, waits)
-            .await?;
         let task_wake = next_task_deadline(transaction, turn.claim.lane.as_str(), turn.now).await?;
         Ok(LanePoll {
             lane: turn.claim.lane,
@@ -172,6 +215,66 @@ impl DbTaskStore {
             reclaimed,
             saturated,
             next_wake_in: effective_lane_wake(rate_blocked, rate_wake, task_wake),
+            owner: None,
+        })
+    }
+
+    /// Applies the shared cancellation, recovery and ownership writes to locked candidates.
+    async fn finish_claim(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        turn: &ClaimTurn<'_>,
+        selected: Vec<TaskRow>,
+        permits: usize,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
+    ) -> Result<(Vec<TaskRecord>, usize), TaskRuntimeError> {
+        let (mut exhausted, mut candidates) = split_exhausted(selected, turn.retry)?;
+        self.fail_exhausted(tx, &mut exhausted, turn.conf, turn.now)
+            .await?;
+        for row in &exhausted {
+            super::writes::queue_delivery(row, deliveries)?;
+        }
+        candidates.truncate(permits);
+        let reclaimed = candidates
+            .iter()
+            .filter(|row| row.status == TaskStatus::Running.as_i16())
+            .count();
+        let tasks = self
+            .claim_candidates(tx, candidates, turn.runner_id, turn.now, waits)
+            .await?;
+        Ok((tasks, reclaimed))
+    }
+
+    /// Future rows cannot be claimed; only newly written leases augment the pre-claim deadline.
+    async fn claim_preloaded(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        turn: ClaimTurn<'_>,
+        probe: Vec<TaskRow>,
+        selected: Vec<TaskRow>,
+        deadline: Option<DateTime<Utc>>,
+        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
+    ) -> Result<LanePoll, TaskRuntimeError> {
+        let limit = turn.claim.limit.min(self.batch_size);
+        let saturated = limit > 0 && probe.len() == limit;
+        let permits = runnable_count(&probe, turn.retry)?;
+        let (tasks, reclaimed) = self
+            .finish_claim(tx, &turn, selected, permits, deliveries, waits)
+            .await?;
+        let next = tasks
+            .iter()
+            .filter_map(|task| task.leased_until)
+            .filter(|value| *value > turn.now)
+            .chain(deadline)
+            .min();
+        Ok(LanePoll {
+            lane: turn.claim.lane,
+            tasks,
+            reclaimed,
+            saturated,
+            next_wake_in: next.and_then(|value| (value - turn.now).to_std().ok()),
             owner: None,
         })
     }
@@ -220,7 +323,7 @@ impl DbTaskStore {
             })?;
             row.status = TaskStatus::Running.as_i16();
             row.locked_by = Some(runner_id.into());
-            row.leased_until = Some(self.lease_until(row, now)?);
+            row.leased_until = Some(self.lease_until(row.lease_duration_ms, now)?);
             row.updated_at = now;
         }
         if candidates.is_empty() {
@@ -375,46 +478,35 @@ async fn persist_rate(
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn statement_now(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<DateTime<Utc>, TaskRuntimeError> {
-    use db::DbSession as _;
-    Ok(transaction
-        .fetch_scalar(db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
-        .await?)
-}
-
 /// Finds the earliest future ready task or reclaimable lease for polled lanes.
 pub(super) async fn next_task_deadline(
     transaction: &mut db::DbTransaction<'_>,
     lane: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<Duration>, TaskRuntimeError> {
-    let table = DbTaskStore::table();
-    let pending = db::from(&table)
-        .filter(table.lane_name.eq(db::val(lane.to_string())))
-        .filter(table.status.eq(db::val(TaskStatus::Pending.as_i16())))
-        .filter(table.ready_at.gt(db::val(Some(now))))
-        .sort(table.ready_at.asc())
-        .first::<TaskRow>()
-        .exec(&mut *transaction)
+    use db::DbSession as _;
+    #[cfg(feature = "postgres")]
+    let parameters = ["$1", "$2", "$3", "$4"];
+    #[cfg(not(feature = "postgres"))]
+    let parameters = ["?", "?", "?", "?"];
+    let [pending_lane, pending_now, running_lane, running_now] = parameters;
+    // Each scalar subquery retains its ordered index seek; MIN sees only two rows.
+    let sql = format!(
+        "SELECT MIN(deadline) FROM (SELECT (SELECT ready_at FROM vyuh_tasks \
+         WHERE lane_name = {pending_lane} AND status = 0 AND ready_at > {pending_now} \
+         ORDER BY ready_at LIMIT 1) AS deadline UNION ALL \
+         SELECT (SELECT leased_until FROM vyuh_tasks WHERE lane_name = {running_lane} \
+         AND status = 1 AND leased_until > {running_now} ORDER BY leased_until LIMIT 1)) deadlines"
+    );
+    let deadline: Option<DateTime<Utc>> = transaction
+        .fetch_scalar(
+            db::Statement::raw(&sql)
+                .bind(lane.to_owned())
+                .bind(now)
+                .bind(lane.to_owned())
+                .bind(now),
+        )
         .await?;
-    let running = db::from(&table)
-        .filter(table.lane_name.eq(db::val(lane.to_string())))
-        .filter(table.status.eq(db::val(TaskStatus::Running.as_i16())))
-        .filter(table.leased_until.gt(db::val(Some(now))))
-        .sort(table.leased_until.asc())
-        .first::<TaskRow>()
-        .exec(transaction)
-        .await?;
-    let deadline = [
-        pending.and_then(|row| row.ready_at),
-        running.and_then(|row| row.leased_until),
-    ]
-    .into_iter()
-    .flatten()
-    .min();
     Ok(deadline.and_then(|value| (value - now).to_std().ok()))
 }
 

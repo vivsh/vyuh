@@ -85,8 +85,8 @@ async fn group_rollback(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
     )];
     let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let (children, deliveries, waits) = store
-        .commit_outcomes_tx(&mut tx, "parent", &commits, &conf(), now)
+    let (children, deliveries, waits, _) = store
+        .commit_outcomes_tx(&mut tx, "parent", &commits, &conf(), now, None)
         .await?;
     crate::tasks::store::database::writes::finalize_workflow(
         &mut tx,

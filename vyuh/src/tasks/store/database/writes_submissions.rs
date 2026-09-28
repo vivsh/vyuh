@@ -57,14 +57,14 @@ pub(super) async fn validate_write_lanes(
         let lane = &write.record.lane;
         let configured = conf
             .as_ref()
-            .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
+            .is_some_and(|(conf, _)| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
         if !configured {
             return Err(TaskRuntimeError::UnknownLane(lane.clone()));
         }
         let handler = &write.record.name;
         if !conf
             .as_ref()
-            .is_some_and(|conf| conf.handlers.iter().any(|(name, _)| name == handler))
+            .is_some_and(|(conf, _)| conf.handlers.iter().any(|(name, _)| name == handler))
         {
             return Err(TaskRuntimeError::TaskNotFound(handler.clone()));
         }
@@ -82,7 +82,7 @@ pub(super) async fn require_runtime_lane(
         .read()
         .await
         .as_ref()
-        .is_some_and(|conf| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
+        .is_some_and(|(conf, _)| conf.lanes.iter().any(|entry| entry.lane().as_str() == lane));
     configured
         .then_some(())
         .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.into()))
@@ -92,11 +92,11 @@ pub(super) async fn require_runtime_lane(
 pub(super) async fn verify_policy(
     store: &DbTaskStore,
     transaction: &mut db::DbTransaction<'_>,
-) -> Result<(), TaskRuntimeError> {
-    let conf = store.runtime_conf.read().await.clone().ok_or_else(|| {
+) -> Result<DateTime<Utc>, TaskRuntimeError> {
+    let (_, fingerprint) = store.runtime_conf.read().await.clone().ok_or_else(|| {
         TaskRuntimeError::InvalidConfig("task runtime was not initialized".into())
     })?;
-    super::super::runtime::verify_runtime_policy(transaction, &conf).await
+    super::super::runtime::verify_runtime_policy(transaction, &fingerprint).await
 }
 
 /// Removes one bounded maintenance batch of expired idempotency archives.
@@ -113,11 +113,22 @@ pub(in super::super) async fn delete_expired_owners(
         .exec(&mut *transaction)
         .await?;
     let ids = expired.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    delete_expired_owner_ids(transaction, ids, now).await
+}
+
+/// Rechecks expiry at deletion so a stale sweep cannot remove a renewed reservation.
+pub(in super::super) async fn delete_expired_owner_ids(
+    transaction: &mut db::DbTransaction<'_>,
+    ids: Vec<uuid::Uuid>,
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
     if ids.is_empty() {
         return Ok(());
     }
+    let table = DbTaskStore::idempotency_table();
     db::from(&table)
         .filter(table.id.in_values(ids))
+        .filter(table.expires_at.lte(db::val(Some(now))))
         .delete()
         .exec(transaction)
         .await?;

@@ -123,6 +123,9 @@ mod cancellation;
 #[path = "all_queries.rs"]
 mod all_queries;
 
+#[path = "throughput_queries.rs"]
+mod throughput;
+
 impl tracing::field::Visit for Sql {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if matches!(field.name(), "summary" | "db.statement") {
