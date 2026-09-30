@@ -69,8 +69,13 @@ mod result_upgrade;
 mod all_database;
 #[path = "all_upgrade.rs"]
 mod all_upgrade;
+#[path = "factory_upgrade.rs"]
+mod factory_upgrade;
 #[path = "flow_upgrade.rs"]
 mod flow_upgrade;
+#[cfg(feature = "pravah")]
+#[path = "pravah_dispatch.rs"]
+mod pravah_dispatch;
 
 /// SQL stores reject invalid capabilities without disturbing accepted sibling outcomes.
 #[tokio::test]
@@ -218,7 +223,7 @@ async fn upgrade_adoption(store: &DbTaskStore) -> Result<(), TaskRuntimeError> {
         .exec(&mut pool)
         .await?;
     assert_eq!(buckets[0].tokens_micros, tokens);
-    assert!(buckets[0].policy_fingerprint.starts_with("tr-v6:"));
+    assert!(buckets[0].policy_fingerprint.starts_with("tr-v7:"));
     Ok(())
 }
 

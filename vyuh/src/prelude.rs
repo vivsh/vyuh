@@ -15,7 +15,8 @@
 // ── Core framework types ────────────────────────────────────────────────────
 
 pub use crate::{
-    Data, DeploymentMode, Error, OperationId, Site, SiteConf, SiteError, Valid, Validate,
+    Data, DeploymentMode, Error, OperationId, PartialSite, Site, SiteConf, SiteError, Valid,
+    Validate,
 };
 
 pub use serde::{Deserialize, Serialize};
@@ -41,8 +42,9 @@ pub use crate::routes::{
 // ── Tasks ───────────────────────────────────────────────────────────────────
 
 pub use crate::tasks::{
-    Batch, Continuation, DEFAULT_TASK_LANE, FlowError, FlowState, TaskFailure, TaskId, TaskKind,
-    TaskLane, TaskOptions, TaskReceipt, TaskRuntimeError, WorkError, WorkState,
+    Batch, Continuation, DEFAULT_TASK_LANE, Flow, FlowConf, FlowError, FlowState, IntoFlow,
+    TaskFailure, TaskId, TaskKind, TaskLane, TaskOptions, TaskReceipt, TaskRuntimeError, WorkError,
+    WorkState,
 };
 
 // ── Services ─────────────────────────────────────────────────────────────────

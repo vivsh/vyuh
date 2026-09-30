@@ -376,10 +376,9 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     }
 
     pub(crate) async fn ensure_initialized(&self) -> Result<(), TaskRuntimeError> {
-        let conf = self.store_conf()?;
         let result = self
             .initialized
-            .get_or_try_init(|| self.store.initialize(conf))
+            .get_or_try_init(|| async { self.store.initialize(self.store_conf()?).await })
             .await
             .map(|_| ());
         self.record_initialization(&result);
@@ -388,6 +387,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
 
     pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
+            flows: self.registry.flow_configuration(),
             max_all_children: self.registry.config.all_limit(),
             handlers: self
                 .registry

@@ -228,6 +228,18 @@ impl<S, R> callables::IntoArgPart for Continuation<S, R> {
 }
 
 impl<S, R> Continuation<S, R> {
+    /// Decodes invocation-local continuation values from the immutable store snapshot.
+    pub(super) fn decode(record: &TaskRecord) -> Result<Self, callables::CallError>
+    where
+        S: serde::de::DeserializeOwned,
+        R: serde::de::DeserializeOwned,
+    {
+        Ok(Self {
+            state: decode_optional(record.state.as_deref())?,
+            resume: decode_optional(record.resume_input.as_deref())?,
+        })
+    }
+
     /// Returns persisted state from a previous lifecycle transition.
     pub const fn state(&self) -> Option<&S> {
         self.state.as_ref()
@@ -256,9 +268,13 @@ pub(crate) struct RegisteredTask {
 
 #[derive(Clone)]
 enum RegisteredHandler {
+    FlowFactory {
+        build: super::flow_build::BuildFlow,
+    },
     Flow {
         handler: Callable<FlowContext, Error>,
         outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
+        compatibility: String,
     },
     Single {
         handler: WorkHandler,
@@ -290,6 +306,14 @@ impl RegisteredTask {
 
     pub(crate) fn operation(&self) -> callables::Operation {
         self.operation.clone()
+    }
+
+    /// Borrows finalization-derived compatibility metadata without examining task rows.
+    pub(crate) fn flow_compatibility(&self) -> Option<&str> {
+        match &self.handler {
+            RegisteredHandler::Flow { compatibility, .. } => Some(compatibility),
+            _ => None,
+        }
     }
 
     pub(crate) const fn is_batch(&self) -> bool {
@@ -364,9 +388,16 @@ impl RegisteredTask {
         records: Vec<Arc<TaskRecord>>,
     ) -> Vec<TaskExecutionResult> {
         match &self.handler {
-            RegisteredHandler::Flow { handler, outcome } => {
-                flow::execute_flows(handler, *outcome, site, records, self.operation.id).await
-            }
+            RegisteredHandler::Flow {
+                handler, outcome, ..
+            } => flow::execute_flows(handler, *outcome, site, records, self.operation.id).await,
+            RegisteredHandler::FlowFactory { .. } => records
+                .into_iter()
+                .map(|record| TaskExecutionResult {
+                    record,
+                    outcome: TaskOutcome::fail("Flow factory was not finalized"),
+                })
+                .collect(),
             RegisteredHandler::Single { handler, outcome } => {
                 execute_singles(handler, *outcome, site, records, self.operation.id).await
             }
@@ -661,6 +692,32 @@ pub(crate) struct TaskRegistry {
 }
 
 impl TaskRegistry {
+    pub(crate) fn flow_configuration(&self) -> Vec<(String, String)> {
+        self.tasks
+            .values()
+            .filter_map(|task| {
+                task.flow_compatibility()
+                    .map(|identity| (task.name.clone(), identity.to_owned()))
+            })
+            .collect()
+    }
+
+    /// Replaces deferred declarations using operation-local policy deduplication scratch.
+    pub(crate) fn prepare_flows(
+        mut self,
+        site: &crate::PartialSite,
+    ) -> Result<Self, TaskRuntimeError> {
+        let mut scratch = super::flow_build::EffectsScratch::new();
+        let mut names: Vec<_> = self.tasks.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            if let Some(task) = self.tasks.get_mut(&name) {
+                task.prepare_flow(site, &mut scratch)?;
+            }
+        }
+        Ok(self)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             config: TaskConf::default(),

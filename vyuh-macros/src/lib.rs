@@ -462,9 +462,11 @@ pub fn work(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_work(attr, item)
 }
 
-/// Registers a synchronous, pure task flow. Equivalent to `bundles::flow`.
-/// Accepts task name, lane, and idempotency attributes. Rust registration bounds
-/// reject async functions, unsupported extractors, and Work return values.
+/// Registers a synchronous factory built once per site into an immutable Flow.
+/// Equivalent to `bundles::flow(factory, FlowConf::new(name))`. Accepts name,
+/// lane, idempotency, and optional `effects = Policy` configuration. The optional
+/// Pravah integration requires the `pravah` feature. Rust bounds reject async
+/// factories and runtime input/continuation extraction; no type syntax is inspected.
 #[proc_macro_attribute]
 pub fn flow(attr: TokenStream, item: TokenStream) -> TokenStream {
     task::parse_flow(attr, item)

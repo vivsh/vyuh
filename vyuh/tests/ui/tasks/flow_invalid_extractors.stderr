@@ -1,141 +1,161 @@
-error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:10:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:12:24
    |
-10 |  let _ = bundles::flow(site, TaskDefinition::new("site"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
+ 5 | fn site(_: Site) -> Manual { Manual }
+   | -------------------------- found signature defined here
+...
+12 |  let _ = bundles::flow(site, FlowConf::new("site"));
+   |          ------------- ^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `HasSite`:
-             CommandContext
-             EmitterContext
-             ServiceWorkContext
-             SignalContext
-             collectors::provider::UrlInfoContext
-             tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::Site` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::Site, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::Site) -> _`
+   = note: required for `fn(vyuh::Site) -> Manual {site}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+12 |  let _ = bundles::flow(|arg0: PartialSite| site(/* vyuh::Site */), FlowConf::new("site"));
+   |                        +++++++++++++++++++     ++++++++++++++++++
 
-error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:11:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:13:24
    |
-11 |  let _ = bundles::flow(service, TaskDefinition::new("service"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
+ 6 | fn service(_: ServiceRef<String>) -> Manual { Manual }
+   | ------------------------------------------- found signature defined here
+...
+13 |  let _ = bundles::flow(service, FlowConf::new("service"));
+   |          ------------- ^^^^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `HasSite`:
-             CommandContext
-             EmitterContext
-             ServiceWorkContext
-             SignalContext
-             collectors::provider::UrlInfoContext
-             tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::prelude::ServiceRef<std::string::String>` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::ServiceRef<std::string::String>, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::ServiceRef<std::string::String>) -> _`
+   = note: required for `fn(vyuh::prelude::ServiceRef<std::string::String>) -> Manual {service}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+13 |  let _ = bundles::flow(|arg0: PartialSite| service(/* vyuh::prelude::ServiceRef<std::string::String> */), FlowConf::new("service"));
+   |                        +++++++++++++++++++        ++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:12:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:14:24
    |
-12 |  let _ = bundles::flow(identity, TaskDefinition::new("id"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
+ 7 | fn identity(_: TaskId) -> Manual { Manual }
+   | -------------------------------- found signature defined here
+...
+14 |  let _ = bundles::flow(identity, FlowConf::new("id"));
+   |          ------------- ^^^^^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `HasSite`:
-             CommandContext
-             EmitterContext
-             ServiceWorkContext
-             SignalContext
-             collectors::provider::UrlInfoContext
-             tasks::lane_lock::LaneHookContext
-   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::TaskId) -> _`
+   = note: required for `fn(vyuh::prelude::TaskId) -> Manual {identity}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+14 |  let _ = bundles::flow(|arg0: PartialSite| identity(/* vyuh::prelude::TaskId */), FlowConf::new("id"));
+   |                        +++++++++++++++++++         +++++++++++++++++++++++++++++
 
-error[E0277]: the trait bound `vyuh::prelude::TaskId: FromSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:12:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:15:24
    |
-12 |  let _ = bundles::flow(identity, TaskDefinition::new("id"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromSite` is not implemented for `vyuh::prelude::TaskId`
+ 8 | fn operation(_: vyuh::OperationId) -> Manual { Manual }
+   | -------------------------------------------- found signature defined here
+...
+15 |  let _ = bundles::flow(operation, FlowConf::new("operation"));
+   |          ------------- ^^^^^^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `FromSite`:
-             Channels
-             SiteConfig
-             Templates
-             vyuh::Site
-             vyuh::prelude::ServiceRef<T>
-   = note: required for `vyuh::prelude::TaskId` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<vyuh::prelude::TaskId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(OperationId) -> _`
+   = note: required for `fn(OperationId) -> Manual {operation}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+15 |  let _ = bundles::flow(|arg0: PartialSite| operation(/* OperationId */), FlowConf::new("operation"));
+   |                        +++++++++++++++++++          +++++++++++++++++++
 
-error[E0277]: the trait bound `FlowContext: HasSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:13:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:16:24
    |
-13 |  let _ = bundles::flow(operation, TaskDefinition::new("operation"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HasSite` is not implemented for `FlowContext`
+ 9 | fn input(_: Data<Job>) -> Manual { Manual }
+   | -------------------------------- found signature defined here
+...
+16 |  let _ = bundles::flow(input, FlowConf::new("input"));
+   |          ------------- ^^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `HasSite`:
-             CommandContext
-             EmitterContext
-             ServiceWorkContext
-             SignalContext
-             collectors::provider::UrlInfoContext
-             tasks::lane_lock::LaneHookContext
-   = note: required for `OperationId` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::Data<Job>) -> _`
+   = note: required for `fn(vyuh::Data<Job>) -> Manual {input}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+16 |  let _ = bundles::flow(|arg0: PartialSite| input(/* vyuh::Data<Job> */), FlowConf::new("input"));
+   |                        +++++++++++++++++++      +++++++++++++++++++++++
 
-error[E0277]: the trait bound `OperationId: FromSite` is not satisfied
-  --> tests/ui/tasks/flow_invalid_extractors.rs:13:10
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:17:24
    |
-13 |  let _ = bundles::flow(operation, TaskDefinition::new("operation"));
-   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromSite` is not implemented for `OperationId`
+10 | fn continuation(_: Continuation<(), ()>) -> Manual { Manual }
+   | -------------------------------------------------- found signature defined here
+...
+17 |  let _ = bundles::flow(continuation, FlowConf::new("continuation"));
+   |          ------------- ^^^^^^^^^^^^ expected due to this
+   |          |
+   |          required by a bound introduced by this call
    |
-   = help: the following other types implement trait `FromSite`:
-             Channels
-             SiteConfig
-             Templates
-             vyuh::Site
-             vyuh::prelude::ServiceRef<T>
-   = note: required for `OperationId` to implement `FromContextParts<FlowContext>`
-   = note: required for `callables::specs::Tuple2<OperationId, vyuh::Data<Job>>` to implement `FromContext<FlowContext>`
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::Continuation<()>) -> _`
+   = note: required for `fn(vyuh::prelude::Continuation<()>) -> Manual {continuation}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
-   | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
    |        ---- required by a bound in this function
 ...
-   |     Args: callables::FromContext<crate::tasks::FlowContext>
-   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+   |     H: crate::tasks::FlowCallable<Args> + 'static,
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
+help: consider wrapping the function in a closure
+   |
+17 |  let _ = bundles::flow(|arg0: PartialSite| continuation(/* vyuh::prelude::Continuation<()> */), FlowConf::new("continuation"));
+   |                        +++++++++++++++++++             +++++++++++++++++++++++++++++++++++++++

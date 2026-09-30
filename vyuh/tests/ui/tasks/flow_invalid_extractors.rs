@@ -1,14 +1,18 @@
-use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
-struct Job;
+use vyuh::{bundles, prelude::*};
+#[path = "support/manual.rs"] mod support;
+use support::{Job, Manual};
 
-fn site(_: Site, _: Data<Job>) {}
-fn service(_: ServiceRef<String>, _: Data<Job>) {}
-fn identity(_: TaskId, _: Data<Job>) {}
-fn operation(_: vyuh::OperationId, _: Data<Job>) {}
+fn site(_: Site) -> Manual { Manual }
+fn service(_: ServiceRef<String>) -> Manual { Manual }
+fn identity(_: TaskId) -> Manual { Manual }
+fn operation(_: vyuh::OperationId) -> Manual { Manual }
+fn input(_: Data<Job>) -> Manual { Manual }
+fn continuation(_: Continuation<(), ()>) -> Manual { Manual }
 fn main() {
- let _ = bundles::flow(site, TaskDefinition::new("site"));
- let _ = bundles::flow(service, TaskDefinition::new("service"));
- let _ = bundles::flow(identity, TaskDefinition::new("id"));
- let _ = bundles::flow(operation, TaskDefinition::new("operation"));
+ let _ = bundles::flow(site, FlowConf::new("site"));
+ let _ = bundles::flow(service, FlowConf::new("service"));
+ let _ = bundles::flow(identity, FlowConf::new("id"));
+ let _ = bundles::flow(operation, FlowConf::new("operation"));
+ let _ = bundles::flow(input, FlowConf::new("input"));
+ let _ = bundles::flow(continuation, FlowConf::new("continuation"));
 }

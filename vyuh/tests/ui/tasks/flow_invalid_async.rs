@@ -1,7 +1,7 @@
-use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
-struct Job;
+#[path = "support/manual.rs"]
+mod support;
+use vyuh::{bundles, prelude::*};
 #[bundles::flow]
-async fn handler(_: Data<Job>) {}
-fn future(_: Data<Job>) -> impl std::future::Future<Output=()> { async {} }
-fn main() { let _ = bundles::flow(future, TaskDefinition::new("future")); }
+async fn handler() -> support::Manual { support::Manual }
+fn future() -> impl std::future::Future<Output=support::Manual> { async { support::Manual } }
+fn main() { let _ = bundles::flow(future, FlowConf::new("future")); }

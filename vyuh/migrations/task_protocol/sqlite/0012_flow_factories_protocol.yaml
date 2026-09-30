@@ -1,0 +1,10 @@
+# Stop incompatible workers/writers and verify retained Flow checkpoints first.
+dependencies: [0011_all_protocol]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_runtime SET policy_fingerprint = 'tr-a6:' || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) = 'tr-v6:'
+  - type: statement
+    up: >-
+      UPDATE vyuh_task_lane_rates SET policy_fingerprint = 'tr-a6:' || SUBSTR(policy_fingerprint, 7) WHERE SUBSTR(policy_fingerprint, 1, 6) = 'tr-v6:'

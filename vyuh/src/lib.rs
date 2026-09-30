@@ -44,6 +44,9 @@ mod watch;
 pub mod routes;
 mod schema_assets;
 mod slash;
+/// Optional synchronous workflow graph API used by Flow factories.
+#[cfg(feature = "pravah")]
+pub use ::pravah;
 pub use callables::{Data, DataValue, Operation, OperationId, OperationKind, Operations};
 pub use commands::CommandError;
 pub use conf::{DeploymentMode, SiteConf};
@@ -56,7 +59,7 @@ pub use file_storage::{
     FileStorageError, LocalStorage, SavedFile, StorageBackend, StorageName, UploadConf,
 };
 pub use serde;
-pub use site::{Site, SiteConfig, SiteError};
+pub use site::{PartialSite, Site, SiteConfig, SiteError};
 pub use slash::SiteService;
 pub use validation::{
     Valid, ValidRejection, Validate, ValidationError, ValidationReport, ValidationSchema,

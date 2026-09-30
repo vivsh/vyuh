@@ -1,4 +1,4 @@
-use crate::tasks::{FlowState, TaskOptions};
+use crate::tasks::{Flow, FlowConf, FlowState, TaskId, TaskOptions};
 use std::{sync::Arc, time::Duration};
 
 use schemars::JsonSchema;
@@ -26,16 +26,30 @@ struct Child {
 }
 
 /// Awaits one child using only typed continuation and input extractors.
-fn parent(
-    continuation: Continuation<u32, u32>,
-    input: Data<Parent>,
-) -> Result<FlowState<u32>, FlowError> {
-    match continuation.resume() {
-        None => Ok(FlowState::spawn(Child { value: input.value }, 7u32)?),
-        Some(Ok(value)) => Ok(FlowState::complete(
-            value + continuation.state().copied().unwrap_or(0),
-        )),
-        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+fn parent() -> ParentFlow {
+    ParentFlow
+}
+
+struct ParentFlow;
+
+impl Flow for ParentFlow {
+    type Input = Parent;
+    type Output = u32;
+    type Checkpoint = u32;
+    type Resume = u32;
+    fn advance(
+        &self,
+        _: TaskId,
+        input: Data<Parent>,
+        continuation: Continuation<u32, u32>,
+    ) -> Result<FlowState<u32>, FlowError> {
+        match continuation.resume() {
+            None => Ok(FlowState::spawn(Child { value: input.value }, 7u32)?),
+            Some(Ok(value)) => Ok(FlowState::complete(
+                value + continuation.state().copied().unwrap_or(0),
+            )),
+            Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+        }
     }
 }
 
@@ -62,7 +76,7 @@ async fn fixture_with(conf: TaskConf) -> Result<(Site, TaskDispatcher<MemoryTask
     let site = Site::build(
         SiteConf::default().log_init(false).tasks(conf.clone()),
         bundles::bundle([
-            bundles::flow(parent, TaskDefinition::new("parent")),
+            bundles::flow(parent, FlowConf::new("parent")),
             bundles::work(child, child_definition()),
         ]),
     )
@@ -70,15 +84,16 @@ async fn fixture_with(conf: TaskConf) -> Result<(Site, TaskDispatcher<MemoryTask
     .map_err(|error| error.to_string())?;
     let mut registry = TaskRegistry::new();
     registry
-        .register(RegisteredTask::new_flow(
-            TaskDefinition::new("parent"),
-            parent,
-        ))
+        .register(RegisteredTask::new_flow(FlowConf::new("parent"), parent))
         .map_err(|error| error.to_string())?;
     registry
         .register(RegisteredTask::new(child_definition(), child))
         .map_err(|error| error.to_string())?;
-    let registry = registry.finalize(conf).map_err(|error| error.to_string())?;
+    let registry = registry
+        .prepare_flows(&crate::PartialSite::new(site.db()))
+        .map_err(|error| error.to_string())?
+        .finalize(conf)
+        .map_err(|error| error.to_string())?;
     let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(32)), Vec::new());
     dispatcher
         .ensure_initialized()
@@ -312,13 +327,25 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
         entries: std::collections::BTreeMap<(u32, u32), u32>,
     }
     async fn malformed(_: Data<Malformed>) {}
-    fn spawn(_: Data<Parent>) -> Result<FlowState, FlowError> {
-        Ok(FlowState::spawn(
-            Malformed {
-                entries: std::collections::BTreeMap::from([((1, 2), 3)]),
-            },
-            (),
-        )?)
+    struct Spawn;
+    impl Flow for Spawn {
+        type Input = Parent;
+        type Output = ();
+        type Checkpoint = ();
+        type Resume = ();
+        fn advance(
+            &self,
+            _: TaskId,
+            _: Data<Parent>,
+            _: Continuation<(), ()>,
+        ) -> Result<FlowState, FlowError> {
+            Ok(FlowState::spawn(
+                Malformed {
+                    entries: std::collections::BTreeMap::from([((1, 2), 3)]),
+                },
+                (),
+            )?)
+        }
     }
     let site = Site::build(
         SiteConf::default().log_init(false),
@@ -332,7 +359,10 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let record = next_task(&dispatcher.store).await?;
-    let handler = RegisteredTask::new_flow(TaskDefinition::new("spawn"), spawn);
+    let mut handler = RegisteredTask::new_flow(FlowConf::new("spawn"), || Spawn);
+    handler
+        .prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())
+        .map_err(|error| error.to_string())?;
     let outcome = handler.execute(site, Arc::new(record)).await;
     assert!(matches!(outcome, TaskOutcome::Fail { error } if error == "Task handler failed"));
     assert_eq!(dispatcher.store.task_count().await, 1);
@@ -342,8 +372,20 @@ async fn malformed_child_fails_parent() -> Result<(), String> {
 /// Unregistered requests fail the parent normally instead of escaping into store commits.
 #[tokio::test]
 async fn unregistered_child_fails_parent() -> Result<(), String> {
-    fn missing(_input: Data<Parent>) -> Result<FlowState, FlowError> {
-        Ok(FlowState::spawn("unregistered child".to_owned(), ())?)
+    struct Missing;
+    impl Flow for Missing {
+        type Input = Parent;
+        type Output = ();
+        type Checkpoint = ();
+        type Resume = ();
+        fn advance(
+            &self,
+            _: TaskId,
+            _: Data<Parent>,
+            _: Continuation<(), ()>,
+        ) -> Result<FlowState, FlowError> {
+            Ok(FlowState::spawn("unregistered child".to_owned(), ())?)
+        }
     }
     let (site, dispatcher) = fixture().await?;
     dispatcher
@@ -351,7 +393,9 @@ async fn unregistered_child_fails_parent() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     let record = next_task(&dispatcher.store).await?;
-    let task = RegisteredTask::new_flow(TaskDefinition::new("missing"), missing);
+    let mut task = RegisteredTask::new_flow(FlowConf::new("missing"), || Missing);
+    task.prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())
+        .map_err(|error| error.to_string())?;
     let outcome = task.execute(site, Arc::new(record.clone())).await;
     assert!(matches!(&outcome, TaskOutcome::Fail { error } if error == "Task handler failed"));
     tick(

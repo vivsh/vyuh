@@ -1,5 +1,38 @@
 use super::*;
-use crate::tasks::{FlowState, TaskKind};
+use crate::tasks::{Flow, FlowConf, FlowError, FlowState, TaskKind};
+
+struct CountFlow(Arc<std::sync::atomic::AtomicUsize>);
+impl Flow for CountFlow {
+    type Input = DirectJob;
+    type Output = ();
+    type Checkpoint = ();
+    type Resume = ();
+    fn advance(
+        &self,
+        _: TaskId,
+        _: Data<DirectJob>,
+        _: Continuation<(), ()>,
+    ) -> Result<FlowState, FlowError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(FlowState::complete(()))
+    }
+}
+
+struct ErrorFlow;
+impl Flow for ErrorFlow {
+    type Input = DirectJob;
+    type Output = ();
+    type Checkpoint = ();
+    type Resume = ();
+    fn advance(
+        &self,
+        _: TaskId,
+        _: Data<DirectJob>,
+        _: Continuation<(), ()>,
+    ) -> Result<FlowState, FlowError> {
+        Err(crate::Error::invalid("secret").into())
+    }
+}
 
 fn flow_record() -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let mut record = (*record("flow", &DirectJob { id: 7 })?).clone();
@@ -12,12 +45,12 @@ fn flow_record() -> Result<Arc<TaskRecord>, TaskRuntimeError> {
 async fn kind_mismatch_is_not_invoked() -> Result<(), TaskRuntimeError> {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = calls.clone();
-    let flow = RegisteredTask::new_flow(TaskDefinition::new("flow"), move |_: Data<DirectJob>| {
-        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    });
+    let mut flow =
+        RegisteredTask::new_flow(FlowConf::new("flow"), move || CountFlow(observed.clone()));
     let site = test_site()
         .await
         .map_err(|e| TaskRuntimeError::TaskExecutionError(e.to_string()))?;
+    flow.prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())?;
     assert!(matches!(
         flow.execute(site.clone(), record("flow", &DirectJob { id: 1 })?)
             .await,
@@ -43,12 +76,8 @@ async fn flow_errors_are_contained() -> Result<(), TaskRuntimeError> {
     let site = test_site()
         .await
         .map_err(|e| TaskRuntimeError::TaskExecutionError(e.to_string()))?;
-    let flow = RegisteredTask::new_flow(
-        TaskDefinition::new("flow"),
-        |_: Data<DirectJob>| -> Result<FlowState, crate::tasks::FlowError> {
-            Err(crate::Error::invalid("secret").into())
-        },
-    );
+    let mut flow = RegisteredTask::new_flow(FlowConf::new("flow"), || ErrorFlow);
+    flow.prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())?;
     assert!(matches!(flow.execute(site.clone(), flow_record()?).await,
         TaskOutcome::Fail { error } if error == "Task handler failed"));
     let mut invalid = (*flow_record()?).clone();
@@ -98,8 +127,14 @@ async fn batch_kind_mismatch_is_isolated() -> Result<(), TaskRuntimeError> {
 /// Registration preserves original metadata identity and scheduled submission infers Flow.
 #[tokio::test]
 async fn flow_metadata_and_scheduled_kind() -> Result<(), TaskRuntimeError> {
-    fn unit(_: Data<DirectJob>) {}
-    let registered = RegisteredTask::new_flow(TaskDefinition::new("flow"), unit);
+    fn unit() -> CountFlow {
+        CountFlow(Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+    }
+    let mut registered = RegisteredTask::new_flow(FlowConf::new("flow"), unit);
+    let site = test_site()
+        .await
+        .map_err(|e| TaskRuntimeError::TaskExecutionError(e.to_string()))?;
+    registered.prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())?;
     assert_eq!(registered.kind(), TaskKind::Flow);
     let RegisteredHandler::Flow { handler, .. } = &registered.handler else {
         return Err(TaskRuntimeError::TaskExecutionError(

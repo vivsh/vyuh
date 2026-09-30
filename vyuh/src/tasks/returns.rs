@@ -1,6 +1,6 @@
 //! Sealed task-only return categories; markers resolve Serialize/Result coherence.
 
-use super::{FlowError, FlowState, TaskOutcome, WorkError, WorkState};
+use super::{TaskOutcome, WorkError, WorkState};
 use serde::Serialize;
 
 /// Keeps the existing tiny unit-return allocation rather than boxing a full outcome enum.
@@ -13,7 +13,6 @@ pub(super) fn erase_outcome(outcome: TaskOutcome) -> crate::callables::DataBox {
 
 mod sealed {
     pub trait Work<K> {}
-    pub trait Flow {}
 }
 
 /// Inferred category for a directly serializable Work value.
@@ -51,35 +50,6 @@ impl<T: IntoWorkOutcomePart<K>, K> IntoWorkOutcomePart<Fallible<K>> for Result<T
         match self {
             Ok(value) => value.into_work_outcome(),
             Err(error) => error.into_outcome(),
-        }
-    }
-}
-
-/// Sealed conversion of synchronous Flow returns, preserving unresolved child intent.
-#[doc(hidden)]
-pub trait IntoFlowOutcomePart: sealed::Flow {
-    /// Prepares completion bytes before erasure; child resolution remains private.
-    fn into_flow_state(self) -> FlowState;
-}
-
-impl sealed::Flow for () {}
-impl IntoFlowOutcomePart for () {
-    fn into_flow_state(self) -> FlowState {
-        FlowState::from_outcome(TaskOutcome::Complete)
-    }
-}
-impl<T: Serialize + 'static> sealed::Flow for FlowState<T> {}
-impl<T: Serialize + 'static> IntoFlowOutcomePart for FlowState<T> {
-    fn into_flow_state(self) -> FlowState {
-        self.prepare()
-    }
-}
-impl<T: IntoFlowOutcomePart> sealed::Flow for Result<T, FlowError> {}
-impl<T: IntoFlowOutcomePart> IntoFlowOutcomePart for Result<T, FlowError> {
-    fn into_flow_state(self) -> FlowState {
-        match self {
-            Ok(value) => value.into_flow_state(),
-            Err(error) => FlowState::from_outcome(error.into_outcome()),
         }
     }
 }

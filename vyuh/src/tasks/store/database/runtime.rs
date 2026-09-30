@@ -156,8 +156,8 @@ async fn ensure_runtime_policy(
             .await?;
         return Ok(());
     }
-    if !stored.policy_fingerprint.starts_with("tr-v6:") {
-        return Err(TaskRuntimeError::InvalidConfig("task all-join protocol migration is required; stop all old workers and writers before upgrading".into()));
+    if !stored.policy_fingerprint.starts_with("tr-v7:") {
+        return Err(TaskRuntimeError::InvalidConfig("task Flow-factory protocol migration is required; stop all old workers and writers before upgrading".into()));
     }
     if stored.policy_fingerprint != fingerprint {
         replace_runtime_policy(transaction, fingerprint, now).await?;

@@ -180,6 +180,8 @@ pub struct TaskStoreConf {
     pub max_all_children: usize,
     /// Stable handler names and classifications understood by this worker deployment.
     pub handlers: Vec<(String, crate::tasks::TaskKind)>,
+    /// Finalized immutable Flow definition compatibility; never populated from task rows.
+    pub flows: Vec<(String, String)>,
     /// Validated named lanes; stores coordinate only their global rate policies.
     pub lanes: Vec<TaskLaneConf>,
     /// Immutable per-handler idempotency policies shared by all workers.
@@ -428,7 +430,7 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
 
 /// Produces the durable policy identity shared by every store implementation.
 pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-v6:{:.58}", policy_hash(conf, 6).to_hex())
+    format!("tr-v7:{:.58}", policy_hash(conf, 7).to_hex())
 }
 
 #[cfg(all(test, any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
@@ -450,11 +452,15 @@ pub(crate) fn is_migrated_policy(conf: &TaskStoreConf, stored: &str) -> bool {
         || stored == format!("tr-a3:{:.58}", policy_hash(conf, 3).to_hex())
         || stored == format!("tr-a4:{:.58}", policy_hash(conf, 4).to_hex())
         || stored == format!("tr-a5:{:.58}", policy_hash(conf, 5).to_hex())
+        || stored == format!("tr-a6:{:.58}", policy_hash(conf, 6).to_hex())
 }
 
 /// Hashes immutable deployment policy, optionally including the new result protocol.
 fn policy_hash(conf: &TaskStoreConf, result_protocol: u8) -> blake3::Hash {
     let mut hasher = blake3::Hasher::new();
+    if result_protocol >= 7 {
+        fingerprint_flows(&mut hasher, &conf.flows);
+    }
     if result_protocol >= 6 {
         hasher.update(b"task-all-claim-results-v6\0");
         hasher.update(&(conf.max_all_children as u64).to_le_bytes());
@@ -510,6 +516,19 @@ fn policy_hash(conf: &TaskStoreConf, result_protocol: u8) -> blake3::Hash {
         hasher.update(&[0xff]);
     }
     hasher.finalize()
+}
+
+/// Includes graph identity and explicit revision without additional store queries.
+fn fingerprint_flows(hasher: &mut blake3::Hasher, flows: &[(String, String)]) {
+    hasher.update(b"task-flow-factory-v7\0");
+    let mut flows: Vec<_> = flows.iter().collect();
+    flows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for (name, identity) in flows {
+        for value in [name, identity] {
+            hasher.update(&(value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+    }
 }
 
 /// Adds one optional lane-owner policy to the shared deployment identity.

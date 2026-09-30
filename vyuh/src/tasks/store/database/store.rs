@@ -201,6 +201,7 @@ mod tests {
     #[test]
     fn only_opted_in_lanes_lock_durable_owner_rows() {
         let conf = TaskStoreConf {
+            flows: Vec::new(),
             max_all_children: 256,
             handlers: Vec::new(),
             lanes: vec![

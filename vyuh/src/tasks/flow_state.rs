@@ -22,6 +22,11 @@ pub struct FlowState<T = ()> {
     reason = "Keep ordinary outcomes inline rather than adding an allocation to every handler return"
 )]
 enum FlowValue<T> {
+    #[cfg(feature = "pravah")]
+    Work {
+        request: super::WorkRequest,
+        state: String,
+    },
     Complete(T),
     Outcome(TaskOutcome),
     All {
@@ -36,6 +41,20 @@ enum FlowValue<T> {
 }
 
 impl<T> FlowState<T> {
+    /// Attaches only invocation-local checkpoint bytes to a routing decision.
+    #[cfg(feature = "pravah")]
+    pub(super) fn work(
+        request: super::WorkRequest,
+        state: impl Serialize,
+    ) -> Result<Self, TaskRuntimeError> {
+        Ok(Self {
+            inner: FlowValue::Work {
+                request,
+                state: serde_json::to_string(&state)?,
+            },
+        })
+    }
+
     /// Requests an ordered, all-settled group without submitting any work.
     /// Checkpoint serialization can fail here; registration, size, and fan-out
     /// limits are checked during framework preparation after the handler returns.
@@ -112,6 +131,8 @@ impl<T: Serialize + 'static> FlowState<T> {
     /// Serializes successful values before erasure, retaining only unresolved child intent.
     pub(super) fn prepare(self) -> FlowState {
         let inner = match self.inner {
+            #[cfg(feature = "pravah")]
+            FlowValue::Work { request, state } => FlowValue::Work { request, state },
             FlowValue::Complete(output) => FlowValue::Outcome(super::state::completion(output)),
             FlowValue::Outcome(outcome) => FlowValue::Outcome(outcome),
             FlowValue::All { inputs, state } => FlowValue::All { inputs, state },
@@ -142,6 +163,8 @@ impl FlowState {
     /// Consumes prepared output bytes; only unresolved child preparation borrows its payload.
     pub(super) fn resolve_owned(self, site: &crate::Site) -> Result<TaskOutcome, TaskRuntimeError> {
         match self.inner {
+            #[cfg(feature = "pravah")]
+            FlowValue::Work { request, state } => request.prepare(&state, site),
             FlowValue::Complete(()) => Ok(TaskOutcome::Complete),
             FlowValue::Outcome(outcome) => Ok(outcome),
             FlowValue::All { inputs, state } => site.tasks().prepare_all(&inputs, &state),
@@ -157,6 +180,10 @@ impl FlowState {
     #[cfg(test)]
     pub(super) fn resolve(&self, site: &crate::Site) -> Result<TaskOutcome, TaskRuntimeError> {
         match &self.inner {
+            #[cfg(feature = "pravah")]
+            FlowValue::Work { .. } => Err(TaskRuntimeError::TaskExecutionError(
+                "Work requests must be consumed".into(),
+            )),
             FlowValue::Complete(()) => Ok(TaskOutcome::Complete),
             FlowValue::Outcome(outcome) => Ok(outcome.clone()),
             FlowValue::All { inputs, state } => site.tasks().prepare_all(inputs, state),

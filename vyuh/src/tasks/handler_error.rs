@@ -34,21 +34,26 @@ impl WorkError {
 
 /// A Flow handler's terminal failure decision; Flow cannot request retries.
 #[derive(Debug, thiserror::Error)]
-#[error("{failure}")]
-pub struct FlowError {
-    failure: TaskFailure,
+pub enum FlowError {
+    /// Application-safe terminal failure.
+    #[error("{0}")]
+    Fail(TaskFailure),
+    /// The graph requested Work dispatch without a configured effects policy.
+    #[error("Flow requires an effects policy")]
+    MissingEffects,
 }
 
 impl FlowError {
     /// Fails terminally with application-safe diagnostic text that will be persisted.
     pub fn fail(message: impl Into<String>) -> Self {
-        Self {
-            failure: TaskFailure::new(None, message),
-        }
+        Self::Fail(TaskFailure::new(None, message))
     }
 
     pub(super) fn into_outcome(self) -> TaskOutcome {
-        TaskOutcome::fail(self.failure.into_message())
+        match self {
+            Self::Fail(failure) => TaskOutcome::fail(failure.into_message()),
+            Self::MissingEffects => TaskOutcome::fail("Flow requires an effects policy"),
+        }
     }
 }
 
@@ -73,4 +78,4 @@ macro_rules! terminal_conversions {
 }
 
 terminal_conversions!(WorkError, WorkError::Fail);
-terminal_conversions!(FlowError, |failure| FlowError { failure });
+terminal_conversions!(FlowError, FlowError::Fail);

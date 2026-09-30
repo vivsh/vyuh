@@ -964,6 +964,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> AbstractTaskRunner<S> {
 
     fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
         Ok(super::TaskStoreConf {
+            flows: self.registry.flow_configuration(),
             max_all_children: self.registry.config.all_limit(),
             handlers: self
                 .registry

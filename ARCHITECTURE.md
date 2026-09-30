@@ -101,12 +101,19 @@ The `vyuh` crate is organized around these subsystems:
   the shared submission, storage, and runtime concept. These registration names
   do not change persisted handler identities or the deployment policy fingerprint.
   Work uses task-specific async callable registration and `WorkState<T>` or direct
-  serializable outputs. Flow uses synchronous registration, `FlowState<T>`, and an
-  invocation-local context containing only input and an immutable record.
-  Both kinds support continuation extraction and suspension; only Flow can sleep
-  or spawn children (one child or an `all` group). Site/service and identity extraction remain unavailable to Flow.
+  serializable outputs. Flow uses one-time synchronous factories, `FlowConf`, and
+  immutable definitions implementing `Flow::advance`. Site construction consumes
+  factory registrations, deduplicates effects-policy construction in temporary
+  type-keyed scratch, and retains only prepared definitions. Manual definitions
+  require no optional dependency. Factories may receive `PartialSite` (database
+  handle only); execution receives input, read-only task identity and continuation.
+  Execution metadata comes from `Flow::Input`, not factory arguments. Factory
+  errors and panics fail construction before workers start.
+  Both kinds receive continuations and support suspension; only Flow can sleep
+  or spawn children (one child or an `all` group). Runtime site/service and
+  operation identity extraction remain unavailable to Flow.
   Task-only return conversion serializes before type erasure through the existing
-  single callable future. Work WorkError chooses retry/failure, FlowError permits
+  single callable future. WorkError chooses retry/failure, FlowError permits
   only failure, and TaskRuntimeError describes infrastructure/API failures.
   Inferred sealed return categories avoid macro type detection. Typed output and
   conversion scratch are invocation-local, never parallel durable task state. The registered handler variant owns its
@@ -116,6 +123,18 @@ The `vyuh` crate is organized around these subsystems:
   store fencing, with cancellation taking precedence. Neither adds SQL or a
   separate recovery policy. Sync signatures restrict supported capabilities,
   not arbitrary Rust effects or blocking operations.
+  The non-default `pravah` feature re-exports the selected dependency and prepares
+  builders/compiled graphs through one adapter. A prepared graph owns only the
+  immutable graph, shared routing policy, and instruction budget. Each invocation
+  owns a temporary VM; snapshots live exclusively in task continuations. Policies
+  select registered Work payloads without performing effects or transforming
+  results. Fetch success decodes directly to FetchResponse; terminal failure maps
+  to the fixed `vyuh_task_failure` FetchError. Suspension failures terminate the
+  parent; successful domain values remain unchanged. Pure instruction-budget
+  exhaustion returns ordinary zero-delay sleep. No VM cache, implicit executor,
+  per-instruction persistence, new table or scheduling loop is introduced.
+  Registration computes graph/policy/revision/budget compatibility once. Protocol
+  upgrades are ledger-owned and never reinterpret existing checkpoints.
   Spawn outcomes checkpoint a suspended parent and prepare one child; terminal
   child outcomes deliver Serde `Result` values through the existing resume input.
   Task updates, child inserts, and narrow parent updates use bounded Mool bulk

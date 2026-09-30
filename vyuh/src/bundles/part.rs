@@ -451,21 +451,17 @@ where
     }
 }
 
-/// Registers synchronous orchestration with input and continuation extraction only.
-/// Future returns and work outcomes are rejected at compile time. Handler failures
-/// become normal terminal task failures; the function must be pure and non-blocking.
-pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+/// Registers a synchronous factory, built once per site into an immutable Flow.
+/// Factory errors and panics fail site construction before workers start.
+pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
 where
     T: callables::DataValue,
     H: crate::tasks::FlowCallable<Args> + 'static,
-    H::Output: crate::tasks::IntoFlowOutcomePart,
-    Args: callables::FromContext<crate::tasks::FlowContext>
-        + callables::IntoArgSpecs
-        + callables::HasData<T>
-        + Send
-        + 'static,
+    H::Output: crate::tasks::FlowReturn<T, E, M>,
+    Args: crate::tasks::FlowArguments<T>,
+    E: Send + Sync + 'static,
 {
-    let task = crate::tasks::RegisteredTask::new_flow::<T, H, Args>(definition, handler);
+    let task = crate::tasks::RegisteredTask::new_flow::<T, H, Args, E, M>(definition, handler);
     let op = task.operation();
     BundlePart {
         operation: Some(op),

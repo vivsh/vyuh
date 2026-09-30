@@ -1,12 +1,16 @@
-error[E0277]: the trait bound `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>: IntoWorkBatchOutcomePart` is not satisfied
+error[E0277]: the trait bound `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>: vyuh::tasks::IntoWorkBatchOutcomePart` is not satisfied
   --> tests/ui/tasks/work_invalid_batch_flow.rs:11:33
    |
 11 |     let _ = bundles::work_batch(invalid, TaskDefinition::new("invalid"));
-   |             ------------------- ^^^^^^^ the trait `IntoWorkBatchOutcomePart` is not implemented for `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>`
+   |             ------------------- ^^^^^^^ the trait `vyuh::tasks::IntoWorkBatchOutcomePart` is not implemented for `Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>`
    |             |
    |             required by a bound introduced by this call
    |
-   = help: the trait `IntoWorkBatchOutcomePart` is implemented for `Result<T, WorkError>`
+help: the trait `vyuh::tasks::IntoWorkBatchOutcomePart` is implemented for `Result<T, WorkError>`
+  --> src/tasks/batch.rs
+   |
+   | impl<T: IntoWorkBatchOutcomePart> IntoWorkBatchOutcomePart for Result<T, super::WorkError> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `work_batch`
   --> src/bundles/part.rs
    |

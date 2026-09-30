@@ -1,9 +1,15 @@
-use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
+use vyuh::prelude::*;
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 struct Job;
 
 struct Bypass;
-impl vyuh::tasks::IntoFlowOutcomePart for Bypass {
- fn into_flow_state(self) -> FlowState { FlowState::complete(()) }
+impl Flow for Bypass {
+ type Input = Job;
+ type Output = ();
+ type Checkpoint = ();
+ type Resume = ();
+ async fn advance(&self, _: TaskId, _: Data<Job>, _: Continuation<(), ()>) -> Result<FlowState, FlowError> {
+  Ok(FlowState::complete(()))
+ }
 }
 fn main() {}

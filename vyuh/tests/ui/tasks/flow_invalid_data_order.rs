@@ -1,5 +1,5 @@
-use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
-#[derive(Deserialize, Serialize, schemars::JsonSchema)]
-struct Job;
-fn handler(_: Data<Job>, _: Continuation<()>) {}
-fn main() { let _ = bundles::flow(handler, TaskDefinition::new("bad")); }
+#[path = "support/manual.rs"]
+mod support;
+use vyuh::{bundles, prelude::*};
+fn handler(_: Data<support::Job>, _: Continuation<()>) -> support::Manual { support::Manual }
+fn main() { let _ = bundles::flow(handler, FlowConf::new("bad")); }

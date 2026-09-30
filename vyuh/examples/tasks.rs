@@ -38,14 +38,29 @@ struct DoubleJob {
 
 /// Suspends atomically with child creation and receives its result on a later poll.
 #[bundles::flow]
-fn parent_job(
-    continuation: Continuation<(), u32>,
-    input: Data<ParentJob>,
-) -> Result<FlowState<u32>, FlowError> {
-    match continuation.resume() {
-        None => Ok(FlowState::spawn(DoubleJob { value: input.value }, ())?),
-        Some(Ok(value)) => Ok(FlowState::complete(*value)),
-        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+fn parent_job() -> ParentFlow {
+    ParentFlow
+}
+
+struct ParentFlow;
+
+impl Flow for ParentFlow {
+    type Input = ParentJob;
+    type Output = u32;
+    type Checkpoint = ();
+    type Resume = u32;
+
+    fn advance(
+        &self,
+        _: TaskId,
+        input: Data<ParentJob>,
+        continuation: Continuation<(), u32>,
+    ) -> Result<FlowState<u32>, FlowError> {
+        match continuation.resume() {
+            None => Ok(FlowState::spawn(DoubleJob { value: input.value }, ())?),
+            Some(Ok(value)) => Ok(FlowState::complete(*value)),
+            Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+        }
     }
 }
 
@@ -112,22 +127,37 @@ fn email_key(job: &SendEmailJob) -> String {
 
 // Pattern 4: Suspend/resume with typed continuation state and input.
 #[bundles::flow(name = "approve_document")]
-fn approve_document(
-    continuation: Continuation<PendingApproval, ApprovalDecision>,
-    input: Data<ApprovalRequest>,
-) -> Result<FlowState<ApprovalDecision>, FlowError> {
-    match continuation.resume() {
-        // ── Resumed: approver has responded ──────────────────────────────
-        Some(Ok(decision)) => Ok(FlowState::complete(decision.clone())),
+fn approve_document() -> ApprovalFlow {
+    ApprovalFlow
+}
 
-        // ── First run: suspend and wait ───────────────────────────────────
-        Some(Err(failure)) => Err(FlowError::fail(failure.message())),
-        None => {
-            let state = PendingApproval {
-                document_id: input.document_id,
-                title: input.title.clone(),
-            };
-            Ok(FlowState::suspend(state)?)
+struct ApprovalFlow;
+
+impl Flow for ApprovalFlow {
+    type Input = ApprovalRequest;
+    type Output = ApprovalDecision;
+    type Checkpoint = PendingApproval;
+    type Resume = ApprovalDecision;
+
+    fn advance(
+        &self,
+        _: TaskId,
+        input: Data<ApprovalRequest>,
+        continuation: Continuation<PendingApproval, ApprovalDecision>,
+    ) -> Result<FlowState<ApprovalDecision>, FlowError> {
+        match continuation.resume() {
+            // ── Resumed: approver has responded ──────────────────────────────
+            Some(Ok(decision)) => Ok(FlowState::complete(decision.clone())),
+
+            // ── First run: suspend and wait ───────────────────────────────────
+            Some(Err(failure)) => Err(FlowError::fail(failure.message())),
+            None => {
+                let state = PendingApproval {
+                    document_id: input.document_id,
+                    title: input.title.clone(),
+                };
+                Ok(FlowState::suspend(state)?)
+            }
         }
     }
 }

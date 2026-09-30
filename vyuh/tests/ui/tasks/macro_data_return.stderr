@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `vyuh::Data<std::string::String>: IntoWorkOutcomePart<tasks::returns::Value>` is not satisfied
+error[E0277]: the trait bound `vyuh::Data<std::string::String>: vyuh::tasks::IntoWorkOutcomePart<tasks::returns::Value>` is not satisfied
  --> tests/ui/tasks/macro_data_return.rs:8:10
   |
 7 | #[bundles::work]
@@ -16,7 +16,7 @@ error[E0277]: the trait bound `vyuh::Data<std::string::String>: IntoWorkOutcomeP
             (T0, T1, T2, T3)
             (T0, T1, T2, T3, T4)
           and $N others
-  = note: required for `vyuh::Data<std::string::String>` to implement `IntoWorkOutcomePart<tasks::returns::Value>`
+  = note: required for `vyuh::Data<std::string::String>` to implement `vyuh::tasks::IntoWorkOutcomePart<tasks::returns::Value>`
 note: required by a bound in `work`
  --> src/bundles/part.rs
   |

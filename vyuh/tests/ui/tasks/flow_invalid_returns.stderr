@@ -1,41 +1,47 @@
-error[E0277]: the trait bound `vyuh::prelude::WorkState: IntoFlowOutcomePart` is not satisfied
- --> tests/ui/tasks/flow_invalid_returns.rs:5:4
+error[E0277]: the trait bound `vyuh::prelude::WorkState: vyuh::tasks::FlowReturn<_, (), tasks::flow_factory::Definition>` is not satisfied
+ --> tests/ui/tasks/flow_invalid_returns.rs:3:4
   |
-4 | #[bundles::flow]
+2 | #[bundles::flow]
   | ---------------- required by a bound introduced by this call
-5 | fn handler(_: Data<Job>) -> WorkState { WorkState::complete(()) }
-  |    ^^^^^^^ the trait `IntoFlowOutcomePart` is not implemented for `vyuh::prelude::WorkState`
+3 | fn handler() -> WorkState { WorkState::complete(()) }
+  |    ^^^^^^^ the trait `vyuh::prelude::Flow` is not implemented for `vyuh::prelude::WorkState`
   |
-  = help: the following other types implement trait `IntoFlowOutcomePart`:
-            ()
-            FlowState<T>
-            Result<T, FlowError>
+help: the trait `vyuh::tasks::FlowReturn<I, E, tasks::flow_factory::Fallible>` is implemented for `Result<F, FlowError>`
+ --> src/tasks/flow_factory.rs
+  |
+  | impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Fallible> for Result<F, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: required for `vyuh::prelude::WorkState` to implement `IntoFlow<_>`
+  = note: required for `vyuh::prelude::WorkState` to implement `vyuh::tasks::FlowReturn<_, (), tasks::flow_factory::Definition>`
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |
-  | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
   |        ---- required by a bound in this function
 ...
-  |     H::Output: crate::tasks::IntoFlowOutcomePart,
+  |     H::Output: crate::tasks::FlowReturn<T, E, M>,
   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`
 
-error[E0277]: the trait bound `u32: IntoFlowOutcomePart` is not satisfied
- --> tests/ui/tasks/flow_invalid_returns.rs:6:35
+error[E0277]: the trait bound `u32: vyuh::tasks::FlowReturn<_, (), tasks::flow_factory::Definition>` is not satisfied
+ --> tests/ui/tasks/flow_invalid_returns.rs:4:35
   |
-6 | fn main() { let _ = bundles::flow(|_: Data<Job>| 42u32, TaskDefinition::new("bad")); }
-  |                     ------------- ^^^^^^^^^^^^^^^^^^^^ the trait `IntoFlowOutcomePart` is not implemented for `u32`
+4 | fn main() { let _ = bundles::flow(|| 42u32, FlowConf::new("bad")); }
+  |                     ------------- ^^^^^^^^ the trait `vyuh::prelude::Flow` is not implemented for `u32`
   |                     |
   |                     required by a bound introduced by this call
   |
-  = help: the following other types implement trait `IntoFlowOutcomePart`:
-            ()
-            FlowState<T>
-            Result<T, FlowError>
+help: the trait `vyuh::tasks::FlowReturn<I, E, tasks::flow_factory::Fallible>` is implemented for `Result<F, FlowError>`
+ --> src/tasks/flow_factory.rs
+  |
+  | impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Fallible> for Result<F, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: required for `u32` to implement `IntoFlow<_>`
+  = note: required for `u32` to implement `vyuh::tasks::FlowReturn<_, (), tasks::flow_factory::Definition>`
 note: required by a bound in `flow`
  --> src/bundles/part.rs
   |
-  | pub fn flow<T, H, Args>(handler: H, definition: TaskDefinition<T>) -> BundlePart
+  | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
   |        ---- required by a bound in this function
 ...
-  |     H::Output: crate::tasks::IntoFlowOutcomePart,
+  |     H::Output: crate::tasks::FlowReturn<T, E, M>,
   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`

@@ -15,13 +15,24 @@ pub trait WorkCallable<Args: IntoArgSpecs>: Send + Sync {
     fn invoke(&self, args: Args) -> Self::Future;
 }
 
-/// Synchronous Flow signature; a future return cannot satisfy Flow conversion.
+/// Synchronous factory signature; a future return cannot satisfy Flow conversion.
 #[doc(hidden)]
 pub trait FlowCallable<Args: IntoArgSpecs>: Send + Sync {
     /// Direct typed return.
     type Output;
-    /// Invokes the bounded, non-blocking synchronous handler.
+    /// Invokes the non-blocking factory during site construction.
     fn invoke(&self, args: Args) -> Self::Output;
+}
+
+impl<H, R> FlowCallable<()> for H
+where
+    H: Fn() -> R + Send + Sync,
+{
+    type Output = R;
+
+    fn invoke(&self, (): ()) -> R {
+        self()
+    }
 }
 
 macro_rules! task_callable {
@@ -64,26 +75,6 @@ where
         Box::pin(async move {
             let args = Args::from_context(ctx)?;
             Ok(convert(handler.invoke(args).await))
-        })
-    })
-}
-
-/// Adapts synchronous Flow only at the existing callable future boundary.
-pub(super) fn flow<C, H, Args>(
-    handler: H,
-    convert: fn(H::Output) -> DataBox,
-) -> Callable<C, crate::Error>
-where
-    C: Send + 'static,
-    H: FlowCallable<Args> + 'static,
-    Args: callables::FromContext<C> + IntoArgSpecs + 'static,
-{
-    let handler = Arc::new(handler);
-    Callable::from_invocation::<Args>(std::any::type_name::<H>(), move |ctx| {
-        let handler = handler.clone();
-        Box::pin(async move {
-            let args = Args::from_context(ctx)?;
-            Ok(convert(handler.invoke(args)))
         })
     })
 }

@@ -138,13 +138,19 @@ fn console_runtime(
     .map_err(crate::bundles::BundleError::RouteRegistry)
 }
 
+/// Build-time database handle, without runtime services or task dispatch capabilities.
 #[derive(Debug, Clone)]
-pub(crate) struct PartialSite {
+pub struct PartialSite {
     db: DbPool,
 }
 
 impl PartialSite {
-    pub(crate) fn db(&self) -> DbPool {
+    pub(crate) fn new(db: DbPool) -> Self {
+        Self { db }
+    }
+
+    /// Returns the configured pool handle without executing database work.
+    pub fn db(&self) -> DbPool {
         self.db.clone()
     }
 }
@@ -565,7 +571,12 @@ impl SiteBuilder {
             task_config.lease_duration_value(),
         );
 
-        let task_registry = Arc::new(bundle.tasks.clone().finalize(task_config)?);
+        let declarations = std::mem::take(&mut bundle.tasks);
+        let task_registry = Arc::new(
+            declarations
+                .prepare_flows(&PartialSite::new(pool.clone()))?
+                .finalize(task_config)?,
+        );
 
         let task_schedules = bundle.emitters.task_schedules(&task_registry)?;
 

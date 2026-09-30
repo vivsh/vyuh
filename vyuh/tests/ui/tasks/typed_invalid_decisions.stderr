@@ -1,8 +1,8 @@
-error[E0599]: no function or associated item named `retry` found for struct `vyuh::prelude::WorkState<T>` in the current scope
+error[E0599]: no associated function or constant named `retry` found for struct `vyuh::prelude::WorkState<T>` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:3:30
   |
 3 |     let _ = WorkState::<()>::retry("retry");
-  |                              ^^^^^ function or associated item not found in `vyuh::prelude::WorkState`
+  |                              ^^^^^ associated function or constant not found in `vyuh::prelude::WorkState`
   |
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
@@ -15,11 +15,11 @@ note: if you're trying to build a new `vyuh::prelude::WorkState` consider using 
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0599]: no function or associated item named `fail` found for struct `vyuh::prelude::WorkState<T>` in the current scope
+error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::WorkState<T>` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:4:30
   |
 4 |     let _ = WorkState::<()>::fail("fail");
-  |                              ^^^^ function or associated item not found in `vyuh::prelude::WorkState`
+  |                              ^^^^ associated function or constant not found in `vyuh::prelude::WorkState`
   |
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
@@ -32,11 +32,11 @@ note: if you're trying to build a new `vyuh::prelude::WorkState` consider using 
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0599]: no function or associated item named `fail` found for struct `vyuh::prelude::FlowState<T>` in the current scope
+error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::FlowState<T>` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:5:30
   |
 5 |     let _ = FlowState::<()>::fail("fail");
-  |                              ^^^^ function or associated item not found in `vyuh::prelude::FlowState`
+  |                              ^^^^ associated function or constant not found in `vyuh::prelude::FlowState`
   |
 note: if you're trying to build a new `vyuh::prelude::FlowState` consider using one of the following associated functions:
       vyuh::prelude::FlowState::<T>::all
@@ -65,11 +65,11 @@ note: if you're trying to build a new `vyuh::prelude::FlowState` consider using 
   |       pub fn complete(output: T) -> Self {
   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0599]: no function or associated item named `retry` found for struct `vyuh::prelude::FlowError` in the current scope
+error[E0599]: no variant, associated function, or constant named `retry` found for enum `vyuh::prelude::FlowError` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:6:24
   |
 6 |     let _ = FlowError::retry("retry");
-  |                        ^^^^^ function or associated item not found in `vyuh::prelude::FlowError`
+  |                        ^^^^^ variant, associated function, or constant not found in `vyuh::prelude::FlowError`
   |
 note: if you're trying to build a new `vyuh::prelude::FlowError`, consider using `vyuh::prelude::FlowError::fail` which returns `vyuh::prelude::FlowError`
  --> src/tasks/handler_error.rs

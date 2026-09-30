@@ -1,33 +1,8 @@
-warning: unused imports: `bundles` and `tasks::TaskDefinition`
- --> tests/ui/tasks/flow_invalid_sealed.rs:1:12
-  |
-1 | use vyuh::{bundles, prelude::*, tasks::TaskDefinition};
-  |            ^^^^^^^              ^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-error[E0277]: the trait bound `Bypass: tasks::returns::sealed::Flow` is not satisfied
- --> tests/ui/tasks/flow_invalid_sealed.rs:6:43
-  |
-6 | impl vyuh::tasks::IntoFlowOutcomePart for Bypass {
-  |                                           ^^^^^^ unsatisfied trait bound
-  |
-help: the trait `tasks::returns::sealed::Flow` is not implemented for `Bypass`
- --> tests/ui/tasks/flow_invalid_sealed.rs:5:1
-  |
-5 | struct Bypass;
-  | ^^^^^^^^^^^^^
-  = help: the following other types implement trait `tasks::returns::sealed::Flow`:
-            ()
-            Result<T, FlowError>
-            vyuh::prelude::FlowState<T>
-note: required by a bound in `IntoFlowOutcomePart`
- --> src/tasks/returns.rs
-  |
-  | pub trait IntoFlowOutcomePart: sealed::Flow {
-  |                                ^^^^^^^^^^^^ required by this bound in `IntoFlowOutcomePart`
-  = note: `IntoFlowOutcomePart` is a "sealed trait", because to implement it you also need to implement `vyuh::tasks::returns::sealed::Flow`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
-  = help: the following types implement the trait:
-            ()
-            vyuh::prelude::FlowState<T>
-            std::result::Result<T, vyuh::prelude::FlowError>
+error[E0053]: method `advance` has an incompatible type for trait
+  --> tests/ui/tasks/flow_invalid_sealed.rs:11:79
+   |
+11 |  async fn advance(&self, _: TaskId, _: Data<Job>, _: Continuation<(), ()>) -> Result<FlowState, FlowError> {
+   |                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<FlowState, FlowError>`, found future
+   |
+   = note: expected signature `fn(&Bypass, vyuh::prelude::TaskId, vyuh::Data<Job>, vyuh::prelude::Continuation<()>) -> Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>`
+              found signature `fn(&Bypass, vyuh::prelude::TaskId, vyuh::Data<Job>, vyuh::prelude::Continuation<()>) -> impl std::future::Future<Output = Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>>`

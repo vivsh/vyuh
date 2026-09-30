@@ -325,9 +325,9 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TaskRuntimeEr
 #[tokio::test]
 async fn task_options_defer_errors_to_submission() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new_flow(
+    registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
-        |_: Data<DirectJob>| (),
+        |_: Data<DirectJob>| async {},
     ))?;
     let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
     let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
@@ -402,9 +402,9 @@ fn static_idempotency_inherits_lane_retention() -> Result<(), TaskRuntimeError> 
 #[tokio::test]
 async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new_flow(
+    registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
-        |_: Data<DirectJob>| (),
+        |_: Data<DirectJob>| async {},
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
@@ -555,9 +555,9 @@ async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
 #[tokio::test]
 async fn external_results_share_envelope() -> Result<(), TaskRuntimeError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
-    registry.register(RegisteredTask::new_flow(
+    registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
-        |_: Data<DirectJob>| (),
+        |_: Data<DirectJob>| async {},
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
@@ -609,9 +609,9 @@ async fn external_result_limit_is_independent() -> Result<(), TaskRuntimeError> 
         .max_payload_bytes(32)
         .max_error_bytes(64 * 1024);
     let mut registry = TaskRegistry::new().with_config(config)?;
-    registry.register(RegisteredTask::new_flow(
+    registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
-        |_: Data<DirectJob>| (),
+        |_: Data<DirectJob>| async {},
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10));
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());

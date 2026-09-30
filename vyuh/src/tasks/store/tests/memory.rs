@@ -68,6 +68,7 @@ pub(crate) fn flow_record() -> TaskRecord {
 
 pub(crate) fn conf() -> TaskStoreConf {
     TaskStoreConf {
+        flows: Vec::new(),
         max_all_children: 256,
         handlers: vec![
             ("workflow".into(), TaskKind::Work),

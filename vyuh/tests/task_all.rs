@@ -18,19 +18,34 @@ async fn item(input: Data<Item>) -> u32 {
 }
 
 #[bundles::flow]
-fn group(
-    continuation: Continuation<(), Vec<Result<u32, vyuh::tasks::TaskFailure>>>,
-    input: Data<Group>,
-) -> Result<FlowState<u32>, FlowError> {
-    match continuation.into_parts() {
-        (None, _) => Ok(FlowState::all((0..input.0.0).map(Item).collect(), ())?),
-        (Some(()), Some(results)) => {
-            let sum = results?
-                .into_iter()
-                .try_fold(0, |sum, value| value.map(|value| sum + value))?;
-            Ok(FlowState::complete(sum))
+fn group() -> GroupFlow {
+    GroupFlow
+}
+
+struct GroupFlow;
+
+impl Flow for GroupFlow {
+    type Input = Group;
+    type Output = u32;
+    type Checkpoint = ();
+    type Resume = Vec<Result<u32, TaskFailure>>;
+
+    fn advance(
+        &self,
+        _: TaskId,
+        input: Data<Group>,
+        continuation: Continuation<(), Vec<Result<u32, vyuh::tasks::TaskFailure>>>,
+    ) -> Result<FlowState<u32>, FlowError> {
+        match continuation.into_parts() {
+            (None, _) => Ok(FlowState::all((0..input.0.0).map(Item).collect(), ())?),
+            (Some(()), Some(results)) => {
+                let sum = results?
+                    .into_iter()
+                    .try_fold(0, |sum, value| value.map(|value| sum + value))?;
+                Ok(FlowState::complete(sum))
+            }
+            _ => Err(FlowError::fail("Missing all result")),
         }
-        _ => Err(FlowError::fail("Missing all result")),
     }
 }
 
@@ -41,7 +56,7 @@ async fn all_registration_parity() -> Result<(), TestError> {
         let bundle = if direct {
             bundles::bundle([
                 bundles::work(item, TaskDefinition::new("item").lane(WORK)),
-                bundles::flow(group, TaskDefinition::new("group")),
+                bundles::flow(group, FlowConf::new("group")),
             ])
         } else {
             bundles::bundle([__bundle_part_item(), __bundle_part_group()])

@@ -28,7 +28,12 @@ impl TaskId {
         Self(id)
     }
 
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    #[cfg(any(
+        feature = "postgres",
+        feature = "mysql",
+        feature = "sqlite",
+        feature = "pravah"
+    ))]
     pub(crate) const fn into_uuid(self) -> uuid::Uuid {
         self.0
     }

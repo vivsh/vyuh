@@ -2,7 +2,7 @@
 
 Vyuh tasks combine typed background work and durable workflow orchestration in
 one runtime. A task has one of two kinds: **Work** handlers are asynchronous and perform effects; **Flow**
-handlers are synchronous and describe the next durable transition. Both return
+definitions are immutable and advance synchronously to the next durable transition. Both return
 typed results and use the same task records, lanes, leases, recovery, and
 cancellation mechanisms.
 
@@ -67,7 +67,8 @@ input + state + resume_input -> handler -> Output | WorkState<Output> | FlowStat
 
 Work can return a serializable value directly, or `WorkState<T>` for completion
 or suspension. Use `Result<_, WorkError>` for explicit failure/retry decisions.
-Flow returns unit or `FlowState<T>`, optionally in `Result<_, FlowError>`.
+Flow factories build once per site; each invocation calls the definition's
+`advance` method, returning `Result<FlowState<T>, FlowError>`.
 Infrastructure APIs return `TaskRuntimeError`; these are not handler decisions.
 Task persistence is framework-owned; applications compose work through
 `site.tasks()` rather than implementing a scheduler store.
@@ -81,9 +82,9 @@ intents; it cannot make an external email, payment, or HTTP request exactly
 once. Use a transactional outbox or a domain-owned idempotency key around those
 effects.
 
-Vyuh tasks are durable continuations, not a workflow DAG interpreter.
-Sequential, nested, and homogeneous parallel child orchestration use explicit
-Flow state transitions; `all` waits for every member rather than selecting a winner.
+Manual workflows use explicit Flow state transitions; `all` waits for every member
+rather than selecting a winner. The optional `pravah` feature adds declarative
+graphs through the same durable continuation boundary, not a second task scheduler.
 
 The durable execution boundary is always:
 
@@ -217,8 +218,8 @@ a child or resumed parent recursively; those run after a later claim.
 | Capability | Work | Flow | Work batch |
 |---|---|---|---|
 | Registration | `work` | `flow` | `work_batch` |
-| Function | `async fn` | synchronous `fn` | `async fn` |
-| Success | Direct `T` or `WorkState<T>` | `()` or `FlowState<T>` | Unit, uniform state, or ordered states |
+| Function | `async fn` | one-time synchronous factory; synchronous `Flow::advance` | `async fn` |
+| Success | Direct `T` or `WorkState<T>` | `FlowState<T>` | Unit, uniform state, or ordered states |
 | Handler error | `WorkError` (`Retry` or `Fail`) | `FlowError` (terminal) | `WorkError`, uniform or per item |
 | External suspension | Yes, with `Continuation<S, R>` | Yes, with `Continuation<S, R>` | No |
 | Sleep, spawn, `all` | No | Yes | No |
@@ -231,16 +232,23 @@ and result size after the handler returns. `suspend`, `sleep`, `spawn`, and `all
 can fail during request preparation and therefore still use `?`.
 
 Use `#[bundles::flow]` or the equivalent
-`bundles::flow(handler, TaskDefinition::new("handler"))`. Both accept the same
+`bundles::flow(factory, FlowConf::new("handler"))`. Both accept the same
 name, lane, and idempotency definition as Work. Registration uses Rust trait
 bounds, not recognition of argument type spelling. Submission remains
 `tasks.submit(input).await?` for either kind.
 
 For associated functions, use direct registration, for example
-`bundles::flow(Checkout::advance, TaskDefinition::new("checkout"))`.
+`bundles::flow(Checkout::build, FlowConf::new("checkout"))`.
 
-Flow accepts `Continuation<S, R>` and a final `Data<T>`. It does not expose
-site/services, task identity, or operation identity. Work can also extract
+Factories return an immutable implementation of `Flow`, optionally inside
+`Result<_, FlowError>`. A manual factory takes no arguments or a build-time
+`PartialSite`. It never receives submitted input or continuation. `PartialSite`
+only exposes the configured database handle: no runtime services or task facade.
+Factories and effects-policy construction must not perform blocking I/O.
+
+`Flow::advance` receives read-only `TaskId`, `Data<Self::Input>`, and
+`Continuation<Self::Checkpoint, Self::Resume>`. It does not receive site/services
+or operation identity. Work can also extract
 `Continuation<S, R>` and suspend, but cannot sleep or spawn. There is no Flow
 batch registration.
 
@@ -259,7 +267,7 @@ shared contention; configure a separate lane for isolation when needed.
 `Data<T>` is the immutable submitted input. It stays the same for the lifetime
 of the task.
 
-`Continuation<S, R>` is an optional Work or Flow handler argument for tasks that save state,
+`Continuation<S, R>` is a Work extractor and an argument to `Flow::advance` for tasks that save state,
 sleep, suspend, or resume. Initial execution has neither value, sleeping work
 has state only, and resumed work has state plus a `Result<R, TaskFailure>`. Its accessors
 borrow values, so continuation types do not need `Clone`.
@@ -287,9 +295,18 @@ struct PendingApproval {
 }
 
 #[bundles::flow(name = "approve_document")]
-fn approve_document(
-    continuation: Continuation<PendingApproval, ApprovalDecision>,
+fn approve_document() -> ApprovalFlow { ApprovalFlow }
+
+struct ApprovalFlow;
+impl Flow for ApprovalFlow {
+    type Input = ApprovalRequest;
+    type Output = ApprovalDecision;
+    type Checkpoint = PendingApproval;
+    type Resume = ApprovalDecision;
+
+fn advance(&self, _: TaskId,
     input: Data<ApprovalRequest>,
+    continuation: Continuation<PendingApproval, ApprovalDecision>,
 ) -> Result<FlowState<ApprovalDecision>, FlowError> {
     if let Some(Ok(decision)) = continuation.resume() {
         return Ok(FlowState::complete(decision.clone()));
@@ -305,6 +322,7 @@ fn approve_document(
 
     Ok(FlowState::suspend(state)?)
 }
+}
 ```
 
 `R` is the successful resume value type. A failure carries a safe message and an
@@ -318,9 +336,18 @@ Return a spawn outcome directly from the parent handler; no `Site` argument is n
 
 ```rust,ignore
 #[bundles::flow]
-fn build_report(
-    continuation: Continuation<ReportCheckpoint, ReportData>,
+fn build_report() -> ReportFlow { ReportFlow }
+
+struct ReportFlow;
+impl Flow for ReportFlow {
+    type Input = ReportRequest;
+    type Output = ReportData;
+    type Checkpoint = ReportCheckpoint;
+    type Resume = ReportData;
+
+fn advance(&self, _: TaskId,
     input: Data<ReportRequest>,
+    continuation: Continuation<ReportCheckpoint, ReportData>,
 ) -> Result<FlowState<ReportData>, FlowError> {
     match continuation.resume() {
         Some(Ok(data)) => Ok(FlowState::complete(data.clone())),
@@ -331,6 +358,7 @@ fn build_report(
         )?),
     }
 }
+}
 
 #[bundles::work]
 async fn fetch_report(input: Data<FetchReport>) -> Result<ReportData, WorkError> {
@@ -338,8 +366,8 @@ async fn fetch_report(input: Data<FetchReport>) -> Result<ReportData, WorkError>
 }
 ```
 
-The equivalent parent registration is `bundles::flow(handler,
-TaskDefinition::new("handler_name"))`. Spawning adds no macro syntax.
+The equivalent parent registration is `bundles::flow(build_report,
+FlowConf::new("build_report"))`. Spawning adds no macro syntax.
 
 `FlowState::spawn(input, state)` and `FlowState::spawn_with(input, state, options)`
 construct an outcome, not a submission. They serialize the checkpoint and reject
@@ -396,9 +424,18 @@ async fn process_item(input: Data<Item>) -> u32 {
 }
 
 #[bundles::flow]
-fn collect(
-    continuation: Continuation<(), Vec<Result<u32, TaskFailure>>>,
+fn collect() -> CollectFlow { CollectFlow }
+
+struct CollectFlow;
+impl Flow for CollectFlow {
+    type Input = Collection;
+    type Output = Vec<u32>;
+    type Checkpoint = ();
+    type Resume = Vec<Result<u32, TaskFailure>>;
+
+fn advance(&self, _: TaskId,
     input: Data<Collection>,
+    continuation: Continuation<(), Vec<Result<u32, TaskFailure>>>,
 ) -> Result<FlowState<Vec<u32>>, FlowError> {
     if let (_, Some(results)) = continuation.into_parts() {
         let values = results?.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -406,13 +443,14 @@ fn collect(
     }
     Ok(FlowState::all(input.items.clone(), ())?)
 }
+}
 
 let bundle = bundles::bundle! { process_item, collect };
 ```
 
 The equivalent direct bundle uses `bundles::work(process_item,
 TaskDefinition::new("process_item"))` and `bundles::flow(collect,
-TaskDefinition::new("collect"))`; import `TaskDefinition` from `vyuh::tasks`.
+FlowConf::new("collect"))`; import `TaskDefinition` from `vyuh::tasks`.
 Submit `Collection { items: vec![Item { value: 2 }, Item { value: 5 }] }`
 through `site.tasks().submit(...)`. Its successful result is `[4, 10]`.
 This handler chooses to fail the Flow if any child failed; it could instead
@@ -446,6 +484,102 @@ groups are not supported. Work and batch handlers cannot return `all`.
 Completed tasks remain stored; this feature adds no retention policy. Any future
 deletion feature must preserve results still needed by active joins. Upgrade using
 the coordinated task-protocol templates before starting new workers or writers.
+
+## Optional Pravah Graphs
+
+Enable `vyuh`'s non-default `pravah` feature and import the matching API from
+`vyuh::pravah`. It does not enable Pravah's testing or MCP features. Manual Flow
+definitions do not require Pravah.
+
+The runnable `pravah_tasks` example demonstrates explicit Work routing with a
+stub provider: `cargo run -p vyuh --example pravah_tasks --features pravah`.
+
+```rust,ignore
+use vyuh::{bundles, pravah, PartialSite};
+use vyuh::tasks::{FlowConf, FlowError, PravahEffects, WorkRequest};
+
+#[bundles::flow(effects = AppEffects)]
+fn checkout(root: pravah::Flow<Checkout>) -> pravah::Flow<Confirmation> {
+    build_checkout(root)
+}
+
+// Equivalent direct registration:
+bundles::flow(checkout, FlowConf::new("checkout")
+    .effects::<AppEffects>().step_limit(256).revision("1"));
+```
+
+Factories receive symbolic roots, optionally preceded by `PartialSite`, never
+submitted input. The framework compiles once; factories may also return an
+already compiled definition. Each invocation creates an isolated temporary VM
+and restores its snapshot from the ordinary task continuation. Factory or policy
+errors/panics prevent site construction. A pure graph can omit effects; ordinary
+external suspension also works without a policy.
+
+Opaque returns must expose the matching preparation bound: `impl IntoFlow<Input>`
+without effects, or `impl IntoFlow<Input, AppEffects>` with that policy. A manual
+factory may return `impl Flow<Input = Input>`.
+
+A reusable policy **routes requests, not results**:
+
+```rust,ignore
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+struct FetchJob {
+    #[schemars(with = "String")]
+    id: uuid::Uuid,
+    request: pravah::FetchRequest,
+}
+
+struct AppEffects;
+impl PravahEffects for AppEffects {
+    fn build(_: &PartialSite) -> Result<Self, FlowError> { Ok(Self) }
+
+    fn fetch(&self, request: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
+        Ok(WorkRequest::new(FetchJob {
+            id: request.id(), request: request.request().clone(),
+        }))
+    }
+}
+```
+
+The policy is constructed once per selected type per site and shared across
+definitions. `suspend(&Suspension)` may return `Some(WorkRequest)` or `None` for
+external waiting; its default is `None`. `WorkRequest::options(...)` validates
+scheduling options and rejects conflict adoption. Targets must be registered
+Work, never Flow. Construction and routing cannot submit work: the snapshot and
+child are committed through the existing atomic spawn path.
+
+Register a Work handler accepting `Data<FetchJob>` and returning `FetchResponse`.
+That handler performs the effect using normal services. It may use an explicitly
+configured `FetchExecutor`; agent/tool requests must use the appropriate handler
+registry and services. Vyuh installs no universal executor. Do not use
+`Data<pravah::Fetch>` directly: it lacks the schema bound required by `DataValue`.
+
+Successful Fetch results are decoded directly as `FetchResponse`. Terminal Work
+failures become Fetch errors with code `vyuh_task_failure`, the safe diagnostic,
+and optional originating task ID in details. Suspension Work must return its
+declared resume type; failed suspension Work or failed external resume terminates
+the parent. There are no result-conversion callbacks. Only Vyuh's outer persisted
+`Result` is unwrapped: a successfully returned domain `Result` remains data.
+Malformed or schema-incompatible values fail the Flow explicitly.
+
+Fetch/suspension boundaries checkpoint immediately. Pure instructions run locally
+up to `step_limit` (default 256, valid 1–10,000); exhaustion checkpoints through
+zero-delay sleep and resumes on a later poll. A boundary emitted by the final
+instruction is handled before yielding. The limit cannot preempt one blocking
+instruction. Graph parallelism is not automatically translated to task `all`.
+
+Snapshots obey the existing checkpoint limit; final results and resume envelopes
+still have the fixed 32,768-byte limit. Snapshots and Fetch payloads can contain
+credentials or sensitive data: apply the same storage/access controls as inputs.
+
+Graph fingerprint, policy type, instruction limit and application revision enter
+deployment compatibility. Increment `.revision(...)` when captured configuration
+or Rust callbacks change replay semantics; graph fingerprints cannot detect every
+such change. Stop incompatible workers and writers and apply the appended
+`0012_flow_factories_protocol` template. It changes protocol markers, not task
+columns. Retained manual checkpoints must match the new implementation; they are
+never reinterpreted as Pravah snapshots. No runtime checkpoint/schema repair or
+mixed-version operation is supported.
 
 ## Retained Results
 
@@ -1112,8 +1246,9 @@ and a complete `all` handler pair above.
 - No exactly-once guarantee.
 - No retained topic events.
 - No durable per-attempt audit history.
-- No declarative workflow interpreter or arbitrary dependency graph API. Explicit
-  Flow handlers support sequential, nested, and homogeneous parallel `all` joins.
+- Manual Flow supports sequential, nested, and homogeneous parallel `all` joins.
+  Optional Pravah graphs use the same runtime; graph parallelism is not automatically
+  converted into durable `all` groups.
 - No first-completion `select`, heterogeneous `all`, or per-child `all` options.
 - Child input types are registered, but their output types are not associated at
   compile time; a mismatched continuation result type fails decoding at runtime.

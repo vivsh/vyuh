@@ -7,8 +7,8 @@ use crate::tasks::{FlowState, TaskKind};
 /// Intentionally provides no site or service extraction capability.
 #[doc(hidden)]
 pub struct FlowContext {
-    pub(super) payload: callables::DataBox,
-    pub(super) record: Arc<TaskRecord>,
+    pub(in crate::tasks) payload: callables::DataBox,
+    pub(in crate::tasks) record: Arc<TaskRecord>,
 }
 
 impl callables::IntoDataBox for FlowContext {
@@ -18,32 +18,38 @@ impl callables::IntoDataBox for FlowContext {
 }
 
 impl RegisteredTask {
-    /// Registers a synchronous handler; future returns and work capabilities are rejected.
-    pub fn new_flow<T, H, Args>(definition: TaskDefinition<T>, handler: H) -> Self
+    /// Declares a synchronous factory; it is invoked once during site finalization.
+    pub fn new_flow<T, H, Args, E, M>(definition: super::super::FlowConf<T, E>, handler: H) -> Self
     where
         T: callables::DataValue,
         H: crate::tasks::FlowCallable<Args> + 'static,
-        H::Output: crate::tasks::IntoFlowOutcomePart,
-        Args: callables::FromContext<FlowContext>
-            + callables::IntoArgSpecs
-            + callables::HasData<T>
-            + Send
-            + 'static,
+        H::Output: crate::tasks::FlowReturn<T, E, M>,
+        Args: crate::tasks::FlowArguments<T>,
+        E: Send + Sync + 'static,
     {
+        let super::super::FlowConf {
+            definition,
+            build_effects,
+            step_limit,
+            revision,
+        } = definition;
         let (name, policy) = definition.into_parts();
-        let callable = crate::tasks::callable::flow(handler, |value: H::Output| {
-            crate::tasks::IntoFlowOutcomePart::into_flow_state(value).erase()
-        });
-        let mut operation =
-            callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
+        let spec = callables::CallSpec::for_types::<callables::specs::Tuple1<callables::Data<T>>, ()>(
+            std::any::type_name::<H>(),
+        );
+        let mut operation = callables::Operation::from_specs(callables::OperationKind::Task, &spec);
         operation.name = name.clone();
         Self {
             name,
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>().to_string(),
-            handler: RegisteredHandler::Flow {
-                handler: callable,
-                outcome: prepared_flow,
+            handler: RegisteredHandler::FlowFactory {
+                build: crate::tasks::flow_build::deferred::<T, H, Args, E, M>(
+                    handler,
+                    build_effects,
+                    step_limit,
+                    revision,
+                ),
             },
             operation,
             policy: policy.erase(),
@@ -53,9 +59,39 @@ impl RegisteredTask {
     /// Derives execution classification from the registration, without parallel metadata.
     pub(crate) const fn kind(&self) -> TaskKind {
         match self.handler {
-            RegisteredHandler::Flow { .. } => TaskKind::Flow,
+            RegisteredHandler::Flow { .. } | RegisteredHandler::FlowFactory { .. } => {
+                TaskKind::Flow
+            }
             _ => TaskKind::Work,
         }
+    }
+
+    /// Contains factory and policy panics before any workers can start.
+    pub(crate) fn prepare_flow(
+        &mut self,
+        site: &crate::PartialSite,
+        scratch: &mut crate::tasks::flow_build::EffectsScratch,
+    ) -> Result<(), TaskRuntimeError> {
+        let RegisteredHandler::FlowFactory { build } = &self.handler else {
+            return Ok(());
+        };
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(site, scratch)))
+                .map_err(|_| {
+                    TaskRuntimeError::InvalidConfig(format!(
+                        "Flow '{}' factory panicked",
+                        self.name
+                    ))
+                })?;
+        let (handler, compatibility) = result.map_err(|error| {
+            TaskRuntimeError::InvalidConfig(format!("Flow '{}': {error}", self.name))
+        })?;
+        self.handler = RegisteredHandler::Flow {
+            handler,
+            outcome: prepared_flow,
+            compatibility,
+        };
+        Ok(())
     }
 }
 

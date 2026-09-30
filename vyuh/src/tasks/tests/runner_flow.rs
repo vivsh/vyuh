@@ -3,16 +3,28 @@ use super::*;
 /// Flow panics use the same spawned invocation containment and terminal failure as Work.
 #[tokio::test]
 async fn synchronous_panic_is_contained() -> Result<(), String> {
-    fn flow(_: Data<PanicJob>) {
-        panic!("deliberate synchronous panic");
+    struct PanicFlow;
+    impl crate::tasks::Flow for PanicFlow {
+        type Input = PanicJob;
+        type Output = ();
+        type Checkpoint = ();
+        type Resume = ();
+        fn advance(
+            &self,
+            _: crate::tasks::TaskId,
+            _: Data<PanicJob>,
+            _: crate::tasks::Continuation<(), ()>,
+        ) -> Result<crate::tasks::FlowState, crate::tasks::FlowError> {
+            panic!("deliberate synchronous panic");
+        }
     }
     let mut registry = TaskRegistry::new()
         .with_config(TaskConf::default())
         .map_err(|e| e.to_string())?;
     registry
         .register(RegisteredTask::new_flow(
-            crate::tasks::TaskDefinition::new("panic-job"),
-            flow,
+            crate::tasks::FlowConf::new("panic-job"),
+            || PanicFlow,
         ))
         .map_err(|e| e.to_string())?;
     let site = crate::Site::build(
@@ -21,6 +33,9 @@ async fn synchronous_panic_is_contained() -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
+    let registry = registry
+        .prepare_flows(&crate::PartialSite::new(site.db()))
+        .map_err(|e| e.to_string())?;
     let mut record = (*panic_record().map_err(|e| e.to_string())?).clone();
     record.kind = crate::tasks::TaskKind::Flow;
     let (sender, mut receiver) = mpsc::channel(1);

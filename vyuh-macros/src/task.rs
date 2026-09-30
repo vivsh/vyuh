@@ -14,89 +14,117 @@ struct TaskArgs {
     /// Optional static idempotency policy.
     #[darling(default)]
     idempotency: Option<Expr>,
+    /// Explicit shared Pravah routing policy, valid only for Flow factories.
+    #[darling(default)]
+    effects: Option<syn::Path>,
 }
 
 /// Unified implementation for both free functions and methods
 pub(crate) fn parse_work(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, quote! { ::vyuh::bundles::work })
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::work }, false)
 }
 
 /// Registers a value-only local batch handler.
 pub(crate) fn parse_work_batch(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, quote! { ::vyuh::bundles::work_batch })
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::work_batch }, false)
 }
 
 /// Registers synchronous orchestration; Rust bounds validate its signature.
 pub(crate) fn parse_flow(attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_task_as(attr, item, quote! { ::vyuh::bundles::flow })
+    parse_task_as(attr, item, quote! { ::vyuh::bundles::flow }, true)
 }
 
 fn parse_task_as(
     attr: TokenStream,
     item: TokenStream,
     register: proc_macro2::TokenStream,
+    is_flow: bool,
 ) -> TokenStream {
-    let args = if attr.is_empty() {
-        TaskArgs::default()
-    } else {
-        match darling::ast::NestedMeta::parse_meta_list(attr.into()) {
-            Ok(v) => match TaskArgs::from_list(&v) {
-                Ok(args) => args,
-                Err(e) => return e.write_errors().into(),
-            },
-            Err(e) => return e.into_compile_error().into(),
-        }
+    let args = match parse_args(attr) {
+        Ok(args) => args,
+        Err(error) => return error,
     };
 
-    let (original, fn_ident, is_method) = if let Ok(func) = syn::parse::<ItemFn>(item.clone()) {
-        let ident = func.sig.ident.clone();
-        (quote! { #func }, ident, false)
-    } else if let Ok(method) = syn::parse::<ImplItemFn>(item.clone()) {
-        let ident = method.sig.ident.clone();
-        (quote! { #method }, ident, true)
-    } else {
+    if !is_flow && args.effects.is_some() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "task attributes can only be applied to functions or methods",
+            "effects is only supported on Flow factories",
         )
-        .to_compile_error()
+        .into_compile_error()
         .into();
+    }
+
+    let (original, fn_ident, is_method) = match parse_function(item) {
+        Ok(parts) => parts,
+        Err(error) => return error.into_compile_error().into(),
     };
-
-    let fn_name = fn_ident.to_string();
-    let task_name = args.name.as_ref().unwrap_or(&fn_name);
-
-    let bundle_part_fn_name =
-        syn::Ident::new(&format!("__bundle_part_{}", fn_name), fn_ident.span());
-
-    let call_expr = if is_method {
+    let name = fn_ident.to_string();
+    let task_name = args.name.as_deref().unwrap_or(&name);
+    let conf = configuration(&args, task_name, is_flow);
+    let bundle_part = syn::Ident::new(&format!("__bundle_part_{name}"), fn_ident.span());
+    let call = if is_method {
         quote! { Self::#fn_ident }
     } else {
         quote! { #fn_ident }
     };
+    quote! {
+        #original
+        #[allow(non_snake_case)]
+        fn #bundle_part() -> ::vyuh::bundles::BundlePart {
+            #register(#call, #conf)
+        }
+    }
+    .into()
+}
 
+/// Parses explicit registration configuration, never Rust argument/return type spelling.
+fn parse_args(attr: TokenStream) -> Result<TaskArgs, TokenStream> {
+    if attr.is_empty() {
+        return Ok(TaskArgs::default());
+    }
+    let values = darling::ast::NestedMeta::parse_meta_list(attr.into())
+        .map_err(|error| TokenStream::from(error.into_compile_error()))?;
+    TaskArgs::from_list(&values).map_err(|error| error.write_errors().into())
+}
+
+/// Preserves the original declaration and supported free/associated registration target.
+fn parse_function(item: TokenStream) -> syn::Result<(proc_macro2::TokenStream, syn::Ident, bool)> {
+    if let Ok(func) = syn::parse::<ItemFn>(item.clone()) {
+        let ident = func.sig.ident.clone();
+        Ok((quote! { #func }, ident, false))
+    } else if let Ok(method) = syn::parse::<ImplItemFn>(item.clone()) {
+        let ident = method.sig.ident.clone();
+        Ok((quote! { #method }, ident, true))
+    } else {
+        Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "task attributes can only be applied to functions or methods",
+        ))
+    }
+}
+
+/// Emits only calls to the equivalent direct configuration API.
+fn configuration(args: &TaskArgs, name: &str, is_flow: bool) -> proc_macro2::TokenStream {
     let lane = args
         .lane
+        .as_ref()
         .map(|lane| quote! { .lane(#lane) })
         .unwrap_or_default();
     let idempotency = args
         .idempotency
+        .as_ref()
         .map(|policy| quote! { .idempotency(#policy) })
         .unwrap_or_default();
-
-    let expanded = quote! {
-        #original
-
-        #[allow(non_snake_case)]
-        fn #bundle_part_fn_name() -> ::vyuh::bundles::BundlePart {
-            #register(
-                #call_expr,
-                ::vyuh::tasks::TaskDefinition::new(#task_name)
-                    #lane
-                    #idempotency,
-            )
-        }
+    let conf = if is_flow {
+        quote! { ::vyuh::tasks::FlowConf }
+    } else {
+        quote! { ::vyuh::tasks::TaskDefinition }
     };
+    let effects = args
+        .effects
+        .as_ref()
+        .map(|ty| quote! { .effects::<#ty>() })
+        .unwrap_or_default();
 
-    expanded.into()
+    quote! { #conf::new(#name) #lane #idempotency #effects }
 }
