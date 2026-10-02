@@ -157,62 +157,52 @@ impl PartialSite {
 
 #[derive(Error)]
 pub enum SiteError {
-    #[error("Database error: {0}")]
     DatabaseError(#[from] DbError),
 
-    #[error("Service not found for type: {0}")]
     ServiceNotFound(String),
 
-    #[error("Configuration error: {0}")]
     ConfError(#[from] conf::ConfError),
 
-    #[error(transparent)]
     AuthBuildError(#[from] crate::auth::AuthBuildError),
 
-    #[error("schema asset error: {0}")]
     SchemaAsset(#[from] crate::schema_assets::SchemaAssetError),
 
-    #[error("Template file error: {0}")]
     TemplateFileError(String),
 
-    #[error("Address resolution error: {0}")]
     AddressResolutionError(String),
 
-    #[error("Invalid timezone: {0}")]
     TimezoneError(String),
 
-    #[error("File watch error: {0}")]
     FileWatchError(String),
 
-    #[error(transparent)]
     BundleError(#[from] crate::bundles::BundleError),
 
-    #[error(transparent)]
     TemplateError(#[from] TemplateError),
 
-    #[error("Serve error: {0}")]
     ServeError(#[from] axum::Error),
 
-    #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
 
-    #[error(transparent)]
     EmitterError(#[from] crate::emitters::EmitterError),
 
-    #[error(transparent)]
     SignalError(#[from] crate::signals::SignalError),
 
-    #[error(transparent)]
     LoggingError(#[from] logging::LoggingError),
 
-    #[error(transparent)]
     ServiceError(#[from] services::ServiceError),
 
-    #[error(transparent)]
     CommandError(#[from] crate::commands::CommandError),
 
-    #[error(transparent)]
     TaskRuntimeError(#[from] crate::tasks::TaskRuntimeError),
+}
+
+impl fmt::Display for SiteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::CommandError(error) = self {
+            return fmt::Display::fmt(error, formatter);
+        }
+        crate::diagnostics::render(formatter, "Site assembly failed", &self.diagnostics())
+    }
 }
 
 impl fmt::Debug for SiteError {
@@ -385,7 +375,7 @@ impl SiteBuilder {
             .conf
             .auth
             .default_audience_id()
-            .map_err(|error| conf::ConfError::Other(format!("Auth config error: {error}")))?;
+            .map_err(conf::ConfError::Auth)?;
         let project_dir = PathBuf::from(&self.conf.project_dir);
 
         let timezone = match &self.conf.tz {
@@ -426,7 +416,7 @@ impl SiteBuilder {
             .extend_definitions(bundle.auth_definitions()?);
         auth_conf
             .validate_provider_names()
-            .map_err(|error| conf::ConfError::Other(format!("Auth config error: {error}")))?;
+            .map_err(conf::ConfError::Auth)?;
         let mut effective_conf = self.conf.clone();
         effective_conf.auth = auth_conf.clone();
         effective_conf.validate()?;
@@ -467,10 +457,8 @@ impl SiteBuilder {
 
         template_engine.inject_templates(&bundle)?;
 
-        let cache = Arc::new(
-            CacheRegistry::build(&self.conf.cache)
-                .map_err(|err| conf::ConfError::Other(format!("Cache config error: {err}")))?,
-        );
+        let cache =
+            Arc::new(CacheRegistry::build(&self.conf.cache).map_err(conf::ConfError::Cache)?);
         let auth_audiences = bundle
             .ops
             .values()

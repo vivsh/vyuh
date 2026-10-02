@@ -20,40 +20,45 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfError {
-    #[error("missing required field '{field}': {reason}")]
-    RequiredField { field: String, reason: String },
+    /// Authentication validation failed; retains the typed provider error.
+    Auth(#[source] crate::auth::AuthError),
+    /// Cache registry validation failed.
+    Cache(#[source] crate::cache::CacheError),
+    /// Task configuration validation failed.
+    Task(#[source] crate::tasks::TaskRuntimeError),
+    /// Logging configuration validation failed.
+    Logging(#[source] logging::LoggingError),
+    RequiredField {
+        field: String,
+        reason: String,
+    },
 
-    #[error("invalid value for '{field}': {reason}{}", expected.as_ref().map(|e| format!(" (expected: {})", e)).unwrap_or_default())]
     InvalidValue {
         field: String,
         reason: String,
         expected: Option<String>,
     },
 
-    #[error("invalid path for '{field}' at '{path}': {reason}")]
     InvalidPath {
         field: String,
         path: String,
         reason: String,
     },
 
-    #[error("validation failed with {} error(s):\n{}", .0.len(), ConfError::display_many(.0))]
     Many(Vec<ConfError>),
 
-    #[error("missing required field: {0}")]
     MissingField(String),
 
-    #[error("{0}")]
     Other(String),
 }
 
-impl ConfError {
-    fn display_many(errors: &[ConfError]) -> String {
-        errors
-            .iter()
-            .map(|e| format!("- {}", e))
-            .collect::<Vec<_>>()
-            .join("\n")
+impl fmt::Display for ConfError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::diagnostics::render(
+            formatter,
+            "Configuration failed",
+            &crate::diagnostics::configuration(self),
+        )
     }
 }
 
@@ -455,42 +460,26 @@ impl SiteConf {
 
     fn validate_tasks(&self, errors: &mut Vec<ConfError>) {
         if let Err(error) = self.tasks.validate() {
-            errors.push(ConfError::InvalidValue {
-                field: "tasks".into(),
-                reason: error.to_string(),
-                expected: Some("valid task lanes, batching, and polling limits".into()),
-            });
+            errors.push(ConfError::Task(error));
         }
     }
 
     /// Adds accumulated cache configuration failures to the site validation report.
     fn validate_cache(&self, errors: &mut Vec<ConfError>) {
         if let Err(error) = self.cache.validate() {
-            errors.push(ConfError::InvalidValue {
-                field: "cache".into(),
-                reason: error.to_string(),
-                expected: Some("unique configured providers and one valid default provider".into()),
-            });
+            errors.push(ConfError::Cache(error));
         }
     }
 
     fn validate_logging(&self, errors: &mut Vec<ConfError>) {
         if let Err(error) = self.logging.validate() {
-            errors.push(ConfError::InvalidValue {
-                field: "logging".into(),
-                reason: error.to_string(),
-                expected: Some("valid logging rules and sinks".into()),
-            });
+            errors.push(ConfError::Logging(error));
         }
         if let Err(error) = self
             .logging
             .validate_mail_admins(self.log_init, self.mail.enabled)
         {
-            errors.push(ConfError::InvalidValue {
-                field: "logging.mail_admins".into(),
-                reason: error.to_string(),
-                expected: Some("enabled logging and outbound mail".into()),
-            });
+            errors.push(ConfError::Logging(error));
         }
     }
 
@@ -535,11 +524,7 @@ impl SiteConf {
 
     fn validate_auth(&self, errors: &mut Vec<ConfError>) {
         if let Err(error) = self.auth.validate_provider_names() {
-            errors.push(ConfError::InvalidValue {
-                field: "auth.providers".into(),
-                reason: error.to_string(),
-                expected: Some("an application provider ID without the 'vyuh-' prefix".into()),
-            });
+            errors.push(ConfError::Auth(error));
         }
     }
 

@@ -31,6 +31,42 @@ The main public pieces are:
 
 ## Configuration
 
+### Assembly diagnostics
+
+Assembly failures return `SiteError` without printing or logging it. Printing
+the error, or returning it from `main`, shows a summary, relevant context and
+causes, and a remedy. Existing accumulated validation errors appear separately;
+initialization still stops at its first failure.
+
+```rust
+match Site::build(conf, bundle).await {
+    Ok(site) => site.start().await?,
+    Err(error) => {
+        for diagnostic in error.diagnostics() {
+            eprintln!("{}", diagnostic.summary);
+            for detail in diagnostic.details {
+                eprintln!("  {detail}");
+            }
+            if let Some(hint) = diagnostic.hint {
+                eprintln!("  hint: {hint}");
+            }
+        }
+        return Err(error);
+    }
+}
+```
+
+`BuildDiagnostic` is a presentation value, not a replacement for the error.
+Typed causes remain available through error variants and
+`std::error::Error::source`. Configuration validation preserves auth, cache,
+task, and logging failures as typed `ConfError` variants.
+
+Relevant causes are shown in both debug and release builds. Presentation omits
+backtraces and configuration dumps, redacts recognized credential formats,
+and bounds cause depth and text size. Do not put secrets in application error
+messages: arbitrary prose cannot be reliably redacted. Diagnostics do not
+change HTTP error rendering.
+
 Start from `SiteConf::default()` and set only what the application needs:
 
 ```rust

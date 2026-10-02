@@ -1,5 +1,16 @@
 # Commands
 
+## Site assembly failures
+
+Commands that need a built site, including migration commands, can fail before
+their handler runs. These failures use the same actionable
+[assembly diagnostics](site.md#assembly-diagnostics) as server startup.
+Fix the identified configuration or registration before retrying the command.
+
+Once migration command execution begins, Gaman's existing diagnostics,
+remedies, and clarification choices remain intact. They are not replaced by
+a generic site-assembly error.
+
 Vyuh commands are site-aware CLI entrypoints. Use them for administration,
 diagnostics, maintenance, one-off data repair, and local operational tools that
 should run against the same configured site as the web server.

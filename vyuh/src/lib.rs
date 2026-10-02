@@ -1,5 +1,7 @@
 mod conf;
+mod diagnostics;
 mod site;
+pub use diagnostics::BuildDiagnostic;
 
 extern crate self as vyuh;
 

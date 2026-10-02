@@ -111,25 +111,13 @@ use thiserror::Error;
 pub enum AuthBuildError {
     /// The effective authentication registry is invalid.
     #[error("invalid authentication configuration: {0}")]
-    Configuration(String),
+    Configuration(#[source] AuthError),
     /// A configured provider or login method could not initialize.
     #[error("authentication provider initialization failed: {0}")]
-    ProviderInitialization(String),
+    ProviderInitialization(#[source] AuthError),
     /// Authentication preparation could not run on the blocking worker pool.
     #[error("authentication startup worker failed")]
     WorkerFailure,
-}
-
-impl AuthBuildError {
-    pub(crate) fn from_auth(error: AuthError) -> Self {
-        match error {
-            AuthError::ProviderUnavailable => Self::ProviderInitialization(error.to_string()),
-            AuthError::InvalidProviderConfig(message) if message.contains("failed during") => {
-                Self::ProviderInitialization(message)
-            }
-            _ => Self::Configuration(error.to_string()),
-        }
-    }
 }
 
 /// Structured authentication failures with deliberately safe HTTP rendering.

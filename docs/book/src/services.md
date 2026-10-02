@@ -1,5 +1,19 @@
 # Services
 
+## Construction diagnostics
+
+A failed factory, facade exposure, or worker registration is reported with the
+concrete service type and the original cause. For example, a factory returning
+an error with the safe message `vault is locked` identifies that cause beneath
+`Service initialization failed.`, followed by a remedy.
+
+`ServiceError::Initialization { service, source }` owns this context only on
+failure. Inspect `source` for the original typed error, or use
+`SiteError::diagnostics()` for sanitized presentation. This applies equally to
+`#[bundles::service]` and `bundles::service(factory)`.
+Construction still preserves exclusive ownership and drops assembly-owned
+resources on failure without starting registered workers.
+
 Vyuh services are site-lifetime application components. Use them for shared
 clients, coordinators, in-process state, and background loops. Service instances
 are constructed during site assembly; registered loops start only when serving.

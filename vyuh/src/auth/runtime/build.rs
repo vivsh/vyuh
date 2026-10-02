@@ -50,8 +50,10 @@ pub(super) async fn authenticator(
     })
     .await
     .map_err(|_| AuthBuildError::WorkerFailure)?
-    .map_err(AuthBuildError::from_auth)?;
-    finish(prepared).await.map_err(AuthBuildError::from_auth)
+    .map_err(AuthBuildError::Configuration)?;
+    finish(prepared)
+        .await
+        .map_err(AuthBuildError::ProviderInitialization)
 }
 
 /// Resolves blocking key sources and prepares login methods before async providers.

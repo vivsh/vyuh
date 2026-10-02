@@ -28,6 +28,12 @@ The `vyuh` crate is organized around these subsystems:
   services, logging, emitters, commands, and database access.
 - `conf` defines `SiteConf`, environment loading, and runtime configuration
   validation.
+- Private `diagnostics` projects typed assembly errors into public
+  `BuildDiagnostic` values on demand. Errors own their sources; the site and
+  registries retain no diagnostic state. Configuration preserves subsystem
+  causes, while service initialization attaches the existing concrete type
+  only on failure. Terminal presentation sanitizes and bounds causes without
+  changing HTTP errors, validation sequencing, or runtime initialization.
 - `bundles` is the composition layer for routes, commands, signals, emitters,
   services, migrations, schema contributors, docs, and assets.
 - `routes` defines route metadata, method handling, middleware helpers, and

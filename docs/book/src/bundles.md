@@ -1,5 +1,24 @@
 # Bundles
 
+## Assembly failures
+
+`Bundle::validate()` and site assembly report accumulated registration failures
+separately, with the affected operation and a remedy. For example, registering
+GET handlers at both `/items` and `/items/` produces:
+
+```text
+Site assembly failed:
+
+1. A route is registered more than once.
+   Route: GET /items
+   Paths differing only by one terminal slash use the same internal routing path.
+   hint: Keep one registration for this method and normalized path, or give the operations distinct paths.
+```
+
+Distinct methods may share a path. The same validation applies to macro and
+direct registration. See [Site](site.md#assembly-diagnostics) for structured
+diagnostic access.
+
 Bundles are Vyuh's composition API. A `Bundle` collects routes, Beacon live
 subscriptions, signals,
 emitters, tasks, services, commands, asset directories, URL info providers,

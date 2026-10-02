@@ -52,16 +52,16 @@ fn assert_construction_error(error: vyuh::SiteError) {
     assert!(
         matches!(
             &error,
-            vyuh::SiteError::ServiceError(ServiceError::CallError(
-                vyuh::callables::CallError::Other(_)
-            ))
+            vyuh::SiteError::ServiceError(ServiceError::Initialization { .. })
         ),
         "unexpected construction error: {error:?}"
     );
-    if let vyuh::SiteError::ServiceError(ServiceError::CallError(
-        vyuh::callables::CallError::Other(source),
-    )) = error
-    {
+    assert!(error.to_string().contains("CounterService"));
+    assert!(error.to_string().contains("vault is locked"));
+    if let vyuh::SiteError::ServiceError(ServiceError::Initialization { source, .. }) = error {
+        let ServiceError::CallError(vyuh::callables::CallError::Other(source)) = *source else {
+            panic!("original callable source was lost");
+        };
         let source = source.downcast_ref::<std::io::Error>();
         assert_eq!(
             source.map(std::io::Error::kind),
@@ -364,7 +364,11 @@ async fn services_duplicate_concrete_services_fail_site_build() {
     .await
     .unwrap_err();
 
-    assert!(format!("{err:?}").contains("AlreadyRegistered"));
+    assert!(
+        err.to_string()
+            .contains("Service already registered for type:")
+    );
+    assert!(err.to_string().contains("Register each concrete service"));
 }
 
 trait Greeting: Send + Sync {

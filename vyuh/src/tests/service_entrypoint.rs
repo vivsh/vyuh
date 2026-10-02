@@ -25,8 +25,8 @@ async fn run_propagates_factory_error() {
     .await;
     assert!(matches!(
         result,
-        Err(SiteError::ServiceError(ServiceError::CallError(
-            CallError::InvalidArgument(_)
-        )))
+        Err(SiteError::ServiceError(ServiceError::Initialization { service, source }))
+            if service.ends_with("Unavailable")
+                && matches!(*source, ServiceError::CallError(CallError::InvalidArgument(_)))
     ));
 }

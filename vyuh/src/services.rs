@@ -20,6 +20,15 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
+    /// Identifies the service whose factory, exposure, or worker registration failed.
+    #[error("service '{service}' could not initialize: {source}")]
+    Initialization {
+        /// Concrete service type being assembled.
+        service: &'static str,
+        /// Original initialization failure, retained for inspection.
+        #[source]
+        source: Box<ServiceError>,
+    },
     #[error("Service already registered for type: {0}")]
     AlreadyRegistered(&'static str),
 
@@ -493,35 +502,48 @@ impl ServiceEngine {
         }
     }
 
+    /// Initializes services in registration order, attaching context only on failure.
     pub(crate) async fn load(
         &mut self,
         registry: ServiceRegistry,
         partial_site: PartialSite,
     ) -> Result<(), ServiceError> {
         for (_, handler) in registry.services {
-            let entry_future = (handler.build_fn)(ServiceBuildContext {
-                site: partial_site.clone(),
-            });
-            let entry = entry_future.await?;
-            let record = ServiceRecord {
-                type_name: entry.type_name,
-                facades: entry
-                    .facades
-                    .iter()
-                    .map(|facade| facade.type_name)
-                    .collect(),
-                workers: entry.workers.clone(),
-            };
-            for facade in entry.facades {
-                let iface = (facade.coerce_fn)(entry.inner.clone())?;
-                if self.services.contains_key(&facade.type_id) {
-                    return Err(ServiceError::AlreadyRegistered(facade.type_name));
-                }
-                self.services.insert(facade.type_id, iface);
-            }
-            self.workers.extend(entry.workers);
-            self.records.push(record);
+            self.load_service(&handler, partial_site.clone())
+                .await
+                .map_err(|source| ServiceError::Initialization {
+                    service: handler.type_name,
+                    source: Box::new(source),
+                })?;
         }
+        Ok(())
+    }
+
+    /// Builds one owned service before publishing its facades and worker records.
+    async fn load_service(
+        &mut self,
+        handler: &ServiceHandler,
+        site: PartialSite,
+    ) -> Result<(), ServiceError> {
+        let entry = (handler.build_fn)(ServiceBuildContext { site }).await?;
+        let record = ServiceRecord {
+            type_name: entry.type_name,
+            facades: entry
+                .facades
+                .iter()
+                .map(|facade| facade.type_name)
+                .collect(),
+            workers: entry.workers.clone(),
+        };
+        for facade in entry.facades {
+            let iface = (facade.coerce_fn)(entry.inner.clone())?;
+            if self.services.contains_key(&facade.type_id) {
+                return Err(ServiceError::AlreadyRegistered(facade.type_name));
+            }
+            self.services.insert(facade.type_id, iface);
+        }
+        self.workers.extend(entry.workers);
+        self.records.push(record);
         Ok(())
     }
 
