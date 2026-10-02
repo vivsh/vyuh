@@ -6,7 +6,7 @@ use crate::{
     callables::{self},
     commands::{self},
     embed, emitters,
-    services::{Service, ServiceBuildContext, ServiceHandler, ServiceInstance},
+    services::{Service, ServiceBuildContext, ServiceHandler, ServiceOutput},
     signals::{self, SignalConf},
     tasks::TaskDefinition,
 };
@@ -469,10 +469,14 @@ where
     }
 }
 
+/// Registers a service factory returning an owned instance or a service error.
+///
+/// Construction and error propagation occur during site assembly, before workers start.
 pub fn service<T, H, Args>(handler: H) -> BundlePart
 where
     T: Service,
-    H: callables::Specable<Args, Output = ServiceInstance<T>> + Send + Sync + 'static,
+    H: callables::Specable<Args> + Send + Sync + 'static,
+    H::Output: ServiceOutput<T>,
     Args: callables::FromContext<ServiceBuildContext> + callables::IntoArgSpecs + Send + 'static,
 {
     let entry = ServiceHandler::new(handler);

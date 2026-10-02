@@ -1,8 +1,8 @@
 # Services
 
 Vyuh services are site-lifetime application components. Use them for shared
-clients, coordinators, in-process state, and background loops that
-should be created once when the serving runtime starts.
+clients, coordinators, in-process state, and background loops. Service instances
+are constructed during site assembly; registered loops start only when serving.
 
 Services are not durable work queues. Use [Tasks](tasks.md) for work that must
 survive process restarts, retries, sleeps, or external resume.
@@ -30,7 +30,9 @@ starts; its registered workers start only when Vyuh serves the site.
 
 ## Registration
 
-Service constructors return `ServiceInstance<T>`:
+Service constructors return `ServiceInstance<T>` or
+`Result<ServiceInstance<T>, ServiceError>`. Existing constructors with a declared
+`ServiceInstance<T>` return type need no changes:
 
 ```rust
 use vyuh::prelude::*;
@@ -64,6 +66,17 @@ let bundle = bundles::bundle([bundles::service(counter)]);
 Only one service can be registered for a concrete service type. Duplicate
 registrations fail site build.
 
+Inline closures must make their output type clear. With both fallible and
+infallible outputs accepted, a bare `.into()` may no longer infer its target:
+
+```rust
+let bundle = bundles::bundle([bundles::service(|| async {
+    ServiceInstance(Counter::default())
+})]);
+```
+
+Named factories with declared return types retain their existing inference.
+
 ## Construction
 
 Constructors run while the site is being built. They can extract
@@ -87,6 +100,58 @@ async fn search_index(db: DbPool) -> ServiceInstance<SearchIndex> {
 
 The full `Site` is intentionally unavailable during service construction,
 because services are part of building the site.
+
+### Fallible Construction
+
+Return `Result` when initialization can fail. Both the macro and direct API
+accept the same factory:
+
+```rust
+use vyuh::{bundles, callables::CallError};
+use vyuh::services::{Service, ServiceError, ServiceInstance};
+
+struct LocalApp {
+    config: String,
+}
+
+impl LocalApp {
+    async fn build() -> std::io::Result<Self> {
+        let config = tokio::fs::read_to_string("app.toml").await?;
+        Ok(Self { config })
+    }
+}
+
+impl Service for LocalApp {}
+
+#[bundles::service]
+async fn local_service() -> Result<ServiceInstance<LocalApp>, ServiceError> {
+    let app = LocalApp::build()
+        .await
+        .map_err(|error| CallError::Other(Box::new(error)))?;
+    Ok(app.into())
+}
+
+let bundle = bundles::bundle! { local_service };
+// Alternatively, register the same factory directly:
+let bundle = bundles::bundle([bundles::service(local_service)]);
+```
+
+This example reads configuration; application-specific validation, vault
+unlocking, and lock acquisition belong in the application's constructor.
+`?` converts `CallError` to `ServiceError`; other application errors need an
+explicit conversion, as shown, which preserves the concrete source error.
+
+A constructor error propagates as `SiteError::ServiceError` from site assembly,
+including `Site::run` when it builds the site. No requests are served and no
+registered workers start. Previously constructed services and worker captures
+owned by the failed assembly are dropped. Successful construction retains the
+same exclusive initialization, facade exposure, and worker registration as an
+infallible factory.
+
+Keep resource guards owned by the service or constructor locals so dropping
+them releases resources on failure. This is ordinary Rust drop cleanup, not
+asynchronous rollback of external side effects. Constructors must not spawn
+detached background tasks; use `ServiceRunner` for runtime work.
 
 ## Using Services
 
@@ -187,6 +252,7 @@ service-owned workers with shutdown handling.
 - Duplicate exposed facade types fail site build.
 - Missing service lookups return `ServiceError::NotFound`.
 - Service constructor extraction errors fail site build.
+- Fallible constructor errors fail site build and release assembly-owned resources.
 - Worker errors are logged and stop that worker.
 
 ## Current Limitations

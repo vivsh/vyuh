@@ -320,10 +320,14 @@ pub struct ServiceHandler {
 }
 
 impl ServiceHandler {
+    /// Registers an infallible or fallible factory without constructing its service.
+    ///
+    /// Factory errors propagate during site assembly, before workers start.
     pub fn new<T, H, Args>(handler: H) -> Self
     where
         T: Service,
-        H: callables::Specable<Args, Output = ServiceInstance<T>> + Send + Sync + 'static,
+        H: callables::Specable<Args> + Send + Sync + 'static,
+        H::Output: ServiceOutput<T>,
         Args:
             callables::FromContext<ServiceBuildContext> + callables::IntoArgSpecs + Send + 'static,
     {
@@ -395,7 +399,25 @@ pub trait Service: Sized + Send + Sync + 'static {
     }
 }
 
+/// An owned service returned by a factory for exclusive initialization by Vyuh.
 pub struct ServiceInstance<T: Service>(pub T);
+
+/// Accepted service factory outputs, preserving the concrete service type.
+///
+/// This sealed constraint accepts only [`ServiceInstance<T>`] and
+/// `Result<ServiceInstance<T>, ServiceError>`. Conversion uses the existing
+/// callable output path; factory errors abort site assembly.
+pub trait ServiceOutput<T: Service>: private::Sealed + callables::IntoOutput<ServiceError> {}
+
+impl<T: Service> ServiceOutput<T> for ServiceInstance<T> {}
+impl<T: Service> ServiceOutput<T> for Result<ServiceInstance<T>, ServiceError> {}
+
+mod private {
+    pub trait Sealed {}
+
+    impl<T: super::Service> Sealed for super::ServiceInstance<T> {}
+    impl<T: super::Service> Sealed for Result<super::ServiceInstance<T>, super::ServiceError> {}
+}
 
 impl<E, T: Service> callables::IntoOutput<E> for ServiceInstance<T> {
     fn into_output(self) -> Result<callables::DataBox, E> {
@@ -647,6 +669,10 @@ impl axum::response::IntoResponse for ServiceError {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "tests/service_entrypoint.rs"]
+mod entrypoint_tests;
 
 #[cfg(test)]
 mod tests {

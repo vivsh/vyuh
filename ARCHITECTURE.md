@@ -38,6 +38,12 @@ The `vyuh` crate is organized around these subsystems:
 - `callables` provides the type-erased invocation model used by routes,
   commands, signals, emitters, and tasks. Canonical UUID-backed `OperationId`
   values identify registered metadata independently of OpenAPI string IDs.
+- `services` constructs site-owned dependencies before runtime startup. A sealed
+  output constraint accepts owned `ServiceInstance<T>` values and fallible
+  `Result<ServiceInstance<T>, ServiceError>` factories through the same callable
+  conversion. Initialization retains unique ownership before exposing facades;
+  factory errors propagate through `SiteError` and drop assembly-owned resources
+  without starting registered workers. No separate construction runtime exists.
 - `db` provides backend-selected SQLx aliases, source-first typed query
   builders, dialect-specific SQL rendering and validation, typed function and
   expression extension hooks, sessions, placeholder handling, mock sessions,

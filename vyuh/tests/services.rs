@@ -11,8 +11,8 @@ use vyuh::{
     db::DbPool,
     routes::Html,
     services::{
-        Service, ServiceBuildContext, ServiceError, ServiceExposer, ServiceInstance, ServiceRef,
-        ServiceRunner,
+        Service, ServiceBuildContext, ServiceError, ServiceExposer, ServiceHandler,
+        ServiceInstance, ServiceRef, ServiceRunner,
     },
     testing::TestSite,
 };
@@ -26,6 +26,240 @@ fn test_conf() -> SiteConf {
         },
         ..SiteConf::default()
     }
+}
+
+#[bundles::service]
+async fn fallible_greeting() -> Result<ServiceInstance<GreetingService>, ServiceError> {
+    Ok(GreetingService.into())
+}
+
+#[bundles::service]
+async fn failed_construction() -> Result<ServiceInstance<CounterService>, ServiceError> {
+    Err(construction_error())
+}
+
+/// Preserves the application's concrete source error through the existing callable path.
+fn construction_error() -> ServiceError {
+    vyuh::callables::CallError::Other(Box::new(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "vault is locked",
+    )))
+    .into()
+}
+
+/// Checks the structured site error without reducing its source to a message.
+fn assert_construction_error(error: vyuh::SiteError) {
+    assert!(
+        matches!(
+            &error,
+            vyuh::SiteError::ServiceError(ServiceError::CallError(
+                vyuh::callables::CallError::Other(_)
+            ))
+        ),
+        "unexpected construction error: {error:?}"
+    );
+    if let vyuh::SiteError::ServiceError(ServiceError::CallError(
+        vyuh::callables::CallError::Other(source),
+    )) = error
+    {
+        let source = source.downcast_ref::<std::io::Error>();
+        assert_eq!(
+            source.map(std::io::Error::kind),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+    }
+}
+
+/// Fallible direct factories retain build-context extraction and concrete service lookup.
+#[tokio::test]
+async fn fallible_direct_factory_builds() -> Result<(), vyuh::SiteError> {
+    async fn factory(db: DbPool) -> Result<ServiceInstance<DbBackedService>, ServiceError> {
+        Ok(DbBackedService { _db: db }.into())
+    }
+    let site = Site::build(test_conf(), bundles::bundle([bundles::service(factory)])).await?;
+    assert!(site.service::<DbBackedService>().is_ok());
+    site.shutdown_and_wait().await;
+    Ok(())
+}
+
+/// Macro fallible factories retain both concrete and trait-object facade access.
+#[tokio::test]
+async fn fallible_macro_factory_exposes_facades() -> Result<(), vyuh::SiteError> {
+    let site = Site::build(test_conf(), bundles::bundle! { fallible_greeting }).await?;
+    assert!(site.service::<GreetingService>().is_ok());
+    assert_eq!(site.service::<dyn Greeting>()?.greeting(), "hello");
+    site.shutdown_and_wait().await;
+    Ok(())
+}
+
+/// Direct registration propagates the original construction failure through SiteError.
+#[tokio::test]
+async fn fallible_direct_factory_fails() {
+    let result = Site::build(
+        test_conf(),
+        bundles::bundle([bundles::service(failed_construction)]),
+    )
+    .await;
+    assert!(result.is_err());
+    if let Err(error) = result {
+        assert_construction_error(error);
+    }
+}
+
+/// Macro registration fails before the serving entrypoint can bind or start workers.
+#[tokio::test]
+async fn fallible_macro_factory_prevents_serving() {
+    let result = Site::serve(test_conf(), bundles::bundle! { failed_construction }).await;
+    assert!(result.is_err());
+    if let Err(error) = result {
+        assert_construction_error(error);
+    }
+}
+
+/// Existing generic wrappers need no new bounds, and all three generic positions remain valid.
+#[test]
+fn typed_factory_registration_preserves_inference() {
+    fn legacy<T, H, Args>(handler: H) -> bundles::BundlePart
+    where
+        T: Service,
+        H: vyuh::callables::Specable<Args, Output = ServiceInstance<T>> + Send + Sync + 'static,
+        Args: vyuh::callables::FromContext<ServiceBuildContext>
+            + vyuh::callables::IntoArgSpecs
+            + Send
+            + 'static,
+    {
+        bundles::service::<T, H, Args>(handler)
+    }
+    let _ = legacy(direct_counter_service);
+    let _ = legacy(|| async { CounterService::default().into() });
+    let _ = bundles::service(|| async { ServiceInstance(CounterService::default()) });
+    let _ = bundles::service::<CounterService, _, ()>(direct_counter_service);
+    let _ = bundles::service::<GreetingService, _, ()>(fallible_greeting);
+    let _ = ServiceHandler::new(direct_counter_service);
+    let _ = ServiceHandler::new(fallible_greeting);
+    let _ = ServiceHandler::new::<CounterService, _, ()>(direct_counter_service);
+    let _ = ServiceHandler::new::<GreetingService, _, ()>(fallible_greeting);
+}
+
+struct DropProbe(Arc<AtomicUsize>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct OwnedService {
+    _resource: DropProbe,
+    worker_resource: Option<DropProbe>,
+    initialized: Arc<AtomicUsize>,
+    started: Arc<AtomicUsize>,
+}
+
+impl Service for OwnedService {
+    fn run(&mut self, runner: &mut ServiceRunner) -> Result<(), ServiceError> {
+        self.initialized.fetch_add(1, Ordering::SeqCst);
+        let resource = Arc::new(self.worker_resource.take());
+        let started = self.started.clone();
+        runner.run("owned-worker", move |site: Site| {
+            let resource = resource.clone();
+            let started = started.clone();
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                site.shutdown_notifier().notified().await;
+                drop(resource);
+                Ok(())
+            }
+        })
+    }
+}
+
+/// A later construction failure releases earlier instances and registered worker captures.
+#[tokio::test]
+async fn failed_assembly_drops_owned_resources() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let initialized = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let factory = owned_factory(&dropped, &initialized, &started);
+    let later_calls = Arc::new(AtomicUsize::new(0));
+    let later = later_calls.clone();
+    let skipped = move || {
+        later.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(ServiceInstance(GreetingService))
+    };
+    let failed_drops = dropped.clone();
+    let failure = move || {
+        let resource = DropProbe(failed_drops.clone());
+        async move {
+            let _resource = resource;
+            Err::<ServiceInstance<CounterService>, _>(construction_error())
+        }
+    };
+    let result = Site::build(
+        test_conf(),
+        bundles::bundle([
+            bundles::service(factory),
+            bundles::service(failure),
+            bundles::service(skipped),
+        ]),
+    )
+    .await;
+    assert!(result.is_err());
+    if let Err(error) = result {
+        assert_construction_error(error);
+    }
+    assert_eq!(initialized.load(Ordering::SeqCst), 1);
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+    assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(later_calls.load(Ordering::SeqCst), 0);
+}
+
+/// Creates each resource inside the factory so registration does not keep extra owners alive.
+fn owned_factory(
+    dropped: &Arc<AtomicUsize>,
+    initialized: &Arc<AtomicUsize>,
+    started: &Arc<AtomicUsize>,
+) -> impl Fn() -> std::future::Ready<Result<ServiceInstance<OwnedService>, ServiceError>> + Clone + use<>
+{
+    let dropped = dropped.clone();
+    let initialized = initialized.clone();
+    let started = started.clone();
+    move || {
+        std::future::ready(Ok(OwnedService {
+            _resource: DropProbe(dropped.clone()),
+            worker_resource: Some(DropProbe(dropped.clone())),
+            initialized: initialized.clone(),
+            started: started.clone(),
+        }
+        .into()))
+    }
+}
+
+/// Successful fallible construction still initializes exclusively and stops workers on shutdown.
+#[tokio::test]
+async fn fallible_service_preserves_worker_lifecycle() -> Result<(), vyuh::SiteError> {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let initialized = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let factory = owned_factory(&dropped, &initialized, &started);
+    let site = Site::build(test_conf(), bundles::bundle([bundles::service(factory)])).await?;
+    assert_eq!(initialized.load(Ordering::SeqCst), 1);
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+    let client = TestSite::new(site.clone());
+    client.start_runtime().await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|error| ServiceError::CallError(vyuh::callables::CallError::Other(Box::new(error))))?;
+    site.shutdown_and_wait().await;
+    drop(client);
+    drop(site);
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    Ok(())
 }
 
 #[derive(Default)]
