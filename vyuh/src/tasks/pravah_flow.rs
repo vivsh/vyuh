@@ -1,7 +1,7 @@
 //! Synchronous Pravah advancement through the existing durable task lifecycle.
 
 use super::{
-    Continuation, Flow, FlowArguments, FlowError, FlowState, IntoFlow, PravahEffects, TaskId,
+    Continuation, Flow, FlowArguments, FlowError, FlowState, IntoFlow, PravahDispatcher, TaskId,
 };
 use crate::{
     PartialSite,
@@ -16,7 +16,7 @@ use std::{any::TypeId, sync::Arc, time::Duration};
 #[doc(hidden)]
 pub struct PreparedPravah<I, O, E> {
     compiled: pravah::CompiledFlow<I, O>,
-    effects: Arc<E>,
+    dispatcher: Arc<E>,
     step_limit: usize,
 }
 
@@ -38,35 +38,37 @@ impl<I: DataValue> FlowArguments<I> for Tuple2<PartialSite, pravah::Flow<I>> {
     }
 }
 
-impl<I: DataValue, O: DataValue, E: PravahEffects> IntoFlow<I, E> for pravah::Flow<O> {
+impl<I: DataValue, O: DataValue, E: PravahDispatcher> IntoFlow<I, E> for pravah::Flow<O> {
     type Prepared = PreparedPravah<I, O, E>;
 
-    fn into_flow(self, effects: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError> {
+    fn into_flow(self, dispatcher: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError> {
         self.finish::<I>()
             .map_err(|_| protocol("Graph compilation failed"))?
-            .into_flow(effects, step_limit)
+            .into_flow(dispatcher, step_limit)
     }
 }
 
-impl<I: DataValue, O: DataValue, E: PravahEffects> IntoFlow<I, E> for pravah::CompiledFlow<I, O> {
+impl<I: DataValue, O: DataValue, E: PravahDispatcher> IntoFlow<I, E>
+    for pravah::CompiledFlow<I, O>
+{
     type Prepared = PreparedPravah<I, O, E>;
 
-    fn into_flow(self, effects: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError> {
+    fn into_flow(self, dispatcher: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError> {
         if !(1..=10_000).contains(&step_limit) {
             return Err(protocol("Invalid Flow instruction limit"));
         }
         if TypeId::of::<E>() == TypeId::of::<()>() && requires_fetch(self.graph()) {
-            return Err(FlowError::MissingEffects);
+            return Err(FlowError::MissingDispatcher);
         }
         Ok(PreparedPravah {
             compiled: self,
-            effects,
+            dispatcher,
             step_limit,
         })
     }
 }
 
-impl<I: DataValue, O: DataValue, E: PravahEffects> Flow for PreparedPravah<I, O, E> {
+impl<I: DataValue, O: DataValue, E: PravahDispatcher> Flow for PreparedPravah<I, O, E> {
     type Input = I;
     type Output = O;
     type Checkpoint = pravah::Snapshot;
@@ -101,7 +103,7 @@ impl<I: DataValue, O: DataValue, E: PravahEffects> Flow for PreparedPravah<I, O,
     }
 }
 
-impl<I: DataValue, O: DataValue, E: PravahEffects> PreparedPravah<I, O, E> {
+impl<I: DataValue, O: DataValue, E: PravahDispatcher> PreparedPravah<I, O, E> {
     /// Processes the final permitted boundary before considering a cooperative yield.
     fn drive(&self, mut runtime: pravah::Runtime) -> Result<FlowState<O>, FlowError> {
         for _ in 0..self.step_limit {
@@ -118,14 +120,14 @@ impl<I: DataValue, O: DataValue, E: PravahEffects> PreparedPravah<I, O, E> {
                     ));
                 }
                 pravah::Step::Fetch(fetch) => {
-                    let request = self.effects.fetch(&fetch)?;
+                    let request = self.dispatcher.fetch(&fetch)?;
                     return Ok(FlowState::work(request, snapshot(&runtime)?)?);
                 }
                 pravah::Step::Suspend(_) => {
                     let suspension = runtime
                         .suspension()
                         .ok_or_else(|| protocol("Missing graph suspension"))?;
-                    let request = self.effects.suspend(suspension)?;
+                    let request = self.dispatcher.suspend(suspension)?;
                     return match request {
                         Some(request) => Ok(FlowState::work(request, snapshot(&runtime)?)?),
                         None => Ok(FlowState::suspend(snapshot(&runtime)?)?),

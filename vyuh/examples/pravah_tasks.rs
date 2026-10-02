@@ -2,7 +2,7 @@
 //! Run with `cargo run -p vyuh --example pravah_tasks --features pravah`.
 
 use std::time::Duration;
-use vyuh::tasks::{PravahEffects, TaskConf, TaskStatus, WorkRequest};
+use vyuh::tasks::{PravahDispatcher, TaskConf, TaskStatus, WorkRequest};
 use vyuh::{pravah, prelude::*};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -15,9 +15,9 @@ struct FetchJob {
     request: pravah::FetchRequest,
 }
 
-struct AppEffects;
+struct AppDispatcher;
 
-impl PravahEffects for AppEffects {
+impl PravahDispatcher for AppDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
@@ -30,7 +30,7 @@ impl PravahEffects for AppEffects {
     }
 }
 
-#[bundles::flow(effects = AppEffects)]
+#[bundles::flow(dispatch = AppDispatcher)]
 fn lookup(root: pravah::Flow<Lookup>) -> pravah::Flow<u16> {
     root.map(|input: Lookup| pravah::FetchRequest::new("GET", input.0))
         .fetch()

@@ -464,7 +464,7 @@ pub fn work(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Registers a synchronous factory built once per site into an immutable Flow.
 /// Equivalent to `bundles::flow(factory, FlowConf::new(name))`. Accepts name,
-/// lane, idempotency, and optional `effects = Policy` configuration. The optional
+/// lane, idempotency, and optional `dispatch = Policy` configuration. The optional
 /// Pravah integration requires the `pravah` feature. Rust bounds reject async
 /// factories and runtime input/continuation extraction; no type syntax is inspected.
 #[proc_macro_attribute]

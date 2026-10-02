@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `vyuh::tasks::PravahEffects`
+ --> tests/ui/tasks/pravah_removed_trait.rs:1:5
+  |
+1 | use vyuh::tasks::PravahEffects;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ no `PravahEffects` in `tasks`

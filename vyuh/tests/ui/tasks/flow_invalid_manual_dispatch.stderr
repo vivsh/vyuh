@@ -1,0 +1,5 @@
+error[E0599]: no method named `dispatch` found for struct `vyuh::prelude::FlowConf<I, E>` in the current scope
+  --> tests/ui/tasks/flow_invalid_manual_dispatch.rs:13:71
+   |
+13 |     let _ = bundles::flow(|| support::Manual, FlowConf::new("manual").dispatch::<Dispatcher>());
+   |                                                                       ^^^^^^^^ method not found in `vyuh::prelude::FlowConf<_>`

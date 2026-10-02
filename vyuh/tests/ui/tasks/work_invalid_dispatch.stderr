@@ -1,0 +1,15 @@
+error: dispatch is only supported on Flow factories
+ --> tests/ui/tasks/work_invalid_dispatch.rs:5:1
+  |
+5 | #[bundles::work(dispatch = Dispatcher)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `bundles::work` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: dispatch is only supported on Flow factories
+ --> tests/ui/tasks/work_invalid_dispatch.rs:7:1
+  |
+7 | #[bundles::work_batch(dispatch = Dispatcher)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `bundles::work_batch` (in Nightly builds, run with -Z macro-backtrace for more info)

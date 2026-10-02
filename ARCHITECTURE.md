@@ -109,7 +109,7 @@ The `vyuh` crate is organized around these subsystems:
   Work uses task-specific async callable registration and `WorkState<T>` or direct
   serializable outputs. Flow uses one-time synchronous factories, `FlowConf`, and
   immutable definitions implementing `Flow::advance`. Site construction consumes
-  factory registrations, deduplicates effects-policy construction in temporary
+  factory registrations, deduplicates dispatcher construction in temporary
   type-keyed scratch, and retains only prepared definitions. Manual definitions
   require no optional dependency. Factories may receive `PartialSite` (database
   handle only); execution receives input, read-only task identity and continuation.
@@ -131,8 +131,8 @@ The `vyuh` crate is organized around these subsystems:
   not arbitrary Rust effects or blocking operations.
   The non-default `pravah` feature re-exports the selected dependency and prepares
   builders/compiled graphs through one adapter. A prepared graph owns only the
-  immutable graph, shared routing policy, and instruction budget. Each invocation
-  owns a temporary VM; snapshots live exclusively in task continuations. Policies
+  immutable graph, shared dispatcher, and instruction budget. Each invocation
+  owns a temporary VM; snapshots live exclusively in task continuations. Dispatchers
   select registered Work payloads without performing effects or transforming
   results. Fetch success decodes directly to FetchResponse; terminal failure maps
   to the fixed `vyuh_task_failure` FetchError. Suspension failures terminate the

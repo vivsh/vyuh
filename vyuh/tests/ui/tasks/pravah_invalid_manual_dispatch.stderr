@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `Manual: FlowReturn<_, Dispatcher, tasks::flow_factory::Definition>` is not satisfied
+  --> tests/ui/tasks/pravah_invalid_manual_dispatch.rs:10:27
+   |
+10 |     let _ = bundles::flow(|| support::Manual, FlowConf::new("manual").dispatch::<Dispatcher>());
+   |             ------------- ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `IntoFlow<_, Dispatcher>` is not implemented for `Manual`
+  --> tests/ui/tasks/support/manual.rs
+   |
+   | pub struct Manual;
+   | ^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `IntoFlow<I, E>`:
+             CompiledFlow<I, O>
+             vyuh::pravah::Flow<O>
+   = note: required for `Manual` to implement `FlowReturn<_, Dispatcher, tasks::flow_factory::Definition>`
+note: required by a bound in `flow`
+  --> src/bundles/part.rs
+   |
+   | pub fn flow<T, H, Args, E, M>(handler: H, definition: crate::tasks::FlowConf<T, E>) -> BundlePart
+   |        ---- required by a bound in this function
+...
+   |     H::Output: crate::tasks::FlowReturn<T, E, M>,
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `flow`

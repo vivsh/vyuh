@@ -16,7 +16,7 @@ struct TaskArgs {
     idempotency: Option<Expr>,
     /// Explicit shared Pravah routing policy, valid only for Flow factories.
     #[darling(default)]
-    effects: Option<syn::Path>,
+    dispatch: Option<syn::Path>,
 }
 
 /// Unified implementation for both free functions and methods
@@ -45,10 +45,10 @@ fn parse_task_as(
         Err(error) => return error,
     };
 
-    if !is_flow && args.effects.is_some() {
+    if !is_flow && args.dispatch.is_some() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "effects is only supported on Flow factories",
+            "dispatch is only supported on Flow factories",
         )
         .into_compile_error()
         .into();
@@ -120,11 +120,11 @@ fn configuration(args: &TaskArgs, name: &str, is_flow: bool) -> proc_macro2::Tok
     } else {
         quote! { ::vyuh::tasks::TaskDefinition }
     };
-    let effects = args
-        .effects
+    let dispatch = args
+        .dispatch
         .as_ref()
-        .map(|ty| quote! { .effects::<#ty>() })
+        .map(|ty| quote! { .dispatch::<#ty>() })
         .unwrap_or_default();
 
-    quote! { #conf::new(#name) #lane #idempotency #effects }
+    quote! { #conf::new(#name) #lane #idempotency #dispatch }
 }

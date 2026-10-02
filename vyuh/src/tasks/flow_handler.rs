@@ -29,7 +29,7 @@ impl RegisteredTask {
     {
         let super::super::FlowConf {
             definition,
-            build_effects,
+            build_dispatcher,
             step_limit,
             revision,
         } = definition;
@@ -46,7 +46,7 @@ impl RegisteredTask {
             handler: RegisteredHandler::FlowFactory {
                 build: crate::tasks::flow_build::deferred::<T, H, Args, E, M>(
                     handler,
-                    build_effects,
+                    build_dispatcher,
                     step_limit,
                     revision,
                 ),
@@ -70,7 +70,7 @@ impl RegisteredTask {
     pub(crate) fn prepare_flow(
         &mut self,
         site: &crate::PartialSite,
-        scratch: &mut crate::tasks::flow_build::EffectsScratch,
+        scratch: &mut crate::tasks::flow_build::DispatcherScratch,
     ) -> Result<(), TaskRuntimeError> {
         let RegisteredHandler::FlowFactory { build } = &self.handler else {
             return Ok(());

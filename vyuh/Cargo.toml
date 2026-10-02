@@ -1,6 +1,6 @@
 [package]
 name = "vyuh"
-version = "0.2.31"
+version = "0.2.32"
 edition = "2024"
 rust-version.workspace = true
 license = "MIT"
@@ -27,7 +27,7 @@ email = ["dep:lettre"]
 pravah = ["dep:pravah"]
 
 [dependencies]
-pravah = { path = "../../pravah", version = "0.4.19", optional = true, default-features = false }
+pravah = { version = "0.4.20", optional = true, default-features = false }
 axum = {workspace = true}
 axum-extra = {workspace = true}
 chrono = {workspace = true}
@@ -74,7 +74,7 @@ http-serde = "2.1.1"
 serde_urlencoded = "0.7"
 rust-silos = { version = "^0.3.2" }
 
-vyuh-macros = { path = "../vyuh-macros", version = "0.2.31" }
+vyuh-macros = { path = "../vyuh-macros", version = "0.2.32" }
 db_core = { package = "mool", version = "0.2.14" }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
 axum-test = "17.3.0"

@@ -17,8 +17,8 @@ struct Job {
     request: pravah::FetchRequest,
 }
 
-struct Effects;
-impl PravahEffects for Effects {
+struct Dispatcher;
+impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
@@ -52,7 +52,7 @@ pub(crate) fn conf() -> TaskConf {
 /// Declares matching graph and Work input identities for private child resolution.
 pub(crate) fn bundle() -> bundles::Bundle {
     bundles::bundle([
-        bundles::flow(graph, FlowConf::new("graph").effects::<Effects>()),
+        bundles::flow(graph, FlowConf::new("graph").dispatch::<Dispatcher>()),
         bundles::work(work, work_definition()),
     ])
 }
@@ -73,7 +73,7 @@ async fn dispatcher<S: AbstractTaskStore + Send + Sync + 'static>(
     let mut registry = TaskRegistry::new();
     registry
         .register(RegisteredTask::new_flow(
-            FlowConf::new("graph").effects::<Effects>(),
+            FlowConf::new("graph").dispatch::<Dispatcher>(),
             graph,
         ))
         .map_err(|e| e.to_string())?;

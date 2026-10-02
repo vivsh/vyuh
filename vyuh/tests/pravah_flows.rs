@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use vyuh::tasks::{PravahEffects, TaskConf, TaskStatus, WorkRequest};
+use vyuh::tasks::{PravahDispatcher, TaskConf, TaskStatus, WorkRequest};
 use vyuh::{PartialSite, pravah, prelude::*};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -19,19 +19,19 @@ struct FetchJob {
     request: pravah::FetchRequest,
 }
 
-struct Effects;
+struct Dispatcher;
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct ApprovalJob(u32);
 
-struct ApprovalEffects;
+struct ApprovalDispatcher;
 
-impl PravahEffects for ApprovalEffects {
+impl PravahDispatcher for ApprovalDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
     fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     }
     fn suspend(&self, request: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
         let input: Input = pravah::graph::from_value(request.payload().clone())
@@ -49,7 +49,7 @@ async fn approve(input: Data<ApprovalJob>) -> Result<u32, WorkError> {
     }
 }
 
-impl PravahEffects for Effects {
+impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
@@ -69,7 +69,7 @@ async fn fetch(input: Data<FetchJob>) -> Result<pravah::FetchResponse, WorkError
     Ok(pravah::FetchResponse::new(201))
 }
 
-#[bundles::flow(effects = Effects)]
+#[bundles::flow(dispatch = Dispatcher)]
 fn fetching(root: pravah::Flow<Input>) -> pravah::Flow<u32> {
     root.map(|input: Input| {
         pravah::FetchRequest::new(
@@ -117,9 +117,9 @@ async fn fetch_result_delivery() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Ordinary suspension has no effects requirement and failed resume fails the Flow.
+/// Ordinary suspension has no dispatcher requirement and failed resume fails the Flow.
 #[tokio::test]
-async fn external_resume_without_effects() -> Result<(), TestError> {
+async fn external_resume_without_dispatch() -> Result<(), TestError> {
     let site = site(bundles::bundle([__bundle_part_external()])).await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
@@ -165,34 +165,34 @@ async fn budget_yields() -> Result<(), TestError> {
 
 /// Static Fetch requirements fail site construction when no routing policy was selected.
 #[tokio::test]
-async fn missing_effects_rejected() {
+async fn missing_dispatch_rejected() {
     let result = site(bundles::bundle([bundles::flow(
         fetching,
         FlowConf::new("missing"),
     )]))
     .await;
-    assert!(matches!(result, Err(error) if error.to_string().contains("effects policy")));
+    assert!(matches!(result, Err(error) if error.to_string().contains("dispatcher")));
 }
 
 static POLICY_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-struct CountedEffects;
+struct CountedDispatcher;
 
-struct PanickingEffects;
-impl PravahEffects for PanickingEffects {
+struct PanickingDispatcher;
+impl PravahDispatcher for PanickingDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         panic!("private policy configuration");
     }
     fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     }
 }
 
-/// Policy panics abort construction with safe context and are not misreported as missing effects.
+/// Policy panics abort construction with safe context and are not misreported as missing dispatch.
 #[tokio::test]
 async fn policy_panics_are_contained() {
     let result = site(bundles::bundle([bundles::flow(
         pure,
-        FlowConf::new("panicking-policy").effects::<PanickingEffects>(),
+        FlowConf::new("panicking-policy").dispatch::<PanickingDispatcher>(),
     )]))
     .await;
     assert!(
@@ -200,25 +200,25 @@ async fn policy_panics_are_contained() {
         && !error.to_string().contains("private policy"))
     );
 }
-impl PravahEffects for CountedEffects {
+impl PravahDispatcher for CountedDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         POLICY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Self)
     }
     fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     }
 }
 
 /// Two definitions share one policy construction, but independent sites do not share it.
 #[tokio::test]
-async fn effects_construct_once_per_site() -> Result<(), TestError> {
+async fn dispatcher_constructs_once() -> Result<(), TestError> {
     let bundle = || {
         bundles::bundle([
-            bundles::flow(pure, FlowConf::new("first").effects::<CountedEffects>()),
+            bundles::flow(pure, FlowConf::new("first").dispatch::<CountedDispatcher>()),
             bundles::flow(
                 |_: PartialSite, root: pravah::Flow<String>| root.map(|value| value.len() as u32),
-                FlowConf::new("second").effects::<CountedEffects>(),
+                FlowConf::new("second").dispatch::<CountedDispatcher>(),
             ),
         ])
     };
@@ -235,7 +235,7 @@ async fn mapped_suspension() -> Result<(), TestError> {
     let site = site(bundles::bundle([
         bundles::flow(
             external,
-            FlowConf::new("approval").effects::<ApprovalEffects>(),
+            FlowConf::new("approval").dispatch::<ApprovalDispatcher>(),
         ),
         __bundle_part_approve(),
     ]))
@@ -263,14 +263,14 @@ async fn compiled_and_opaque_factories() -> Result<(), TestError> {
     fn opaque(root: pravah::Flow<Input>) -> impl vyuh::tasks::IntoFlow<Input> {
         pure(root)
     }
-    fn opaque_effects(root: pravah::Flow<Input>) -> impl vyuh::tasks::IntoFlow<Input, Effects> {
+    fn opaque_dispatch(root: pravah::Flow<Input>) -> impl vyuh::tasks::IntoFlow<Input, Dispatcher> {
         pure(root)
     }
     let definitions = [
         bundles::flow(opaque, FlowConf::new("opaque")),
         bundles::flow(
-            opaque_effects,
-            FlowConf::new("opaque-effects").effects::<Effects>(),
+            opaque_dispatch,
+            FlowConf::new("opaque-dispatch").dispatch::<Dispatcher>(),
         ),
         bundles::flow(
             || pravah::compile(pure).map_err(|error| FlowError::fail(error.to_string())),
@@ -305,7 +305,7 @@ async fn sequential_fetches() -> Result<(), TestError> {
             })
     }
     let site = site(bundles::bundle([
-        bundles::flow(sequence, FlowConf::new("sequence").effects::<Effects>()),
+        bundles::flow(sequence, FlowConf::new("sequence").dispatch::<Dispatcher>()),
         __bundle_part_fetch(),
     ]))
     .await?;
@@ -349,7 +349,7 @@ async fn nested_fetches() -> Result<(), TestError> {
             })
     }
     let site = site(bundles::bundle([
-        bundles::flow(nested, FlowConf::new("nested").effects::<Effects>()),
+        bundles::flow(nested, FlowConf::new("nested").dispatch::<Dispatcher>()),
         __bundle_part_fetch(),
     ]))
     .await?;

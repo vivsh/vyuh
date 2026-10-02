@@ -244,7 +244,7 @@ Factories return an immutable implementation of `Flow`, optionally inside
 `Result<_, FlowError>`. A manual factory takes no arguments or a build-time
 `PartialSite`. It never receives submitted input or continuation. `PartialSite`
 only exposes the configured database handle: no runtime services or task facade.
-Factories and effects-policy construction must not perform blocking I/O.
+Factories and dispatcher construction must not perform blocking I/O.
 
 `Flow::advance` receives read-only `TaskId`, `Data<Self::Input>`, and
 `Continuation<Self::Checkpoint, Self::Resume>`. It does not receive site/services
@@ -496,30 +496,30 @@ stub provider: `cargo run -p vyuh --example pravah_tasks --features pravah`.
 
 ```rust,ignore
 use vyuh::{bundles, pravah, PartialSite};
-use vyuh::tasks::{FlowConf, FlowError, PravahEffects, WorkRequest};
+use vyuh::tasks::{FlowConf, FlowError, PravahDispatcher, WorkRequest};
 
-#[bundles::flow(effects = AppEffects)]
+#[bundles::flow(dispatch = AppDispatcher)]
 fn checkout(root: pravah::Flow<Checkout>) -> pravah::Flow<Confirmation> {
     build_checkout(root)
 }
 
 // Equivalent direct registration:
 bundles::flow(checkout, FlowConf::new("checkout")
-    .effects::<AppEffects>().step_limit(256).revision("1"));
+    .dispatch::<AppDispatcher>().step_limit(256).revision("1"));
 ```
 
 Factories receive symbolic roots, optionally preceded by `PartialSite`, never
 submitted input. The framework compiles once; factories may also return an
 already compiled definition. Each invocation creates an isolated temporary VM
-and restores its snapshot from the ordinary task continuation. Factory or policy
-errors/panics prevent site construction. A pure graph can omit effects; ordinary
-external suspension also works without a policy.
+and restores its snapshot from the ordinary task continuation. Factory or dispatcher
+errors/panics prevent site construction. A pure graph can omit dispatch; ordinary
+external suspension also works without a dispatcher.
 
 Opaque returns must expose the matching preparation bound: `impl IntoFlow<Input>`
-without effects, or `impl IntoFlow<Input, AppEffects>` with that policy. A manual
+without dispatch, or `impl IntoFlow<Input, AppDispatcher>` with that dispatcher. A manual
 factory may return `impl Flow<Input = Input>`.
 
-A reusable policy **routes requests, not results**:
+A reusable dispatcher **routes requests, not results**:
 
 ```rust,ignore
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -529,8 +529,8 @@ struct FetchJob {
     request: pravah::FetchRequest,
 }
 
-struct AppEffects;
-impl PravahEffects for AppEffects {
+struct AppDispatcher;
+impl PravahDispatcher for AppDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> { Ok(Self) }
 
     fn fetch(&self, request: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
@@ -541,12 +541,15 @@ impl PravahEffects for AppEffects {
 }
 ```
 
-The policy is constructed once per selected type per site and shared across
+The dispatcher is constructed once per selected type per site and shared across
 definitions. `suspend(&Suspension)` may return `Some(WorkRequest)` or `None` for
 external waiting; its default is `None`. `WorkRequest::options(...)` validates
 scheduling options and rejects conflict adoption. Targets must be registered
 Work, never Flow. Construction and routing cannot submit work: the snapshot and
 child are committed through the existing atomic spawn path.
+
+Missing dispatch for a statically declared Fetch fails site construction. A
+dynamically encountered Fetch without dispatch returns `FlowError::MissingDispatcher`.
 
 Register a Work handler accepting `Data<FetchJob>` and returning `FetchResponse`.
 That handler performs the effect using normal services. It may use an explicitly

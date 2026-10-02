@@ -707,7 +707,7 @@ impl TaskRegistry {
         mut self,
         site: &crate::PartialSite,
     ) -> Result<Self, TaskRuntimeError> {
-        let mut scratch = super::flow_build::EffectsScratch::new();
+        let mut scratch = super::flow_build::DispatcherScratch::new();
         let mut names: Vec<_> = self.tasks.keys().cloned().collect();
         names.sort();
         for name in names {

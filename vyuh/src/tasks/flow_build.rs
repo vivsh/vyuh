@@ -13,15 +13,15 @@ use crate::{
 
 use super::{Flow, FlowArguments, FlowCallable, FlowContext, FlowError, FlowReturn};
 
-pub(super) type EffectsScratch = HashMap<TypeId, Arc<dyn Any + Send + Sync>>;
+pub(super) type DispatcherScratch = HashMap<TypeId, Arc<dyn Any + Send + Sync>>;
 pub(super) type BuiltFlow = (Callable<FlowContext, crate::Error>, String);
 pub(super) type BuildFlow =
-    Arc<dyn Fn(&PartialSite, &mut EffectsScratch) -> Result<BuiltFlow, FlowError> + Send + Sync>;
+    Arc<dyn Fn(&PartialSite, &mut DispatcherScratch) -> Result<BuiltFlow, FlowError> + Send + Sync>;
 
-/// Builds policy once by concrete type; scratch is discarded after site construction.
-fn shared_effects<E: Send + Sync + 'static>(
+/// Builds a dispatcher once by concrete type; scratch is discarded after site construction.
+fn shared_dispatcher<E: Send + Sync + 'static>(
     site: &PartialSite,
-    scratch: &mut EffectsScratch,
+    scratch: &mut DispatcherScratch,
     build: fn(&PartialSite) -> Result<E, FlowError>,
 ) -> Result<Arc<E>, FlowError> {
     if let Some(existing) = scratch.get(&TypeId::of::<E>()) {
@@ -30,9 +30,9 @@ fn shared_effects<E: Send + Sync + 'static>(
             .downcast::<E>()
             .map_err(|_| FlowError::fail("Flow policy identity mismatch"));
     }
-    let effects = Arc::new(build(site)?);
-    scratch.insert(TypeId::of::<E>(), effects.clone());
-    Ok(effects)
+    let dispatcher = Arc::new(build(site)?);
+    scratch.insert(TypeId::of::<E>(), dispatcher.clone());
+    Ok(dispatcher)
 }
 
 /// Captures only declaration inputs until site finalization replaces this closure.
@@ -55,8 +55,10 @@ where
                 "Invalid Flow instruction limit or revision",
             ));
         }
-        let effects = shared_effects(site, scratch, build)?;
-        let definition = factory.invoke(Args::build(site)).prepare(effects, limit)?;
+        let dispatcher = shared_dispatcher(site, scratch, build)?;
+        let definition = factory
+            .invoke(Args::build(site))
+            .prepare(dispatcher, limit)?;
         let compatibility = serde_json::to_string(&(
             "flow-factory-v1",
             definition.compatibility(),

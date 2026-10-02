@@ -43,8 +43,8 @@ pub trait IntoFlow<I: DataValue, E = ()> {
     /// Definition retained by registration; it must not retain execution progress.
     type Prepared: Flow<Input = I>;
 
-    /// Finalizes a definition and binds shared routing policy without performing effects.
-    fn into_flow(self, effects: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError>;
+    /// Finalizes a definition and binds its shared dispatcher without performing effects.
+    fn into_flow(self, dispatcher: Arc<E>, step_limit: usize) -> Result<Self::Prepared, FlowError>;
 }
 
 impl<F: Flow> IntoFlow<F::Input> for F {

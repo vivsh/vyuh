@@ -208,14 +208,14 @@ fn completion_envelope_limit() -> Result<(), String> {
     Ok(())
 }
 
-/// Missing effects are rejected inside nested static graphs, not only at the top level.
+/// Missing dispatch are rejected inside nested static graphs, not only at the top level.
 #[test]
-fn nested_fetch_requires_effects() -> Result<(), String> {
+fn nested_fetch_requires_dispatch() -> Result<(), String> {
     let compiled = pravah::compile(|root: pravah::Flow<Vec<u32>>| root.each(fetch_graph))
         .map_err(|e| e.to_string())?;
     assert!(matches!(
         compiled.into_flow(Arc::new(()), 256),
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     ));
     Ok(())
 }
@@ -301,7 +301,7 @@ impl pravah::graph::ContinuationHandler for DynamicFetch {
 
 /// A dynamic Fetch can pass static checks but must explicitly fail at runtime without policy.
 #[test]
-fn dynamic_fetch_missing_effects() -> Result<(), String> {
+fn dynamic_fetch_missing_dispatch() -> Result<(), String> {
     let builder = pravah::graph::TypedGraphBuilder::<u32>::new();
     let output = builder.continuation::<u32, u32, DynamicFetch, ()>(builder.root(), ());
     let prepared = builder
@@ -315,7 +315,7 @@ fn dynamic_fetch_missing_effects() -> Result<(), String> {
             Data(Arc::new(0)),
             continuation(None, None)?
         ),
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     ));
     Ok(())
 }

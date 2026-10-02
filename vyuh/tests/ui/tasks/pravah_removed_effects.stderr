@@ -1,0 +1,5 @@
+error: Unknown field: `effects`
+ --> tests/ui/tasks/pravah_removed_effects.rs:9:17
+  |
+9 | #[bundles::flow(effects = Dispatcher)]
+  |                 ^^^^^^^

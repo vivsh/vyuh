@@ -7,17 +7,17 @@ use super::{FlowError, TaskDefinition, TaskIdempotency, TaskLane};
 /// Flow registration policy. Validation occurs during site construction.
 pub struct FlowConf<I, E = ()> {
     pub(super) definition: TaskDefinition<I>,
-    pub(super) build_effects: fn(&PartialSite) -> Result<E, FlowError>,
+    pub(super) build_dispatcher: fn(&PartialSite) -> Result<E, FlowError>,
     pub(super) step_limit: usize,
     pub(super) revision: &'static str,
 }
 
 impl<I: DataValue> FlowConf<I> {
-    /// Declares a flow without an effects policy, using a 256-instruction budget.
+    /// Declares a flow without a dispatcher, using a 256-instruction budget.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             definition: TaskDefinition::new(name),
-            build_effects: |_| Ok(()),
+            build_dispatcher: |_| Ok(()),
             step_limit: 256,
             revision: "1",
         }
@@ -49,12 +49,12 @@ impl<I: DataValue, E> FlowConf<I, E> {
         self
     }
 
-    /// Selects a shared routing policy, constructed once per type and site.
+    /// Selects a shared request dispatcher, constructed once per type and site.
     #[cfg(feature = "pravah")]
-    pub fn effects<P: super::PravahEffects>(self) -> FlowConf<I, P> {
+    pub fn dispatch<P: super::PravahDispatcher>(self) -> FlowConf<I, P> {
         FlowConf {
             definition: self.definition,
-            build_effects: P::build,
+            build_dispatcher: P::build,
             step_limit: self.step_limit,
             revision: self.revision,
         }

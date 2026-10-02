@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 use vyuh::tasks::{
-    PravahEffects, TaskConf, TaskFilter, TaskOptions, TaskRetry, TaskStatus, WorkRequest,
+    PravahDispatcher, TaskConf, TaskFilter, TaskOptions, TaskRetry, TaskStatus, WorkRequest,
 };
 use vyuh::{pravah, prelude::*};
 
@@ -23,8 +23,8 @@ struct Job {
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct Unknown;
 
-struct Effects;
-impl PravahEffects for Effects {
+struct Dispatcher;
+impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
@@ -103,7 +103,7 @@ async fn site() -> Result<Site, TestError> {
                 ),
         ),
         bundles::bundle([
-            bundles::flow(graph, FlowConf::new("graph").effects::<Effects>()),
+            bundles::flow(graph, FlowConf::new("graph").dispatch::<Dispatcher>()),
             bundles::work(work, vyuh::tasks::TaskDefinition::new("worker")),
         ]),
     )
@@ -250,7 +250,7 @@ async fn locked_effect_deadline() -> Result<(), TestError> {
     let site = Site::build(
         SiteConf::default().log_init(false).tasks(conf),
         bundles::bundle([
-            bundles::flow(graph, FlowConf::new("graph").effects::<Effects>()),
+            bundles::flow(graph, FlowConf::new("graph").dispatch::<Dispatcher>()),
             bundles::work(work, TaskDefinition::new("worker").lane(lane)),
         ]),
     )

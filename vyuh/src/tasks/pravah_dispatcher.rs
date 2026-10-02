@@ -1,4 +1,4 @@
-//! Explicit request routing; external effects execute only inside registered Work.
+//! Flow request dispatch; external effects execute only inside registered Work.
 
 use super::{FlowError, TaskOptions, TaskRuntimeError};
 use crate::{
@@ -6,11 +6,12 @@ use crate::{
     callables::{DataBox, DataValue},
 };
 
-/// Shared, immutable application routing policy, built once per type and site.
+/// Shared, immutable dispatcher, built once per concrete type and site.
 ///
 /// Methods only select Work payloads/options. They must not perform external
 /// effects, submit tasks, retain execution progress, or transform returned results.
-pub trait PravahEffects: Send + Sync + 'static {
+/// The store creates each Work child atomically with its Flow checkpoint.
+pub trait PravahDispatcher: Send + Sync + 'static {
     /// Obtains build-time handles without blocking I/O or runtime service extraction.
     fn build(site: &PartialSite) -> Result<Self, FlowError>
     where
@@ -25,13 +26,13 @@ pub trait PravahEffects: Send + Sync + 'static {
     }
 }
 
-impl PravahEffects for () {
+impl PravahDispatcher for () {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(())
     }
 
     fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        Err(FlowError::MissingEffects)
+        Err(FlowError::MissingDispatcher)
     }
 }
 
@@ -71,7 +72,7 @@ impl WorkRequest {
             && child.record.kind != super::TaskKind::Work
         {
             return Err(TaskRuntimeError::InvalidOptions(
-                "Flow effects must target Work".into(),
+                "Flow dispatch must target Work".into(),
             ));
         }
         Ok(outcome)

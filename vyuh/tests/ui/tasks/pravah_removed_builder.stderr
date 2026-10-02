@@ -1,0 +1,11 @@
+error[E0599]: no method named `effects` found for struct `vyuh::prelude::FlowConf<I, E>` in the current scope
+  --> tests/ui/tasks/pravah_removed_builder.rs:10:44
+   |
+10 |     let _ = FlowConf::<u32>::new("legacy").effects::<Dispatcher>();
+   |                                            ^^^^^^^ method not found in `vyuh::prelude::FlowConf<u32>`
+
+error[E0599]: no variant or associated item named `MissingEffects` found for enum `vyuh::prelude::FlowError` in the current scope
+  --> tests/ui/tasks/pravah_removed_builder.rs:11:24
+   |
+11 |     let _ = FlowError::MissingEffects;
+   |                        ^^^^^^^^^^^^^^ variant or associated item not found in `vyuh::prelude::FlowError`

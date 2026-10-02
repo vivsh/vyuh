@@ -38,9 +38,9 @@ pub enum FlowError {
     /// Application-safe terminal failure.
     #[error("{0}")]
     Fail(TaskFailure),
-    /// The graph requested Work dispatch without a configured effects policy.
-    #[error("Flow requires an effects policy")]
-    MissingEffects,
+    /// The graph requested Work dispatch without a configured dispatcher.
+    #[error("Flow requires a dispatcher")]
+    MissingDispatcher,
 }
 
 impl FlowError {
@@ -52,7 +52,7 @@ impl FlowError {
     pub(super) fn into_outcome(self) -> TaskOutcome {
         match self {
             Self::Fail(failure) => TaskOutcome::fail(failure.into_message()),
-            Self::MissingEffects => TaskOutcome::fail("Flow requires an effects policy"),
+            Self::MissingDispatcher => TaskOutcome::fail("Flow requires a dispatcher"),
         }
     }
 }

@@ -46,21 +46,21 @@ pub trait FlowReturn<I: DataValue, E, M> {
     /// The immutable executable definition after successful preparation.
     type Prepared: super::Flow<Input = I>;
     /// Prepares a direct or fallible factory result exactly once.
-    fn prepare(self, effects: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError>;
+    fn prepare(self, dispatcher: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError>;
 }
 
 impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Definition> for F {
     type Prepared = F::Prepared;
 
-    fn prepare(self, effects: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError> {
-        self.into_flow(effects, limit)
+    fn prepare(self, dispatcher: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError> {
+        self.into_flow(dispatcher, limit)
     }
 }
 
 impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Fallible> for Result<F, FlowError> {
     type Prepared = F::Prepared;
 
-    fn prepare(self, effects: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError> {
-        self?.into_flow(effects, limit)
+    fn prepare(self, dispatcher: Arc<E>, limit: usize) -> Result<Self::Prepared, FlowError> {
+        self?.into_flow(dispatcher, limit)
     }
 }

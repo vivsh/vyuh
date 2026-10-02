@@ -18,7 +18,7 @@ mod lane_lock_tests;
 mod metrics;
 mod models;
 #[cfg(feature = "pravah")]
-mod pravah_effects;
+mod pravah_dispatcher;
 #[cfg(feature = "pravah")]
 mod pravah_flow;
 mod rate;
@@ -55,7 +55,7 @@ pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
 pub use models::{TaskDefinition, TaskFilter, TaskId, TaskIdempotency, TaskInfo, TaskKind};
 #[cfg(feature = "pravah")]
-pub use pravah_effects::{PravahEffects, WorkRequest};
+pub use pravah_dispatcher::{PravahDispatcher, WorkRequest};
 #[doc(hidden)]
 pub use returns::IntoWorkOutcomePart;
 pub(crate) use runner::AbstractTaskRunner;
