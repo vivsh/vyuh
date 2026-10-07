@@ -13,13 +13,19 @@ use super::{
     submission::{canonical_json, canonical_json_value},
 };
 
-/// Shared task registry, store, and local worker wake channel.
+/// Best-effort local control messages; durable task facts remain exclusively in the store.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RunnerEvent {
+    Wake,
+    Cancel(TaskId),
+}
+
+/// Shared task registry, store, and bounded local worker control channel.
 #[derive(Clone)]
 pub struct TaskDispatcher<S: AbstractTaskStore + Send + Sync + 'static> {
     pub(crate) store: Arc<S>,
-    pub(crate) notifier: Arc<tokio::sync::Notify>,
+    pub(crate) events: tokio::sync::broadcast::Sender<RunnerEvent>,
     pub(crate) registry: Arc<TaskRegistry>,
-    pub(crate) initialized: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) metrics: Arc<super::TaskMetrics>,
     pub(crate) health: super::TaskHealth,
     pub(crate) schedules: Arc<[TaskScheduleConf]>,
@@ -58,9 +64,10 @@ impl Tasks {
         })
     }
 
-    /// Requests cancellation without waiting for finalization through normal polling.
-    /// Returns false for missing, terminal, or already-cancelled tasks; store errors propagate.
-    pub async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+    /// Commits terminal cancellation or an idempotent no-op, without interrupting execution.
+    /// Already-claimed work may still run; store errors propagate.
+    /// A commit acknowledgement error may follow persistence; retrying is idempotent.
+    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskRuntimeError> {
         self.dispatcher.cancel(id).await
     }
 
@@ -188,15 +195,25 @@ impl Tasks {
 }
 
 impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
-    /// Records cancellation intent and wakes local workers after commit.
-    /// Returns false for missing, terminal, or already-cancelled tasks; store errors propagate.
-    pub async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
-        self.ensure_initialized().await?;
-        let changed = self.store.cancel(id).await?;
-        if changed {
-            self.notifier.notify_waiters();
-        }
-        Ok(changed)
+    /// Commits terminal cancellation before notifying local queues; never interrupts a handler.
+    /// Missing, terminal and repeated requests succeed as no-ops. Store errors propagate.
+    /// A commit acknowledgement error may follow persistence; retrying is idempotent.
+    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskRuntimeError> {
+        let commits = [super::TaskCommit::Cancel { task_id: id }];
+        self.store
+            .commit_tasks(&commits)
+            .await
+            .map_err(|failure| match failure {
+                super::store::StoreFailure::BeforeCommit(error)
+                | super::store::StoreFailure::CommitUnknown { error, .. } => error,
+            })?;
+        self.notify(RunnerEvent::Cancel(id));
+        Ok(())
+    }
+
+    /// No subscriber is normal for producer-only sites; the committed store write is authoritative.
+    fn notify(&self, event: RunnerEvent) {
+        let _ = self.events.send(event);
     }
 
     /// Validates a child using ordinary submission preparation without touching storage.
@@ -277,7 +294,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .get(name)
             .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.to_string()))?;
         let writes = build_writes(service, name, inputs, &options, &self.registry.config)?;
-        self.ensure_initialized().await?;
         let result = self.store.store_tasks(writes).await;
         self.metrics.submission(name, &result);
         let receipts = result?;
@@ -285,7 +301,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .iter()
             .any(|receipt| matches!(receipt, TaskReceipt::Queued(_)))
         {
-            self.notifier.notify_one();
+            self.notify(RunnerEvent::Wake);
         }
         Ok(receipts)
     }
@@ -309,10 +325,9 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
     ) -> Result<bool, TaskRuntimeError> {
         let serialized = serde_json::to_string(&input)?;
         super::result::validate_size(&serialized)?;
-        self.ensure_initialized().await?;
         let changed = self.store.resume(id, serialized).await?;
         if changed {
-            self.notifier.notify_waiters();
+            self.notify(RunnerEvent::Wake);
         }
         Ok(changed)
     }
@@ -324,10 +339,9 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         to: TaskLane,
     ) -> Result<u64, TaskRuntimeError> {
         self.require_lane(to)?;
-        self.ensure_initialized().await?;
         let count = self.store.reassign_lane(from.as_str(), to.as_str()).await?;
         if count > 0 {
-            self.notifier.notify_waiters();
+            self.notify(RunnerEvent::Wake);
         }
         Ok(count)
     }
@@ -375,39 +389,11 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
     }
 
-    pub(crate) async fn ensure_initialized(&self) -> Result<(), TaskRuntimeError> {
-        let result = self
-            .initialized
-            .get_or_try_init(|| async { self.store.initialize(self.store_conf()?).await })
-            .await
-            .map(|_| ());
-        self.record_initialization(&result);
-        result
-    }
-
-    pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
-        Ok(super::TaskStoreConf {
-            flows: self.registry.flow_configuration(),
-            max_all_children: self.registry.config.all_limit(),
-            handlers: self
-                .registry
-                .tasks
-                .values()
-                .map(|task| (task.name.clone(), task.kind()))
-                .collect(),
-            lanes: self.registry.lanes().to_vec(),
-            idempotency: self.registry.idempotency_conf()?,
-            schedules: self.schedules.to_vec(),
-            poll_interval: self.registry.config.poll_interval_value(),
-        })
-    }
-
     /// Reads durable schedule cursors with the store-relative current time.
     pub(crate) async fn schedule_snapshot(
         &self,
         names: &[String],
     ) -> Result<super::TaskScheduleSnapshot, TaskRuntimeError> {
-        self.ensure_initialized().await?;
         self.store.schedule_snapshot(names).await
     }
 
@@ -421,7 +407,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
         let service = self.task_for_payload(&payload)?;
         self.require_schedule_target(schedule, service.name())?;
         let write = build_box_write(service, &payload, &self.registry.config)?;
-        self.ensure_initialized().await?;
         let result = self
             .store
             .store_scheduled(ScheduledTaskWrite {
@@ -431,7 +416,7 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
             })
             .await;
         if matches!(result, Ok(Some(TaskReceipt::Queued(_)))) {
-            self.notifier.notify_one();
+            self.notify(RunnerEvent::Wake);
         }
         result
     }
@@ -459,19 +444,6 @@ impl<S: AbstractTaskStore + Send + Sync + 'static> TaskDispatcher<S> {
 
     pub(crate) fn health_snapshot(&self) -> super::TaskHealthSnapshot {
         self.health.snapshot()
-    }
-
-    fn record_initialization(&self, result: &Result<(), TaskRuntimeError>) {
-        match result {
-            Ok(()) => self.health.initialized(),
-            Err(error) => {
-                self.health.initialization_failed();
-                super::diagnostics::log_runtime_error(
-                    error,
-                    "durable task runtime initialization failed",
-                );
-            }
-        }
     }
 }
 
@@ -612,13 +584,11 @@ fn build_record(
         attempts: 0,
         step_attempts: 0,
         lane: lane.to_string(),
-        lease_duration_ms: None,
         last_result: None,
         idempotency_key: key,
         idempotency_fingerprint: fingerprint,
         idempotency_expires_at: None,
-        locked_by: None,
-        leased_until: None,
+        node_id: None,
         ready_at: Some(now),
         created_at: now,
         updated_at: now,

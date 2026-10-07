@@ -274,7 +274,6 @@ enum RegisteredHandler {
     Flow {
         handler: Callable<FlowContext, Error>,
         outcome: fn(callables::DataBox, &Site) -> Result<TaskOutcome, TaskRuntimeError>,
-        compatibility: String,
     },
     Single {
         handler: WorkHandler,
@@ -306,14 +305,6 @@ impl RegisteredTask {
 
     pub(crate) fn operation(&self) -> callables::Operation {
         self.operation.clone()
-    }
-
-    /// Borrows finalization-derived compatibility metadata without examining task rows.
-    pub(crate) fn flow_compatibility(&self) -> Option<&str> {
-        match &self.handler {
-            RegisteredHandler::Flow { compatibility, .. } => Some(compatibility),
-            _ => None,
-        }
     }
 
     pub(crate) const fn is_batch(&self) -> bool {
@@ -692,16 +683,6 @@ pub(crate) struct TaskRegistry {
 }
 
 impl TaskRegistry {
-    pub(crate) fn flow_configuration(&self) -> Vec<(String, String)> {
-        self.tasks
-            .values()
-            .filter_map(|task| {
-                task.flow_compatibility()
-                    .map(|identity| (task.name.clone(), identity.to_owned()))
-            })
-            .collect()
-    }
-
     /// Replaces deferred declarations using operation-local policy deduplication scratch.
     pub(crate) fn prepare_flows(
         mut self,
@@ -843,6 +824,21 @@ impl TaskRegistry {
             .collect()
     }
 
+    /// Builds immutable store configuration before producers or workers use it.
+    pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
+        Ok(super::TaskStoreConf {
+            max_all_children: self.config.all_limit(),
+            handlers: self
+                .tasks
+                .values()
+                .map(|task| (task.name.clone(), task.kind()))
+                .collect(),
+            lanes: self.lanes().to_vec(),
+            idempotency: self.idempotency_conf()?,
+            poll_interval: self.config.poll_interval_value(),
+        })
+    }
+
     pub(crate) fn dispatcher<S: crate::tasks::store::AbstractTaskStore + Send + Sync + 'static>(
         self: Arc<Self>,
         store: Arc<S>,
@@ -855,8 +851,7 @@ impl TaskRegistry {
         TaskDispatcher {
             store,
             registry: self.clone(),
-            notifier: Arc::new(tokio::sync::Notify::new()),
-            initialized: Arc::new(tokio::sync::OnceCell::new()),
+            events: tokio::sync::broadcast::channel(self.config.batch_size_value()).0,
             metrics,
             health: super::TaskHealth::new(self.config.readiness_policy(), !self.is_empty()),
             schedules: schedules.into(),

@@ -15,14 +15,14 @@ use crate::{
 use super::{
     claim::{next_task_deadline, probe_candidates},
     common::{DbTaskStore, add_time},
-    model::{TaskLaneLockPatch, TaskLaneLockRow, TaskRow},
+    model::{TaskLaneLockPatch, TaskLaneLockRow, TaskProbeRow},
 };
 
 struct OwnerTurn<'a> {
     claim: &'a LaneClaim,
     lane: &'a TaskLaneConf,
     conf: &'a crate::tasks::TaskStoreConf,
-    runner_id: &'a str,
+    runner_id: &'a uuid::Uuid,
     now: DateTime<Utc>,
 }
 
@@ -31,7 +31,7 @@ impl DbTaskStore {
     pub(super) async fn claim_owned_lane(
         &self,
         transaction: &mut db::DbTransaction<'_>,
-        runner_id: &str,
+        runner_id: &uuid::Uuid,
         claim: &LaneClaim,
         lane: &TaskLaneConf,
         conf: &crate::tasks::TaskStoreConf,
@@ -62,6 +62,14 @@ impl DbTaskStore {
             now,
         };
         let result = if !self.resolve_owner(&mut row, &turn)? {
+            if claim
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.token.is_some())
+            {
+                self.release_lane_claims(transaction, runner_id, claim.lane, now)
+                    .await?;
+            }
             wait_poll(transaction, row, &turn).await
         } else {
             if let Some(result) = claim.owner.as_ref().and_then(|owner| owner.hook.as_ref()) {
@@ -107,7 +115,7 @@ impl DbTaskStore {
         if requested.is_some() || owner_live(row, turn.now) {
             return Ok(false);
         }
-        row.owner_id = Some(turn.runner_id.into());
+        row.owner_id = Some(turn.runner_id.to_string());
         row.owner_token = Some(uuid::Uuid::now_v7().to_string());
         row.leased_until = Some(owner_deadline(turn.now, self.lease_duration)?);
         row.updated_at = turn.now;
@@ -190,7 +198,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         row: &mut TaskLaneLockRow,
-        candidates: Vec<TaskRow>,
+        candidates: Vec<TaskProbeRow>,
         turn: &OwnerTurn<'_>,
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
@@ -373,7 +381,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: &OwnerTurn<'_>,
-    ) -> Result<Vec<TaskRow>, TaskRuntimeError> {
+    ) -> Result<Vec<TaskProbeRow>, TaskRuntimeError> {
         let size = turn.lane.lane_lock().map_or(1, |lock| lock.batch_size());
         probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), size).await
     }
@@ -430,7 +438,7 @@ fn mark_takeover(poll: &mut LanePoll, candidate: bool) {
 }
 
 fn should_flush(
-    rows: &[TaskRow],
+    rows: &[TaskProbeRow],
     lane: &TaskLaneConf,
     now: DateTime<Utc>,
 ) -> Result<bool, TaskRuntimeError> {
@@ -444,7 +452,7 @@ fn should_flush(
 }
 
 fn flush_wake(
-    rows: &[TaskRow],
+    rows: &[TaskProbeRow],
     lane: &TaskLaneConf,
     now: DateTime<Utc>,
 ) -> Result<Option<Duration>, TaskRuntimeError> {
@@ -522,7 +530,7 @@ async fn wait_poll(
 }
 
 fn current_owner(row: &TaskLaneLockRow, turn: &OwnerTurn<'_>, token: &str) -> bool {
-    row.owner_id.as_deref() == Some(turn.runner_id)
+    row.owner_id.as_deref() == Some(turn.runner_id.to_string().as_str())
         && row.owner_token.as_deref() == Some(token)
         && owner_live(row, turn.now)
 }
@@ -609,7 +617,7 @@ fn owner_deadline(
     add_time(now, duration, "lane owner duration")
 }
 
-async fn persist(
+pub(super) async fn persist(
     transaction: &mut db::DbTransaction<'_>,
     row: &TaskLaneLockRow,
 ) -> Result<(), TaskRuntimeError> {

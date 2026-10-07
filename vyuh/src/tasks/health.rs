@@ -115,6 +115,14 @@ impl TaskHealth {
         self.failed(TaskFailureClass::Store);
     }
 
+    /// Records terminal ownership loss without applying the transient failure threshold.
+    pub(crate) fn retired(&self) {
+        let mut inner = self.inner.lock();
+        inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+        inner.last_failure = Some(TaskFailureClass::Store);
+        inner.state = TaskHealthState::Unhealthy;
+    }
+
     /// Returns whether this task runtime should affect site readiness.
     pub(crate) fn is_ready(&self) -> bool {
         self.ready_state(self.inner.lock().state)

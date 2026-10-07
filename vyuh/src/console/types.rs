@@ -389,8 +389,7 @@ pub struct TaskOut {
     pub lane: String,
     pub idempotency_key: Option<String>,
     pub idempotency_expires_at: Option<String>,
-    pub locked_by: Option<String>,
-    pub leased_until: Option<String>,
+    pub node_id: Option<String>,
     pub ready_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -414,8 +413,7 @@ impl From<&TaskInfo> for TaskOut {
             idempotency_expires_at: record
                 .idempotency_expires_at
                 .map(|value| value.to_rfc3339()),
-            locked_by: record.locked_by.clone(),
-            leased_until: record.leased_until.map(|value| value.to_rfc3339()),
+            node_id: record.node_id.map(|id| id.to_string()),
             ready_at: record.ready_at.map(|value| value.to_rfc3339()),
             created_at: record.created_at.to_rfc3339(),
             updated_at: record.updated_at.to_rfc3339(),

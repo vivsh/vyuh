@@ -32,8 +32,6 @@ pub(crate) struct TaskMetrics {
     claims: Vec<AtomicU64>,
     reclaimed: Vec<AtomicU64>,
     idempotency_conflicts: Vec<AtomicU64>,
-    renewals: Vec<AtomicU64>,
-    ownership_losses: Vec<AtomicU64>,
     ownership_acquires: Vec<AtomicU64>,
     ownership_takeovers: Vec<AtomicU64>,
     lane_owner_losses: Vec<AtomicU64>,
@@ -46,6 +44,9 @@ pub(crate) struct TaskMetrics {
     hook_micros: Timing,
     commit_micros: Timing,
     store_failures: AtomicU64,
+    heartbeat_successes: AtomicU64,
+    heartbeat_failures: AtomicU64,
+    heartbeat_micros: Timing,
 }
 
 #[derive(Default)]
@@ -70,8 +71,6 @@ impl TaskMetrics {
             claims: atomic_vector(lanes.len()),
             reclaimed: atomic_vector(lanes.len()),
             idempotency_conflicts: atomic_vector(handlers.len()),
-            renewals: atomic_vector(lanes.len()),
-            ownership_losses: atomic_vector(lanes.len()),
             ownership_acquires: atomic_vector(lanes.len()),
             ownership_takeovers: atomic_vector(lanes.len()),
             lane_owner_losses: atomic_vector(lanes.len()),
@@ -86,6 +85,9 @@ impl TaskMetrics {
             hook_micros: Timing::default(),
             commit_micros: Timing::default(),
             store_failures: AtomicU64::new(0),
+            heartbeat_successes: AtomicU64::new(0),
+            heartbeat_failures: AtomicU64::new(0),
+            heartbeat_micros: Timing::default(),
         }
     }
 
@@ -143,15 +145,6 @@ impl TaskMetrics {
         increment(&self.handlers, &self.batch_items, handler, items as u64);
     }
 
-    pub(crate) fn renewed(&self, lane: &str, lost: bool) {
-        let counters = if lost {
-            &self.ownership_losses
-        } else {
-            &self.renewals
-        };
-        increment(&self.lanes, counters, lane, 1);
-    }
-
     pub(crate) fn owner_acquired(&self, lane: &str) {
         increment(&self.lanes, &self.ownership_acquires, lane, 1);
     }
@@ -204,10 +197,38 @@ impl TaskMetrics {
         self.store_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records one applied heartbeat response without node-identity labels.
+    pub(crate) fn heartbeat(&self, elapsed: Duration, failed: bool) {
+        self.heartbeat_micros.record(elapsed);
+        let counter = if failed {
+            &self.heartbeat_failures
+        } else {
+            &self.heartbeat_successes
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Renders bounded outcome labels and elapsed time without identifying nodes.
+    fn render_heartbeats(&self, output: &mut String) {
+        render_timing(output, "heartbeat", &self.heartbeat_micros);
+        let _ = writeln!(output, "# TYPE vyuh_task_heartbeats_total counter");
+        for (result, count) in [
+            ("success", &self.heartbeat_successes),
+            ("failure", &self.heartbeat_failures),
+        ] {
+            let _ = writeln!(
+                output,
+                "vyuh_task_heartbeats_total{{result=\"{result}\"}} {}",
+                count.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     pub(crate) fn render(&self, health: TaskHealthSnapshot) -> String {
         let mut output = String::from("# TYPE vyuh_task_submissions_total counter\n");
         self.render_handler_metrics(&mut output);
         self.render_lane_metrics(&mut output);
+        self.render_heartbeats(&mut output);
         render_timing(&mut output, "queue", &self.queue_micros);
         render_timing(&mut output, "handler", &self.handler_micros);
         render_timing(&mut output, "lane_hook", &self.hook_micros);
@@ -282,29 +303,13 @@ impl TaskMetrics {
             &self.lanes,
             &self.claims,
         );
-        output.push_str("# TYPE vyuh_task_lease_renewals_total counter\n");
+        output.push_str("# TYPE vyuh_task_reclaims_total counter\n");
         render_vector(
             output,
-            "vyuh_task_lease_renewals_total",
-            "lane",
-            &self.lanes,
-            &self.renewals,
-        );
-        output.push_str("# TYPE vyuh_task_reclaimed_leases_total counter\n");
-        render_vector(
-            output,
-            "vyuh_task_reclaimed_leases_total",
+            "vyuh_task_reclaims_total",
             "lane",
             &self.lanes,
             &self.reclaimed,
-        );
-        output.push_str("# TYPE vyuh_task_lease_losses_total counter\n");
-        render_vector(
-            output,
-            "vyuh_task_lease_losses_total",
-            "lane",
-            &self.lanes,
-            &self.ownership_losses,
         );
         output.push_str("# TYPE vyuh_task_lane_owner_acquisitions_total counter\n");
         render_vector(

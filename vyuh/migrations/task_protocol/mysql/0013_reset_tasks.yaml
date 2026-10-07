@@ -1,0 +1,8 @@
+# DESTRUCTIVE: stop all workers/writers and back up before applying through the ledger.
+dependencies: [0012_flow_factories_protocol]
+atomic: true
+operations:
+  - type: statement
+    up: DELETE FROM vyuh_tasks
+  - type: statement
+    up: DELETE FROM vyuh_task_idempotency

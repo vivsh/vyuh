@@ -1,38 +1,130 @@
-//! Persistent task-runtime policy initialization and orphan detection.
+//! Store initialization and database-relative clock reads.
 
-use chrono::Utc;
+#[cfg(all(test, feature = "migrations"))]
+#[path = "tests/nodes.rs"]
+mod node_tests;
 
+use super::{
+    common::DbTaskStore,
+    model::{TaskLaneLockRow, TaskRateRow, TaskRow},
+};
 use crate::{
     db,
     tasks::{TaskRuntimeError, TaskStatus, TaskStoreConf},
 };
+use chrono::Utc;
 
-use super::{
-    common::DbTaskStore,
-    model::{RuntimePolicyPatch, TaskLaneLockRow, TaskRateRow, TaskRow, TaskRuntimeRow},
-    writes::{batch_update_rows, update_idempotency_batch},
-};
-
-pub(super) const RUNTIME_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
 const TOKEN_SCALE: i64 = 1_000_000;
 
 impl DbTaskStore {
-    /// Establishes one compatible store-wide policy before any claims are served.
-    pub(super) async fn initialize_impl(
+    /// Inserts one runner incarnation without resetting an existing registration.
+    pub(super) async fn register_node_impl(
         &self,
-        conf: TaskStoreConf,
+        node: &uuid::Uuid,
     ) -> Result<(), TaskRuntimeError> {
-        let fingerprint = crate::tasks::store::policy_fingerprint(&conf);
+        use db::DbSession as _;
+        #[cfg(feature = "postgres")]
+        let sql = "INSERT INTO vyuh_task_nodes (id, started_at, heartbeat_at) VALUES ($1, statement_timestamp(), statement_timestamp()) ON CONFLICT (id) DO NOTHING";
+        #[cfg(feature = "sqlite")]
+        let sql = "INSERT INTO vyuh_task_nodes (id, started_at, heartbeat_at) VALUES (?, strftime('%Y-%m-%d %H:%M:%f', 'now'), strftime('%Y-%m-%d %H:%M:%f', 'now')) ON CONFLICT (id) DO NOTHING";
+        #[cfg(feature = "mysql")]
+        let sql = "INSERT INTO vyuh_task_nodes (id, started_at, heartbeat_at) VALUES (?, CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id = id";
+        self.pool
+            .clone()
+            .execute(db::Statement::raw(sql).bind(*node))
+            .await?;
+        Ok(())
+    }
+
+    /// Updates only the existing node; SQLx MySQL FOUND_ROWS reports matched rows.
+    pub(super) async fn heartbeat_impl(
+        &self,
+        node: &uuid::Uuid,
+        stale_after: std::time::Duration,
+    ) -> Result<bool, TaskRuntimeError> {
+        use db::DbSession as _;
+        #[cfg(feature = "postgres")]
+        let sql = "UPDATE vyuh_task_nodes SET heartbeat_at = statement_timestamp() WHERE id = $1";
+        #[cfg(feature = "sqlite")]
+        let sql = "UPDATE vyuh_task_nodes SET heartbeat_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?";
+        #[cfg(feature = "mysql")]
+        let sql = "UPDATE vyuh_task_nodes SET heartbeat_at = CURRENT_TIMESTAMP(6) WHERE id = ?";
+        let present = self
+            .pool
+            .clone()
+            .execute(db::Statement::raw(sql).bind(*node))
+            .await?
+            == 1;
+        if present {
+            self.retire_nodes(node, stale_after).await?;
+        }
+        Ok(present)
+    }
+
+    /// A separate autocommit delete rechecks peer age without retaining our heartbeat lock.
+    async fn retire_nodes(
+        &self,
+        node: &uuid::Uuid,
+        stale_after: std::time::Duration,
+    ) -> Result<(), TaskRuntimeError> {
+        use db::DbSession as _;
+        let micros = i64::try_from(stale_after.as_micros()).map_err(|_| {
+            TaskRuntimeError::InvalidOptions(
+                "node retirement duration exceeds database range".into(),
+            )
+        })?;
+        #[cfg(feature = "postgres")]
+        let sql = "DELETE FROM vyuh_task_nodes WHERE id <> $1 AND heartbeat_at < statement_timestamp() - (CAST($2 AS BIGINT) * INTERVAL '1 microsecond')";
+        #[cfg(feature = "mysql")]
+        let sql = "DELETE FROM vyuh_task_nodes WHERE id <> ? AND heartbeat_at < TIMESTAMPADD(MICROSECOND, -?, CURRENT_TIMESTAMP(6))";
+        #[cfg(feature = "sqlite")]
+        let sql = "DELETE FROM vyuh_task_nodes WHERE id <> ? AND heartbeat_at < strftime('%Y-%m-%d %H:%M:%f', 'now', printf('-%f seconds', ? / 1000000.0))";
+        self.pool
+            .clone()
+            .execute(db::Statement::raw(sql).bind(*node).bind(micros))
+            .await?;
+        Ok(())
+    }
+
+    /// Uses one conditional update at a quiescent lifecycle boundary, with database time.
+    /// This neither discovers abandoned nodes nor changes lane leases or workflow state.
+    pub(super) async fn return_claims_impl(
+        &self,
+        node: Option<uuid::Uuid>,
+    ) -> Result<u64, TaskRuntimeError> {
+        use db::DbSession as _;
+        #[cfg(feature = "postgres")]
+        let (clock, parameter) = ("statement_timestamp()", "$1");
+        #[cfg(feature = "sqlite")]
+        let (clock, parameter) = ("strftime('%Y-%m-%d %H:%M:%f', 'now')", "?");
+        #[cfg(feature = "mysql")]
+        let (clock, parameter) = ("CURRENT_TIMESTAMP(6)", "?");
+        let owner = if node.is_some() {
+            format!(" AND node_id = {parameter}")
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "UPDATE vyuh_tasks SET status = 0, node_id = NULL, \
+             ready_at = {clock}, updated_at = {clock} WHERE status = 1{owner}"
+        );
+        let statement = db::Statement::raw(&sql);
+        let statement = match node {
+            Some(node) => statement.bind(node),
+            None => statement,
+        };
+        Ok(self.pool.clone().execute(statement).await?)
+    }
+
+    /// Validates registered task targets and creates missing rate and lane-owner rows.
+    pub(super) async fn initialize_impl(&self) -> Result<(), TaskRuntimeError> {
+        let conf = &self.runtime_conf;
         let mut transaction = self.pool.begin().await?;
         let now = statement_now(&mut transaction).await?;
-        self.fail_unleased_running(&mut transaction, &conf, now)
-            .await?;
-        reject_orphaned_tasks(&mut transaction, &conf).await?;
-        ensure_runtime_policy(&mut transaction, &fingerprint, &conf, now).await?;
-        initialize_rate_rows(&mut transaction, &conf, &fingerprint, now).await?;
-        initialize_lock_rows(&mut transaction, &conf, now).await?;
+        reject_orphaned_tasks(&mut transaction, conf).await?;
+        initialize_rate_rows(&mut transaction, conf, now).await?;
+        initialize_lock_rows(&mut transaction, conf, now).await?;
         transaction.commit().await?;
-        *self.runtime_conf.write().await = Some((conf.into(), fingerprint.into()));
         Ok(())
     }
 }
@@ -64,108 +156,7 @@ async fn initialize_lock_rows(
     Ok(())
 }
 
-/// Terminates legacy running rows that have no deadline for safe lease recovery.
-impl DbTaskStore {
-    /// Terminates legacy running rows that have no deadline for safe lease recovery.
-    async fn fail_unleased_running(
-        &self,
-        transaction: &mut db::DbTransaction<'_>,
-        conf: &TaskStoreConf,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<(), TaskRuntimeError> {
-        loop {
-            let mut rows = load_unleased(transaction, self.batch_size).await?;
-            if rows.is_empty() {
-                return Ok(());
-            }
-            for row in &mut rows {
-                super::writes::apply_outcome(
-                    row,
-                    &crate::tasks::TaskOutcome::fail("Running task has no lease deadline"),
-                    crate::tasks::TaskRetry::default(),
-                    now,
-                )?;
-                row.locked_by = None;
-                row.leased_until = None;
-                row.updated_at = now;
-            }
-            update_idempotency_batch(transaction, &mut rows, conf, now).await?;
-            batch_update_rows(transaction, &rows, self.batch_size).await?;
-            let mut deliveries = Vec::new();
-            for row in &rows {
-                super::writes::queue_delivery(row, &mut deliveries)?;
-            }
-            super::writes::finalize_workflow(
-                transaction,
-                &[],
-                deliveries,
-                &[],
-                conf,
-                now,
-                self.batch_size,
-            )
-            .await?;
-        }
-    }
-}
-
-/// Locks orphaned running rows so concurrent initializers cannot redeliver an old failure.
-async fn load_unleased(
-    transaction: &mut db::DbTransaction<'_>,
-    limit: usize,
-) -> Result<Vec<TaskRow>, TaskRuntimeError> {
-    let table = DbTaskStore::table();
-    let query = db::from(&table)
-        .filter(table.status.eq(db::val(TaskStatus::Running.as_i16())))
-        .filter(table.leased_until.is_null())
-        .sort(table.id.asc());
-    #[cfg(any(feature = "postgres", feature = "mysql"))]
-    let query = {
-        use crate::db::backend::RowLockExt as _;
-        query.for_update()
-    };
-    Ok(query.slice::<TaskRow>(0, limit).exec(transaction).await?)
-}
-
-/// Creates or safely advances the singleton policy while no work is running.
-async fn ensure_runtime_policy(
-    transaction: &mut db::DbTransaction<'_>,
-    fingerprint: &str,
-    conf: &TaskStoreConf,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), TaskRuntimeError> {
-    let table = DbTaskStore::runtime_table();
-    let row = TaskRuntimeRow {
-        id: RUNTIME_ID,
-        policy_fingerprint: fingerprint.into(),
-        updated_at: now,
-    };
-    insert_runtime_if_missing(transaction, &table, &row).await?;
-    let stored = load_runtime_for_update(transaction).await?.ok_or_else(|| {
-        TaskRuntimeError::TaskExecutionError("task runtime policy was not stored".into())
-    })?;
-    if crate::tasks::store::is_migrated_policy(conf, &stored.policy_fingerprint) {
-        let patch = RuntimePolicyPatch {
-            policy_fingerprint: fingerprint.into(),
-            updated_at: now,
-        };
-        db::from(&table)
-            .filter(table.id.eq(db::val(RUNTIME_ID)))
-            .update(&patch)
-            .exec(transaction)
-            .await?;
-        return Ok(());
-    }
-    if !stored.policy_fingerprint.starts_with("tr-v7:") {
-        return Err(TaskRuntimeError::InvalidConfig("task Flow-factory protocol migration is required; stop all old workers and writers before upgrading".into()));
-    }
-    if stored.policy_fingerprint != fingerprint {
-        replace_runtime_policy(transaction, fingerprint, now).await?;
-    }
-    Ok(())
-}
-
-/// Rejects active rows whose lane is absent from the candidate policy.
+/// Rejects active rows whose lane is absent from the configured registry.
 async fn reject_orphaned_tasks(
     transaction: &mut db::DbTransaction<'_>,
     conf: &TaskStoreConf,
@@ -210,11 +201,11 @@ async fn reject_orphaned_tasks(
     Ok(())
 }
 
-/// Ensures each limited lane has one durable bucket for the current policy.
+/// Creates missing global buckets without resetting existing tokens or refill clocks.
+/// Configuration compatibility is not checked against a persisted fingerprint.
 async fn initialize_rate_rows(
     transaction: &mut db::DbTransaction<'_>,
     conf: &TaskStoreConf,
-    fingerprint: &str,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), TaskRuntimeError> {
     let table = DbTaskStore::rate_table();
@@ -225,203 +216,33 @@ async fn initialize_rate_rows(
         let row = TaskRateRow {
             id: uuid::Uuid::now_v7(),
             lane_name: lane.lane().to_string(),
-            policy_fingerprint: fingerprint.into(),
             tokens_micros: i64::from(rate.burst_size()).saturating_mul(TOKEN_SCALE),
             updated_at: now,
         };
         insert_rate_if_missing(transaction, &table, &row).await?;
-        let mut stored = db::from(&table)
-            .filter(table.lane_name.eq(db::val(lane.lane().to_string())))
-            .first::<TaskRateRow>()
-            .exec(&mut *transaction)
-            .await?
-            .ok_or_else(|| {
-                TaskRuntimeError::TaskExecutionError("task rate state was not stored".into())
-            })?;
-        if crate::tasks::store::is_migrated_policy(conf, &stored.policy_fingerprint) {
-            stored.policy_fingerprint = fingerprint.into();
-            db::from(&table)
-                .filter(table.lane_name.eq(db::val(lane.lane().to_string())))
-                .update(&stored)
-                .exec(&mut *transaction)
-                .await?;
-        } else if stored.policy_fingerprint != fingerprint {
-            return Err(TaskRuntimeError::InvalidConfig(format!(
-                "task lane '{}' has an incompatible global rate policy",
-                lane.lane()
-            )));
-        }
     }
     Ok(())
 }
 
-pub(super) async fn verify_runtime_policy(
-    transaction: &mut db::DbTransaction<'_>,
-    expected: &str,
-) -> Result<chrono::DateTime<Utc>, TaskRuntimeError> {
-    use db::DbSession as _;
-    #[cfg(feature = "postgres")]
-    let sql = "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = $1 FOR SHARE";
-    #[cfg(feature = "mysql")]
-    let sql = "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = ? LOCK IN SHARE MODE";
-    #[cfg(feature = "sqlite")]
-    let sql =
-        "SELECT policy_fingerprint, CURRENT_TIMESTAMP AS now FROM vyuh_task_runtime WHERE id = ?";
-    let stored: Option<RuntimeTurnRow> = transaction
-        .fetch_optional(db::Statement::raw(sql).bind(RUNTIME_ID))
-        .await?;
-    let stored = stored.ok_or_else(missing_policy)?;
-    stored.verify(expected)?;
-    Ok(stored.now)
-}
-
-/// Transaction-local policy evidence and the database clock from one locked read.
+/// Operation-local clock evidence; no persisted runtime-policy row is consulted.
 #[derive(db::Record)]
-pub(super) struct RuntimeTurnRow {
-    policy_fingerprint: String,
+pub(super) struct StoreClockRow {
     pub(super) now: chrono::DateTime<Utc>,
 }
 
-impl RuntimeTurnRow {
-    /// Rejects a replaced policy before accepting any row mutations.
-    pub(super) fn verify(&self, expected: &str) -> Result<(), TaskRuntimeError> {
-        if self.policy_fingerprint != expected {
-            return Err(TaskRuntimeError::InvalidConfig(
-                "task worker policy changed after this worker initialized".into(),
-            ));
-        }
-        Ok(())
-    }
+/// Missing clock evidence indicates a malformed internal query projection.
+pub(super) fn missing_clock() -> TaskRuntimeError {
+    TaskRuntimeError::TaskExecutionError("task query omitted database clock".into())
 }
 
-/// Missing metadata is an initialization error, never an empty successful poll.
-pub(super) fn missing_policy() -> TaskRuntimeError {
-    TaskRuntimeError::InvalidConfig("task runtime policy has not been initialized".into())
-}
-
-/// Replaces an idle policy and discards buckets that belong to its old shape.
-async fn replace_runtime_policy(
-    transaction: &mut db::DbTransaction<'_>,
-    fingerprint: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), TaskRuntimeError> {
-    let tasks = DbTaskStore::table();
-    let running = db::from(&tasks)
-        .filter(tasks.status.eq(db::val(TaskStatus::Running.as_i16())))
-        .exists()
-        .exec(&mut *transaction)
-        .await?;
-    if running {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task lane or global rate policy cannot change while tasks are running".into(),
-        ));
-    }
-    if live_lane_owner(transaction, now).await? {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task lane policy cannot change while a lane owner is active".into(),
-        ));
-    }
-    let runtime = DbTaskStore::runtime_table();
-    let patch = RuntimePolicyPatch {
-        policy_fingerprint: fingerprint.into(),
-        updated_at: now,
-    };
-    db::from(&runtime)
-        .filter(runtime.id.eq(db::val(RUNTIME_ID)))
-        .update(&patch)
-        .exec(&mut *transaction)
-        .await?;
-    let rates = DbTaskStore::rate_table();
-    db::from(&rates)
-        .filter(rates.id.is_not_null())
-        .delete()
-        .exec(transaction)
-        .await?;
-    Ok(())
-}
-
-/// Detects live lane ownership before a deployment policy is replaced.
-async fn live_lane_owner(
-    transaction: &mut db::DbTransaction<'_>,
-    now: chrono::DateTime<Utc>,
-) -> Result<bool, TaskRuntimeError> {
-    let locks = DbTaskStore::lane_lock_table();
-    Ok(db::from(&locks)
-        .filter(locks.owner_token.is_not_null())
-        .filter(locks.leased_until.gt(db::val(Some(now))))
-        .exists()
-        .exec(transaction)
-        .await?)
-}
-
-#[cfg(feature = "sqlite")]
-async fn load_runtime(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    let table = DbTaskStore::runtime_table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(RUNTIME_ID)))
-        .first::<TaskRuntimeRow>()
-        .exec(transaction)
-        .await?)
-}
-
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-/// Exclusively locks the singleton while initializing or changing policy.
-async fn load_runtime_for_update(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    use crate::db::backend::RowLockExt as _;
-    let table = DbTaskStore::runtime_table();
-    Ok(db::from(&table)
-        .filter(table.id.eq(db::val(RUNTIME_ID)))
-        .for_update()
-        .first::<TaskRuntimeRow>()
-        .exec(transaction)
-        .await?)
-}
-
-#[cfg(feature = "sqlite")]
-async fn load_runtime_for_update(
-    transaction: &mut db::DbTransaction<'_>,
-) -> Result<Option<TaskRuntimeRow>, TaskRuntimeError> {
-    load_runtime(transaction).await
-}
-
-async fn statement_now(
+/// Reads database time without locking or inspecting deployment metadata.
+pub(super) async fn statement_now(
     transaction: &mut db::DbTransaction<'_>,
 ) -> Result<chrono::DateTime<Utc>, TaskRuntimeError> {
     use db::DbSession as _;
     Ok(transaction
         .fetch_scalar(db::Statement::raw("SELECT CURRENT_TIMESTAMP"))
         .await?)
-}
-
-/// Creates the singleton runtime row without mutating an existing policy.
-async fn insert_runtime_if_missing(
-    transaction: &mut db::DbTransaction<'_>,
-    table: &db::queries::ModelTable<TaskRuntimeRow>,
-    row: &TaskRuntimeRow,
-) -> Result<(), TaskRuntimeError> {
-    #[cfg(any(feature = "postgres", feature = "sqlite"))]
-    {
-        use crate::db::backend::IgnoreConflictsExt as _;
-        db::from(table)
-            .insert_many(std::slice::from_ref(row))
-            .ignore_conflicts_on(&table.id)
-            .exec(transaction)
-            .await?;
-    }
-    #[cfg(all(feature = "mysql", not(any(feature = "postgres", feature = "sqlite"))))]
-    {
-        use crate::db::backend::IgnoreErrorsExt as _;
-        db::from(table)
-            .insert_many(std::slice::from_ref(row))
-            .ignore_errors()
-            .exec(transaction)
-            .await?;
-    }
-    Ok(())
 }
 
 /// Creates one rate row without resetting an existing bucket's refill clock.
@@ -479,87 +300,5 @@ async fn insert_lock_if_missing(
 }
 
 #[cfg(all(test, any(feature = "postgres", feature = "sqlite")))]
-mod tests {
-    use super::*;
-
-    /// Verifies singleton and lane initialization use conflict-ignore inserts, never no-op upserts.
-    #[test]
-    fn initialization_inserts_ignore_conflicts() -> Result<(), String> {
-        let now = Utc::now();
-        assert_ignore_plan(&runtime_plan(now)?, "id")?;
-        assert_ignore_plan(&rate_plan(now)?, "lane_name")?;
-        assert_ignore_plan(&lock_plan(now)?, "lane_name")
-    }
-
-    /// Builds the singleton runtime insert-if-missing statement.
-    fn runtime_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
-        use crate::db::backend::IgnoreConflictsExt as _;
-        let runtime = DbTaskStore::runtime_table();
-        let runtime_row = TaskRuntimeRow {
-            id: RUNTIME_ID,
-            policy_fingerprint: "policy".into(),
-            updated_at: now,
-        };
-        Ok(db::from(&runtime)
-            .insert_many(&[runtime_row])
-            .ignore_conflicts_on(&runtime.id)
-            .plan()
-            .map_err(|error| error.to_string())?
-            .sql)
-    }
-
-    /// Builds one global-rate insert-if-missing statement.
-    fn rate_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
-        use crate::db::backend::IgnoreConflictsExt as _;
-        let rates = DbTaskStore::rate_table();
-        let rate_row = TaskRateRow {
-            id: uuid::Uuid::now_v7(),
-            lane_name: "default".into(),
-            policy_fingerprint: "policy".into(),
-            tokens_micros: TOKEN_SCALE,
-            updated_at: now,
-        };
-        Ok(db::from(&rates)
-            .insert_many(&[rate_row])
-            .ignore_conflicts_on(&rates.lane_name)
-            .plan()
-            .map_err(|error| error.to_string())?
-            .sql)
-    }
-
-    /// Builds one lane-owner insert-if-missing statement.
-    fn lock_plan(now: chrono::DateTime<Utc>) -> Result<String, String> {
-        use crate::db::backend::IgnoreConflictsExt as _;
-        let locks = DbTaskStore::lane_lock_table();
-        let lock_row = TaskLaneLockRow {
-            lane_name: "gpu".into(),
-            owner_id: None,
-            owner_token: None,
-            leased_until: None,
-            phase: crate::tasks::LaneOwnerPhase::Active as i16,
-            flushing: false,
-            empty_since: None,
-            generation: 0,
-            hook_retry_at: None,
-            last_hook_error: None,
-            created_at: now,
-            updated_at: now,
-        };
-        Ok(db::from(&locks)
-            .insert_many(&[lock_row])
-            .ignore_conflicts_on(&locks.lane_name)
-            .plan()
-            .map_err(|error| error.to_string())?
-            .sql)
-    }
-
-    /// Confirms an insert-if-missing plan leaves the existing row unchanged.
-    fn assert_ignore_plan(sql: &str, target: &str) -> Result<(), String> {
-        if !sql.contains(&format!("ON CONFLICT ({target}) DO NOTHING")) {
-            return Err(format!(
-                "expected conflict-ignore plan for '{target}', got {sql}"
-            ));
-        }
-        Ok(())
-    }
-}
+#[path = "tests/runtime.rs"]
+mod tests;

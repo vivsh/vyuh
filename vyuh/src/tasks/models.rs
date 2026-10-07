@@ -428,18 +428,17 @@ pub struct TaskRecord {
     pub state: Option<String>,
     pub resume_input: Option<String>,
     pub status: TaskStatus,
-    /// Durable cancellation intent; terminal status is applied by the store turn.
+    /// Durable cancellation marker, retained after terminal failure.
     pub cancelled: bool,
     pub attempts: i32,
     pub step_attempts: i32,
     pub lane: String,
-    pub lease_duration_ms: Option<i64>,
     pub last_result: Option<String>,
     pub idempotency_key: Option<String>,
     pub idempotency_fingerprint: Option<String>,
     pub idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub locked_by: Option<String>,
-    pub leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Execution-owner incarnation; only the store establishes or clears ownership.
+    pub node_id: Option<uuid::Uuid>,
     pub ready_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -509,8 +508,7 @@ pub struct TaskInfo {
     pub(crate) last_result: Option<String>,
     pub(crate) idempotency_key: Option<String>,
     pub(crate) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(crate) locked_by: Option<String>,
-    pub(crate) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) node_id: Option<uuid::Uuid>,
     pub(crate) ready_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(crate) created_at: chrono::DateTime<chrono::Utc>,
     pub(crate) updated_at: chrono::DateTime<chrono::Utc>,
@@ -518,7 +516,7 @@ pub struct TaskInfo {
 }
 
 impl TaskInfo {
-    /// Returns whether cancellation was requested, even before failure is finalized.
+    /// Returns the durable cancellation marker retained on a cancelled task.
     pub const fn cancelled(&self) -> bool {
         self.cancelled
     }
@@ -590,9 +588,9 @@ impl TaskInfo {
         self.idempotency_expires_at
     }
 
-    /// Returns the current lease deadline when the task is running.
-    pub const fn leased_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.leased_until
+    /// Returns the current execution owner, cleared when that execution ends or its node retires.
+    pub const fn node_id(&self) -> Option<uuid::Uuid> {
+        self.node_id
     }
 
     /// Returns the mutable processing timer, not an audit of the original schedule.
@@ -653,8 +651,7 @@ impl From<TaskRecord> for TaskInfo {
             last_result: record.last_result,
             idempotency_key: record.idempotency_key,
             idempotency_expires_at: record.idempotency_expires_at,
-            locked_by: record.locked_by,
-            leased_until: record.leased_until,
+            node_id: record.node_id,
             ready_at: record.ready_at,
             created_at: record.created_at,
             updated_at: record.updated_at,

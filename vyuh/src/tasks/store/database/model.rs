@@ -5,6 +5,18 @@ use crate::{
     tasks::{TaskRecord, TaskRuntimeError},
 };
 
+/// Store-owned liveness evidence; clustered heartbeats retire stale incarnations.
+#[derive(Debug, Clone, db::Model)]
+#[table(name = "vyuh_task_nodes")]
+pub(super) struct TaskNodeRow {
+    #[column(primary_key)]
+    pub(super) id: uuid::Uuid,
+    #[cfg_attr(feature = "mysql", column(type = "datetime(6)"))]
+    pub(super) started_at: chrono::DateTime<chrono::Utc>,
+    #[cfg_attr(feature = "mysql", column(type = "datetime(6)"))]
+    pub(super) heartbeat_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Private persistence representation for a durable task.
 ///
 /// Application inspection receives the read-only `TaskInfo` projection. This
@@ -42,19 +54,35 @@ pub(super) struct TaskRow {
     pub(super) step_attempts: i32,
     #[column(type = "varchar(64)", default = "'default'")]
     pub(super) lane_name: String,
-    pub(super) lease_duration_ms: Option<i64>,
     pub(super) last_result: Option<String>,
     #[column(type = "varchar(512)")]
     pub(super) idempotency_key: Option<String>,
     #[column(type = "varchar(64)")]
     pub(super) idempotency_fingerprint: Option<String>,
     pub(super) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Schema-owned nullable FK; deleting a node clears only this ownership field.
+    pub(super) node_id: Option<uuid::Uuid>,
     pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) created_at: chrono::DateTime<chrono::Utc>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
     pub(super) completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Bounded eligibility evidence; probes never load payloads, results, or checkpoints.
+#[derive(db::Record)]
+#[table(name = "vyuh_tasks")]
+pub(super) struct TaskProbeRow {
+    pub(super) cancelled: bool,
+    pub(super) step_attempts: i32,
+    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A future readiness hint, without fetching its task payload.
+#[derive(db::Record)]
+#[table(name = "vyuh_tasks")]
+pub(super) struct TaskReadyRow {
+    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Candidate-only projection; ordinary reads neither select nor decode join metadata.
@@ -64,38 +92,6 @@ pub(super) struct TaskClaimRow {
     row: TaskRow,
     waiting_children: Option<String>,
     remaining_completions: i32,
-}
-
-/// Renewal-only projection; payloads, checkpoints, results and join metadata stay in storage.
-#[derive(db::Model)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct TaskLeaseRow {
-    #[column(primary_key)]
-    pub(super) id: uuid::Uuid,
-    pub(super) lane_name: String,
-    pub(super) status: i16,
-    pub(super) cancelled: bool,
-    pub(super) locked_by: Option<String>,
-    pub(super) leased_until: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) lease_duration_ms: Option<i64>,
-    /// Write-only timestamp populated from this transaction's database clock.
-    #[column(selectable = false)]
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<&TaskRow> for TaskLeaseRow {
-    fn from(row: &TaskRow) -> Self {
-        Self {
-            id: row.id,
-            lane_name: row.lane_name.clone(),
-            status: row.status,
-            cancelled: row.cancelled,
-            locked_by: row.locked_by.clone(),
-            leased_until: row.leased_until,
-            lease_duration_ms: row.lease_duration_ms,
-            updated_at: row.updated_at,
-        }
-    }
 }
 
 impl From<TaskClaimRow> for TaskRow {
@@ -126,13 +122,11 @@ impl From<TaskRecord> for TaskRow {
             attempts: record.attempts,
             step_attempts: record.step_attempts,
             lane_name: record.lane,
-            lease_duration_ms: record.lease_duration_ms,
             last_result: record.last_result,
             idempotency_key: record.idempotency_key,
             idempotency_fingerprint: record.idempotency_fingerprint,
             idempotency_expires_at: record.idempotency_expires_at,
-            locked_by: record.locked_by,
-            leased_until: record.leased_until,
+            node_id: record.node_id,
             ready_at: record.ready_at,
             created_at: record.created_at,
             updated_at: record.updated_at,
@@ -159,13 +153,11 @@ impl TryFrom<TaskRow> for TaskRecord {
             attempts: row.attempts,
             step_attempts: row.step_attempts,
             lane: row.lane_name,
-            lease_duration_ms: row.lease_duration_ms,
             last_result: row.last_result,
             idempotency_key: row.idempotency_key,
             idempotency_fingerprint: row.idempotency_fingerprint,
             idempotency_expires_at: row.idempotency_expires_at,
-            locked_by: row.locked_by,
-            leased_until: row.leased_until,
+            node_id: row.node_id,
             ready_at: row.ready_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -192,7 +184,7 @@ pub(super) struct TaskIdempotencyRow {
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Durable token bucket and policy identity for one globally rate-limited lane.
+/// Durable token bucket for one globally rate-limited lane.
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_task_lane_rates")]
 pub(super) struct TaskRateRow {
@@ -200,8 +192,6 @@ pub(super) struct TaskRateRow {
     pub(super) id: uuid::Uuid,
     #[column(type = "varchar(64)")]
     pub(super) lane_name: String,
-    #[column(type = "varchar(64)")]
-    pub(super) policy_fingerprint: String,
     pub(super) tokens_micros: i64,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -243,17 +233,6 @@ pub(super) struct TaskLaneLockPatch {
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Store-wide task scheduling policy identity shared by all workers.
-#[derive(Debug, Clone, db::Model)]
-#[table(name = "vyuh_task_runtime")]
-pub(super) struct TaskRuntimeRow {
-    #[column(primary_key)]
-    pub(super) id: uuid::Uuid,
-    #[column(type = "varchar(64)")]
-    pub(super) policy_fingerprint: String,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
 /// One durable cursor for a task-targeted cron or periodic emitter.
 #[derive(Debug, Clone, db::Model)]
 #[table(name = "vyuh_schedules")]
@@ -269,14 +248,6 @@ pub(super) struct TaskScheduleRow {
 #[table(name = "vyuh_schedules")]
 pub(super) struct TaskSchedulePatch {
     pub(super) last_submitted_at: chrono::DateTime<chrono::Utc>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Mutable singleton task-runtime policy fields.
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_task_runtime")]
-pub(super) struct RuntimePolicyPatch {
-    pub(super) policy_fingerprint: String,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }
 

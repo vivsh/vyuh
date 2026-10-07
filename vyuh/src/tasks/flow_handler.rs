@@ -31,7 +31,6 @@ impl RegisteredTask {
             definition,
             build_dispatcher,
             step_limit,
-            revision,
         } = definition;
         let (name, policy) = definition.into_parts();
         let spec = callables::CallSpec::for_types::<callables::specs::Tuple1<callables::Data<T>>, ()>(
@@ -48,7 +47,6 @@ impl RegisteredTask {
                     handler,
                     build_dispatcher,
                     step_limit,
-                    revision,
                 ),
             },
             operation,
@@ -83,13 +81,12 @@ impl RegisteredTask {
                         self.name
                     ))
                 })?;
-        let (handler, compatibility) = result.map_err(|error| {
+        let handler = result.map_err(|error| {
             TaskRuntimeError::InvalidConfig(format!("Flow '{}': {error}", self.name))
         })?;
         self.handler = RegisteredHandler::Flow {
             handler,
             outcome: prepared_flow,
-            compatibility,
         };
         Ok(())
     }

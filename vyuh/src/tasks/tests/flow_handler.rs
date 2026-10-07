@@ -1,4 +1,5 @@
 use super::*;
+use crate::tasks::store::TestError;
 use crate::tasks::{Flow, FlowConf, FlowError, FlowState, TaskKind};
 
 struct CountFlow(Arc<std::sync::atomic::AtomicUsize>);
@@ -42,7 +43,7 @@ fn flow_record() -> Result<Arc<TaskRecord>, TaskRuntimeError> {
 
 /// Kind mismatch is rejected before input decoding or application side effects.
 #[tokio::test]
-async fn kind_mismatch_is_not_invoked() -> Result<(), TaskRuntimeError> {
+async fn kind_mismatch_is_not_invoked() -> Result<(), TestError> {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = calls.clone();
     let mut flow =
@@ -72,7 +73,7 @@ async fn kind_mismatch_is_not_invoked() -> Result<(), TaskRuntimeError> {
 
 /// Flow errors remain terminal and safe; malformed payloads never invoke user code.
 #[tokio::test]
-async fn flow_errors_are_contained() -> Result<(), TaskRuntimeError> {
+async fn flow_errors_are_contained() -> Result<(), TestError> {
     let site = test_site()
         .await
         .map_err(|e| TaskRuntimeError::TaskExecutionError(e.to_string()))?;
@@ -89,7 +90,7 @@ async fn flow_errors_are_contained() -> Result<(), TaskRuntimeError> {
 
 /// Batch kind validation isolates corrupt rows and preserves valid member ordering.
 #[tokio::test]
-async fn batch_kind_mismatch_is_isolated() -> Result<(), TaskRuntimeError> {
+async fn batch_kind_mismatch_is_isolated() -> Result<(), TestError> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = seen.clone();
     let batch = RegisteredTask::new_batch(
@@ -126,7 +127,7 @@ async fn batch_kind_mismatch_is_isolated() -> Result<(), TaskRuntimeError> {
 
 /// Registration preserves original metadata identity and scheduled submission infers Flow.
 #[tokio::test]
-async fn flow_metadata_and_scheduled_kind() -> Result<(), TaskRuntimeError> {
+async fn flow_metadata_and_scheduled_kind() -> Result<(), TestError> {
     fn unit() -> CountFlow {
         CountFlow(Arc::new(std::sync::atomic::AtomicUsize::new(0)))
     }
@@ -137,14 +138,13 @@ async fn flow_metadata_and_scheduled_kind() -> Result<(), TaskRuntimeError> {
     registered.prepare_flow(&crate::PartialSite::new(site.db()), &mut Default::default())?;
     assert_eq!(registered.kind(), TaskKind::Flow);
     let RegisteredHandler::Flow { handler, .. } = &registered.handler else {
-        return Err(TaskRuntimeError::TaskExecutionError(
-            "wrong registration mode".into(),
-        ));
+        return Err(TaskRuntimeError::TaskExecutionError("wrong registration mode".into()).into());
     };
     assert_eq!(handler.inspect().name, std::any::type_name_of_val(&unit));
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(registered)?;
-    let store = Arc::new(MemoryTaskStore::new(10));
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
     let receipt = dispatcher
         .submit_with(
@@ -164,7 +164,7 @@ async fn flow_metadata_and_scheduled_kind() -> Result<(), TaskRuntimeError> {
     assert!(
         store
             .claim_tasks(
-                "owner",
+                &uuid::Uuid::from_u128(1),
                 &[LaneClaim {
                     lane: DEFAULT_TASK_LANE,
                     limit: 10,

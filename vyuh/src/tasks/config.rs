@@ -314,12 +314,25 @@ impl TaskReadiness {
     }
 }
 
+/// Deployment contract for task runners sharing one task store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskMode {
+    /// One runner across restarts: reclaim and register at startup, without node heartbeats.
+    Standalone,
+    /// Records per-incarnation liveness; abandoned-node recovery remains deferred.
+    #[default]
+    Clustered,
+}
+
 /// Runtime policy for durable task workers.
 #[derive(Debug, Clone)]
 pub struct TaskConf {
+    mode: TaskMode,
+    heartbeat_interval: Duration,
     poll_interval: Duration,
     fallback_poll_interval: Duration,
     concurrency: usize,
+    db_concurrency: usize,
     batch_size: usize,
     max_all_children: usize,
     lease_duration: Duration,
@@ -333,9 +346,12 @@ pub struct TaskConf {
 impl Default for TaskConf {
     fn default() -> Self {
         Self {
+            mode: TaskMode::Clustered,
+            heartbeat_interval: Duration::from_secs(12),
             poll_interval: Duration::from_secs(1),
             fallback_poll_interval: Duration::from_secs(300),
             concurrency: 10,
+            db_concurrency: 1,
             batch_size: 250,
             max_all_children: 256,
             lease_duration: Duration::from_secs(300),
@@ -349,6 +365,39 @@ impl Default for TaskConf {
 }
 
 impl TaskConf {
+    /// Selects the deployment contract. Standalone exclusivity is not enforced by Vyuh.
+    pub const fn mode(mut self, mode: TaskMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Sets clustered heartbeat cadence independently of polling; unused in standalone mode.
+    /// Finalization rejects intervals outside one millisecond through seven days.
+    /// Peers older than six intervals are retired; clustered runners must share this setting.
+    pub const fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
+    pub(crate) const fn mode_value(&self) -> TaskMode {
+        self.mode
+    }
+
+    pub(crate) const fn heartbeat_interval_value(&self) -> Duration {
+        self.heartbeat_interval
+    }
+
+    /// Bounds runner-managed database operations; unrelated application queries are unaffected.
+    /// Zero and values exceeding Tokio's semaphore capacity fail registry finalization.
+    pub const fn db_concurrency(mut self, maximum: usize) -> Self {
+        self.db_concurrency = maximum;
+        self
+    }
+
+    pub(crate) const fn db_concurrency_value(&self) -> usize {
+        self.db_concurrency
+    }
+
     /// Limits one all-settled child group; validated at finalization in 1..=10,000.
     pub const fn max_all_children(mut self, maximum: usize) -> Self {
         self.max_all_children = maximum;
@@ -384,13 +433,13 @@ impl TaskConf {
         self
     }
 
-    /// Sets the ownership lease renewed while a handler remains active.
+    /// Sets the durable lane-owner lease; individual tasks use node ownership.
     pub const fn lease_duration(mut self, duration: Duration) -> Self {
         self.lease_duration = duration;
         self
     }
 
-    /// Sets the maximum serialized input, continuation, or resume payload size.
+    /// Sets the maximum serialized input or continuation payload size.
     pub const fn max_payload_bytes(mut self, bytes: usize) -> Self {
         self.max_payload_bytes = bytes;
         self
@@ -560,8 +609,24 @@ fn insert_default_lane(
     Ok(())
 }
 
+/// Validates database admission and liveness cadence independently of task polling.
+fn validate_database(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
+    if !(Duration::from_millis(1)..=MAX_INTERVAL).contains(&conf.heartbeat_interval) {
+        return Err(TaskRuntimeError::InvalidConfig(
+            "task heartbeat interval must be between one millisecond and seven days".into(),
+        ));
+    }
+    if conf.db_concurrency == 0 || conf.db_concurrency > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err(TaskRuntimeError::InvalidConfig(
+            "invalid task database concurrency".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Rejects scalar limits that could disable progress or exceed bounded policy.
 fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
+    validate_database(conf)?;
     if conf.poll_interval.is_zero() || conf.fallback_poll_interval < conf.poll_interval {
         return Err(TaskRuntimeError::InvalidConfig(
             "task fallback interval must be at least the non-zero poll interval".into(),
@@ -589,13 +654,13 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
     }
     if conf.lease_duration.is_zero() || conf.max_payload_bytes == 0 || conf.max_error_bytes == 0 {
         return Err(TaskRuntimeError::InvalidConfig(
-            "task lease and payload limits must be non-zero".into(),
+            "lane lease and payload limits must be non-zero".into(),
         ));
     }
     let minimum_lease = conf.poll_interval.saturating_mul(3);
     if conf.lease_duration < minimum_lease {
         return Err(TaskRuntimeError::InvalidConfig(
-            "task lease duration must be at least three poll intervals".into(),
+            "lane lease duration must be at least three poll intervals".into(),
         ));
     }
     if conf.lease_duration > MAX_LEASE
@@ -603,7 +668,7 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
         || conf.max_error_bytes > MAX_ERROR_BYTES
     {
         return Err(TaskRuntimeError::InvalidConfig(
-            "task lease or persisted payload limits exceed framework bounds".into(),
+            "lane lease or persisted payload limits exceed framework bounds".into(),
         ));
     }
     Ok(())

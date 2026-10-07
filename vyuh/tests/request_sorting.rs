@@ -27,7 +27,7 @@ enum NoteSort {
     Newest,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 struct ListNotes {
     sort: Option<db::Sort<NoteSort>>,
     page: Option<u32>,

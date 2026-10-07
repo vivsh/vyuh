@@ -67,10 +67,6 @@ impl LaneHook {
         }
     }
 
-    pub(crate) const fn identity(&self) -> &'static str {
-        self.identity
-    }
-
     pub(crate) async fn call(
         &self,
         site: Site,

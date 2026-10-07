@@ -1,4 +1,54 @@
-# Coordinated task protocol upgrade
+# Coordinated task upgrades
+
+## Current upgrade: node-owned task pipeline
+
+This is a **destructive, breaking upgrade** from the lease-owned runtime.
+`0013_reset_tasks` deletes **every old task**, including pending/running work,
+suspended workflows, join metadata, results and history. It also deletes their
+idempotency reservations. There is no automatic downgrade or recovery of those
+records: retain a verified backup if they may be needed.
+
+1. Stop **all workers and writers**, including producer-only processes and
+   task-managed emitters. Back up the database. Keep them stopped through both
+   migrations; old and new runtimes cannot share the store.
+2. Select your backend directory (`mysql` includes MariaDB). Integrate
+   `0013_reset_tasks` and `0014_node_pipeline` into the application's existing
+   Gaman ledger. The predecessor is the current task schema through
+   `0012_flow_factories_protocol`; adapt that dependency to the actual application
+   schema head **before first application**, never by editing applied identities.
+3. Apply the reset transaction and its ledger entry atomically. Then apply the
+   schema migration. It creates nodes, replaces `locked_by` with nullable UUID
+   `node_id`, adds `ON DELETE SET NULL` ownership and its index, updates readiness
+   indexing, and removes task-lease columns/index and fingerprint storage.
+4. Deploy the new code, then start compatible workers and writers. Validate
+   readiness and node registration. No migration runs during startup.
+
+Schedule cursors, rate balances/refill timestamps, and lane lifecycle rows are
+preserved. Existing lane leases expire through ordinary takeover. Do not reset
+schedule cursors unintentionally: that can replay scheduled submissions.
+
+The PostgreSQL readiness index uses `(lane_name, ready_at, created_at, id)` with
+the partial predicate `node_id IS NULL AND status IN (0, 1)`. Keeping status out
+of the ordering keys allows one ordered scan across pending and abandoned running
+tasks. SQLite and MySQL retain their backend-specific index definitions.
+
+The migrations take offline schema locks and must be rendered with the full
+predecessor history. SQLite requires Gaman's context-aware table rebuild; do not
+disable FK enforcement. PostgreSQL/SQLite schema migration is atomic. MySQL and
+MariaDB DDL is non-atomic: after partial failure inspect which operations committed
+and reconcile before retrying; do not blindly replay or mark the ledger complete.
+The acknowledged task reset remains applied if the later schema migration fails.
+
+These templates target the framework-owned schema. Review application-added
+foreign keys, triggers and indexes before applying; unsupported dependencies
+should fail visibly, not be removed with `CASCADE`. Fresh installations generate
+only the current desired schema and do not run historical data conversions.
+
+The following sections document **historical migrations only**. Their identities
+and contents remain immutable for existing application ledgers. The current
+runtime has no fingerprint compatibility methods, policy table or verification.
+
+## Historical protocol upgrades (0001–0012)
 
 These are Gaman migration templates, not startup migrations. Stop **all old task
 workers and writers**, including processes that only submit or resume tasks.

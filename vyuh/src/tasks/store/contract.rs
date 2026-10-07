@@ -8,6 +8,87 @@ use crate::tasks::{
 
 use super::{TaskOutcome, TaskRecord, TaskWrite};
 
+/// Preserves acknowledgement evidence without publishing an uncommitted response.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StoreFailure<T> {
+    #[error("{0}")]
+    BeforeCommit(#[source] TaskRuntimeError),
+    #[error("{error}")]
+    CommitUnknown {
+        #[source]
+        error: TaskRuntimeError,
+        prepared: T,
+    },
+}
+
+#[cfg(test)]
+#[path = "tests/errors.rs"]
+mod errors;
+#[cfg(test)]
+pub(crate) use errors::TestError;
+
+impl<T, E> From<E> for StoreFailure<T>
+where
+    TaskRuntimeError: From<E>,
+{
+    fn from(error: E) -> Self {
+        Self::BeforeCommit(TaskRuntimeError::from(error))
+    }
+}
+
+impl<T> StoreFailure<T> {
+    /// Changes response erasure without dropping unknown-commit evidence.
+    pub(crate) fn map<U>(self, convert: impl FnOnce(T) -> U) -> StoreFailure<U> {
+        match self {
+            Self::BeforeCommit(error) => StoreFailure::BeforeCommit(error),
+            Self::CommitUnknown { error, prepared } => StoreFailure::CommitUnknown {
+                error,
+                prepared: convert(prepared),
+            },
+        }
+    }
+
+    /// A failed recovery must retain the evidence from its original transaction.
+    pub(crate) fn retain(self, original: T) -> Self {
+        match self {
+            Self::BeforeCommit(error) => Self::CommitUnknown {
+                error,
+                prepared: original,
+            },
+            Self::CommitUnknown { error, .. } => Self::CommitUnknown {
+                error,
+                prepared: original,
+            },
+        }
+    }
+}
+
+/// Keeps retained recovery wake evidence bounded to distinct configured lanes.
+pub(crate) fn merge_wakes(
+    target: &mut Vec<TaskLane>,
+    incoming: impl IntoIterator<Item = TaskLane>,
+) {
+    for lane in incoming {
+        if !target.contains(&lane) {
+            target.push(lane);
+        }
+    }
+}
+
+/// Accepts only ownership evidence from the original request or its prepared response.
+pub(crate) fn recovery_token(claim: &LaneClaim, prepared: &TaskPoll, token: Option<&str>) -> bool {
+    let Some(token) = token else { return false };
+    claim
+        .owner
+        .as_ref()
+        .and_then(|owner| owner.token.as_deref())
+        == Some(token)
+        || prepared.lanes.iter().any(|lane| {
+            lane.lane == claim.lane
+                && lane.owner.as_ref().and_then(|owner| owner.token.as_deref()) == Some(token)
+        })
+}
+
 /// One lane's available claim capacity for the current scheduling turn.
 #[derive(Debug, Clone)]
 pub struct LaneClaim {
@@ -106,7 +187,7 @@ pub struct LanePoll {
     pub lane: TaskLane,
     /// Rows successfully claimed for the requesting runner.
     pub tasks: Vec<TaskRecord>,
-    /// Number of claimed rows reclaimed after an expired lease.
+    /// Number of abandoned running rows reclaimed from a retired node.
     pub reclaimed: usize,
     /// Whether the candidate query filled its requested limit.
     pub saturated: bool,
@@ -119,57 +200,122 @@ pub struct LanePoll {
 /// One per-lane store poll and its earliest useful future wake.
 #[derive(Debug, Clone)]
 pub struct TaskPoll {
+    /// Lanes made ready by claim-side terminal transitions.
+    pub wake_lanes: Vec<TaskLane>,
     /// Per-lane claim results in scheduling order.
     pub lanes: Vec<LanePoll>,
 }
 
-/// One paced scheduler turn, including ownership maintenance and new claims.
+/// Acknowledgement of one atomic batch of outcomes and cancellations.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct TaskTick {
-    /// Lanes with work created after claim selection; poll these in a later turn.
+pub struct CommitResult {
+    /// Lanes made eligible by committed workflow transitions.
     pub wake_lanes: Vec<TaskLane>,
-    /// Work claimed after owned outcomes and leases were durably processed.
-    pub poll: TaskPoll,
-    /// Running tasks that no longer belong to this runner.
-    pub lost: Vec<TaskId>,
-    /// Subset of lost leases whose durable task is terminally cancelled.
-    /// Shared invocations may finish while these members' results are discarded.
-    pub cancelled: Vec<TaskId>,
+    /// Stale outputs and missing/already-terminal cancellation targets; none were mutated.
+    pub rejected: Vec<TaskId>,
 }
 
 #[cfg(test)]
 impl TaskPoll {
     /// Creates an empty poll with no known future task deadline.
     pub fn empty() -> Self {
-        Self { lanes: Vec::new() }
+        Self {
+            lanes: Vec::new(),
+            wake_lanes: Vec::new(),
+        }
     }
 }
 
-/// One completed handler outcome waiting for durable commit.
+/// Operation-local commit authority: a fenced execution output or explicit cancellation.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
-pub struct TaskCommit {
-    /// Persisted task receiving the lifecycle outcome.
-    pub task_id: TaskId,
-    /// Lane whose newly available capacity should be polled after commit.
-    pub lane: TaskLane,
-    /// Payload-free handler lifecycle outcome.
-    pub outcome: TaskOutcome,
-    /// Fencing token required when the task belongs to a locked lane.
-    pub owner_token: Option<String>,
+pub enum TaskCommit {
+    /// An execution output requires its original node, attempt and lane fencing.
+    Outcome {
+        /// Node which owns the claimed execution.
+        node_id: uuid::Uuid,
+        /// Lifetime attempt identifying the immutable claimed execution.
+        attempts: i32,
+        /// Persisted task receiving the lifecycle outcome.
+        task_id: TaskId,
+        /// Lane whose newly available capacity should be polled after commit.
+        lane: TaskLane,
+        /// Handler lifecycle outcome, including any serialized result or checkpoint.
+        outcome: TaskOutcome,
+        /// Fencing token required when the task belongs to a locked lane.
+        owner_token: Option<String>,
+    },
+    /// An explicit cancellation may terminally fail any nonterminal task.
+    Cancel {
+        /// Task to cancel without claiming execution ownership.
+        task_id: TaskId,
+    },
 }
 
-/// One task lease renewal fenced by its optional durable lane owner.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub struct TaskLease {
-    /// Persisted task whose execution lease must be extended.
-    pub task_id: TaskId,
-    /// Lane used to select the ordinary or fenced renewal path.
-    pub lane: TaskLane,
-    /// Fencing token required when the task belongs to a locked lane.
-    pub owner_token: Option<String>,
+impl TaskCommit {
+    pub(crate) fn task_id(&self) -> TaskId {
+        match self {
+            Self::Outcome { task_id, .. } | Self::Cancel { task_id } => *task_id,
+        }
+    }
+
+    pub(crate) fn lane(&self) -> Option<TaskLane> {
+        match self {
+            Self::Outcome { lane, .. } => Some(*lane),
+            Self::Cancel { .. } => None,
+        }
+    }
+
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub(crate) fn node_id(&self) -> Option<uuid::Uuid> {
+        match self {
+            Self::Outcome { node_id, .. } => Some(*node_id),
+            Self::Cancel { .. } => None,
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> Option<&TaskOutcome> {
+        match self {
+            Self::Outcome { outcome, .. } => Some(outcome),
+            Self::Cancel { .. } => None,
+        }
+    }
+
+    #[cfg(all(test, feature = "sqlite"))]
+    pub(crate) fn attempts(&self) -> Option<i32> {
+        match self {
+            Self::Outcome { attempts, .. } => Some(*attempts),
+            Self::Cancel { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_cancel(&self) -> bool {
+        matches!(self, Self::Cancel { .. })
+    }
+
+    /// Checks authoritative execution evidence; cancellation has no execution-owner requirement.
+    pub(crate) fn accepts(
+        &self,
+        status: crate::tasks::TaskStatus,
+        node: Option<uuid::Uuid>,
+        attempt: i32,
+    ) -> bool {
+        use crate::tasks::TaskStatus;
+        match self {
+            Self::Cancel { .. } => matches!(
+                status,
+                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Suspended
+            ),
+            Self::Outcome {
+                node_id, attempts, ..
+            } => status == TaskStatus::Running && node == Some(*node_id) && attempt == *attempts,
+        }
+    }
+
+    pub(crate) fn weight(&self) -> usize {
+        self.outcome().map_or(1, super::workflow::weight)
+    }
 }
 
 /// Runtime policy resolved before a task store starts serving workers.
@@ -180,14 +326,10 @@ pub struct TaskStoreConf {
     pub max_all_children: usize,
     /// Stable handler names and classifications understood by this worker deployment.
     pub handlers: Vec<(String, crate::tasks::TaskKind)>,
-    /// Finalized immutable Flow definition compatibility; never populated from task rows.
-    pub flows: Vec<(String, String)>,
     /// Validated named lanes; stores coordinate only their global rate policies.
     pub lanes: Vec<TaskLaneConf>,
     /// Immutable per-handler idempotency policies shared by all workers.
     pub idempotency: Vec<TaskIdempotencyConf>,
-    /// Normalized durable emitter schedules accepted by this worker deployment.
-    pub schedules: Vec<TaskScheduleConf>,
     /// Shared polling cadence used to throttle failed lifecycle hooks.
     pub poll_interval: Duration,
 }
@@ -257,47 +399,66 @@ impl TaskStoreConf {
 /// Persistence and coordination boundary for durable task execution.
 #[allow(dead_code)]
 pub(crate) trait AbstractTaskStore {
-    /// Records cancellation intent only for a not-yet-cancelled nonterminal task.
-    fn cancel(
-        &self,
-        id: TaskId,
-    ) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + '_;
+    /// Registers a runner using store time; duplicate registration preserves timestamps.
+    fn register_node<'a>(
+        &'a self,
+        node: &'a uuid::Uuid,
+    ) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + 'a;
 
-    /// Validates or initializes store-wide task-lane coordination state.
-    fn initialize(
+    /// Refreshes an existing node, then retires stale peers using store time.
+    /// False means the caller is missing; it is never recreated and no peers are retired.
+    fn heartbeat<'a>(
+        &'a self,
+        node: &'a uuid::Uuid,
+        stale_after: Duration,
+    ) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + 'a;
+
+    /// Returns running claims to pending, preserving checkpoints and attempt budgets.
+    /// None is exclusively for standalone startup after the prior runner has stopped.
+    /// Some(node) requires that node's execution and database operations to be settled.
+    fn return_claims(
         &self,
-        conf: TaskStoreConf,
-    ) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + '_;
+        node: Option<uuid::Uuid>,
+    ) -> impl Future<Output = Result<u64, TaskRuntimeError>> + Send + '_;
+
+    /// Sets up worker coordination using configuration supplied at construction.
+    fn initialize(&self) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + '_;
 
     /// Claims bounded work for every supplied lane and returns its wake hint.
     fn claim_tasks<'a>(
         &'a self,
-        runner_id: &'a str,
+        runner_id: &'a uuid::Uuid,
         claims: &'a [LaneClaim],
-    ) -> impl Future<Output = Result<TaskPoll, TaskRuntimeError>> + Send + 'a;
+    ) -> impl Future<Output = Result<TaskPoll, StoreFailure<TaskPoll>>> + Send + 'a;
 
-    /// Commits multiple outcomes owned by one runner.
-    fn commit_outcomes<'a>(
+    /// Atomically accepts fenced execution outcomes or explicit terminal cancellations.
+    fn commit_tasks<'a>(
         &'a self,
-        runner_id: &'a str,
         commits: &'a [TaskCommit],
-    ) -> impl Future<Output = Result<(), TaskRuntimeError>> + Send + 'a;
+    ) -> impl Future<Output = Result<CommitResult, StoreFailure<CommitResult>>> + Send + 'a;
 
-    /// Renews leases still owned by one runner and returns ownership losses.
-    fn renew_leases<'a>(
+    /// Coordinates existing lane leases and hooks without claiming tasks.
+    fn coordinate_lanes<'a>(
         &'a self,
-        runner_id: &'a str,
-        leases: &'a [TaskLease],
-    ) -> impl Future<Output = Result<Vec<TaskId>, TaskRuntimeError>> + Send + 'a;
+        runner_id: &'a uuid::Uuid,
+        lanes: &'a [LaneClaim],
+    ) -> impl Future<Output = Result<TaskPoll, StoreFailure<TaskPoll>>> + Send + 'a;
 
-    /// Runs one atomic scheduler turn for one runner.
-    fn tick<'a>(
+    /// Resolves a claim whose commit acknowledgement was lost, without claiming again.
+    fn recover_claims<'a>(
         &'a self,
-        runner_id: &'a str,
+        node: &'a uuid::Uuid,
         claims: &'a [LaneClaim],
+        prepared: TaskPoll,
+    ) -> impl Future<Output = Result<TaskPoll, StoreFailure<TaskPoll>>> + Send + 'a;
+
+    /// Reconciles exact output identities before retrying still-owned outcomes.
+    fn recover_outputs<'a>(
+        &'a self,
+        node: &'a uuid::Uuid,
         commits: &'a [TaskCommit],
-        renewals: &'a [TaskLease],
-    ) -> impl Future<Output = Result<TaskTick, TaskRuntimeError>> + Send + 'a;
+        prepared: CommitResult,
+    ) -> impl Future<Output = Result<CommitResult, StoreFailure<CommitResult>>> + Send + 'a;
 
     /// Stores a batch of task intents and resolves idempotency receipts.
     fn store_tasks(
@@ -345,46 +506,65 @@ pub(crate) trait AbstractTaskStore {
 }
 
 impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
-    async fn cancel(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
-        (**self).cancel(id).await
+    async fn register_node(&self, node: &uuid::Uuid) -> Result<(), TaskRuntimeError> {
+        (**self).register_node(node).await
     }
 
-    async fn initialize(&self, conf: TaskStoreConf) -> Result<(), TaskRuntimeError> {
-        (**self).initialize(conf).await
+    async fn heartbeat(
+        &self,
+        node: &uuid::Uuid,
+        stale_after: Duration,
+    ) -> Result<bool, TaskRuntimeError> {
+        (**self).heartbeat(node, stale_after).await
+    }
+
+    async fn return_claims(&self, node: Option<uuid::Uuid>) -> Result<u64, TaskRuntimeError> {
+        (**self).return_claims(node).await
+    }
+
+    async fn initialize(&self) -> Result<(), TaskRuntimeError> {
+        (**self).initialize().await
     }
 
     async fn claim_tasks(
         &self,
-        runner_id: &str,
+        runner_id: &uuid::Uuid,
         claims: &[LaneClaim],
-    ) -> Result<TaskPoll, TaskRuntimeError> {
+    ) -> Result<TaskPoll, StoreFailure<TaskPoll>> {
         (**self).claim_tasks(runner_id, claims).await
     }
 
-    async fn commit_outcomes(
+    async fn commit_tasks(
         &self,
-        runner_id: &str,
         commits: &[TaskCommit],
-    ) -> Result<(), TaskRuntimeError> {
-        (**self).commit_outcomes(runner_id, commits).await
+    ) -> Result<CommitResult, StoreFailure<CommitResult>> {
+        (**self).commit_tasks(commits).await
     }
 
-    async fn renew_leases(
+    async fn coordinate_lanes(
         &self,
-        runner_id: &str,
-        leases: &[TaskLease],
-    ) -> Result<Vec<TaskId>, TaskRuntimeError> {
-        (**self).renew_leases(runner_id, leases).await
+        runner_id: &uuid::Uuid,
+        lanes: &[LaneClaim],
+    ) -> Result<TaskPoll, StoreFailure<TaskPoll>> {
+        (**self).coordinate_lanes(runner_id, lanes).await
     }
 
-    async fn tick(
+    async fn recover_claims(
         &self,
-        runner_id: &str,
+        node: &uuid::Uuid,
         claims: &[LaneClaim],
+        prepared: TaskPoll,
+    ) -> Result<TaskPoll, StoreFailure<TaskPoll>> {
+        (**self).recover_claims(node, claims, prepared).await
+    }
+
+    async fn recover_outputs(
+        &self,
+        node: &uuid::Uuid,
         commits: &[TaskCommit],
-        renewals: &[TaskLease],
-    ) -> Result<TaskTick, TaskRuntimeError> {
-        (**self).tick(runner_id, claims, commits, renewals).await
+        prepared: CommitResult,
+    ) -> Result<CommitResult, StoreFailure<CommitResult>> {
+        (**self).recover_outputs(node, commits, prepared).await
     }
 
     async fn store_tasks(
@@ -425,165 +605,6 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
 
     async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskRuntimeError> {
         (**self).get_task(id).await
-    }
-}
-
-/// Produces the durable policy identity shared by every store implementation.
-pub(crate) fn policy_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-v7:{:.58}", policy_hash(conf, 7).to_hex())
-}
-
-#[cfg(all(test, any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-#[path = "tests/contract.rs"]
-mod tests;
-
-/// Identifies the exact pre-upgrade policy so protocol migration cannot change live budgets.
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-pub(crate) fn migration_fingerprint(conf: &TaskStoreConf) -> String {
-    format!("tr-a0:{:.58}", policy_hash(conf, 0).to_hex())
-}
-
-/// Accepts only a ledger-marked predecessor with exactly the same runtime policy.
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-pub(crate) fn is_migrated_policy(conf: &TaskStoreConf, stored: &str) -> bool {
-    stored == migration_fingerprint(conf)
-        || stored == format!("tr-a1:{:.58}", policy_hash(conf, 1).to_hex())
-        || stored == format!("tr-a2:{:.58}", policy_hash(conf, 2).to_hex())
-        || stored == format!("tr-a3:{:.58}", policy_hash(conf, 3).to_hex())
-        || stored == format!("tr-a4:{:.58}", policy_hash(conf, 4).to_hex())
-        || stored == format!("tr-a5:{:.58}", policy_hash(conf, 5).to_hex())
-        || stored == format!("tr-a6:{:.58}", policy_hash(conf, 6).to_hex())
-}
-
-/// Hashes immutable deployment policy, optionally including the new result protocol.
-fn policy_hash(conf: &TaskStoreConf, result_protocol: u8) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
-    if result_protocol >= 7 {
-        fingerprint_flows(&mut hasher, &conf.flows);
-    }
-    if result_protocol >= 6 {
-        hasher.update(b"task-all-claim-results-v6\0");
-        hasher.update(&(conf.max_all_children as u64).to_le_bytes());
-    }
-    if result_protocol > 0 {
-        hasher.update(b"task-resume-result-step-attempts-v1\0");
-    }
-    if result_protocol >= 2 {
-        hasher.update(b"task-last-result-json-32768-checkpoint-clear-v2\0");
-    }
-    if result_protocol >= 3 {
-        hasher.update(b"task-store-owned-cancellation-finish-shared-v3\0");
-    }
-    fingerprint_idempotency(&mut hasher, &conf.idempotency);
-    fingerprint_schedules(&mut hasher, &conf.schedules);
-    if result_protocol >= 4 {
-        hasher.update(b"task-work-flow-capabilities-v4\0");
-    }
-    if result_protocol >= 5 {
-        hasher.update(b"task-typed-returns-work-suspend-v5\0");
-    }
-    let mut handlers = conf.handlers.iter().collect::<Vec<_>>();
-    handlers.sort_unstable_by_key(|(name, _)| name);
-    for (handler, kind) in handlers {
-        hasher.update(b"handler\0");
-        hasher.update(handler.as_bytes());
-        if result_protocol >= 4 {
-            hasher.update(&[*kind as u8]);
-        }
-        hasher.update(&[0xff]);
-    }
-    let mut lanes = conf.lanes.iter().collect::<Vec<_>>();
-    lanes.sort_unstable_by_key(|lane| lane.lane().as_str());
-    if lanes.iter().any(|lane| lane.lane_lock().is_some()) {
-        hasher.update(b"lane-lock-v1\0");
-        hasher.update(&conf.poll_interval.as_nanos().to_le_bytes());
-    }
-    for lane in lanes {
-        hasher.update(b"lane\0");
-        hasher.update(lane.lane().as_str().as_bytes());
-        if let Some(lane_lock) = lane.lane_lock() {
-            fingerprint_lock(&mut hasher, lane_lock);
-        }
-        if let Some(rate) = lane.global_rate() {
-            hasher.update(&rate.permits().to_le_bytes());
-            hasher.update(&rate.period().as_nanos().to_le_bytes());
-            hasher.update(&rate.burst_size().to_le_bytes());
-        }
-        let retry = lane.retry_policy();
-        hasher.update(&retry.max_attempts().to_le_bytes());
-        hasher.update(&retry.initial_delay().as_nanos().to_le_bytes());
-        hasher.update(&retry.maximum_delay().as_nanos().to_le_bytes());
-        hasher.update(&[0xff]);
-    }
-    hasher.finalize()
-}
-
-/// Includes graph identity and explicit revision without additional store queries.
-fn fingerprint_flows(hasher: &mut blake3::Hasher, flows: &[(String, String)]) {
-    hasher.update(b"task-flow-factory-v7\0");
-    let mut flows: Vec<_> = flows.iter().collect();
-    flows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    for (name, identity) in flows {
-        for value in [name, identity] {
-            hasher.update(&(value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
-        }
-    }
-}
-
-/// Adds one optional lane-owner policy to the shared deployment identity.
-fn fingerprint_lock(hasher: &mut blake3::Hasher, lane_lock: &crate::tasks::TaskLaneLock) {
-    hasher.update(b"locked\0");
-    hasher.update(&lane_lock.batch_size().to_le_bytes());
-    hasher.update(&lane_lock.idle_duration().as_nanos().to_le_bytes());
-    if let Some(deadline) = lane_lock.batch_deadline() {
-        hasher.update(&deadline.as_nanos().to_le_bytes());
-    }
-    for hook in [lane_lock.idle_hook(), lane_lock.busy_hook()] {
-        if let Some(hook) = hook {
-            hasher.update(hook.identity().as_bytes());
-        }
-        hasher.update(&[0]);
-    }
-}
-
-fn fingerprint_schedules(hasher: &mut blake3::Hasher, schedules: &[TaskScheduleConf]) {
-    let mut values = schedules.iter().collect::<Vec<_>>();
-    values.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    for schedule in values {
-        for value in [
-            schedule.name.as_str(),
-            schedule.task.as_str(),
-            schedule.source.as_str(),
-            schedule.expression.as_str(),
-            schedule.start.as_str(),
-        ] {
-            hasher.update(value.as_bytes());
-            hasher.update(&[0]);
-        }
-        hasher.update(&[0xff]);
-    }
-}
-
-fn fingerprint_idempotency(hasher: &mut blake3::Hasher, policies: &[TaskIdempotencyConf]) {
-    let mut policies = policies.iter().collect::<Vec<_>>();
-    policies.sort_unstable_by(|left, right| left.handler.cmp(&right.handler));
-    for policy in policies {
-        hasher.update(policy.handler.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(policy.lane.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(policy.revision.as_bytes());
-        hasher.update(&[0]);
-        match policy.retention {
-            IdempotencyRetention::ActiveOnly => {
-                hasher.update(b"idempotency-active");
-            }
-            IdempotencyRetention::RetainFor(duration) => {
-                hasher.update(b"idempotency-retain");
-                hasher.update(&duration.as_nanos().to_le_bytes());
-            }
-        }
     }
 }
 
@@ -635,4 +656,17 @@ pub(crate) fn truncate_utf8(mut value: String, limit: usize) -> String {
     }
     value.truncate(end);
     value
+}
+
+/// Rejects claim-capable requests at the maintenance-only store boundary.
+pub(crate) fn validate_coordination(claims: &[LaneClaim]) -> Result<(), TaskRuntimeError> {
+    if claims
+        .iter()
+        .any(|claim| claim.owner.as_ref().is_none_or(|owner| owner.allow_claim))
+    {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "lane coordination cannot claim work".into(),
+        ));
+    }
+    Ok(())
 }

@@ -546,19 +546,6 @@ impl SiteBuilder {
             .into());
         }
 
-        #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-        let task_store = TaskStore::new(
-            pool.as_sqlx().clone(),
-            task_config.batch_size_value(),
-            task_config.lease_duration_value(),
-        );
-
-        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
-        let task_store = MemoryTaskStore::with_lease_duration(
-            task_config.batch_size_value(),
-            task_config.lease_duration_value(),
-        );
-
         let declarations = std::mem::take(&mut bundle.tasks);
         let task_registry = Arc::new(
             declarations
@@ -567,6 +554,21 @@ impl SiteBuilder {
         );
 
         let task_schedules = bundle.emitters.task_schedules(&task_registry)?;
+
+        #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+        let task_store = TaskStore::new(
+            pool.as_sqlx().clone(),
+            task_registry.config.batch_size_value(),
+            task_registry.config.lease_duration_value(),
+            task_registry.store_conf()?,
+        );
+
+        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+        let task_store = MemoryTaskStore::with_lease_duration(
+            task_registry.config.batch_size_value(),
+            task_registry.config.lease_duration_value(),
+            task_registry.store_conf()?,
+        );
 
         let task_dispatcher = task_registry.dispatcher(Arc::new(task_store), task_schedules);
 

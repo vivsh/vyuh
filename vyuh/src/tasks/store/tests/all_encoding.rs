@@ -46,15 +46,6 @@ fn expanded_flush_budget() {
     assert!(validate_turn(&[group(), group()], 32, 32).is_err());
 }
 
-/// Fan-out limits are deployment policy and cannot diverge between workers.
-#[test]
-fn join_limit_is_fingerprinted() {
-    let mut conf = crate::tasks::store::memory::tests::conf();
-    let before = crate::tasks::store::policy_fingerprint(&conf);
-    conf.max_all_children += 1;
-    assert_ne!(before, crate::tasks::store::policy_fingerprint(&conf));
-}
-
 /// Geometric scratch growth never allocates a parent aggregate beyond its fixed result budget.
 #[test]
 fn bounded_buffer_capacity() {

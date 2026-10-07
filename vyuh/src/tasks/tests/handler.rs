@@ -1,3 +1,4 @@
+use crate::tasks::store::TestError;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -92,13 +93,11 @@ fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskRu
         attempts: 0,
         step_attempts: 0,
         lane: DEFAULT_TASK_LANE.to_string(),
-        lease_duration_ms: None,
         last_result: None,
         idempotency_key: None,
         idempotency_fingerprint: None,
         idempotency_expires_at: None,
-        locked_by: Some("runner-a".to_string()),
-        leased_until: None,
+        node_id: Some(uuid::Uuid::from_u128(1)),
         ready_at: Some(now),
         created_at: now,
         updated_at: now,
@@ -274,19 +273,20 @@ async fn batch_all_invalid_inputs_skip_the_handler() -> Result<(), String> {
 
 /// Verifies direct task registration retains typed task submission without result storage.
 #[tokio::test]
-async fn direct_registration_supports_typed_submit() -> Result<(), TaskRuntimeError> {
+async fn direct_registration_supports_typed_submit() -> Result<(), TestError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
         direct_job,
     ))?;
 
-    let store = Arc::new(MemoryTaskStore::new(10));
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
     let task_id = dispatcher.submit(DirectJob { id: 42 }).await?.id();
     let claimed = store
         .claim_tasks(
-            "runner-a",
+            &uuid::Uuid::from_u128(1),
             &[LaneClaim {
                 lane: DEFAULT_TASK_LANE,
                 limit: 10,
@@ -308,28 +308,31 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TaskRuntimeEr
     assert_eq!(task.kind, super::super::TaskKind::Work);
 
     store
-        .commit_outcomes(
-            "runner-a",
-            &[TaskCommit {
-                task_id,
-                lane: DEFAULT_TASK_LANE,
-                outcome: TaskOutcome::complete(),
-                owner_token: None,
-            }],
-        )
+        .commit_tasks(&[TaskCommit::Outcome {
+            node_id: uuid::Uuid::from_u128(1),
+            attempts: store
+                .get_task(task_id)
+                .await?
+                .map_or(0, |task| task.attempts),
+            task_id: task_id,
+            lane: DEFAULT_TASK_LANE,
+            outcome: TaskOutcome::complete(),
+            owner_token: None,
+        }])
         .await?;
     Ok(())
 }
 
 /// Verifies invalid submission delay values surface only from submission terminals.
 #[tokio::test]
-async fn task_options_defer_errors_to_submission() -> Result<(), TaskRuntimeError> {
+async fn task_options_defer_errors_to_submission() -> Result<(), TestError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
         |_: Data<DirectJob>| async {},
     ))?;
-    let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    let dispatcher = Arc::new(registry).dispatcher(store, Vec::new());
     let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
     assert!(matches!(
         dispatcher.submit_with(DirectJob { id: 1 }, oversized).await,
@@ -340,7 +343,7 @@ async fn task_options_defer_errors_to_submission() -> Result<(), TaskRuntimeErro
 
 /// Verifies typed bulk key derivation preserves ordered queued and existing receipts.
 #[tokio::test]
-async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskRuntimeError> {
+async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TestError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job")
@@ -349,7 +352,8 @@ async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TaskRunt
             })),
         direct_job,
     ))?;
-    let dispatcher = Arc::new(registry).dispatcher(Arc::new(MemoryTaskStore::new(10)), Vec::new());
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    let dispatcher = Arc::new(registry).dispatcher(store, Vec::new());
     let receipts = dispatcher
         .submit_many_with(
             [DirectJob { id: 1 }, DirectJob { id: 1 }],
@@ -400,13 +404,14 @@ fn static_idempotency_inherits_lane_retention() -> Result<(), TaskRuntimeError> 
 
 /// Verifies an empty typed batch succeeds without touching durable storage.
 #[tokio::test]
-async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TaskRuntimeError> {
+async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TestError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
         |_: Data<DirectJob>| async {},
     ))?;
-    let store = Arc::new(MemoryTaskStore::new(10));
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
 
     let receipts = dispatcher.submit_many(Vec::<DirectJob>::new()).await?;
@@ -525,7 +530,7 @@ async fn continuation_decodes_state_and_resume_input() -> Result<(), String> {
 
 /// Verifies every lifecycle control maps to a payload-free store outcome.
 #[tokio::test]
-async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
+async fn task_state_encodes_only_lifecycle() -> Result<(), TestError> {
     let site = test_site()
         .await
         .map_err(|error| TaskRuntimeError::TaskExecutionError(error.to_string()))?;
@@ -553,13 +558,14 @@ async fn task_state_encodes_only_lifecycle() -> Result<(), TaskRuntimeError> {
 }
 /// External success and failure resumes share the result envelope.
 #[tokio::test]
-async fn external_results_share_envelope() -> Result<(), TaskRuntimeError> {
+async fn external_results_share_envelope() -> Result<(), TestError> {
     let mut registry = TaskRegistry::new().with_config(TaskConf::default())?;
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job"),
         |_: Data<DirectJob>| async {},
     ))?;
-    let store = Arc::new(MemoryTaskStore::new(10));
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
     let id = dispatcher.submit(DirectJob { id: 8 }).await?.id();
     let claim = LaneClaim {
@@ -569,18 +575,17 @@ async fn external_results_share_envelope() -> Result<(), TaskRuntimeError> {
     };
     for failed in [false, true] {
         store
-            .claim_tasks("owner", std::slice::from_ref(&claim))
+            .claim_tasks(&uuid::Uuid::from_u128(1), std::slice::from_ref(&claim))
             .await?;
         store
-            .commit_outcomes(
-                "owner",
-                &[TaskCommit {
-                    task_id: id,
-                    lane: DEFAULT_TASK_LANE,
-                    owner_token: None,
-                    outcome: TaskOutcome::suspend(&"checkpoint")?,
-                }],
-            )
+            .commit_tasks(&[TaskCommit::Outcome {
+                node_id: uuid::Uuid::from_u128(1),
+                attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
+                task_id: id,
+                lane: DEFAULT_TASK_LANE,
+                owner_token: None,
+                outcome: TaskOutcome::suspend(&"checkpoint")?,
+            }])
             .await?;
         if failed {
             assert!(
@@ -604,7 +609,7 @@ async fn external_results_share_envelope() -> Result<(), TaskRuntimeError> {
 
 /// External result limits are independent of checkpoint limits and reject before mutation.
 #[tokio::test]
-async fn external_result_limit_is_independent() -> Result<(), TaskRuntimeError> {
+async fn external_result_limit_is_independent() -> Result<(), TestError> {
     let config = TaskConf::default()
         .max_payload_bytes(32)
         .max_error_bytes(64 * 1024);
@@ -613,7 +618,8 @@ async fn external_result_limit_is_independent() -> Result<(), TaskRuntimeError> 
         TaskDefinition::new("direct_job"),
         |_: Data<DirectJob>| async {},
     ))?;
-    let store = Arc::new(MemoryTaskStore::new(10));
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
     let id = dispatcher.submit(DirectJob { id: 1 }).await?.id();
     suspend_fixture(&store, id).await?;
@@ -641,10 +647,10 @@ async fn external_result_limit_is_independent() -> Result<(), TaskRuntimeError> 
 }
 
 /// Suspends a claimed fixture before testing the public resume validation boundary.
-async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), TaskRuntimeError> {
+async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), TestError> {
     store
         .claim_tasks(
-            "owner",
+            &uuid::Uuid::from_u128(1),
             &[LaneClaim {
                 lane: DEFAULT_TASK_LANE,
                 limit: 1,
@@ -653,15 +659,14 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Task
         )
         .await?;
     store
-        .commit_outcomes(
-            "owner",
-            &[TaskCommit {
-                task_id: id,
-                lane: DEFAULT_TASK_LANE,
-                owner_token: None,
-                outcome: TaskOutcome::suspend(&())?,
-            }],
-        )
+        .commit_tasks(&[TaskCommit::Outcome {
+            node_id: uuid::Uuid::from_u128(1),
+            attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
+            task_id: id,
+            lane: DEFAULT_TASK_LANE,
+            owner_token: None,
+            outcome: TaskOutcome::suspend(&())?,
+        }])
         .await?;
     Ok(())
 }

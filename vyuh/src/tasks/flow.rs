@@ -29,13 +29,6 @@ pub trait Flow: Send + Sync + 'static {
         input: Data<Self::Input>,
         continuation: Continuation<Self::Checkpoint, Self::Resume>,
     ) -> Result<FlowState<Self::Output>, FlowError>;
-
-    /// Definition compatibility contribution, computed only during registration.
-    /// Manual implementations normally use the explicit `FlowConf::revision` instead.
-    #[doc(hidden)]
-    fn compatibility(&self) -> String {
-        std::any::type_name::<Self>().into()
-    }
 }
 
 /// Converts a factory result into an immutable executable definition once per site.

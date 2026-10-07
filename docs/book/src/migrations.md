@@ -186,34 +186,36 @@ its SQL for the selected backend, and commit it with the application.
 
 Current tasks retain JSON results in `last_result`, resume values in
 `resume_input`, lineage in `parent_id`/`root_id`, Work/Flow classification, per-step
-attempt counts, cancellation intent, and private `all`-join metadata. Do not use
-old value-less-task migration advice to delete current result or continuation
-data. Schema generation alone does not migrate the persisted task protocol.
+attempt counts, cancellation state, and private `all`-join metadata. Execution
+ownership is nullable UUID `node_id`, referencing `vyuh_task_nodes` with
+`ON DELETE SET NULL`. Individual task leases and deployment fingerprints are gone.
 
 For existing deployments, use the backend-specific
 [task-protocol migration templates](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol)
-and their predecessor checks:
+for the breaking node-owned pipeline upgrade:
 
 1. Stop **all old workers and writers**, including submit/resume-only processes,
    and back up the database. Mixed-version operation is unsupported.
-2. Preflight retained inputs, checkpoints, handler name/kind assignments, and JSON
-   envelopes. Resolve incompatible data explicitly; never truncate resume values.
-3. Integrate the required schema and data templates into the application's Gaman
-   history in dependency order. Avoid adding columns twice when a generated schema
-   migration already adds them. Keep applied migration identities unchanged.
+2. Explicitly accept the destructive reset: **all old tasks, results, checkpoints,
+   joins and idempotency reservations are deleted**. Schedule cursors, rate
+   balances and lane lifecycle records remain. Review application-added foreign
+   keys, triggers and indexes; the templates do not use `CASCADE` to remove them.
+3. Integrate `0013_reset_tasks` followed by `0014_node_pipeline` into the
+   application's current Gaman history. Adapt dependencies before first use;
+   do not modify applied identities or apply a second generated schema change
+   that adds the same columns and constraints.
 4. Apply the migrations through the ledger. Data changes and their ledger entries
    must commit atomically; MySQL/MariaDB DDL is separate and non-atomic. Keep lane,
-   rate, retry, and idempotency configuration unchanged through the protocol upgrade.
-5. Deploy compatible handler signatures and checkpoint/result types, then restart
-   workers and writers. Startup validates the protocol; it never repairs it.
+   rate, retry, and idempotency configuration unchanged through the upgrade.
+   SQLite requires the complete predecessor schema for its table rebuild with
+   foreign keys enabled. If MySQL DDL fails, inspect partial changes before retrying.
+5. Deploy the new runtime, then restart workers and writers. Startup registers
+   nodes and validates configuration; it does not migrate or verify fingerprints.
 
-The templates cover result envelopes and per-step attempts, persisted results,
-cancellation, Work/Flow classification, typed returns, and durable `all` joins.
-Legacy resume values are wrapped once, even when already shaped like a result
-object. Existing error text becomes `Err(TaskFailure)`; historical successful
-outputs cannot be reconstructed and remain absent. Already-migrated result bytes
-are preserved. Use the templates' preflights for the **32,768-byte** envelope limit
-and an explicit application-owned handler-name list when reclassifying rows as Flow.
+Historical templates 0001–0012 remain immutable for existing ledgers; they are
+not compatibility code in the new runtime. Fresh installations generate only
+the desired schema. The reset has no automatic downgrade: restoring a backup
+is the only way to recover deleted tasks. No schema changes are applied at startup.
 
 See [Tasks](tasks.md) for current handler APIs and runtime guarantees.
 

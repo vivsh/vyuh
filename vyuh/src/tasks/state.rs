@@ -70,7 +70,3 @@ fn complete_output<T: Serialize + 'static>(output: T) -> Result<TaskOutcome, Tas
         TaskOutcome::CompleteWith { output }
     })
 }
-
-#[cfg(test)]
-#[path = "tests/state.rs"]
-mod tests;

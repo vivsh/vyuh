@@ -40,6 +40,9 @@ async fn synchronous_panic_is_contained() -> Result<(), String> {
     record.kind = crate::tasks::TaskKind::Flow;
     let (sender, mut receiver) = mpsc::channel(1);
     execute_task(TaskExecution {
+        node_id: uuid::Uuid::from_u128(1),
+        global_permit: permit()?,
+        lane_permit: permit()?,
         invocation_id: uuid::Uuid::now_v7(),
         engine: Arc::new(registry),
         site,
@@ -58,7 +61,7 @@ async fn synchronous_panic_is_contained() -> Result<(), String> {
     let completion = receiver.recv().await.ok_or("missing completion")?;
     let commit = completion.commits.first().ok_or("missing commit")?;
     assert!(
-        matches!(&commit.outcome, crate::tasks::TaskOutcome::Fail { error } if error == "Task handler panicked")
+        matches!(commit.outcome(), Some(crate::tasks::TaskOutcome::Fail { error }) if error == "Task handler panicked")
     );
     Ok(())
 }

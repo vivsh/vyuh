@@ -5,7 +5,7 @@ use super::*;
 /// Coordinates one process-local lane owner using the durable-store state machine.
 pub(super) fn claim_owned_state(
     state: &mut MemoryState,
-    runner_id: &str,
+    runner_id: &uuid::Uuid,
     claim: &LaneClaim,
     lane: &crate::tasks::TaskLaneConf,
     lease_duration: Duration,
@@ -13,10 +13,6 @@ pub(super) fn claim_owned_state(
     deliveries: &mut Vec<(TaskId, String)>,
     undo: &mut Vec<TaskRecord>,
 ) -> Result<LanePoll, TaskRuntimeError> {
-    #[cfg(test)]
-    {
-        state.lane_lock_turns = state.lane_lock_turns.saturating_add(1);
-    }
     let name = claim.lane.to_string();
     let mut owner = state.lane_locks.remove(&name).ok_or_else(|| {
         TaskRuntimeError::InvalidConfig(format!(
@@ -60,7 +56,7 @@ pub(super) fn claim_owned_state(
 pub(super) fn claim_owned_inner(
     state: &mut MemoryState,
     owner: &mut MemoryLaneLock,
-    runner_id: &str,
+    runner_id: &uuid::Uuid,
     claim: &LaneClaim,
     lane: &crate::tasks::TaskLaneConf,
     lease_duration: Duration,
@@ -69,6 +65,22 @@ pub(super) fn claim_owned_inner(
     undo: &mut Vec<TaskRecord>,
 ) -> Result<LanePoll, TaskRuntimeError> {
     if !memory_owner(owner, runner_id, claim, lease_duration, now)? {
+        if claim
+            .owner
+            .as_ref()
+            .is_some_and(|request| request.token.is_some())
+        {
+            for task in &mut state.tasks {
+                if task.node_id == Some(*runner_id)
+                    && task.lane == claim.lane.as_str()
+                    && task.status == TaskStatus::Running
+                {
+                    undo.push(task.clone());
+                    task.node_id = None;
+                    task.updated_at = now;
+                }
+            }
+        }
         let wake = owner
             .leased_until
             .and_then(|deadline| (deadline - now).to_std().ok())
@@ -100,7 +112,7 @@ pub(super) fn claim_owned_inner(
 
 pub(super) fn memory_owner(
     owner: &mut MemoryLaneLock,
-    runner_id: &str,
+    runner_id: &uuid::Uuid,
     claim: &LaneClaim,
     duration: Duration,
     now: chrono::DateTime<chrono::Utc>,
@@ -110,7 +122,7 @@ pub(super) fn memory_owner(
         .as_ref()
         .and_then(|request| request.token.as_deref());
     let current = requested.is_some_and(|token| {
-        owner.owner_id.as_deref() == Some(runner_id)
+        owner.owner_id.as_deref() == Some(runner_id.to_string().as_str())
             && owner.owner_token.as_deref() == Some(token)
             && memory_owner_live(owner, now)
     });
@@ -121,7 +133,7 @@ pub(super) fn memory_owner(
     if requested.is_some() || memory_owner_live(owner, now) {
         return Ok(false);
     }
-    owner.owner_id = Some(runner_id.into());
+    owner.owner_id = Some(runner_id.to_string());
     owner.owner_token = Some(uuid::Uuid::now_v7().to_string());
     owner.leased_until = checked_deadline(now, duration)?;
     Ok(true)
@@ -130,7 +142,7 @@ pub(super) fn memory_owner(
 pub(super) fn memory_phase_poll(
     state: &mut MemoryState,
     owner: &mut MemoryLaneLock,
-    runner_id: &str,
+    runner_id: &uuid::Uuid,
     claim: &LaneClaim,
     lane: &crate::tasks::TaskLaneConf,
     lease_duration: Duration,
@@ -306,7 +318,7 @@ pub(super) fn memory_start_busy(
 pub(super) fn memory_claim(
     state: &mut MemoryState,
     owner: &MemoryLaneLock,
-    runner_id: &str,
+    runner_id: &uuid::Uuid,
     claim: &LaneClaim,
     lane: &crate::tasks::TaskLaneConf,
     lease_duration: Duration,

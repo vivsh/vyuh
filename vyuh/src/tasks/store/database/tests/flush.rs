@@ -1,252 +1,109 @@
+use super::super::claim::tests::row;
 use super::*;
 
-use crate::tasks::store::memory::tests::{claim, commit, conf, flow_record, record, write};
-use crate::tasks::{AbstractTaskStore, TaskCommit, TaskOutcome};
-
-/// Reports ordinary and workflow flush costs at fixed bounded sizes, outside setup time.
-#[tokio::test]
-#[ignore = "disposable database benchmark; run alone with --nocapture"]
-async fn benchmark_flushes() -> Result<(), String> {
-    let store = store().await?;
-    store.initialize(conf()).await.map_err(|e| e.to_string())?;
-    let store = DbTaskStore {
-        batch_size: 250,
-        ..store
+/// One prepared command map rejects both duplicate outputs and mixed cancellation duplicates.
+#[test]
+fn preparation_rejects_duplicates() -> Result<(), TaskRuntimeError> {
+    let output = command(1, TaskOutcome::Complete);
+    let cancel = TaskCommit::Cancel {
+        task_id: output.task_id(),
     };
-    for size in [1, 32, 250] {
-        for workflow in ["ordinary", "error", "delivery-small", "delivery-large"] {
-            let mut times = Vec::with_capacity(50);
-            for _ in 0..50 {
-                times.push(
-                    flush_sample(&store, size, workflow)
-                        .await
-                        .map_err(|e| e.to_string())?,
-                );
-            }
-            times.sort();
-            let total: std::time::Duration = times.iter().copied().sum();
-            eprintln!(
-                "flush size={size} workflow={workflow} median_us={} p95_us={} tasks_per_second={:.0}",
-                times[25].as_micros(),
-                times[47].as_micros(),
-                size as f64 * 50.0 / total.as_secs_f64()
-            );
-        }
-    }
+    assert!(prepare_commits(&[output.clone(), output.clone()], 32, 256).is_err());
+    assert!(prepare_commits(&[output, cancel], 32, 256).is_err());
+    assert!(prepare_commits(&[], 32, 256)?.is_empty());
     Ok(())
 }
 
-/// Measures only the atomic outcome flush after all durable fixtures are claimed.
-async fn flush_sample(
-    store: &DbTaskStore,
-    size: usize,
-    workflow: &str,
-) -> Result<std::time::Duration, TaskRuntimeError> {
-    let mut commits = prepare_flush(store, size, workflow.starts_with("delivery")).await?;
-    for commit in &mut commits {
-        commit.outcome = match workflow {
-            "error" => TaskOutcome::fail("representative safe error"),
-            "delivery-small" => TaskOutcome::CompleteWith {
-                output: "42".into(),
+/// Entry preparation keeps the weighted All budget even when called by a recovery operation.
+#[test]
+fn preparation_preserves_budget() -> Result<(), TaskRuntimeError> {
+    let commands = [
+        command(
+            1,
+            TaskOutcome::All {
+                state: "null".into(),
+                children: Vec::new(),
             },
-            "delivery-large" => TaskOutcome::CompleteWith {
-                output: serde_json::to_string(&"x".repeat(32_759))?,
-            },
-            _ => TaskOutcome::Complete,
-        };
-    }
-    let started = std::time::Instant::now();
-    store.commit_outcomes("benchmark", &commits).await?;
-    let elapsed = started.elapsed();
-    let table = DbTaskStore::table();
-    db::from(&table)
-        .filter(table.name.eq(db::val("workflow".to_owned())))
-        .delete()
-        .exec(&mut store.pool.clone())
-        .await?;
-    Ok(elapsed)
+        ),
+        command(2, TaskOutcome::Complete),
+    ];
+    assert!(prepare_commits(&commands, 1, 1).is_err());
+    assert_eq!(prepare_commits(&commands, 2, 1)?.len(), 2);
+    Ok(())
 }
 
-/// Prepares a bounded flush while leaving fixture creation outside its measurements.
-async fn prepare_flush(
-    store: &DbTaskStore,
-    size: usize,
-    workflow: bool,
-) -> Result<Vec<TaskCommit>, TaskRuntimeError> {
-    let mut writes = Vec::with_capacity(size * 2);
-    let mut commits = Vec::<TaskCommit>::with_capacity(size);
-    for _ in 0..size {
-        let mut task = record();
-        if workflow {
-            let mut parent = record();
-            parent.status = TaskStatus::Suspended;
-            task.parent_id = Some(parent.id);
-            task.root_id = Some(parent.id);
-            writes.push(write(parent));
-        }
-        commits.push(commit(task.id, TaskOutcome::Complete));
-        writes.push(write(task));
-    }
-    store.store_tasks(writes).await?;
-    let mut claim = claim();
-    claim.limit = size;
-    for _ in 0..size.div_ceil(store.batch_size) {
-        store
-            .claim_tasks("benchmark", std::slice::from_ref(&claim))
-            .await?;
-    }
-    Ok(commits)
-}
-
-#[derive(Clone, Default)]
-struct Queries(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Queries {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        if event.metadata().target() != "sqlx::query" {
-            return;
-        }
-        let mut sql = Sql::default();
-        event.record(&mut sql);
-        if let Ok(mut queries) = self.0.lock() {
-            queries.push(sql.0);
-        }
-    }
-}
-
-#[derive(Default)]
-struct Sql(String);
-
-#[path = "cancellation_queries.rs"]
-mod cancellation;
-
-#[path = "all_queries.rs"]
-mod all_queries;
-
-#[path = "throughput_queries.rs"]
-mod throughput;
-
-impl tracing::field::Visit for Sql {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if matches!(field.name(), "summary" | "db.statement") {
-            self.0.push_str(&format!("{value:?}"));
-        }
-    }
-}
-
-/// Counts actual SQL statements: ordinary flushes never issue parent projection queries.
-#[tokio::test]
-#[ignore = "disposable database query instrumentation; run alone"]
-async fn flush_query_counts() -> Result<(), String> {
-    use tracing_subscriber::prelude::*;
-    let queries = Queries::default();
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(queries.clone()))
-        .map_err(|e| e.to_string())?;
-    let store = store().await?;
-    store.initialize(conf()).await.map_err(|e| e.to_string())?;
-    for size in [1usize, 32, 250] {
-        for workflow in [false, true] {
-            let commits = prepare_flush(&store, size, workflow)
-                .await
-                .map_err(|e| e.to_string())?;
-            queries.0.lock().map_err(|e| e.to_string())?.clear();
-            store
-                .commit_outcomes("benchmark", &commits)
-                .await
-                .map_err(|e| e.to_string())?;
-            let queries = queries.0.lock().map_err(|e| e.to_string())?;
-            let updates = queries
-                .iter()
-                .filter(|sql| sql.contains("UPDATE vyuh_tasks"))
-                .count();
-            let expected = size.div_ceil(store.batch_size) * if workflow { 2 } else { 1 };
-            assert_eq!(updates, expected, "{queries:?}");
-            eprintln!(
-                "SQL size={size} workflow={workflow}: {} statements, {updates} task updates",
-                queries.len()
-            );
-            drop(queries);
-            let table = DbTaskStore::table();
-            db::from(&table)
-                .filter(table.name.eq(db::val("workflow".to_owned())))
-                .delete()
-                .exec(&mut store.pool.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        spawn_queries(&store, &queries, size).await?;
-    }
-    queries.0.lock().map_err(|e| e.to_string())?.clear();
-    store
-        .store_tasks(vec![write(record())])
-        .await
-        .map_err(|e| e.to_string())?;
-    let sql = queries.0.lock().map_err(|e| e.to_string())?;
-    assert!(!sql.iter().any(|sql| sql.contains("vyuh_task_lane_locks")));
+/// The shared command map preserves retry data, cancellation precedence, and stale rejection.
+#[test]
+fn prepared_acceptance_preserves_outcomes() -> Result<(), TaskRuntimeError> {
+    let now = Utc::now();
+    let commits = [
+        command(1, TaskOutcome::retry("again")),
+        command(2, TaskOutcome::Complete),
+        command(3, TaskOutcome::Complete),
+        TaskCommit::Cancel {
+            task_id: TaskId::new(uuid::Uuid::from_u128(4)),
+        },
+    ];
+    let mut commands = prepare_commits(&commits, 32, 256)?;
+    let mut rows: Vec<_> = (1..=4)
+        .map(|id| {
+            let mut row = row(id, now, None);
+            row.status = 1;
+            row.node_id = Some(uuid::Uuid::from_u128(100));
+            row.attempts = if id == 3 { 2 } else { 1 };
+            row.step_attempts = 1;
+            row.cancelled = id == 2;
+            row
+        })
+        .collect();
+    let allowed = commands.keys().copied().collect();
+    accept_rows(&mut rows, &commands, &allowed)?;
+    assert_eq!(rows.len(), 3);
+    let conf = crate::tasks::TaskRegistry::new()
+        .with_config(crate::tasks::TaskConf::default())?
+        .store_conf()?;
     assert!(
-        !sql.iter()
-            .any(|sql| sql.contains("SELECT") && sql.contains("vyuh_tasks"))
+        apply_owned_outcomes(&mut rows, &mut commands, &HashSet::new(), &conf, now)?.is_empty()
     );
+    assert_eq!(
+        commands.keys().copied().collect::<Vec<_>>(),
+        vec![commits.get(2).ok_or_else(missing)?.task_id()]
+    );
+    assert_preserved(&rows)
+}
+
+/// Retry keeps resume/checkpoint bytes; both cancellation routes clear only consumed input.
+fn assert_preserved(rows: &[TaskRow]) -> Result<(), TaskRuntimeError> {
+    let retry = rows.first().ok_or_else(missing)?;
+    assert_eq!(retry.status, 0);
+    assert_eq!(retry.state.as_deref(), Some("{}"));
+    assert_eq!(retry.resume_input.as_deref(), Some("{\"Ok\":null}"));
+    for cancelled in rows.iter().skip(1) {
+        assert_eq!(cancelled.status, 4);
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.state.as_deref(), Some("{}"));
+        assert!(cancelled.resume_input.is_none());
+        assert!(
+            cancelled
+                .last_result
+                .as_deref()
+                .is_some_and(|r| r.contains("Task cancelled"))
+        );
+    }
     Ok(())
 }
 
-/// Spawn insertion scales by bounded chunks without a per-parent lookup or write.
-async fn spawn_queries(store: &DbTaskStore, queries: &Queries, size: usize) -> Result<(), String> {
-    let parents = (0..size).map(|_| flow_record()).collect::<Vec<_>>();
-    let mut commits = parents
-        .iter()
-        .map(|parent| commit(parent.id, TaskOutcome::Complete))
-        .collect::<Vec<_>>();
-    store
-        .store_tasks(parents.into_iter().map(write).collect())
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut claims = claim();
-    claims.limit = size;
-    for _ in 0..size.div_ceil(store.batch_size) {
-        store
-            .claim_tasks("benchmark", std::slice::from_ref(&claims))
-            .await
-            .map_err(|e| e.to_string())?;
+fn missing() -> TaskRuntimeError {
+    TaskRuntimeError::TaskExecutionError("missing fixture".into())
+}
+
+fn command(id: u128, outcome: TaskOutcome) -> TaskCommit {
+    TaskCommit::Outcome {
+        node_id: uuid::Uuid::from_u128(100),
+        attempts: 1,
+        task_id: TaskId::new(uuid::Uuid::from_u128(id)),
+        lane: crate::tasks::DEFAULT_TASK_LANE,
+        outcome,
+        owner_token: None,
     }
-    for commit in &mut commits {
-        commit.outcome = TaskOutcome::Spawn {
-            state: "null".into(),
-            child: write(record()),
-        };
-    }
-    queries.0.lock().map_err(|e| e.to_string())?.clear();
-    store
-        .commit_outcomes("benchmark", &commits)
-        .await
-        .map_err(|e| e.to_string())?;
-    let sql = queries.0.lock().map_err(|e| e.to_string())?;
-    let count = |operation: &str| {
-        sql.iter()
-            .filter(|sql| sql.contains(&format!("{operation} vyuh_tasks")))
-            .count()
-    };
-    let chunks = size.div_ceil(store.batch_size);
-    assert_eq!(count("UPDATE"), chunks, "{sql:?}");
-    assert_eq!(count("INSERT INTO"), chunks, "{sql:?}");
-    assert!(!sql.iter().any(|sql| sql.contains("vyuh_task_lane_locks")));
-    eprintln!(
-        "SQL size={size} spawn: {} statements, {} updates, {} inserts",
-        sql.len(),
-        count("UPDATE"),
-        count("INSERT INTO")
-    );
-    drop(sql);
-    let table = DbTaskStore::table();
-    db::from(&table)
-        .filter(
-            table
-                .name
-                .in_values(["workflow".to_owned(), "flow".to_owned()]),
-        )
-        .delete()
-        .exec(&mut store.pool.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }

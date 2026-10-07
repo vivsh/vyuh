@@ -32,20 +32,7 @@ pub(super) fn finalize_idempotency(
     Ok(())
 }
 
-/// Selects a task only while the committing runner still owns its lease.
-pub(super) fn owned_task_mut<'a>(
-    tasks: &'a mut [TaskRecord],
-    id: TaskId,
-    runner_id: &str,
-) -> Option<&'a mut TaskRecord> {
-    tasks.iter_mut().find(|task| {
-        task.id == id
-            && task.status == TaskStatus::Running
-            && task.locked_by.as_deref() == Some(runner_id)
-    })
-}
-
-/// Returns the earliest future readiness or lease-expiry deadline.
+/// Returns the earliest future readiness among ownerless pending or abandoned running tasks.
 pub(super) fn task_deadline(
     tasks: &[TaskRecord],
     lane: &str,
@@ -56,8 +43,9 @@ pub(super) fn task_deadline(
         .filter(|task| task.lane == lane)
         .filter_map(|task| {
             let deadline = match task.status {
-                TaskStatus::Pending => task.ready_at,
-                TaskStatus::Running => task.leased_until,
+                TaskStatus::Pending | TaskStatus::Running if task.node_id.is_none() => {
+                    task.ready_at
+                }
                 _ => None,
             }?;
             (deadline > now)
@@ -207,20 +195,4 @@ pub(super) fn chrono_duration(duration: Duration) -> Result<chrono::Duration, Ta
     chrono::Duration::from_std(duration).map_err(|_| {
         TaskRuntimeError::InvalidConfig("task duration exceeds supported timestamp range".into())
     })
-}
-
-/// Uses the same record-specific lease duration for claiming and renewing.
-pub(super) fn lease_deadline(
-    task: &TaskRecord,
-    default: Duration,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<chrono::DateTime<chrono::Utc>, TaskRuntimeError> {
-    let lease = match task.lease_duration_ms {
-        Some(value) => Duration::from_millis(u64::try_from(value).map_err(|_| {
-            TaskRuntimeError::InvalidConfig("task lease duration cannot be negative".into())
-        })?),
-        None => default,
-    };
-    now.checked_add_signed(chrono_duration(lease)?)
-        .ok_or_else(|| TaskRuntimeError::InvalidConfig("task lease exceeds timestamp range".into()))
 }

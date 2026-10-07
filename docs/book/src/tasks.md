@@ -1,9 +1,13 @@
 # Tasks
 
+> Breaking upgrade: existing lease-owned stores must stop all workers and writers
+> and apply the destructive task-reset and node-schema migrations before restart.
+> Old tasks and their results are deleted. See [upgrading](#upgrading-existing-task-stores).
+
 Vyuh tasks combine typed background work and durable workflow orchestration in
 one runtime. A task has one of two kinds: **Work** handlers are asynchronous and perform effects; **Flow**
 definitions are immutable and advance synchronously to the next durable transition. Both return
-typed results and use the same task records, lanes, leases, recovery, and
+typed results and use the same task records, lanes, ownership, recovery, and
 cancellation mechanisms.
 
 Use them for emails, imports, report generation, webhook retries, approvals,
@@ -20,6 +24,54 @@ For orchestration, see [spawn](#spawning-and-waiting-for-a-child),
 [`all`](#parallel-children-with-all), and [external resume](#suspend-and-resume).
 [Handler batching](#local-handler-batching) and [lane ownership](#durable-lane-ownership)
 are independent execution controls, not requirements for workflows.
+
+## Runner deployment mode
+
+```rust
+use std::time::Duration;
+use vyuh::tasks::{TaskConf, TaskMode};
+
+// Default: multiple runners may share the store.
+let clustered = TaskConf::default()
+    .mode(TaskMode::Clustered)
+    .heartbeat_interval(Duration::from_secs(12));
+
+// Deployment MUST prevent overlapping runners, including during restarts.
+let standalone = TaskConf::default().mode(TaskMode::Standalone);
+```
+
+All runners register their fresh UUID before claiming. Clustered runners
+periodically update their node row with database time, even while idle. The interval is independent of task
+polling and must be between one millisecond and seven days. Heartbeats use the
+existing database concurrency budget, not handler concurrency. No node query is
+added to submission, claims, or flushes. Standalone performs one node-registration
+insert at startup and no heartbeat queries; its interval setting is unused. Standalone worker startup
+returns all retained running tasks to pending with one database update, after
+ordinary worker setup and before registration and claims. The previous runner must have stopped.
+Clustered startup never resets another incarnation's claims.
+
+Each runner gets a fresh UUID in both modes. A shared store with multiple
+runners is clustered even if each runner serves different lanes. Mode changes
+require stopped runners and a coordinated deployment; Vyuh does not enforce
+standalone exclusivity or detect mixed modes.
+
+After refreshing itself, a clustered runner deletes peers older than **six
+heartbeat intervals** (72 seconds by default). All clustered runners must use the
+same interval. The task ownership FK clears deleted nodes' `node_id` values;
+ordinary claims reclaim eligible ownerless Running tasks without a recovery scan.
+Counters, checkpoints, resume input and cancellation intent are preserved.
+Task and lane fencing still reject stale outputs; external effects can repeat.
+
+A heartbeat matching no node aborts task/hook futures and **exits that runner**,
+without flushing, giving back claims, or registering again. Other application
+services are not terminated. Already-issued SQL may still finish server-side.
+Transient database errors recover at normal poll boundaries; permanent errors
+stop the runner. Heartbeats
+continue during graceful draining; node rows remain after shutdown until a peer
+retires them. Standalone does no periodic cleanup. Stalled DB calls, FK cleanup,
+polling and lane gates can delay recovery beyond the cutoff. Existing lane-lock
+coordination remains independent. Per-query timeouts remain deferred; the
+database-contact watchdog can still exit a runner with a stalled operation.
 
 ## When To Use Tasks
 
@@ -93,9 +145,9 @@ claim -> immutable handler snapshot -> outcome -> atomic store commit -> later c
 ```
 
 Returning a value or constructing an outcome is not a commit. Only the store
-mutates authoritative task state. New children and resumed parents are finalized
-after that turn's claim selection; they never execute synchronously from the
-parent or child handler. Another worker may claim the committed work afterward;
+mutates authoritative task state. New children and resumed parents become eligible
+when the output transaction commits; they execute only through an independently
+poll-paced claim, never synchronously from the parent or child handler. Another worker may claim the committed work afterward;
 there is no cluster-wide poll counter. Crashes before commit can replay a step.
 
 ## Registration
@@ -211,7 +263,7 @@ Use explicit `WorkError::retry` for retries; automatic `?` conversions are termi
 Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
 Flow handlers are synchronous and can complete, fail, suspend, sleep, spawn, or
 join a homogeneous group with `all`.
-Both use the same statuses, lanes, concurrency, rates, lane locks, leases,
+Both use the same statuses, lanes, concurrency, rates, lane locks, node ownership,
 attempt counters, cancellation, and atomic outcome flushes. Neither executes
 a child or resumed parent recursively; those run after a later claim.
 
@@ -258,7 +310,7 @@ Work children. Globals and captured effects cannot be prevented by Rust's type
 system. A non-yielding function cannot be preempted mid-call.
 
 Flow cannot request retry, but an uncommitted execution is recovered with exactly
-the same lease, retry-budget, and backoff rules as Work. A returned error or panic
+the same node-ownership, retry-budget, and backoff rules as Work. A returned error or panic
 is terminal, except an explicit Work `WorkError::Retry`. Shared lanes also mean
 shared contention; configure a separate lane for isolation when needed.
 
@@ -385,7 +437,7 @@ child. The site task facade has no public spawn operation.
 
 The child's successful output becomes `Ok(value)` in the parent continuation;
 plain `()`/`complete(())` becomes `Ok(())`. Terminal failure, including exhausted
-retries or leases, becomes `Err(TaskFailure)` with the child's ID. A retry,
+retries or abandoned executions, becomes `Err(TaskFailure)` with the child's ID. A retry,
 sleep, or suspension is not terminal and does not resume the parent. The child's
 result is retained on its task row and copied to the parent atomically.
 Applications own any archive that must outlive task cleanup.
@@ -473,7 +525,7 @@ the normal continuation extractor.
 The store decrements a durable counter when children finish. It collects results
 only when the satisfied parent is actually claimed, persists `resume_input`,
 and clears the wait atomically. Crash recovery then reuses that persisted input.
-Groups use normal lanes, rates, scheduling, leases, retries, and cancellation.
+Groups use normal lanes, rates, scheduling, node ownership, retries, and cancellation.
 Cancellation of a parent does not cancel its children.
 
 Do not externally resume a parent awaiting `all`. Duplicate/conflicting child
@@ -505,7 +557,7 @@ fn checkout(root: pravah::Flow<Checkout>) -> pravah::Flow<Confirmation> {
 
 // Equivalent direct registration:
 bundles::flow(checkout, FlowConf::new("checkout")
-    .dispatch::<AppDispatcher>().step_limit(256).revision("1"));
+    .dispatch::<AppDispatcher>().step_limit(256));
 ```
 
 Factories receive symbolic roots, optionally preceded by `PartialSite`, never
@@ -575,14 +627,11 @@ Snapshots obey the existing checkpoint limit; final results and resume envelopes
 still have the fixed 32,768-byte limit. Snapshots and Fetch payloads can contain
 credentials or sensitive data: apply the same storage/access controls as inputs.
 
-Graph fingerprint, policy type, instruction limit and application revision enter
-deployment compatibility. Increment `.revision(...)` when captured configuration
-or Rust callbacks change replay semantics; graph fingerprints cannot detect every
-such change. Stop incompatible workers and writers and apply the appended
-`0012_flow_factories_protocol` template. It changes protocol markers, not task
-columns. Retained manual checkpoints must match the new implementation; they are
-never reinterpreted as Pravah snapshots. No runtime checkpoint/schema repair or
-mixed-version operation is supported.
+The runtime does not compute or verify a deployment fingerprint; unused Flow revision and compatibility APIs have been removed.
+Keep worker configurations consistent and stop incompatible workers and writers
+before changing persisted checkpoint representations. Retained manual checkpoints
+must match the new implementation; they are never reinterpreted as Pravah snapshots.
+Pravah's own snapshot checks remain. Version-based task admission is not implemented.
 
 ## Retained Results
 
@@ -591,8 +640,7 @@ until the handler returns. The framework serializes a successful value and store
 `{"Ok": value}` on the completed task. Ordinary unit-return handlers retain
 `{"Ok": null}`. Retrying and terminal failures retain `{"Err": TaskFailure}`;
 the task status distinguishes a retry from terminal failure. Successful suspend,
-sleep, spawn, and all checkpoints clear the previous result. Claims and lease
-renewals preserve it. This is the latest result, not an attempt history.
+sleep, spawn, and all checkpoints clear the previous result. Claims preserve it. This is the latest result, not an attempt history.
 
 Inspect results with `task.last_result::<Output>()?`, which returns
 `Option<Result<Output, TaskFailure>>`, or borrow their JSON using
@@ -645,7 +693,7 @@ The distinct macro selects the reduced value-only batch contract without inspect
 or resolving the handler's argument syntax. The equivalent direct registration is
 `bundles::work_batch(normalize_texts, TaskDefinition::new("normalize_texts"))`.
 The submitted type remains `T`: every call to `submit(T)` creates its own
-durable task row, attempt count, lease, retry policy, and terminal outcome.
+durable task row, attempt count, execution owner, retry policy, and terminal outcome.
 
 Batching never waits for more rows and adds no store query. At dispatch, Vyuh
 groups all currently eligible queued rows for the same registered handler while
@@ -735,51 +783,54 @@ mapping from event keys to task IDs and call `resume` for each task.
 ## Cancellation
 
 ```rust
-let requested = site.tasks().cancel(receipt.id()).await?;
+site.tasks().cancel(receipt.id()).await?;
 ```
 
-`cancel` records durable intent, not immediate completion. It returns `true` for
-a newly accepted request and `false` for missing, terminal, or already-cancelled
-tasks. Store errors propagate. Inspect intent with `TaskInfo::cancelled()`;
-status remains authoritative about whether finalization has happened.
+`cancel` returns `Result<(), TaskRuntimeError>` after the store transaction has
+acknowledged terminal cancellation. Pending, suspended, or running tasks become
+`Failed`, retain `cancelled = true`, and store `Err(TaskFailure)` with the task ID
+and message `Task cancelled`. Missing and already-terminal tasks are idempotent
+no-ops. `TaskInfo::cancelled()` distinguishes a cancelled failure from other failures.
 
-Suspended tasks become pending and due now. Future pending timers advance to
-now; already-due timers keep their ordering. Running tasks retain their status
-and lease until a normal store turn accepts cancellation. `ready_at` is the
-store-owned processing eligibility timer, not an audit of the original schedule.
+Cancellation uses the same atomic commit machinery as handler outputs; there is
+no intermediate intent update or later cancellation flush. It does not wait for
+lane polling, rates, or lifecycle hooks. Once cancellation commits, later handler
+outputs are stale and cannot complete, retry, checkpoint, or spawn from that task.
+If terminal completion commits first, cancellation does nothing. Cancelled tasks
+cannot be resumed.
 
-Normal polling finalizes cancellation as `Failed`, storing
-`Err(TaskFailure)` with the task ID and message `Task cancelled`. No handler is
-invoked when cancellation is observed during candidate selection. Running-task
-renewals and outcome commits also check durable intent: once accepted, a later
-success, retry, checkpoint, or spawn cannot override cancellation. Cancelled
-tasks cannot be resumed.
+Store errors propagate. An acknowledgement error can occur after the database
+committed; retrying cancellation is safe and idempotent. Successful cancellation
+does **not** acknowledge that an already-running handler has stopped.
 
 A cancelled single child delivers its failure to its suspended `spawn` parent
 atomically; the parent continues on a subsequent poll. Within `all`, cancellation
 counts as one terminal child, but the parent still waits for every other member
 before receiving the ordered results.
 Cancelling a parent does not cancel its children, and their later results cannot
-revive it. Checkpoints remain intact when cancellation is requested.
+revive it. Normal terminal cleanup applies to the cancelled task.
 
-Cancellation follows normal polling, concurrency, rate, batch-threshold, and lane
-hook gates. It can remain pending while those gates block discovery. Cancellation
-protects the durable terminal result; it does not guarantee that external execution
-stops. This holds for both individual and batch tasks, even on one worker.
+After acknowledgement, the submitting dispatcher sends a best-effort local
+notification. A runner removes matching items still in its lane queues without
+creating another output or changing uncommitted accounting. Other queued items
+keep their order; no execution permit is needed for a skipped item. There is no
+retained cancellation cache or per-task lookup on the execution hot path.
 
-When renewal finalizes cancellation of a member of a shared batch invocation,
-the invocation continues. Remaining members retain their leases and commit normally;
-cancelled members stop receiving renewals and their returned outcomes are discarded.
-Even if every member is cancelled, the shared invocation retains its execution slot
-until it finishes. The lane stays busy until execution and outstanding commits drain,
-then its normal `idle_after` debounce begins. A hung shared handler can therefore
-delay lane idle and graceful shutdown. A cancelled child's parent may already have
-received its failure while that external operation is still running.
+**Cancellation never interrupts a running handler**, single or batch. Its later
+output is rejected as stale. Batch siblings complete normally;
+cancelling one member does not deliberately replay the others. Execution permits
+remain held until completion collection, just as for ordinary work. A hung
+handler can delay lane idle and graceful shutdown, but not durable cancellation
+or parent delivery. A resumed parent may therefore run before its cancelled
+child's external effects finish. Ownership loss and runner termination retain
+their separate abort behavior.
 
-Cancellation of an invocation containing only one task still aborts its future as
-best-effort cleanup. Genuine task or lane ownership loss still invalidates an entire
-invocation. Crash recovery can replay work, but cancellation of a batch member no
-longer deliberately forces unaffected members through lease expiry and replay.
+Notifications are local and bounded, not cluster broadcasts. A task on another
+runner, a claim response still in flight, or notification lag can therefore
+allow already-claimed work to execute. Its output cannot overwrite the terminal
+row. Cancellation cannot undo external effects. Parent execution remains subject
+to ordinary polling, rates, concurrency, batch thresholds, and lane hooks; there
+is no cancellation scan or watcher.
 
 Task snapshots held by runners and handlers remain immutable. All authoritative
 mutations, including cancellation resolution, happen inside the store. Existing
@@ -882,7 +933,8 @@ These controls have different jobs:
 
 | Control | What it bounds or groups |
 |---|---|
-| `TaskConf::concurrency(n)` | Running handler invocations across the local runner |
+| `TaskConf::concurrency(n)` | Invocations through collection of their outcomes into the shared buffer |
+| `TaskConf::db_concurrency(n)` | Runner-managed database operations through application of their responses; default 1 |
 | `TaskLaneConf::new(lane, n)` | Per-runner lane handler concurrency and refill capacity |
 | `TaskConf::batch_size(n)` | Store claim/commit batch bound, not handler batch size |
 | `#[bundles::work_batch]` | Matching, eligible inputs already queued locally; never waits |
@@ -900,10 +952,53 @@ the lane's normal free capacity. Refill capacity subtracts running invocations,
 queued tasks, and completed-but-uncommitted task outcomes from the lane quota.
 This applies to every outcome, not just fan-out. Batch completion counts every
 item until its outcome is acknowledged, although execution uses one handler slot.
-The paced store tick still runs for commits, lease renewal, and other lanes; a
-full lane is simply skipped rather than queried again. Claims are calculated
-before commit acknowledgement, so a fully occupied fast-handler lane may alternate
-commit-only and refill polls. Already queued work continues executing normally.
+Claims, flushes, and lane coordination are independent database operations.
+A saturated lane is skipped without querying it. Pending claims reserve capacity;
+buffered and in-flight outputs retain refill pressure until acknowledged.
+
+Execution and completion collection continue while database calls are pending.
+Completion messages carry their global and lane permits; the collector releases
+them only after buffering all accepted outcomes. Database permits are separate,
+and external submissions and inspections do not consume that runner budget.
+
+One FIFO output buffer serves all lanes. Its normal flush interval is independent
+of input-lane idle and rate deadlines. With `db_concurrency` above one, eligible
+claims and flushes can overlap. FIFO describes admission, not transaction commit
+order. A flush never recursively executes a child or forces an immediate claim.
+
+Transient database errors retain their request and retry no earlier than the next
+poll interval. An uncertain commit is reconciled using its retained batch and
+current ownership/attempts before anything is dispatched or acknowledged.
+Permanent database and internal protocol errors stop the runner.
+Graceful shutdown stops new claims
+and queued dispatch, lets executing handlers finish, and persists their outputs.
+After all admitted database operations settle, one update returns this node's
+remaining running claims to pending. Transient give-back failures retry on poll
+boundaries; successful shutdown is reported only after acknowledgement.
+
+A death watchdog applies while database operations are executing or unresolved.
+It expires after six heartbeat intervals without a successful runner database
+operation (72 seconds by default). Any acknowledged operation, including a
+heartbeat, resets it. Idle standalone runners have no armed watchdog and perform
+no extra liveness SQL. A successful heartbeat does not resolve another failed
+operation or conceal its degraded health.
+
+Expiry or a confirmed missing node stops the task runner, not the whole
+application. Local work is discarded as unacknowledged; there is no automatic
+re-registration. Already-issued SQL and external effects may still finish.
+Ordinary successful operations gain no recovery queries. Error-path current
+reads can wait for database locks, while the runner continues execution,
+collection and independent operations.
+
+Startup reclaim and shutdown give-back preserve checkpoints, resume input,
+results, cancellation intent, join state, and retry counters. They clear task
+ownership and advance the internal readiness timer using database time. Returned
+queued tasks retain their already-charged claim attempt; the next ordinary claim
+still enforces retry exhaustion and cancellation. These boundary updates add no
+hot-path queries and do not release or bypass durable lane locks: existing
+token-fenced coordination and lease expiry still apply. External effects are not
+undone. Clustered abandonment is handled by heartbeat retirement and ordinary
+claims. Recovery preserves the same ownership fencing and atomic workflow writes.
 
 ```rust
 use vyuh::prelude::*;
@@ -941,7 +1036,7 @@ minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
 by `max_delay`. This policy cannot be overridden by a submission or handler.
 `attempts()` reports lifetime invocations; `step_attempts()` reports the current
 step's retry budget. A committed `suspend`, `sleep`, `spawn`, or `all` resets the step
-counter. Retries and lease reclaims do not reset it.
+counter. Retries and abandoned-task reclaims do not reset it.
 `rate_limit` is an inexpensive in-memory token bucket owned by the local site
 runner. `global_rate_limit` coordinates starts across workers sharing a durable
 task store. Configure either one independently, or configure both when each
@@ -1025,10 +1120,9 @@ Only locked lanes use the lane-lock table and bounded owner coordination query.
 Ordinary lanes retain their existing claim query, and task submission never
 reads or writes lane ownership state.
 
-Lane lease renewal is part of the runner's central paced store turn. The runner
-wakes that turn at the earliest normal poll, useful-work, fallback, task-lease,
-or half-lane-lease deadline; ownership does not create a separate per-lane
-poller or renewal query stream.
+Lane lease renewal uses the central database-work pipeline and its semaphore.
+The scheduler includes normal polling, useful-work, fallback, and half-lane-lease
+deadlines; there is no separate per-lane poller or task-lease renewal stream.
 
 Reusable bundles can contribute a complete default for a named lane without
 changing `bundle!` syntax:
@@ -1059,12 +1153,12 @@ tasks prevent worker startup. After running work drains, explicitly call
 `site.tasks().reassign_lane(OLD, NEW)` before deploying the configuration that
 removes the old lane.
 
-## Adaptive Polling And Leases
+## Adaptive Polling And Ownership
 
 `poll_interval` is the short backlog interval. A lane whose candidate query
 fills its requested batch is revisited after this interval when it has capacity.
 `fallback_poll_interval` is the maximum idle recheck interval. Future
-`ready_at`, lease-expiry, and rate-token deadlines wake the runner at their
+`ready_at`, lane-lease expiry, and rate-token deadlines wake the runner at their
 store-relative database time when they are earlier. Deadlines are tracked per
 lane, so activity in one lane does not force an idle or rate-limited lane to
 query early.
@@ -1076,14 +1170,15 @@ submitted by another process may wait until the fallback poll.
 Choose a smaller fallback or an external deployment wake mechanism when that
 latency is unacceptable.
 
-Running leases are renewed in bounded batches before one third of the lease
-remains. A worker that loses ownership cancels its local handler and cannot
-commit its outcome. A crashed worker leaves its lease to expire; reclaiming the
-task consumes another attempt and another rate permit.
+Individual tasks have node ownership, not timed leases. Node retirement clears
+ownership, after which ordinary claims can reclaim abandoned Running tasks.
+Standalone startup instead returns prior running claims under its singleton
+deployment contract. Reclaiming consumes another attempt and rate permit.
+A stale node or attempt cannot commit an outcome.
 
 When observability is enabled, Vyuh exports bounded-label task counters for
-submission receipts and conflicts, claims and reclaimed leases, handler starts
-and lifecycle outcomes, lease renewals and ownership loss, and store failures.
+submission receipts and conflicts, claims and abandoned-task reclaims, handler starts
+and lifecycle outcomes, node heartbeats, lane ownership loss, and store failures.
 Batch handlers additionally expose invocation and item counters by registered
 handler name.
 Queue, handler, and outcome-commit durations are exported without dynamic
@@ -1091,6 +1186,13 @@ application-data labels. Handler and lane labels come only from the immutable
 site registries.
 
 ## Runtime Health
+
+Building a site configures its task store without querying task tables. This
+keeps migration commands and producer-only sites independent of worker startup.
+Submission does not lazily initialize workers. Starting the site runtime validates
+retained task registrations and prepares rate/lane coordination rows, reclaims
+standalone tasks, then registers the node before claims begin in both modes.
+Startup failure prevents the worker from starting.
 
 Task runtime health is updated from initialization and existing scheduler-store
 ticks; readiness checks never issue an additional task-store query. The default
@@ -1127,23 +1229,20 @@ With a database backend feature enabled, Vyuh stores tasks durably:
 
 Durable stores use framework-owned tables for task lifecycle records,
 idempotency ownership, per-lane rate buckets, opt-in lane-owner leases, durable
-schedule cursors, and the store-wide scheduling policy fingerprint. The
-fingerprint prevents workers with incompatible lane, retry, rate, ownership,
-hook, or idempotency policies from sharing one store. The lane-owner table has
-one primary-key row per configured locked lane and no foreign keys or secondary
+schedule cursors. The runtime has no runtime-policy table, fingerprint checks,
+or policy-row locks. Submission validation and task/lane ownership fencing remain.
+Deployments are responsible for compatible worker configuration; version-based
+admission is deferred. The lane-owner table has one primary-key row per configured locked lane and no foreign keys or secondary
 indexes.
 
-Database work is batched without changing polling or lease timing. Ordinary
-lanes never consult lane-lock storage. Optional rates, lane ownership, recovery,
-and workflow transitions can require additional bounded statements in the same
-transaction. PostgreSQL and SQLite combine ordinary claim evidence. PostgreSQL
-also shares ordinary outcome/renewal observations; SQLite retains separate reads.
-Mixed turns still apply outcomes and renewals before selecting more work. Batched
-database access does not imply a fixed one- or two-query budget for every turn.
-Recovery eligibility is checked from current database evidence, not a cache or
-a slower recovery schedule. Expired idempotency reservations are physically cleaned up
-periodically; this does not extend their logical retention window or prevent
-reuse of an expired key.
+Claims and output flushes are independently paced, batched transactions.
+Ordinary lanes never consult lane-lock storage. Optional rates, lane ownership,
+and workflow transitions require additional bounded statements. Ordinary
+PostgreSQL/SQLite claims include database time in their bounded candidate query;
+flushes retain task ownership locks but do not read deployment policy.
+Expired idempotency reservations are physically cleaned up periodically; logical
+expiry still permits reuse immediately. Task renewal is replaced by node ownership;
+the ownership FK adds engine-level validation and locking, not a per-claim node query.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
 migrations before starting task workers; `Site::build` never creates or alters
@@ -1152,30 +1251,29 @@ changing production DDL during startup.
 
 ### Upgrading Existing Task Stores
 
-These APIs and persisted protocols require a coordinated upgrade. Stop all old
-workers and writers, back up the database, and integrate the backend-specific
+Stop all workers and writers, back up, and integrate the backend-specific
 [task-protocol templates](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol)
-into the application's Gaman migration history. Apply them through its ledger
-before starting new workers. See [task schema migrations](migrations.md#durable-task-schema-changes)
-for deployment order and preflight requirements. Mixed-version operation and
-startup schema repair are unsupported.
+`0013_reset_tasks` and `0014_node_pipeline` into the application's Gaman ledger.
+This is a **destructive upgrade**: every old task, result, continuation, join and
+idempotency reservation is deleted. Schedule cursors, rate balances and lane
+lifecycle state are preserved. Existing lane ownership expires normally.
 
-For applications using older task APIs:
+The schema migration replaces string task owners with nullable UUID node
+ownership and its FK, and removes individual task lease columns and deployment
+fingerprint storage. SQLite requires Gaman's predecessor-aware rebuild with FK
+enforcement enabled; MySQL/MariaDB DDL is non-atomic. Both steps require offline
+schema locks. Review application-specific foreign keys and indexes before applying.
 
-| Earlier API | Current API |
-|---|---|
-| `complete()` / fallible `complete_with(value)` | Infallible `WorkState::complete(())` / `WorkState::complete(value)`; declare `WorkState<T>` |
-| `WorkState::retry` / `WorkState::fail` | Return `Err(WorkError::retry(...))` / `Err(WorkError::fail(...))` |
-| Work sleep or child spawn | Synchronous `flow` registration with `FlowState<T>` and `FlowError` |
-| Infrastructure `WorkError` | `TaskRuntimeError`; `WorkError` now describes Work decisions |
-| Raw resume value `R` | `Result<R, TaskFailure>` inside the continuation |
-| `last_error()` inspection | `last_result::<T>()?` and `last_result_json()` |
+There is no automatic downgrade, mixed-version operation, startup migration or
+retained-task compatibility layer. Backups are the only recovery path for deleted
+old tasks. Fresh installations generate only the current desired schema.
 
-Continuable Work remains supported for external suspension. Preserve registered
-names and JSON types where possible; reclassify existing rows only for handlers
-actually converted to Flow. New successful outputs are retained, but migrations
-cannot reconstruct historical successful values. Never infer whether resume
-data was migrated by inspecting its JSON shape or reapply ledger-tracked wrapping.
+Public cancellation now returns `Result<(), TaskRuntimeError>` after terminal
+persistence or an idempotent no-op; it never acknowledges stopped execution.
+Task inspection exposes `node_id()` instead of an individual task lease deadline.
+`FlowConf::revision` and `Flow::compatibility` have been removed because they
+provided no admission guarantee. Keep workers' handler, checkpoint and lane
+configuration compatible through coordinated deployments.
 
 ### Runtime And Backend Selection
 
@@ -1226,14 +1324,13 @@ and a complete `all` handler pair above.
   `vyuh::Error` or `TaskRuntimeError` converts it to the handler's terminal error;
   `Result<_, vyuh::Error>` is not the task-handler decision contract.
 - Stale workers cannot overwrite tasks they no longer own.
-- Stale lane owners cannot renew tasks, commit outcomes, or apply lifecycle
+- Stale lane owners cannot renew lane ownership, commit outcomes, or apply lifecycle
   results after another owner takes over.
 - Lane lifecycle hooks may repeat after lease recovery and therefore must be
   idempotent reconcilers rather than one-shot external effects.
-- A crashed worker's running task is reclaimed only after its lease expires;
-  the replacement invocation consumes another attempt and may repeat effects.
-- A malformed historical running row without a lease deadline is marked failed
-  during task-runtime initialization rather than being retried unsafely.
+- Clustered abandoned tasks become reclaimable after node retirement; lane gates
+  and polling can delay execution. Standalone recovery requires the prior runner
+  to have stopped. Reclaimed attempts may repeat external effects.
 - Retried tasks become failed when their lane's per-step attempt budget is exhausted;
   lifetime invocation count is not that budget.
 - Conflicting idempotency intents reject the submission batch unless conflict

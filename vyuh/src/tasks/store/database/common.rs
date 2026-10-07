@@ -7,9 +7,7 @@ use crate::{
     tasks::{TaskFilter, TaskRecord, TaskRuntimeError, TaskStatus},
 };
 
-use super::model::{
-    TaskIdempotencyRow, TaskLaneLockRow, TaskRateRow, TaskRow, TaskRuntimeRow, TaskScheduleRow,
-};
+use super::model::{TaskIdempotencyRow, TaskLaneLockRow, TaskRateRow, TaskRow, TaskScheduleRow};
 
 /// Mool-backed persistent task store selected by Vyuh's database feature.
 #[derive(Clone)]
@@ -17,27 +15,23 @@ pub struct DbTaskStore {
     pub(super) pool: db::DbPool,
     pub(super) batch_size: usize,
     pub(super) lease_duration: std::time::Duration,
-    #[allow(clippy::type_complexity)]
-    // Publish configuration and its identity as one immutable unit.
-    pub(super) runtime_conf: std::sync::Arc<
-        tokio::sync::RwLock<
-            Option<(
-                std::sync::Arc<crate::tasks::TaskStoreConf>,
-                std::sync::Arc<str>,
-            )>,
-        >,
-    >,
+    pub(super) runtime_conf: std::sync::Arc<crate::tasks::TaskStoreConf>,
     pub(super) maintenance_turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DbTaskStore {
-    /// Creates a task store over the selected Mool database pool.
-    pub fn new(pool: db::Pool, batch_size: usize, lease_duration: std::time::Duration) -> Self {
+    /// Configures a task store without querying the database; worker setup happens at startup.
+    pub fn new(
+        pool: db::Pool,
+        batch_size: usize,
+        lease_duration: std::time::Duration,
+        conf: crate::tasks::TaskStoreConf,
+    ) -> Self {
         Self {
             pool: db::DbPool::from_pool(pool),
             batch_size: batch_size.max(1),
             lease_duration,
-            runtime_conf: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            runtime_conf: conf.into(),
             maintenance_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -70,59 +64,27 @@ impl DbTaskStore {
         <TaskLaneLockRow as db::Model>::table()
     }
 
-    /// Returns the singleton task-runtime policy table.
-    pub(super) fn runtime_table() -> db::queries::ModelTable<TaskRuntimeRow> {
-        <TaskRuntimeRow as db::Model>::table()
-    }
-
     /// Returns the typed durable emitter schedule cursor table.
     pub(super) fn schedule_table() -> db::queries::ModelTable<TaskScheduleRow> {
         <TaskScheduleRow as db::Model>::table()
     }
 
-    /// Selects pending work that is ready or running work whose lease expired.
+    /// Selects ready pending or abandoned running work without an execution owner.
     pub(super) fn due_predicate(
         table: &db::queries::ModelTable<TaskRow>,
         now: DateTime<Utc>,
     ) -> db::queries::Predicate {
-        let pending = table.status.eq(db::val(TaskStatus::Pending.as_i16())).and(
-            table
-                .ready_at
-                .is_null()
-                .or(table.ready_at.lte(db::val(Some(now)))),
-        );
-        let expired = table.status.eq(db::val(TaskStatus::Running.as_i16())).and(
-            table
-                .leased_until
-                .is_not_null()
-                .and(table.leased_until.lte(db::val(Some(now)))),
-        );
-        pending.or(expired)
-    }
-
-    /// Calculates an absolute lease deadline while rejecting invalid durations.
-    pub(super) fn lease_until(
-        &self,
-        lease_duration_ms: Option<i64>,
-        now: DateTime<Utc>,
-    ) -> Result<DateTime<Utc>, TaskRuntimeError> {
-        let default_milliseconds =
-            i64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                TaskRuntimeError::TaskExecutionError(
-                    "task lease duration is outside the supported range".into(),
-                )
-            })?;
-        let milliseconds = lease_duration_ms.unwrap_or(default_milliseconds);
-        if milliseconds < 0 {
-            return Err(TaskRuntimeError::TaskExecutionError(
-                "task lease duration cannot be negative".into(),
-            ));
-        }
-        add_time(
-            now,
-            ChronoDuration::milliseconds(milliseconds),
-            "task lease duration",
-        )
+        table
+            .status
+            .eq(db::val(TaskStatus::Pending.as_i16()))
+            .or(table.status.eq(db::val(TaskStatus::Running.as_i16())))
+            .and(table.node_id.is_null())
+            .and(
+                table
+                    .ready_at
+                    .is_null()
+                    .or(table.ready_at.lte(db::val(Some(now)))),
+            )
     }
 
     /// Converts selected database rows without exposing persistence types.
@@ -224,6 +186,72 @@ where
     })
     .eq(db::val(true))
 }
-#[cfg(all(test, feature = "migrations"))]
-#[path = "tests/common.rs"]
-pub(super) mod tests;
+use super::{
+    model::{TaskClaimRow, TaskProbeRow},
+    runtime::StoreClockRow,
+};
+use crate::db::Record as _;
+/// A metadata row is deliberately distinct from a task, including on an empty result.
+#[allow(clippy::large_enum_variant)] // Keep row decoding allocation-free beyond the owned fields.
+pub(super) enum StoreRow {
+    Clock(StoreClockRow),
+    Snapshot(TaskRow),
+    Candidate(TaskClaimRow),
+    Probe(TaskProbeRow),
+    Deadline(LaneDeadlineRow),
+}
+
+/// A deadline is query evidence, not a task snapshot or retained scheduler state.
+#[derive(db::Record)]
+pub(super) struct LaneDeadlineRow {
+    pub(super) lane_name: String,
+    pub(super) deadline: Option<DateTime<Utc>>,
+}
+
+impl<'r> db::sqlx::FromRow<'r, db::Row> for StoreRow {
+    fn from_row(row: &'r db::Row) -> Result<Self, db::sqlx::Error> {
+        use db::sqlx::Row as _;
+        match row.try_get::<i32, _>("turn_kind")? {
+            0 => Ok(Self::Clock(StoreClockRow::record_scan_ordered(
+                row, &mut 1,
+            )?)),
+            1 => Ok(Self::Snapshot(TaskRow::record_scan_ordered(row, &mut 2)?)),
+            3 => Ok(Self::Candidate(TaskClaimRow::record_scan_ordered(
+                row, &mut 2,
+            )?)),
+            4 => Ok(Self::Deadline(LaneDeadlineRow::record_scan_unordered(row)?)),
+            5 => Ok(Self::Probe(TaskProbeRow::record_scan_unordered(row)?)),
+            _ => Err(db::sqlx::Error::Protocol(
+                "invalid task turn row discriminator".into(),
+            )),
+        }
+    }
+}
+
+impl DbTaskStore {
+    /// Returns one deterministic page using the existing count/read query pair.
+    pub(super) async fn list_tasks_impl(
+        &self,
+        filter: TaskFilter,
+    ) -> Result<crate::routes::Page<TaskRecord>, TaskRuntimeError> {
+        let table = Self::table();
+        let mut pool = self.pool.clone();
+        let page = apply_filter(db::from(&table), &table, &filter)
+            .sort(table.created_at.desc())
+            .sort(table.id.desc())
+            .page::<TaskRow, _>(
+                db::Pagination {
+                    page_num: filter.page,
+                    page_size: filter.per_page,
+                },
+                &mut pool,
+            )
+            .await?;
+        Ok(crate::routes::Page::new(
+            Self::into_records(page.items)?,
+            page.total,
+            page.page,
+            page.per_page,
+        ))
+    }
+}

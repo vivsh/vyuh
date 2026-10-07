@@ -14,7 +14,7 @@ use crate::{
 use super::{Flow, FlowArguments, FlowCallable, FlowContext, FlowError, FlowReturn};
 
 pub(super) type DispatcherScratch = HashMap<TypeId, Arc<dyn Any + Send + Sync>>;
-pub(super) type BuiltFlow = (Callable<FlowContext, crate::Error>, String);
+pub(super) type BuiltFlow = Callable<FlowContext, crate::Error>;
 pub(super) type BuildFlow =
     Arc<dyn Fn(&PartialSite, &mut DispatcherScratch) -> Result<BuiltFlow, FlowError> + Send + Sync>;
 
@@ -40,7 +40,6 @@ pub(super) fn deferred<I, H, Args, E, M>(
     factory: H,
     build: fn(&PartialSite) -> Result<E, FlowError>,
     limit: usize,
-    revision: &'static str,
 ) -> BuildFlow
 where
     I: DataValue,
@@ -50,24 +49,14 @@ where
     E: Send + Sync + 'static,
 {
     Arc::new(move |site, scratch| {
-        if !(1..=10_000).contains(&limit) || revision.is_empty() {
-            return Err(FlowError::fail(
-                "Invalid Flow instruction limit or revision",
-            ));
+        if !(1..=10_000).contains(&limit) {
+            return Err(FlowError::fail("Invalid Flow instruction limit"));
         }
         let dispatcher = shared_dispatcher(site, scratch, build)?;
         let definition = factory
             .invoke(Args::build(site))
             .prepare(dispatcher, limit)?;
-        let compatibility = serde_json::to_string(&(
-            "flow-factory-v1",
-            definition.compatibility(),
-            std::any::type_name::<E>(),
-            revision,
-            limit,
-        ))
-        .map_err(|_| FlowError::fail("Invalid Flow compatibility metadata"))?;
-        Ok((executable::<_, H>(definition), compatibility))
+        Ok(executable::<_, H>(definition))
     })
 }
 

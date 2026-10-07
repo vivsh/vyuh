@@ -97,10 +97,6 @@ impl<I: DataValue, O: DataValue, E: PravahDispatcher> Flow for PreparedPravah<I,
         deliver(&mut runtime, resume)?;
         self.drive(runtime)
     }
-
-    fn compatibility(&self) -> String {
-        self.compiled.prepared().fingerprint().to_string()
-    }
 }
 
 impl<I: DataValue, O: DataValue, E: PravahDispatcher> PreparedPravah<I, O, E> {
@@ -204,7 +200,3 @@ fn requires_fetch(graph: &pravah::graph::UntypedGraph) -> bool {
 #[cfg(test)]
 #[path = "tests/pravah_flow.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "tests/pravah_dispatch.rs"]
-pub(crate) mod dispatch_tests;

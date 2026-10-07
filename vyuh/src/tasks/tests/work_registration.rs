@@ -1,8 +1,5 @@
 use super::*;
-use crate::tasks::{
-    Batch, TaskIdempotency, TaskKind, TaskLane, TaskLaneConf,
-    store::{MemoryTaskStore, policy_fingerprint},
-};
+use crate::tasks::{Batch, TaskIdempotency, TaskKind, TaskLane, TaskLaneConf};
 use crate::{Data, bundles};
 
 const LANE: TaskLane = TaskLane::new("legacy-lane");
@@ -101,12 +98,10 @@ fn compare(
             Some(name)
         );
     }
-    let store = Arc::new(MemoryTaskStore::new(32));
-    let left = left.dispatcher(store.clone(), Vec::new()).store_conf()?;
-    let right = right.dispatcher(store, Vec::new()).store_conf()?;
+    let left = left.store_conf()?;
+    let right = right.store_conf()?;
     assert_eq!(left.handlers, vec![(name.to_string(), TaskKind::Work)]);
     assert_eq!(left.handlers, right.handlers);
     assert_eq!(left.idempotency, right.idempotency);
-    assert_eq!(policy_fingerprint(&left), policy_fingerprint(&right));
     Ok(())
 }

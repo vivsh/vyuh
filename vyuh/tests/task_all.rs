@@ -52,7 +52,10 @@ impl Flow for GroupFlow {
 /// Macro and direct registration both support zero/full fan-out even with one-row flushes.
 #[tokio::test]
 async fn all_registration_parity() -> Result<(), TestError> {
-    for direct in [false, true] {
+    for (direct, db_concurrency) in [false, true]
+        .into_iter()
+        .flat_map(|direct| [1, 2, 4].map(|limit| (direct, limit)))
+    {
         let bundle = if direct {
             bundles::bundle([
                 bundles::work(item, TaskDefinition::new("item").lane(WORK)),
@@ -64,6 +67,7 @@ async fn all_registration_parity() -> Result<(), TestError> {
         let site = vyuh::Site::build(
             vyuh::SiteConf::default().log_init(false).tasks(
                 TaskConf::default()
+                    .db_concurrency(db_concurrency)
                     .batch_size(1)
                     .lane(vyuh::tasks::TaskLaneConf::new(WORK, 8))
                     .max_all_children(32)

@@ -13,8 +13,6 @@ mod handler;
 mod handler_error;
 mod health;
 mod lane_lock;
-#[cfg(test)]
-mod lane_lock_tests;
 mod metrics;
 mod models;
 #[cfg(feature = "pravah")]
@@ -27,8 +25,6 @@ mod returns;
 mod runner;
 mod state;
 pub(crate) mod store;
-#[cfg(test)]
-mod store_tests;
 mod submission;
 
 #[doc(hidden)]
@@ -63,9 +59,9 @@ pub use state::WorkState;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 pub(crate) use store::MemoryTaskStore;
 pub(crate) use store::{
-    AbstractTaskStore, LaneClaim, LaneHookAction, LaneHookResult, LaneOwnerPhase, LaneOwnerPoll,
-    LaneOwnerRequest, LanePoll, ScheduledTaskWrite, TaskCommit, TaskLease, TaskPoll,
-    TaskScheduleConf, TaskScheduleSnapshot, TaskStoreConf, TaskTick,
+    AbstractTaskStore, CommitResult, LaneClaim, LaneHookAction, LaneHookResult, LaneOwnerPhase,
+    LaneOwnerPoll, LaneOwnerRequest, LanePoll, ScheduledTaskWrite, TaskCommit, TaskPoll,
+    TaskScheduleConf, TaskScheduleSnapshot, TaskStoreConf,
 };
 pub(crate) use submission::TaskWrite;
 pub use submission::{TaskOptions, TaskReceipt};

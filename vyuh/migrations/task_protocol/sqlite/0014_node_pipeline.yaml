@@ -1,0 +1,65 @@
+# Offline breaking upgrade; requires the acknowledged task reset first.
+dependencies: [0013_reset_tasks]
+atomic: true
+operations:
+  - type: create_table
+    table:
+      name: vyuh_task_nodes
+      columns:
+        - {name: id, type: blob, primary_key: true}
+        - {name: started_at, type: text}
+        - {name: heartbeat_at, type: text}
+  - type: drop_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_lane_running_lease
+      columns: [lane_name, status, leased_until, id]
+      unique: false
+      predicate: "status = 1"
+  - type: drop_column
+    table_name: vyuh_tasks
+    column: {name: locked_by, type: text, nullable: true}
+  - type: drop_column
+    table_name: vyuh_tasks
+    column: {name: leased_until, type: text, nullable: true}
+  - type: drop_column
+    table_name: vyuh_tasks
+    column: {name: lease_duration_ms, type: bigint, nullable: true}
+  - type: add_column
+    table_name: vyuh_tasks
+    column: {name: node_id, type: blob, nullable: true}
+  - type: add_index
+    table_name: vyuh_tasks
+    index: {name: idx_vyuh_tasks_node, columns: [node_id], unique: false}
+  - type: add_foreign_key
+    table_name: vyuh_tasks
+    foreign_key:
+      name: fk_vyuh_tasks_node
+      columns: [node_id]
+      to_table: vyuh_task_nodes
+      to_columns: [id]
+      on_delete: set_null
+  - type: drop_column
+    table_name: vyuh_task_lane_rates
+    column: {name: policy_fingerprint, type: 'varchar(64)'}
+  - type: drop_table
+    table:
+      name: vyuh_task_runtime
+      columns:
+        - {name: id, type: blob, primary_key: true}
+        - {name: policy_fingerprint, type: 'varchar(64)'}
+        - {name: updated_at, type: text}
+  - type: drop_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_lane_pending_ready
+      columns: [lane_name, status, ready_at, created_at, id]
+      unique: false
+      predicate: "status = 0"
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_lane_pending_ready
+      columns: [lane_name, status, ready_at, created_at, id]
+      unique: false
+      predicate: "node_id IS NULL AND status IN (0, 1)"

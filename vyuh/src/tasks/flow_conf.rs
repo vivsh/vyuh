@@ -9,7 +9,6 @@ pub struct FlowConf<I, E = ()> {
     pub(super) definition: TaskDefinition<I>,
     pub(super) build_dispatcher: fn(&PartialSite) -> Result<E, FlowError>,
     pub(super) step_limit: usize,
-    pub(super) revision: &'static str,
 }
 
 impl<I: DataValue> FlowConf<I> {
@@ -19,7 +18,6 @@ impl<I: DataValue> FlowConf<I> {
             definition: TaskDefinition::new(name),
             build_dispatcher: |_| Ok(()),
             step_limit: 256,
-            revision: "1",
         }
     }
 }
@@ -43,12 +41,6 @@ impl<I: DataValue, E> FlowConf<I, E> {
         self
     }
 
-    /// Identifies replay-relevant application code/configuration changes.
-    pub fn revision(mut self, revision: &'static str) -> Self {
-        self.revision = revision;
-        self
-    }
-
     /// Selects a shared request dispatcher, constructed once per type and site.
     #[cfg(feature = "pravah")]
     pub fn dispatch<P: super::PravahDispatcher>(self) -> FlowConf<I, P> {
@@ -56,7 +48,6 @@ impl<I: DataValue, E> FlowConf<I, E> {
             definition: self.definition,
             build_dispatcher: P::build,
             step_limit: self.step_limit,
-            revision: self.revision,
         }
     }
 }
