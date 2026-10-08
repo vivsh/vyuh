@@ -316,7 +316,7 @@ cargo run -p vyuh --features postgres --example signals_emitters
 
 ## Best Practices
 
-- Return stable data structs and handle the real work in signal handlers.
+- Return stable data structs and handle the real work in the selected signal or task handler.
 - Keep emitter handlers small; use them to produce events, not durable work.
 - Return `vyuh::Error` for application failures; keep `EmitterError` for
   emitter registration and source machinery.
@@ -326,7 +326,10 @@ cargo run -p vyuh --features postgres --example signals_emitters
 
 ## Current Limitations
 
-- Emitters are in-process only.
-- Cron and periodic ticks are not persisted or replayed.
+- Producers run in-process; signal delivery is not a durable or distributed bus.
+- Signal-targeted cron and periodic ticks are not persisted or replayed.
+  Task-targeted schedules persist cursor advancement and task creation, but
+  coalesce missed occurrences rather than replaying every missed tick.
 - PgNotify is Postgres-only.
-- The public v0 target is signals.
+- Durable task execution is supported for cron and periodic producers; PgNotify
+  remains a signal source.

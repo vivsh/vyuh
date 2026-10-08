@@ -71,7 +71,13 @@ table. A safe release order is:
 1. Build and inspect the intended migration plan in a staging copy.
 2. Apply the migration through the deployment job.
 3. Verify schema/status through the migration command.
-4. Start or roll the application workers only after the migration succeeds.
+4. Start the application workers only after the migration succeeds. Roll workers
+   only when that upgrade explicitly supports overlapping versions.
+
+The node-owned task runtime requires an [offline, destructive upgrade](tasks.md#upgrading-existing-task-stores)
+from the old lease-owned schema. Stop workers and writers first; the reset deletes
+old tasks and their results. Ordinary schema diff generation is not a substitute
+for that coordinated reset.
 
 For an existing task table, inspect the live schema first. Use the migration
 engine's baseline/fake operation only after an operator has reviewed and
@@ -80,12 +86,20 @@ never silently stamp a production schema during startup.
 
 ## Cluster responsibilities
 
-PostgreSQL task workers coordinate claims through the durable task table and
-leases. Task handlers must still be idempotent: a worker can lose a lease after
-performing an external side effect, so Vyuh does not promise exactly-once
-execution.
+Task workers use fresh node identities and fenced claims. In the default
+`TaskMode::Clustered`, heartbeats retire stale nodes and ordinary claims recover
+their abandoned tasks. All peers must use the same heartbeat interval.
+`TaskMode::Standalone` skips periodic heartbeat work but requires deployment-enforced
+exclusivity, including during restarts; select it explicitly for a single-runner
+SQLite deployment. Backend selection does not select the task mode.
 
-Vyuh does not provide a framework-local rate limiter. Enforce rate limits at a
+Task handlers must still be idempotent: an isolated or crashed worker may have
+performed an external effect before its output committed. Cancellation prevents
+later outputs from changing the cancelled row but never interrupts a running
+handler. Vyuh does not promise exactly-once effects. See [task recovery and health](tasks.md#runtime-health)
+for watchdog, readiness, and shutdown behavior.
+
+Vyuh does not provide a general HTTP rate limiter. Enforce HTTP rate limits at a
 reverse proxy or API gateway, or install application middleware backed by a
 shared store when a cluster-wide limit is required. Terminate TLS at the
 application or trusted proxy, forward only validated proxy headers, and set
@@ -93,7 +107,9 @@ host/firewall policy outside the framework.
 
 Signals, channels, and periodic emitters are in-process runtime facilities.
 They do not become a distributed event bus merely by running multiple Vyuh
-replicas. Use a shared external transport when delivery must cross processes.
+replicas. Task-targeted cron/periodic emitters are different: their schedule cursor
+and task insertion commit atomically, with coalesced catch-up after restart.
+Use a shared external transport when event delivery must cross processes.
 
 ## 0.3 compatibility note
 

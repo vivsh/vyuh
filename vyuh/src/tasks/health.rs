@@ -101,7 +101,7 @@ impl TaskHealth {
         self.inner.lock().state = TaskHealthState::Unhealthy;
     }
 
-    /// Records one successful scheduler-store turn.
+    /// Records initialization or a database acknowledgement with no unresolved recovery.
     pub(crate) fn succeeded(&self) {
         let mut inner = self.inner.lock();
         inner.state = TaskHealthState::Healthy;
@@ -110,7 +110,7 @@ impl TaskHealth {
         inner.last_failure = None;
     }
 
-    /// Records one failed scheduler-store turn without preserving error text.
+    /// Records one failed runner database operation without preserving error text.
     pub(crate) fn store_failed(&self) {
         self.failed(TaskFailureClass::Store);
     }

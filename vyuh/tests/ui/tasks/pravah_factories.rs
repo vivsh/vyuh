@@ -6,7 +6,7 @@ type Root = pravah::Flow<Job>;
 struct Dispatcher;
 impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> { Ok(Self) }
-    fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> { Err(FlowError::MissingDispatcher) }
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> { Err(FlowError::MissingDispatcher) }
 }
 #[bundles::flow(dispatch = Dispatcher)]
 fn qualified(_: vyuh::PartialSite, root: Root) -> vyuh::pravah::Flow<u32> {

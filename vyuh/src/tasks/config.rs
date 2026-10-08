@@ -371,9 +371,11 @@ impl TaskConf {
         self
     }
 
-    /// Sets clustered heartbeat cadence independently of polling; unused in standalone mode.
+    /// Sets clustered heartbeat cadence independently of polling.
     /// Finalization rejects intervals outside one millisecond through seven days.
     /// Peers older than six intervals are retired; clustered runners must share this setting.
+    /// Six intervals also bound database-contact loss in both modes while operations remain
+    /// outstanding. Standalone performs no periodic heartbeat or peer retirement queries.
     pub const fn heartbeat_interval(mut self, interval: Duration) -> Self {
         self.heartbeat_interval = interval;
         self

@@ -280,7 +280,8 @@ Console never exposes env vars, secrets, JWT keys, API keys, cookies, full
 database URLs, or raw configuration.
 
 It also reports the task runtime's safe health state, consecutive store-failure
-count, last successful scheduler tick, and failure class. Native task error
+count, last healthy database acknowledgement, and failure class. A successful
+heartbeat does not clear health failures for unresolved task operations. Native task error
 chains remain in structured logs and are never retained by the console.
 
 Status is cached in-process for `ConsoleConf.status_cache_ttl_seconds`, default

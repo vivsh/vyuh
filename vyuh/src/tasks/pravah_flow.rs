@@ -57,7 +57,8 @@ impl<I: DataValue, O: DataValue, E: PravahDispatcher> IntoFlow<I, E>
         if !(1..=10_000).contains(&step_limit) {
             return Err(protocol("Invalid Flow instruction limit"));
         }
-        if TypeId::of::<E>() == TypeId::of::<()>() && requires_fetch(self.graph()) {
+        if TypeId::of::<E>() == TypeId::of::<()>() && requires_agent(self.graph(), self.registry())
+        {
             return Err(FlowError::MissingDispatcher);
         }
         Ok(PreparedPravah {
@@ -83,11 +84,15 @@ impl<I: DataValue, O: DataValue, E: PravahDispatcher> Flow for PreparedPravah<I,
         let (snapshot, resume) = continuation.into_parts();
         let mut runtime = match snapshot {
             Some(snapshot) => self.compiled.restore(snapshot),
-            None if resume.is_none() => self.compiled.prepared().start(
-                pravah::graph::to_value(input.as_ref())
-                    .map_err(|_| protocol("Invalid graph input"))?,
-                task_id.into_uuid(),
-            ),
+            None if resume.is_none() => self
+                .compiled
+                .prepared()
+                .start(
+                    pravah::graph::to_value(input.as_ref())
+                        .map_err(|_| protocol("Invalid graph input"))?,
+                    task_id.into_uuid(),
+                )
+                .and_then(|runtime| runtime.with_history(self.dispatcher.history_policy())),
             None => return Err(protocol("Resume input without graph checkpoint")),
         }
         .map_err(|_| protocol("Invalid graph checkpoint or input"))?;
@@ -115,8 +120,8 @@ impl<I: DataValue, O: DataValue, E: PravahDispatcher> PreparedPravah<I, O, E> {
                             .map_err(|_| protocol("Invalid graph output"))?,
                     ));
                 }
-                pravah::Step::Fetch(fetch) => {
-                    let request = self.dispatcher.fetch(&fetch)?;
+                pravah::Step::Agent(agent) => {
+                    let request = self.dispatcher.agent(&agent)?;
                     return Ok(FlowState::work(request, snapshot(&runtime)?)?);
                 }
                 pravah::Step::Suspend(_) => {
@@ -140,20 +145,20 @@ fn deliver(
     runtime: &mut pravah::Runtime,
     resume: Option<Result<serde_json::Value, super::TaskFailure>>,
 ) -> Result<(), FlowError> {
-    let waiting = runtime.pending_fetch().is_some() || runtime.suspension().is_some();
+    let waiting = runtime.pending_agent().is_some() || runtime.suspension().is_some();
     match (waiting, resume) {
         (false, None) => Ok(()),
         (true, Some(result)) => {
-            if let Some(fetch) = runtime.pending_fetch() {
-                let id = fetch.id();
+            if let Some(agent) = runtime.pending_agent() {
+                let id = agent.id();
                 let response = match result {
-                    Ok(value) => Ok(serde_json::from_value(value)
-                        .map_err(|_| protocol("Work output is not a FetchResponse"))?),
-                    Err(failure) => Err(fetch_failure(failure)?),
+                    Ok(value) => serde_json::from_value(value)
+                        .map_err(|_| protocol("Work output is not an AgentResponse"))?,
+                    Err(failure) => pravah::AgentResponse::new(id, Err(agent_failure(failure)?)),
                 };
                 runtime
-                    .resume_fetch(id, response)
-                    .map_err(|_| protocol("Invalid Fetch response"))
+                    .resume_agent(response)
+                    .map_err(|_| protocol("Invalid Agent response"))
             } else {
                 runtime
                     .resume(result?)
@@ -175,8 +180,8 @@ fn protocol(message: &'static str) -> FlowError {
 }
 
 /// Maps only the outer durable task failure; application domain values remain untouched.
-fn fetch_failure(failure: super::TaskFailure) -> Result<pravah::FetchError, FlowError> {
-    let mut error = pravah::FetchError::new("vyuh_task_failure", failure.message());
+fn agent_failure(failure: super::TaskFailure) -> Result<pravah::AgentError, FlowError> {
+    let mut error = pravah::AgentError::new("vyuh_task_failure", failure.message());
     if let Some(id) = failure.task_id() {
         let details = pravah::graph::to_value(serde_json::json!({ "task_id": id }))
             .map_err(|_| protocol("Invalid task failure identity"))?;
@@ -186,13 +191,20 @@ fn fetch_failure(failure: super::TaskFailure) -> Result<pravah::FetchError, Flow
 }
 
 /// Checks static nested graph declarations once, never during task advancement.
-fn requires_fetch(graph: &pravah::graph::UntypedGraph) -> bool {
+fn requires_agent(
+    graph: &pravah::graph::UntypedGraph,
+    registry: &pravah::graph::HandlerRegistry,
+) -> bool {
     use pravah::graph::NodeKind;
     graph.nodes.iter().any(|node| match &node.kind {
-        NodeKind::Fetch => true,
-        NodeKind::Subflow { graph } | NodeKind::Each { graph } => requires_fetch(graph),
-        NodeKind::Either { left, right, .. } => requires_fetch(left) || requires_fetch(right),
-        NodeKind::Continuation { children, .. } => children.iter().any(requires_fetch),
+        NodeKind::Subflow { graph } | NodeKind::Each { graph } => requires_agent(graph, registry),
+        NodeKind::Either { left, right, .. } => {
+            requires_agent(left, registry) || requires_agent(right, registry)
+        }
+        NodeKind::Continuation { key, children, .. } => {
+            registry.has_agent(key.as_str())
+                || children.iter().any(|child| requires_agent(child, registry))
+        }
         _ => false,
     })
 }

@@ -315,8 +315,12 @@ The `vyuh` crate is organized around these subsystems:
   immutable graph, shared dispatcher, and instruction budget. Each invocation
   owns a temporary VM; snapshots live exclusively in task continuations. Dispatchers
   select registered Work payloads without performing effects or transforming
-  results. Fetch success decodes directly to FetchResponse; terminal failure maps
-  to the fixed `vyuh_task_failure` FetchError. Suspension failures terminate the
+  results. Agent Work returns the complete AgentResponse, preserving partial
+  history/compaction acknowledgements even on an inner AgentError. Terminal Work
+  failure maps to an AgentResponse with the fixed `vyuh_task_failure` AgentError.
+  The dispatcher's history policy initializes fresh executions only; restored
+  snapshots own their saved policy. History I/O runs in Work through an explicitly
+  configured executor, never inside synchronous advancement. Suspension failures terminate the
   parent; successful domain values remain unchanged. Pure instruction-budget
   exhaustion returns ordinary zero-delay sleep. No VM cache, implicit executor,
   per-instruction persistence, new table or scheduling loop is introduced.
@@ -366,7 +370,7 @@ The `vyuh` crate is organized around these subsystems:
   per-site protocol concern and never consumes an application cache provider.
 - `observability` owns configured liveness/readiness probes and bounded-label
   Prometheus HTTP metrics. Task readiness is derived from per-site task runtime
-  state updated by initialization and existing scheduler ticks, never by an
+  state updated by initialization and runner database acknowledgements, never by an
   additional task-store probe. Deployment policy is supplied through `SiteConf`,
   not inferred from a host environment.
 - `commands` provides typed command registration and command dispatch through a
@@ -412,7 +416,7 @@ The `vyuh` crate is organized around these subsystems:
   assets.
 - Persistent task stores use Mool models, typed query scopes, batched writes,
   transactions, and backend lock extensions. Vyuh owns lane scheduling,
-  leases, idempotency ownership, durable token buckets, and database-relative
+  node ownership, lane leases, idempotency ownership, durable token buckets, and database-relative
   wake deadlines; Mool owns database execution. There is no store-wide
   deployment fingerprint or policy-row lock. Task schemas are
   migration-owned and are never created or altered during site startup. Store

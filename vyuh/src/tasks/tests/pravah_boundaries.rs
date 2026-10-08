@@ -159,7 +159,7 @@ fn reject_different_graph(snapshot: pravah::Snapshot, id: TaskId) -> Result<(), 
     Ok(())
 }
 
-/// A valid snapshot from another task cannot reuse its Fetch execution namespace.
+/// A valid snapshot from another task cannot reuse its Agent execution namespace.
 #[test]
 fn foreign_task_snapshot_rejected() -> Result<(), String> {
     let compiled = pravah::compile(|root: pravah::Flow<u32>| root.suspend::<u32>())
@@ -210,8 +210,8 @@ fn completion_envelope_limit() -> Result<(), String> {
 
 /// Missing dispatch are rejected inside nested static graphs, not only at the top level.
 #[test]
-fn nested_fetch_requires_dispatch() -> Result<(), String> {
-    let compiled = pravah::compile(|root: pravah::Flow<Vec<u32>>| root.each(fetch_graph))
+fn nested_agent_requires_dispatch() -> Result<(), String> {
+    let compiled = pravah::compile(|root: pravah::Flow<Vec<u32>>| root.each(agent_graph))
         .map_err(|e| e.to_string())?;
     assert!(matches!(
         compiled.into_flow(Arc::new(()), 256),
@@ -222,17 +222,17 @@ fn nested_fetch_requires_dispatch() -> Result<(), String> {
 
 /// Every graph-bearing node is inspected, including both Either branches and continuations.
 #[test]
-fn static_fetch_node_variants() -> Result<(), String> {
+fn static_agent_node_variants() -> Result<(), String> {
     use pravah::graph::NodeKind;
     let pure =
         pravah::compile(|root: pravah::Flow<u32>| root.map(|v| v)).map_err(|e| e.to_string())?;
-    let fetch = pravah::compile(fetch_graph).map_err(|e| e.to_string())?;
+    let agent = pravah::compile(agent_graph).map_err(|e| e.to_string())?;
     let mut graph = pure.graph().clone();
-    let NodeKind::PureHandler { key } = &graph.nodes[0].kind else {
+    let NodeKind::PureHandler { key } = &graph.nodes.first().ok_or("missing node")?.kind else {
         return Err("missing pure handler fixture".into());
     };
     let key = key.clone();
-    let child = Box::new(fetch.graph().clone());
+    let child = Box::new(agent.graph().clone());
     for kind in [
         NodeKind::Subflow {
             graph: child.clone(),
@@ -253,62 +253,24 @@ fn static_fetch_node_variants() -> Result<(), String> {
         NodeKind::Continuation {
             key,
             payload: pravah::graph::to_value(()).map_err(|e| e.to_string())?,
-            children: vec![pure.graph().clone(), fetch.graph().clone()],
+            children: vec![pure.graph().clone(), agent.graph().clone()],
         },
     ] {
-        graph.nodes[0].kind = kind;
-        assert!(requires_fetch(&graph));
+        graph.nodes.first_mut().ok_or("missing node")?.kind = kind;
+        assert!(requires_agent(&graph, agent.registry()));
     }
-    assert!(!requires_fetch(pure.graph()));
+    assert!(!requires_agent(pure.graph(), pure.registry()));
     Ok(())
 }
 
-#[derive(Default)]
-struct DynamicFetch;
-impl pravah::graph::ContinuationHandler for DynamicFetch {
-    fn start(
-        &self,
-        _: &pravah::graph::Value,
-        _: Option<pravah::graph::Value>,
-        _: Vec<pravah::graph::Value>,
-        _: pravah::graph::ContinuationContext<'_>,
-    ) -> Result<pravah::graph::ContinuationTransition, pravah::GraphError> {
-        Ok(pravah::graph::ContinuationTransition {
-            fetch: Some(FetchRequest::new("GET", "https://example.invalid")),
-            checkpoint: Some(
-                pravah::graph::to_value(())
-                    .map_err(|e| pravah::GraphError::GraphValidation(e.to_string()))?,
-            ),
-            ..Default::default()
-        })
-    }
-    fn advance(
-        &self,
-        _: &pravah::graph::Value,
-        _: pravah::graph::Value,
-        _: pravah::graph::ContinuationEvent,
-        _: pravah::graph::ContinuationContext<'_>,
-    ) -> Result<pravah::graph::ContinuationTransition, pravah::GraphError> {
-        Ok(pravah::graph::ContinuationTransition {
-            outputs: vec![
-                pravah::graph::to_value(1u32)
-                    .map_err(|e| pravah::GraphError::GraphValidation(e.to_string()))?,
-            ],
-            ..Default::default()
-        })
-    }
-}
-
-/// A dynamic Fetch can pass static checks but must explicitly fail at runtime without policy.
+/// Runtime dispatch still fails safely if a definition bypasses registration preflight.
 #[test]
-fn dynamic_fetch_missing_dispatch() -> Result<(), String> {
-    let builder = pravah::graph::TypedGraphBuilder::<u32>::new();
-    let output = builder.continuation::<u32, u32, DynamicFetch, ()>(builder.root(), ());
-    let prepared = builder
-        .finish(output)
-        .map_err(|e| e.to_string())?
-        .into_flow(Arc::new(()), 256)
-        .map_err(|e| e.to_string())?;
+fn runtime_missing_dispatch() -> Result<(), String> {
+    let prepared = PreparedPravah {
+        compiled: pravah::compile(agent_graph).map_err(|e| e.to_string())?,
+        dispatcher: Arc::new(()),
+        step_limit: 256,
+    };
     assert!(matches!(
         prepared.advance(
             TaskId::new(uuid::Uuid::now_v7()),
@@ -317,5 +279,92 @@ fn dynamic_fetch_missing_dispatch() -> Result<(), String> {
         ),
         Err(FlowError::MissingDispatcher)
     ));
+    Ok(())
+}
+
+struct HistoryDispatcher(std::sync::atomic::AtomicUsize);
+impl PravahDispatcher for HistoryDispatcher {
+    fn build(_: &PartialSite) -> Result<Self, FlowError> {
+        Ok(Self(std::sync::atomic::AtomicUsize::new(0)))
+    }
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<crate::tasks::WorkRequest, FlowError> {
+        Err(FlowError::MissingDispatcher)
+    }
+    fn history_policy(&self) -> pravah::HistoryPolicy {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        pravah::HistoryPolicy {
+            persist: true,
+            load: true,
+            compact: true,
+        }
+    }
+}
+
+/// Only fresh execution reads dispatch policy; restoration retains the exact durable flags.
+#[test]
+fn history_policy_is_checkpointed() -> Result<(), String> {
+    let dispatcher = Arc::new(HistoryDispatcher(std::sync::atomic::AtomicUsize::new(0)));
+    let prepared = pravah::compile(|root: pravah::Flow<u32>| root.map(|v| v + 1).map(|v| v * 2))
+        .map_err(|e| e.to_string())?
+        .into_flow(dispatcher.clone(), 1)
+        .map_err(|e| e.to_string())?;
+    let id = TaskId::new(uuid::Uuid::now_v7());
+    let first = outcome(
+        prepared
+            .advance(id, Data(Arc::new(3)), continuation(None, None)?)
+            .map_err(|e| e.to_string())?,
+    )?;
+    let TaskOutcome::Sleep { state, .. } = first.as_ref() else {
+        return Err("missing yield".into());
+    };
+    let snapshot: pravah::Snapshot = serde_json::from_str(state).map_err(|e| e.to_string())?;
+    let restored = prepared
+        .compiled
+        .restore(snapshot.clone())
+        .map_err(|e| e.to_string())?;
+    assert_eq!(
+        restored.history_policy(),
+        &pravah::HistoryPolicy {
+            persist: true,
+            load: true,
+            compact: true
+        }
+    );
+    let next = prepared
+        .advance(id, Data(Arc::new(3)), continuation(Some(snapshot), None)?)
+        .map_err(|e| e.to_string())?;
+    assert!(matches!(
+        outcome(next)?.as_ref(),
+        TaskOutcome::CompleteWith { .. }
+    ));
+    assert_eq!(dispatcher.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(().history_policy(), pravah::HistoryPolicy::default());
+    Ok(())
+}
+
+/// A legacy snapshot fails closed rather than having its version rewritten during restore.
+#[test]
+fn old_snapshot_version_rejected() -> Result<(), String> {
+    let compiled = pravah::compile(|root: pravah::Flow<u32>| root.suspend::<u32>())
+        .map_err(|e| e.to_string())?;
+    let id = uuid::Uuid::now_v7();
+    let mut runtime = compiled.start(3, id).map_err(|e| e.to_string())?;
+    runtime.next().map_err(|e| e.to_string())?;
+    let mut value = serde_json::to_value(runtime.snapshot().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    *value.get_mut("snapshot_version").ok_or("missing version")? = serde_json::json!(12);
+    let snapshot = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    let prepared = compiled
+        .into_flow(Arc::new(()), 256)
+        .map_err(|e| e.to_string())?;
+    assert!(
+        prepared
+            .advance(
+                TaskId::new(id),
+                Data(Arc::new(3)),
+                continuation(Some(snapshot), Some(Ok(serde_json::json!(4))))?
+            )
+            .is_err()
+    );
     Ok(())
 }

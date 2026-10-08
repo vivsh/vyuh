@@ -17,12 +17,20 @@ pub trait PravahDispatcher: Send + Sync + 'static {
     where
         Self: Sized;
 
-    /// Selects registered Work which successfully returns `pravah::FetchResponse`.
-    fn fetch(&self, request: &pravah::Fetch) -> Result<WorkRequest, FlowError>;
+    /// Selects Work returning the complete `pravah::AgentResponse`, including stage
+    /// acknowledgements even when its agent outcome is a failure. Routing performs no effects.
+    fn agent(&self, request: &pravah::AgentRequest) -> Result<WorkRequest, FlowError>;
 
     /// Selects Work returning the declared resume value, or ordinary external waiting.
     fn suspend(&self, _: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
         Ok(None)
+    }
+
+    /// Selects history maintenance for new executions; all flags default to off.
+    /// Restored executions retain their checkpointed policy. Work services must supply
+    /// the requested store/compactor; this method must be deterministic and non-blocking.
+    fn history_policy(&self) -> pravah::HistoryPolicy {
+        pravah::HistoryPolicy::default()
     }
 }
 
@@ -31,7 +39,7 @@ impl PravahDispatcher for () {
         Ok(())
     }
 
-    fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
         Err(FlowError::MissingDispatcher)
     }
 }

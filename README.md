@@ -102,7 +102,9 @@ without binding a port, with auth helpers and isolated database fixtures.
 Database-backed tasks atomically commit checkpoints with child creation, and
 child results with parent readiness. Execution resumes through later claims.
 It is **at least once**: external effects need idempotency, and cancellation
-cannot undo them. Signals, live replay, and service workers remain process-local;
+does not interrupt running handlers or undo their effects. Clustered workers
+recover abandoned tasks through node heartbeats; standalone deployment requires
+a single runner. Signals, live replay, and service workers remain process-local;
 they do not inherit task durability.
 
 ## Try it

@@ -13,11 +13,7 @@ use vyuh::{PartialSite, pravah, prelude::*};
 struct Input(u32);
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
-struct FetchJob {
-    #[schemars(with = "String")]
-    id: uuid::Uuid,
-    request: pravah::FetchRequest,
-}
+struct ExternalJob(u32);
 
 struct Dispatcher;
 
@@ -30,7 +26,7 @@ impl PravahDispatcher for ApprovalDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
-    fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
         Err(FlowError::MissingDispatcher)
     }
     fn suspend(&self, request: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
@@ -53,36 +49,27 @@ impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
-    fn fetch(&self, fetch: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        Ok(WorkRequest::new(FetchJob {
-            id: fetch.id(),
-            request: fetch.request().clone(),
-        }))
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
+        Err(FlowError::MissingDispatcher)
+    }
+    fn suspend(&self, request: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
+        let input: Input = pravah::graph::from_value(request.payload().clone())
+            .map_err(|_| FlowError::fail("Invalid test input"))?;
+        Ok(Some(WorkRequest::new(ExternalJob(input.0))))
     }
 }
 
 #[bundles::work]
-async fn fetch(input: Data<FetchJob>) -> Result<pravah::FetchResponse, WorkError> {
-    if input.request.method() == "FAIL" {
+async fn external_work(input: Data<ExternalJob>) -> Result<u32, WorkError> {
+    if input.as_ref().0 == 0 {
         return Err(WorkError::fail("Safe provider failure"));
     }
-    Ok(pravah::FetchResponse::new(201))
+    Ok(201)
 }
 
 #[bundles::flow(dispatch = Dispatcher)]
-fn fetching(root: pravah::Flow<Input>) -> pravah::Flow<u32> {
-    root.map(|input: Input| {
-        pravah::FetchRequest::new(
-            if input.0 == 0 { "FAIL" } else { "GET" },
-            "https://example.invalid",
-        )
-    })
-    .fetch()
-    .map(|response| match response {
-        Ok(response) => u32::from(response.status()),
-        Err(error) if error.code() == "vyuh_task_failure" => 499,
-        Err(_) => 500,
-    })
+fn working(root: pravah::Flow<Input>) -> pravah::Flow<u32> {
+    root.suspend::<u32>()
 }
 
 #[bundles::flow]
@@ -96,22 +83,24 @@ fn pure(root: pravah::Flow<Input>) -> pravah::Flow<u32> {
         .map(|value| value * 2)
 }
 
-/// Fetch success and terminal child failures take the same later-poll result boundary.
+/// Typed suspension success and terminal child failures use the later-poll result boundary.
 #[tokio::test]
-async fn fetch_result_delivery() -> Result<(), TestError> {
+async fn work_result_delivery() -> Result<(), TestError> {
     let site = site(bundles::bundle([
-        __bundle_part_fetching(),
-        __bundle_part_fetch(),
+        __bundle_part_working(),
+        __bundle_part_external_work(),
     ]))
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    for (input, expected) in [(1, 201), (0, 499)] {
+    for input in [1, 0] {
         let id = site.tasks().submit(Input(input)).await?.id();
-        assert_eq!(
-            terminal(&site, id).await?.last_result::<u32>()?,
-            Some(Ok(expected))
-        );
+        let result = terminal(&site, id).await?.last_result::<u32>()?;
+        if input == 0 {
+            assert!(matches!(result, Some(Err(_))));
+        } else {
+            assert_eq!(result, Some(Ok(201)));
+        }
     }
     runtime.shutdown_and_wait().await;
     Ok(())
@@ -163,11 +152,21 @@ async fn budget_yields() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Static Fetch requirements fail site construction when no routing policy was selected.
+/// Static Agent requirements fail site construction when no routing policy was selected.
 #[tokio::test]
 async fn missing_dispatch_rejected() {
     let result = site(bundles::bundle([bundles::flow(
-        fetching,
+        |root: pravah::Flow<Input>| -> pravah::Flow<u32> {
+            root.agent(|agent| {
+                agent.configure(|_: Input, _: pravah::Context| async {
+                    Ok::<_, pravah::GraphError>(pravah::AgentConfig::new(
+                        "test:///model",
+                        "Answer",
+                        pravah::clients::Message::user("hello"),
+                    ))
+                })
+            })
+        },
         FlowConf::new("missing"),
     )]))
     .await;
@@ -182,7 +181,7 @@ impl PravahDispatcher for PanickingDispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         panic!("private policy configuration");
     }
-    fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
         Err(FlowError::MissingDispatcher)
     }
 }
@@ -205,7 +204,7 @@ impl PravahDispatcher for CountedDispatcher {
         POLICY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Self)
     }
-    fn fetch(&self, _: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
         Err(FlowError::MissingDispatcher)
     }
 }
@@ -291,22 +290,15 @@ async fn compiled_and_opaque_factories() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Sequential Fetch boundaries reuse the definition but create distinct durable Work children.
+/// Sequential suspension boundaries reuse the definition but create distinct Work children.
 #[tokio::test]
-async fn sequential_fetches() -> Result<(), TestError> {
+async fn sequential_work() -> Result<(), TestError> {
     fn sequence(root: pravah::Flow<Input>) -> pravah::Flow<u32> {
-        fetching(root)
-            .map(|value| pravah::FetchRequest::new("GET", value.to_string()))
-            .fetch()
-            .map(|result| {
-                result
-                    .map(|response| u32::from(response.status()))
-                    .unwrap_or(500)
-            })
+        working(root).map(Input).suspend::<u32>()
     }
     let site = site(bundles::bundle([
         bundles::flow(sequence, FlowConf::new("sequence").dispatch::<Dispatcher>()),
-        __bundle_part_fetch(),
+        __bundle_part_external_work(),
     ]))
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
@@ -318,7 +310,7 @@ async fn sequential_fetches() -> Result<(), TestError> {
     );
     let children = site
         .tasks()
-        .list(vyuh::tasks::TaskFilter::new().name("fetch"))
+        .list(vyuh::tasks::TaskFilter::new().name("external_work"))
         .await?;
     assert_eq!(children.total, 2);
     assert!(
@@ -331,31 +323,21 @@ async fn sequential_fetches() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Nested each-graph Fetches restore the correct frame and preserve item result ordering.
+/// Nested suspensions restore the correct frame and preserve item result ordering.
 #[tokio::test]
-async fn nested_fetches() -> Result<(), TestError> {
+async fn nested_work() -> Result<(), TestError> {
     fn nested(root: pravah::Flow<Input>) -> pravah::Flow<Vec<u32>> {
         root.map(|input: Input| (0..input.0).collect::<Vec<_>>())
-            .each(|root| {
-                root.map(|value| Input(value))
-                    .map(|input: Input| {
-                        pravah::FetchRequest::new(
-                            if input.0 == 0 { "FAIL" } else { "GET" },
-                            "https://example.invalid",
-                        )
-                    })
-                    .fetch()
-                    .map(|result| result.map(|r| u32::from(r.status())).unwrap_or(499))
-            })
+            .each(|root| root.map(|value| Input(value + 1)).suspend::<u32>())
     }
     let site = site(bundles::bundle([
         bundles::flow(nested, FlowConf::new("nested").dispatch::<Dispatcher>()),
-        __bundle_part_fetch(),
+        __bundle_part_external_work(),
     ]))
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    for (count, expected) in [(0, vec![]), (1, vec![499]), (3, vec![499, 201, 201])] {
+    for (count, expected) in [(0, vec![]), (1, vec![201]), (3, vec![201, 201, 201])] {
         let id = site.tasks().submit(Input(count)).await?.id();
         assert_eq!(
             terminal(&site, id).await?.last_result::<Vec<u32>>()?,
@@ -369,23 +351,21 @@ async fn nested_fetches() -> Result<(), TestError> {
 /// Batched effect handlers preserve independent ordered Work results for each waiting graph.
 #[tokio::test]
 async fn batched_effects() -> Result<(), TestError> {
-    async fn batch(
-        input: Data<Batch<FetchJob>>,
-    ) -> Batch<Result<WorkState<pravah::FetchResponse>, WorkError>> {
+    async fn batch(input: Data<Batch<ExternalJob>>) -> Batch<Result<WorkState<u32>, WorkError>> {
         input
             .iter()
             .map(|job| {
-                if job.request.method() == "FAIL" {
+                if job.0 == 0 {
                     Err(WorkError::fail("Rejected"))
                 } else {
-                    Ok(WorkState::complete(pravah::FetchResponse::new(201)))
+                    Ok(WorkState::complete(201))
                 }
             })
             .collect()
     }
     let site = site(bundles::bundle([
-        __bundle_part_fetching(),
-        bundles::work_batch(batch, vyuh::tasks::TaskDefinition::new("fetch")),
+        __bundle_part_working(),
+        bundles::work_batch(batch, vyuh::tasks::TaskDefinition::new("external_work")),
     ]))
     .await?;
     let ids = site
@@ -395,11 +375,12 @@ async fn batched_effects() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for (n, receipt) in ids.into_iter().enumerate() {
-        let expected = if n % 2 == 0 { 499 } else { 201 };
-        assert_eq!(
-            terminal(&site, receipt.id()).await?.last_result::<u32>()?,
-            Some(Ok(expected))
-        );
+        let result = terminal(&site, receipt.id()).await?.last_result::<u32>()?;
+        if n % 2 == 0 {
+            assert!(matches!(result, Some(Err(_))));
+        } else {
+            assert_eq!(result, Some(Ok(201)));
+        }
     }
     runtime.shutdown_and_wait().await;
     Ok(())

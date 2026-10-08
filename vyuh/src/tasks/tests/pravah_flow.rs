@@ -1,29 +1,34 @@
 use super::*;
-use pravah::{FetchRequest, FetchResponse, Step};
+use pravah::{AgentResponse, Step};
 
 #[path = "pravah_boundaries.rs"]
 mod boundaries;
+#[cfg(all(feature = "sqlite", feature = "migrations"))]
+#[path = "pravah_sqlite.rs"]
+mod sqlite;
 
-fn fetch_graph(root: pravah::Flow<u32>) -> pravah::Flow<u16> {
-    root.map(|_| FetchRequest::new("GET", "https://example.invalid"))
-        .fetch()
-        .map(|result| result.map(|response| response.status()).unwrap_or(599))
+fn agent_graph(root: pravah::Flow<u32>) -> pravah::Flow<u16> {
+    root.agent(|agent| {
+        agent.configure(|input: u32, _: pravah::Context| async move {
+            Ok::<_, pravah::GraphError>(pravah::AgentConfig::new(
+                "test:///model",
+                "Return a number",
+                pravah::clients::Message::user(input.to_string()),
+            ))
+        })
+    })
 }
 
-/// A pending Fetch cannot be redispatched when the checkpoint has no committed result.
+/// A pending Agent cannot be redispatched when the checkpoint has no committed result.
 #[test]
-fn missing_fetch_result_rejected() -> Result<(), String> {
-    let compiled = pravah::compile(fetch_graph).map_err(|e| e.to_string())?;
+fn missing_agent_result_rejected() -> Result<(), String> {
+    let compiled = pravah::compile(agent_graph).map_err(|e| e.to_string())?;
     let mut runtime = compiled
         .start(1, uuid::Uuid::now_v7())
         .map_err(|e| e.to_string())?;
     assert!(matches!(
         runtime.next().map_err(|e| e.to_string())?,
-        Step::Continue
-    ));
-    assert!(matches!(
-        runtime.next().map_err(|e| e.to_string())?,
-        Step::Fetch(_)
+        Step::Agent(_)
     ));
     let snapshot = runtime.snapshot().map_err(|e| e.to_string())?;
     let mut restored = compiled.restore(snapshot).map_err(|e| e.to_string())?;
@@ -31,45 +36,55 @@ fn missing_fetch_result_rejected() -> Result<(), String> {
     Ok(())
 }
 
-/// Crash replays preserve Fetch identity and deliver accepted output without another Fetch.
-#[test]
-fn replay_delivers_once() -> Result<(), String> {
-    let compiled = pravah::compile(fetch_graph).map_err(|e| e.to_string())?;
+/// Crash replays preserve request identity and accepted configuration is not redispatched.
+#[tokio::test]
+async fn replay_delivers_once() -> Result<(), String> {
+    let compiled = pravah::compile(agent_graph).map_err(|e| e.to_string())?;
     let id = uuid::Uuid::now_v7();
     let mut runtime = compiled.start(1, id).map_err(|e| e.to_string())?;
-    runtime.next().map_err(|e| e.to_string())?;
-    let Step::Fetch(fetch) = runtime.next().map_err(|e| e.to_string())? else {
-        return Err("missing fetch".into());
+    let Step::Agent(agent) = runtime.next().map_err(|e| e.to_string())? else {
+        return Err("missing agent request".into());
     };
     let snapshot = runtime.snapshot().map_err(|e| e.to_string())?;
-    let value = serde_json::to_value(FetchResponse::new(202)).map_err(|e| e.to_string())?;
+    let executor = compiled.prepared().executor(pravah::Context::default());
+    let value = serde_json::to_value(executor.execute(&agent).await).map_err(|e| e.to_string())?;
     for _ in 0..2 {
         let mut restored = compiled
             .restore(snapshot.clone())
             .map_err(|e| e.to_string())?;
-        assert_eq!(restored.pending_fetch().map(|f| f.id()), Some(fetch.id()));
+        assert_eq!(restored.pending_agent().map(|a| a.id()), Some(agent.id()));
         deliver(&mut restored, Some(Ok(value.clone()))).map_err(|e| e.to_string())?;
-        assert!(restored.pending_fetch().is_none());
+        assert!(restored.pending_agent().is_none());
         assert!(deliver(&mut restored, Some(Ok(value.clone()))).is_err());
-        assert!(matches!(
-            restored.next().map_err(|e| e.to_string())?,
-            Step::Done(_)
-        ));
+        let accepted = restored.snapshot().map_err(|e| e.to_string())?;
+        let mut restored = compiled.restore(accepted).map_err(|e| e.to_string())?;
+        assert_next_generation(&mut restored, agent.id())?;
     }
     let mut replay = compiled.start(1, id).map_err(|e| e.to_string())?;
-    replay.next().map_err(|e| e.to_string())?;
-    let Step::Fetch(repeated) = replay.next().map_err(|e| e.to_string())? else {
+    let Step::Agent(repeated) = replay.next().map_err(|e| e.to_string())? else {
         return Err("missing replay".into());
     };
-    assert_eq!(repeated.id(), fetch.id());
+    assert_eq!(repeated.id(), agent.id());
     Ok(())
 }
 
-/// Only the outer task error becomes a fixed FetchError with structured originating identity.
+/// An accepted configure response advances to generation instead of dispatching configure again.
+fn assert_next_generation(runtime: &mut pravah::Runtime, prior: uuid::Uuid) -> Result<(), String> {
+    for _ in 0..8 {
+        if let Step::Agent(next) = runtime.next().map_err(|e| e.to_string())? {
+            assert_ne!(next.id(), prior);
+            assert_eq!(next.kind(), "generate");
+            return Ok(());
+        }
+    }
+    Err("accepted configuration did not advance to generation".into())
+}
+
+/// Only the outer task error becomes a fixed AgentError with structured originating identity.
 #[test]
 fn failure_contract() -> Result<(), String> {
     let id = TaskId::new(uuid::Uuid::now_v7());
-    let error = fetch_failure(crate::tasks::TaskFailure::new(
+    let error = agent_failure(crate::tasks::TaskFailure::new(
         Some(id),
         "Provider unavailable",
     ))
@@ -121,14 +136,45 @@ fn suspension_domain_result() -> Result<(), String> {
 
 /// Invalid successful Work output fails protocol validation without altering the wait.
 #[test]
-fn malformed_fetch_output() -> Result<(), String> {
-    let compiled = pravah::compile(fetch_graph).map_err(|e| e.to_string())?;
+fn malformed_agent_output() -> Result<(), String> {
+    let compiled = pravah::compile(agent_graph).map_err(|e| e.to_string())?;
     let mut runtime = compiled
         .start(1, uuid::Uuid::now_v7())
         .map_err(|e| e.to_string())?;
     runtime.next().map_err(|e| e.to_string())?;
-    runtime.next().map_err(|e| e.to_string())?;
     assert!(deliver(&mut runtime, Some(Ok(serde_json::json!({"Ok":42})))).is_err());
-    assert!(runtime.pending_fetch().is_some());
+    assert!(runtime.pending_agent().is_some());
+    Ok(())
+}
+
+/// Wrong identities, versions and fabricated history acknowledgements leave the wait intact.
+#[test]
+fn invalid_agent_responses() -> Result<(), String> {
+    let compiled = pravah::compile(agent_graph).map_err(|e| e.to_string())?;
+    let mut runtime = compiled
+        .start(1, uuid::Uuid::now_v7())
+        .map_err(|e| e.to_string())?;
+    let Step::Agent(request) = runtime.next().map_err(|e| e.to_string())? else {
+        return Err("missing request".into());
+    };
+    let response = AgentResponse::new(request.id(), Err(pravah::AgentError::new("test", "failed")));
+    let value = serde_json::to_value(response).map_err(|e| e.to_string())?;
+    for (key, replacement) in [
+        ("id", serde_json::json!(uuid::Uuid::now_v7())),
+        ("version", serde_json::json!(0)),
+        ("persisted_through", serde_json::json!(999)),
+    ] {
+        let mut invalid = value.clone();
+        let field = invalid.get_mut(key).ok_or("missing response field")?;
+        *field = replacement;
+        assert!(deliver(&mut runtime, Some(Ok(invalid))).is_err());
+        assert_eq!(runtime.pending_agent().map(|r| r.id()), Some(request.id()));
+    }
+    deliver(
+        &mut runtime,
+        Some(Err(crate::tasks::TaskFailure::new(None, "cancelled"))),
+    )
+    .map_err(|e| e.to_string())?;
+    assert!(runtime.pending_agent().is_none());
     Ok(())
 }

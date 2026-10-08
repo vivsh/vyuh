@@ -28,44 +28,43 @@ impl PravahDispatcher for Dispatcher {
     fn build(_: &PartialSite) -> Result<Self, FlowError> {
         Ok(Self)
     }
-    fn fetch(&self, fetch: &pravah::Fetch) -> Result<WorkRequest, FlowError> {
-        let mode = fetch.request().method();
+    fn agent(&self, _: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
+        Err(FlowError::MissingDispatcher)
+    }
+    fn suspend(&self, suspension: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
+        let input: Input = pravah::graph::from_value(suspension.payload().clone())
+            .map_err(|_| FlowError::fail("Invalid test input"))?;
+        let mode = input.mode.as_str();
         match mode {
             "route-panic" => panic!("private routing panic"),
             "route-error" => return Err(FlowError::fail("Routing rejected")),
-            "unknown" => return Ok(WorkRequest::new(Unknown)),
+            "unknown" => return Ok(Some(WorkRequest::new(Unknown))),
             "flow" => {
-                return Ok(WorkRequest::new(Input {
+                return Ok(Some(WorkRequest::new(Input {
                     mode: "ok".into(),
                     value: 0,
-                }));
+                })));
             }
             _ => {}
         }
-        let value = fetch
-            .request()
-            .url()
-            .parse()
-            .map_err(|_| FlowError::fail("Invalid test input"))?;
         let request = WorkRequest::new(Job {
             mode: mode.into(),
-            value,
+            value: input.value,
         });
-        Ok(match mode {
+        Ok(Some(match mode {
             "conflict" => request.options(TaskOptions::new().ignore_conflicts())?,
             "delayed" => request.options(TaskOptions::new().delay(Duration::from_millis(80)))?,
             _ => request,
-        })
+        }))
     }
 }
 
 fn graph(root: pravah::Flow<Input>) -> pravah::Flow<u16> {
     root.map(|input: Input| {
         assert!(input.mode != "graph-panic", "private graph panic");
-        pravah::FetchRequest::new(input.mode, input.value.to_string())
+        input
     })
-    .fetch()
-    .map(|result| result.map(|r| r.status()).unwrap_or(499))
+    .suspend::<u16>()
 }
 
 async fn work(id: TaskId, site: Site, input: Data<Job>) -> Result<serde_json::Value, WorkError> {
@@ -85,8 +84,7 @@ async fn work(id: TaskId, site: Site, input: Data<Job>) -> Result<serde_json::Va
         }
         _ => {}
     }
-    serde_json::to_value(pravah::FetchResponse::new(input.value))
-        .map_err(|_| WorkError::fail("Test serialization failed"))
+    serde_json::to_value(input.value).map_err(|_| WorkError::fail("Test serialization failed"))
 }
 
 /// Uses fast ordinary polls and retries, without altering production scheduling rules.
@@ -152,7 +150,7 @@ async fn rejected_routes_do_not_spawn() -> Result<(), TestError> {
     Ok(())
 }
 
-/// Child failure/panic/oversize is a Fetch error; malformed success fails protocol decoding.
+/// Child failures and incompatible successful suspension values terminate only their parent.
 #[tokio::test]
 async fn effect_outcome_matrix() -> Result<(), TestError> {
     let site = site().await?;
@@ -161,9 +159,9 @@ async fn effect_outcome_matrix() -> Result<(), TestError> {
     for (mode, expected) in [
         ("ok", Some(202)),
         ("retry", Some(202)),
-        ("work-fail", Some(499)),
-        ("work-panic", Some(499)),
-        ("oversized", Some(499)),
+        ("work-fail", None),
+        ("work-panic", None),
+        ("oversized", None),
         ("malformed", None),
     ] {
         let id = site

@@ -4,7 +4,7 @@ struct Dispatcher;
 #[cfg(feature = "pravah")]
 impl vyuh::tasks::PravahDispatcher for Dispatcher {
  fn build(_: &PartialSite) -> Result<Self, FlowError> { Ok(Self) }
- fn fetch(&self, _: &vyuh::pravah::Fetch) -> Result<vyuh::tasks::WorkRequest, FlowError> {
+ fn agent(&self, _: &vyuh::pravah::AgentRequest) -> Result<vyuh::tasks::WorkRequest, FlowError> {
   Err(FlowError::MissingDispatcher)
  }
 }
