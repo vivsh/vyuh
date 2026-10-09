@@ -1,1 +1,0 @@
-Error: ConfError(Many([InvalidValue { field: "secret_key", reason: "must be at least 32 characters for auth signing", expected: Some("32 or more characters") }]))

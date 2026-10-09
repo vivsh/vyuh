@@ -1,0 +1,16 @@
+# Apply offline; MySQL/MariaDB retain the nonpartial ordered index.
+dependencies: [0015_sticky_flows]
+atomic: false
+operations:
+  - type: drop_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_flow_ready
+      columns: [node_id, lane_name, ready_at, created_at, id]
+      unique: false
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_owned_ready
+      columns: [node_id, lane_name, ready_at, created_at, id]
+      unique: false

@@ -145,7 +145,7 @@ async fn flow_metadata_and_scheduled_kind() -> Result<(), TestError> {
     registry.register(registered)?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
-    let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
+    let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
     let receipt = dispatcher
         .submit_with(
             DirectJob { id: 1 },

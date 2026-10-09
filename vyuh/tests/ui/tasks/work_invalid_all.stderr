@@ -4,7 +4,7 @@ error[E0599]: `WorkState` is not an iterator
 4 |     let _ = WorkState::<()>::all(Vec::<()>::new(), ());
   |                              ^^^ `WorkState` is not an iterator
   |
- ::: src/tasks/state.rs
+ ::: src/tasks/work/state.rs
   |
   | pub struct WorkState<T = ()> {
   | ---------------------------- doesn't satisfy `WorkState: Iterator`
@@ -12,7 +12,7 @@ error[E0599]: `WorkState` is not an iterator
 note: if you're trying to build a new `WorkState` consider using one of the following associated functions:
       WorkState::<T>::complete
       WorkState::<T>::suspend
- --> src/tasks/state.rs
+ --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

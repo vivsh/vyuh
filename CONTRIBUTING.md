@@ -5,7 +5,9 @@ These rules apply to contributors and coding agents working in this repository.
 ## Hard Rules
 
 - Functions must never exceed 50 lines. Prefer small, focused helpers.
-- Avoid file more than 1000 lines - break them into multiple modules.
+- Treat 1,000 lines as a review trigger, not a hard file limit. Split by cohesive
+  responsibility when that improves navigation; do not add forwarding layers or
+  artificial modules solely to meet a line count.
 - Keep `mod.rs` clean and tiny - it should be import/exports/re-exports/mod
   statements only except in special cases.
 - Function names must be descriptive but no more than 4 words; prefer 1-2 word

@@ -1,7 +1,7 @@
 //! Error-path reconciliation. Normal operations never call these locking reads.
 use std::collections::HashMap;
 
-use super::{common::DbTaskStore, flush, model::TaskRow, runtime};
+use super::{commit, model::TaskRow, queries, store::DbTaskStore};
 use crate::tasks::store::StoreFailure;
 use crate::{
     db,
@@ -33,7 +33,11 @@ impl DbTaskStore {
                 query.for_update()
             };
             let mut rows = query
-                .slice::<TaskRow>(0, self.batch_size)
+                .slice::<TaskRow>(
+                    0,
+                    super::queries::configured_lane(&self.runtime_conf, lane)?
+                        .claim_batch_size_value(),
+                )
                 .exec(&mut *tx)
                 .await?;
             if rows.is_empty() {
@@ -43,7 +47,7 @@ impl DbTaskStore {
                 row.node_id = None;
                 row.updated_at = now;
             }
-            flush::batch_update_rows(tx, &rows, self.batch_size).await?;
+            commit::batch_update_rows(tx, &rows, super::queries::WRITE_CHUNK_SIZE).await?;
         }
     }
 
@@ -57,7 +61,7 @@ impl DbTaskStore {
         let mut tx = self.pool.begin().await?;
         serialize_sqlite(&mut tx).await?;
         let owners = recover_owners(&mut tx, node, claims, prepared, self.lease_duration).await?;
-        let now = runtime::statement_now(&mut tx).await?;
+        let now = queries::statement_now(&mut tx).await?;
         let mut lost: Vec<_> = owners
             .iter()
             .filter(|(_, owner)| owner.token.is_none())
@@ -73,9 +77,9 @@ impl DbTaskStore {
             .flat_map(|lane| &lane.tasks)
             .map(|task| task.id.into_uuid())
             .collect();
-        let mut rows = load_rows(&mut tx, ids, self.batch_size).await?;
+        let mut rows = load_rows(&mut tx, ids, super::queries::WRITE_CHUNK_SIZE).await?;
         let (poll, cancelled, released) = recovered_poll(node, prepared, owners, &mut rows, now)?;
-        flush::batch_update_rows(&mut tx, &released, self.batch_size).await?;
+        commit::batch_update_rows(&mut tx, &released, super::queries::WRITE_CHUNK_SIZE).await?;
         let mut poll = self
             .finish_recovered(&mut tx, node, poll, &cancelled, now)
             .await?;
@@ -92,39 +96,44 @@ impl DbTaskStore {
     /// Retries only current executions, using the existing workflow transition engine.
     pub(super) async fn recover_outputs_impl(
         &self,
-        _node: &uuid::Uuid,
+        node: &uuid::Uuid,
         commits: &[TaskCommit],
         prepared: &CommitResult,
     ) -> Result<CommitResult, StoreFailure<CommitResult>> {
         let conf = &self.runtime_conf;
-        let commands = flush::prepare_commits(commits, self.batch_size, conf.max_all_children)?;
+        let commands =
+            commit::prepare_commits(commits, self.commit_batch_size, conf.max_all_children)?;
         let mut tx = self.pool.begin().await?;
         serialize_sqlite(&mut tx).await?;
         lock_output_lanes(&mut tx, commits, conf).await?;
         let ids = commits
             .iter()
             .map(|commit| commit.task_id().into_uuid())
+            .chain(prepared.tasks.iter().map(|task| task.id.into_uuid()))
             .collect();
-        let rows = load_rows(&mut tx, ids, self.batch_size).await?;
-        let now = runtime::statement_now(&mut tx).await?;
+        let rows = load_rows(&mut tx, ids, super::queries::WRITE_CHUNK_SIZE).await?;
+        let recovered = recovered_inputs(&rows, prepared, node)?;
+        let now = queries::statement_now(&mut tx).await?;
         let owned = rows.into_values().collect();
-        let (children, deliveries, waits, rejected) = self
+        let (children, deliveries, waits, rejected, mut tasks) = self
             .commit_outcomes_tx(&mut tx, commits, commands, conf, now, Some(owned))
             .await?;
-        let mut wake_lanes = flush::finalize_workflow(
+        let mut wake_lanes = super::workflow::finalize_workflow(
             &mut tx,
             &children,
             deliveries,
             &waits,
             conf,
             now,
-            self.batch_size,
+            super::queries::WRITE_CHUNK_SIZE,
         )
         .await?;
         crate::tasks::store::merge_wakes(&mut wake_lanes, prepared.wake_lanes.iter().copied());
+        tasks.extend(recovered);
         let result = CommitResult {
             wake_lanes,
             rejected,
+            tasks,
         };
         match tx.commit().await {
             Ok(()) => Ok(result),
@@ -148,24 +157,45 @@ impl DbTaskStore {
             return Ok(poll);
         }
         let conf = &self.runtime_conf;
-        let commands = flush::prepare_commits(cancelled, self.batch_size, conf.max_all_children)?;
-        let (children, deliveries, waits, _) = self
+        let commands =
+            commit::prepare_commits(cancelled, self.commit_batch_size, conf.max_all_children)?;
+        let (children, deliveries, waits, _, _) = self
             .commit_outcomes_tx(tx, cancelled, commands, conf, now, None)
             .await?;
         poll.wake_lanes.extend(
-            flush::finalize_workflow(
+            super::workflow::finalize_workflow(
                 tx,
                 &children,
                 deliveries,
                 &waits,
                 conf,
                 now,
-                self.batch_size,
+                super::queries::WRITE_CHUNK_SIZE,
             )
             .await?,
         );
         Ok(poll)
     }
+}
+
+/// Returns only acknowledged-attempt snapshots that still agree with authoritative ownership.
+fn recovered_inputs(
+    rows: &HashMap<uuid::Uuid, TaskRow>,
+    prepared: &CommitResult,
+    node: &uuid::Uuid,
+) -> Result<Vec<std::sync::Arc<TaskRecord>>, TaskRuntimeError> {
+    prepared
+        .tasks
+        .iter()
+        .filter_map(|previous| {
+            let row = rows.get(&previous.id.into_uuid())?;
+            (((row.status == 1 && row.node_id == Some(*node))
+                || (row.kind == 1 && row.node_id.is_none() && row.status != 1))
+                && row.attempts == previous.attempts
+                && row.status == previous.status.as_i16())
+            .then(|| TaskRecord::try_from(row.clone()).map(std::sync::Arc::new))
+        })
+        .collect()
 }
 
 /// Reserves SQLite's writer before the first read, so an old snapshot cannot settle a commit.
@@ -200,7 +230,7 @@ async fn lock_output_lanes(
         .filter_map(|commit| commit.lane().map(|lane| lane.as_str()))
         .collect();
     for name in names {
-        flush::load_lane_lock(tx, name).await?;
+        commit::load_lane_lock(tx, name).await?;
     }
     Ok(())
 }
@@ -220,14 +250,14 @@ async fn recover_owners(
     ordered.sort_unstable_by_key(|claim| claim.lane.as_str());
     let mut rows = Vec::new();
     for claim in ordered {
-        let row = flush::load_lane_lock(tx, claim.lane.as_str())
+        let row = commit::load_lane_lock(tx, claim.lane.as_str())
             .await?
             .ok_or_else(|| TaskRuntimeError::UnknownLane(claim.lane.to_string()))?;
         let known =
             crate::tasks::store::recovery_token(claim, prepared, row.owner_token.as_deref());
         rows.push((claim.lane, row, known));
     }
-    let now = runtime::statement_now(tx).await?;
+    let now = queries::statement_now(tx).await?;
     let node = node.to_string();
     for (_, row, known) in &mut rows {
         if *known
@@ -237,7 +267,7 @@ async fn recover_owners(
             let duration = chrono::Duration::from_std(lease).map_err(|_| {
                 TaskRuntimeError::InvalidConfig("invalid lane lease duration".into())
             })?;
-            row.leased_until = Some(super::common::add_time(
+            row.leased_until = Some(super::queries::add_time(
                 now,
                 duration,
                 "lane recovery lease",

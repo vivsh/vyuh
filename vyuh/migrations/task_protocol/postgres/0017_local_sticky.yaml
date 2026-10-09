@@ -1,0 +1,13 @@
+# Apply offline with all workers and writers stopped. Running ownership is preserved.
+dependencies: [0016_sticky_tasks]
+atomic: true
+operations:
+  - type: statement
+    up: UPDATE vyuh_tasks SET node_id = NULL WHERE status <> 1 AND node_id IS NOT NULL
+  - type: drop_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_owned_ready
+      columns: [node_id, lane_name, ready_at, created_at, id]
+      unique: false
+      predicate: "status = 0 AND node_id IS NOT NULL"

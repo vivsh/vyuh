@@ -4,7 +4,10 @@ use std::{fmt, time::Duration};
 
 use serde::Serialize;
 
-use super::{TaskId, TaskRecord, TaskRuntimeError};
+use super::{
+    RegisteredTask, TaskFilter, TaskId, TaskLane, TaskRecord, TaskRuntimeError, TaskStatus,
+};
+use crate::callables::DataBox;
 
 /// Submission policy evaluated before one or more task records are stored.
 #[derive(Default)]
@@ -111,4 +114,241 @@ pub struct TaskWrite {
     pub ignore_conflicts: bool,
     /// Store-relative delay before the task first becomes eligible.
     pub initial_delay: Option<Duration>,
+}
+
+/// Normalizes a typed submission batch before any store mutation occurs.
+pub(super) fn build_writes<T: Serialize + 'static>(
+    service: &RegisteredTask,
+    name: &str,
+    inputs: impl IntoIterator<Item = T>,
+    options: &TaskOptions,
+    config: &super::TaskConf,
+) -> Result<Vec<TaskWrite>, TaskRuntimeError> {
+    validate_options(options)?;
+    let mut writes = Vec::new();
+    for input in inputs {
+        if writes.len() >= super::config::MAX_BATCH_SIZE {
+            return Err(TaskRuntimeError::InvalidOptions(
+                "task submission exceeds the 10,000-input safety limit".into(),
+            ));
+        }
+        service.validate_object(&input)?;
+        let key = service.idempotency_key(&input)?;
+        if key.is_none() && options.ignore_conflicts {
+            return Err(TaskRuntimeError::InvalidOptions(
+                "ignore_conflicts requires an idempotent task definition".into(),
+            ));
+        }
+        let serialized = if key.is_some() {
+            canonical_json(&input)?
+        } else {
+            serde_json::to_string(&input)?
+        };
+        validate_payload(&serialized, config.payload_limit())?;
+        validate_key(key.as_deref())?;
+        let fingerprint = key
+            .as_ref()
+            .map(|_| fingerprint(name, &serialized, service))
+            .transpose()?;
+        writes.push(TaskWrite {
+            record: build_record(
+                name,
+                serialized,
+                key,
+                fingerprint,
+                service.effective_lane(),
+                service.kind(),
+            )?,
+            ignore_conflicts: options.ignore_conflicts,
+            initial_delay: options.initial_delay,
+        });
+    }
+    Ok(writes)
+}
+
+/// Converts one verified type-erased payload into a normal task write.
+pub(super) fn build_box_write(
+    service: &RegisteredTask,
+    input: &DataBox,
+    config: &super::TaskConf,
+) -> Result<TaskWrite, TaskRuntimeError> {
+    service.validate_box(input)?;
+    let value = input
+        .to_json()
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("task input cannot be serialized".into())
+        })?
+        .map_err(TaskRuntimeError::TaskExecutionError)?;
+    let key = service.idempotency_key_box(input.as_any())?;
+    let serialized = if key.is_some() {
+        canonical_json_value(value)?
+    } else {
+        serde_json::to_string(&value)?
+    };
+    validate_payload(&serialized, config.payload_limit())?;
+    validate_key(key.as_deref())?;
+    let fingerprint = key
+        .as_ref()
+        .map(|_| fingerprint(service.name(), &serialized, service))
+        .transpose()?;
+    Ok(TaskWrite {
+        record: build_record(
+            service.name(),
+            serialized,
+            key,
+            fingerprint,
+            service.effective_lane(),
+            service.kind(),
+        )?,
+        ignore_conflicts: false,
+        initial_delay: None,
+    })
+}
+
+/// Rejects incompatible conflict behavior before a child request can be returned.
+pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
+    if options.ignore_conflicts {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "spawn cannot ignore idempotency conflicts".into(),
+        ));
+    }
+    validate_options(options)
+}
+
+/// Surfaces all accumulated builder failures at the submission terminal.
+pub(super) fn validate_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
+    if options
+        .initial_delay
+        .is_some_and(|value| value > super::config::MAX_TASK_DELAY)
+    {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "task delays cannot exceed ten years".into(),
+        ));
+    }
+    duration_ms(options.initial_delay)?;
+    Ok(())
+}
+
+/// Creates one pending record without assigning store-relative readiness time.
+pub(super) fn build_record(
+    name: &str,
+    input: String,
+    key: Option<String>,
+    fingerprint: Option<String>,
+    lane: TaskLane,
+    kind: super::TaskKind,
+) -> Result<TaskRecord, TaskRuntimeError> {
+    let now = chrono::Utc::now();
+    Ok(TaskRecord {
+        id: TaskId::new(uuid::Uuid::now_v7()),
+        parent_id: None,
+        root_id: None,
+        kind,
+        name: name.into(),
+        input,
+        state: None,
+        resume_input: None,
+        status: TaskStatus::Pending,
+        cancelled: false,
+        attempts: 0,
+        step_attempts: 0,
+        lane: lane.to_string(),
+        last_result: None,
+        idempotency_key: key,
+        idempotency_fingerprint: fingerprint,
+        idempotency_expires_at: None,
+        node_id: None,
+        ready_at: Some(now),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    })
+}
+
+/// Fingerprints canonical input and immutable idempotency-key semantics.
+pub(super) fn fingerprint(
+    name: &str,
+    input: &str,
+    service: &RegisteredTask,
+) -> Result<String, TaskRuntimeError> {
+    let revision = service
+        .idempotency_policy()
+        .ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("idempotent task is missing policy".into())
+        })?
+        .revision;
+    let mut hasher = blake3::Hasher::new();
+    for part in [name, revision, input] {
+        hasher.update(part.as_bytes());
+        hasher.update(&[0]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+pub(super) fn validate_payload(payload: &str, limit: usize) -> Result<(), TaskRuntimeError> {
+    if payload.len() > limit {
+        Err(TaskRuntimeError::InvalidOptions(format!(
+            "task payload exceeds the configured {limit}-byte limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn validate_filter(filter: &TaskFilter) -> Result<(), TaskRuntimeError> {
+    if filter.page == 0 || filter.per_page == 0 || filter.per_page > 200 {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "task pages are one-indexed and contain at most 200 records".into(),
+        ));
+    }
+    if filter.query.as_ref().is_some_and(|query| query.len() > 256) {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "task search text cannot exceed 256 bytes".into(),
+        ));
+    }
+    for (value, limit, label) in [
+        (filter.name.as_deref(), 191, "task name"),
+        (filter.lane.as_deref(), 64, "task lane"),
+        (
+            filter.idempotency_key.as_deref(),
+            512,
+            "task idempotency key",
+        ),
+    ] {
+        if value.is_some_and(|value| value.len() > limit) {
+            return Err(TaskRuntimeError::InvalidOptions(format!(
+                "{label} filters cannot exceed {limit} bytes"
+            )));
+        }
+    }
+    if filter
+        .created_from
+        .zip(filter.created_to)
+        .is_some_and(|(from, to)| from > to)
+    {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "task creation range starts after it ends".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_key(key: Option<&str>) -> Result<(), TaskRuntimeError> {
+    if key.is_some_and(|value| value.is_empty() || value.len() > 512) {
+        Err(TaskRuntimeError::InvalidOptions(
+            "task idempotency keys must contain between 1 and 512 bytes".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn duration_ms(duration: Option<Duration>) -> Result<Option<i64>, TaskRuntimeError> {
+    duration
+        .map(|value| {
+            i64::try_from(value.as_millis()).map_err(|_| {
+                TaskRuntimeError::InvalidOptions("task duration exceeds the supported range".into())
+            })
+        })
+        .transpose()
 }

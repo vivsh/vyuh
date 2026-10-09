@@ -16,7 +16,7 @@ error[E0432]: unresolved imports `vyuh::tasks::TaskState`, `vyuh::tasks::TaskErr
 help: a similar name exists in the module
   |
 1 - use vyuh::tasks::{TaskState, TaskError, TaskContext, BatchTaskContext, TaskCallable,
-1 + use vyuh::tasks::{TaskStore, TaskError, TaskContext, BatchTaskContext, TaskCallable,
+1 + use vyuh::tasks::{TaskStatus, TaskError, TaskContext, BatchTaskContext, TaskCallable,
   |
 help: a similar name exists in the module
   |

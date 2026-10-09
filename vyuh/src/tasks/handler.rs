@@ -1,10 +1,7 @@
-use serde::Serialize;
-use std::{
-    any::TypeId,
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+//! Registered handler invocation, input decoding, and per-task outcome conversion.
+use super::TaskRegistry;
+use super::{BatchWorkContext, WorkContext};
+use std::{any::TypeId, sync::Arc};
 
 use crate::{
     Error, Site,
@@ -18,156 +15,22 @@ use super::TaskStatus;
 use super::WorkState;
 use super::diagnostics::causal_chain as error_chain;
 use super::models::{IdempotencyPolicy, TaskPolicy};
-use super::{TaskConf, TaskDefinition, TaskDispatcher, TaskRecord};
+#[cfg(test)]
+use super::{Continuation, TaskConf};
+use super::{TaskDefinition, TaskOutcome, TaskRecord};
 
-#[path = "flow_handler.rs"]
-mod flow;
+use super::FlowContext;
+use super::flow::handler as flow;
 use super::{IntoWorkBatchOutcomePart, IntoWorkOutcomePart};
-pub use flow::FlowContext;
-
-/// Work invocation context used internally to extract task data and runtime identity.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct WorkContext {
-    site: Site,
-    payload: callables::DataBox,
-    record: Arc<TaskRecord>,
-    operation_id: crate::OperationId,
-}
-
-impl callables::IntoDataBox for WorkContext {
-    fn into_data_box(self) -> callables::DataBox {
-        self.payload
-    }
-}
-
-impl callables::HasSite for WorkContext {
-    fn site(&self) -> &Site {
-        &self.site
-    }
-}
-
-impl callables::FromContextParts<WorkContext> for crate::OperationId {
-    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
-        Ok(context.operation_id)
-    }
-}
-
-impl callables::FromContextParts<WorkContext> for super::TaskId {
-    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
-        Ok(context.record.id())
-    }
-}
-
-impl callables::IntoArgPart for super::TaskId {
-    fn into_arg_part() -> callables::ArgPart {
-        callables::ArgPart::Ignore
-    }
-}
 
 type WorkHandler = Callable<WorkContext, Error>;
-
-#[derive(Clone)]
-#[doc(hidden)]
-pub struct BatchWorkContext {
-    site: Site,
-    payload: callables::DataBox,
-    operation_id: crate::OperationId,
-}
-
-impl callables::IntoDataBox for BatchWorkContext {
-    fn into_data_box(self) -> callables::DataBox {
-        self.payload
-    }
-}
-
-impl callables::HasSite for BatchWorkContext {
-    fn site(&self) -> &Site {
-        &self.site
-    }
-}
-
-impl callables::FromContextParts<BatchWorkContext> for crate::OperationId {
-    fn from_context_parts(context: &BatchWorkContext) -> Result<Self, callables::CallError> {
-        Ok(context.operation_id)
-    }
-}
 
 type BatchHandler = Callable<BatchWorkContext, Error>;
 type BatchDecoder = fn(Vec<Arc<TaskRecord>>, crate::OperationId) -> DecodedBatch;
 type BatchOutcome = fn(callables::DataBox, usize) -> Result<Vec<TaskOutcome>, TaskRuntimeError>;
 
-/// Prepared lifecycle outcome committed by Vyuh's internal task store.
-///
-/// Work returns [`WorkState`] and Flow returns [`super::FlowState`], not this store contract.
-#[derive(Debug, Clone)]
-pub enum TaskOutcome {
-    /// Suspends this flow until every atomically created child becomes terminal.
-    All {
-        state: String,
-        children: Vec<super::TaskWrite>,
-    },
-    /// Marks the task as successfully completed.
-    Complete,
-    /// Completes with a serialized success value, retained and delivered to the parent.
-    CompleteWith { output: String },
-    /// Suspends this task and atomically creates one child.
-    Spawn {
-        state: String,
-        child: super::TaskWrite,
-    },
-    /// Stores continuation state until an explicit resume.
-    Suspend { state: String },
-    /// Stores continuation state and schedules another execution.
-    Sleep { state: String, delay: Duration },
-    /// Schedules a retry and records its error.
-    Retry { error: String },
-    /// Marks the task as terminally failed.
-    Fail { error: String },
-}
-
-impl TaskOutcome {
-    /// Completes a task, delivering a unit success to an awaiting parent.
-    pub const fn complete() -> Self {
-        Self::Complete
-    }
-
-    /// Suspends a task with durable continuation state.
-    pub fn suspend<S: Serialize>(state: &S) -> Result<Self, TaskRuntimeError> {
-        Ok(Self::Suspend {
-            state: serde_json::to_string(state)?,
-        })
-    }
-
-    /// Sleeps a task until the supplied delay with durable continuation state.
-    pub fn sleep<S: Serialize>(state: &S, delay: Duration) -> Result<Self, TaskRuntimeError> {
-        Ok(Self::Sleep {
-            state: serde_json::to_string(state)?,
-            delay,
-        })
-    }
-
-    /// Retries a task using its lane's exponential-backoff policy.
-    pub fn retry(error: impl Into<String>) -> Self {
-        Self::Retry {
-            error: error.into(),
-        }
-    }
-
-    /// Fails a task with a safe stored error message.
-    pub fn fail(error: impl Into<String>) -> Self {
-        Self::Fail {
-            error: error.into(),
-        }
-    }
-
-    pub(crate) fn handler_failed() -> Self {
-        Self::fail("Task handler failed")
-    }
-}
-
 /// Consumes prepared outcomes without copying successful output strings.
-fn prepared_outcome(
+pub(in crate::tasks) fn prepared_outcome(
     data: callables::DataBox,
     _site: &Site,
 ) -> Result<TaskOutcome, TaskRuntimeError> {
@@ -180,96 +43,20 @@ fn prepared_outcome(
     Ok(Arc::try_unwrap(value).unwrap_or_else(|shared| (*shared).clone()))
 }
 
-/// Optional typed checkpoint and resume input for Work or Flow handlers.
-pub struct Continuation<S, R = ()> {
-    state: Option<S>,
-    resume: Option<Result<R, super::TaskFailure>>,
-}
-
-impl<S, R> callables::FromContextParts<FlowContext> for Continuation<S, R>
-where
-    S: serde::de::DeserializeOwned + Send,
-    R: serde::de::DeserializeOwned + Send,
-{
-    fn from_context_parts(ctx: &FlowContext) -> Result<Self, callables::CallError> {
-        Ok(Self {
-            state: decode_optional(ctx.record.state.as_deref())?,
-            resume: decode_optional(ctx.record.resume_input.as_deref())?,
-        })
-    }
-}
-
-impl<S, R> callables::FromContextParts<WorkContext> for Continuation<S, R>
-where
-    S: serde::de::DeserializeOwned + Send,
-    R: serde::de::DeserializeOwned + Send,
-{
-    fn from_context_parts(ctx: &WorkContext) -> Result<Self, callables::CallError> {
-        Ok(Self {
-            state: decode_optional(ctx.record.state.as_deref())?,
-            resume: decode_optional(ctx.record.resume_input.as_deref())?,
-        })
-    }
-}
-
-fn decode_optional<T: serde::de::DeserializeOwned>(
-    value: Option<&str>,
-) -> Result<Option<T>, callables::CallError> {
-    value
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|_| callables::CallError::DeserializeFailed)
-}
-
-impl<S, R> callables::IntoArgPart for Continuation<S, R> {
-    fn into_arg_part() -> callables::ArgPart {
-        callables::ArgPart::Ignore
-    }
-}
-
-impl<S, R> Continuation<S, R> {
-    /// Decodes invocation-local continuation values from the immutable store snapshot.
-    pub(super) fn decode(record: &TaskRecord) -> Result<Self, callables::CallError>
-    where
-        S: serde::de::DeserializeOwned,
-        R: serde::de::DeserializeOwned,
-    {
-        Ok(Self {
-            state: decode_optional(record.state.as_deref())?,
-            resume: decode_optional(record.resume_input.as_deref())?,
-        })
-    }
-
-    /// Returns persisted state from a previous lifecycle transition.
-    pub const fn state(&self) -> Option<&S> {
-        self.state.as_ref()
-    }
-
-    /// Returns the input that resumed this suspended execution.
-    pub const fn resume(&self) -> Option<&Result<R, super::TaskFailure>> {
-        self.resume.as_ref()
-    }
-
-    /// Consumes the extractor into its optional state and resume input.
-    pub fn into_parts(self) -> (Option<S>, Option<Result<R, super::TaskFailure>>) {
-        (self.state, self.resume)
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct RegisteredTask {
     pub name: String,
     pub type_id: TypeId,
     pub type_name: String,
-    handler: RegisteredHandler,
-    operation: callables::Operation,
-    policy: TaskPolicy,
+    pub(in crate::tasks) handler: RegisteredHandler,
+    pub(in crate::tasks) operation: callables::Operation,
+    pub(in crate::tasks) policy: TaskPolicy,
 }
 
 #[derive(Clone)]
-enum RegisteredHandler {
+pub(in crate::tasks) enum RegisteredHandler {
     FlowFactory {
-        build: super::flow_build::BuildFlow,
+        build: super::flow::factory::BuildFlow,
     },
     Flow {
         handler: Callable<FlowContext, Error>,
@@ -291,7 +78,7 @@ pub(crate) struct TaskExecutionResult {
     pub(crate) outcome: TaskOutcome,
 }
 
-struct DecodedBatch {
+pub(in crate::tasks) struct DecodedBatch {
     records: Vec<Arc<TaskRecord>>,
     positions: Vec<usize>,
     outcomes: Vec<Option<TaskOutcome>>,
@@ -456,7 +243,7 @@ impl RegisteredTask {
     {
         let (name, policy) = definition.into_parts();
         let callable = super::callable::work(handler, |value: H::Output| {
-            super::returns::erase_outcome(value.into_work_outcome())
+            super::outcome::erase_outcome(value.into_work_outcome())
         });
         let mut operation =
             callables::Operation::from_specs(callables::OperationKind::Task, callable.inspect());
@@ -497,7 +284,7 @@ impl RegisteredTask {
             handler: RegisteredHandler::Batch {
                 handler: callable,
                 decode: decode_batch::<T>,
-                outcome: super::batch::resolve_batch,
+                outcome: super::work::batch::resolve_batch,
             },
             operation,
             policy: policy.erase(),
@@ -658,7 +445,7 @@ fn finish_batch(batch: DecodedBatch) -> Vec<TaskExecutionResult> {
 }
 
 /// Logs one native handler failure while keeping durable task state generic.
-fn log_handler_error(
+pub(in crate::tasks) fn log_handler_error(
     record: &TaskRecord,
     operation_id: crate::OperationId,
     error: &(dyn std::error::Error + 'static),
@@ -673,191 +460,7 @@ fn log_handler_error(
     );
 }
 
-#[derive(Clone)]
-pub(crate) struct TaskRegistry {
-    pub(crate) config: TaskConf,
-    pub(crate) tasks: HashMap<String, RegisteredTask>,
-    pub(crate) typed_map: HashMap<TypeId, String>,
-    lane_defaults: BTreeMap<super::TaskLane, super::TaskLaneConf>,
-    lanes: Vec<super::TaskLaneConf>,
-}
-
 impl TaskRegistry {
-    /// Replaces deferred declarations using operation-local policy deduplication scratch.
-    pub(crate) fn prepare_flows(
-        mut self,
-        site: &crate::PartialSite,
-    ) -> Result<Self, TaskRuntimeError> {
-        let mut scratch = super::flow_build::DispatcherScratch::new();
-        let mut names: Vec<_> = self.tasks.keys().cloned().collect();
-        names.sort();
-        for name in names {
-            if let Some(task) = self.tasks.get_mut(&name) {
-                task.prepare_flow(site, &mut scratch)?;
-            }
-        }
-        Ok(self)
-    }
-
-    pub(crate) fn new() -> Self {
-        Self {
-            config: TaskConf::default(),
-            tasks: HashMap::new(),
-            typed_map: HashMap::new(),
-            lane_defaults: BTreeMap::new(),
-            lanes: Vec::new(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_config(mut self, config: TaskConf) -> Result<Self, TaskRuntimeError> {
-        self.lanes = config.resolve_lanes(std::iter::empty())?;
-        self.config = config;
-        Ok(self)
-    }
-
-    /// Resolves every immutable task definition against validated site policy.
-    pub(crate) fn finalize(mut self, config: TaskConf) -> Result<Self, TaskRuntimeError> {
-        let lanes = config.resolve_lanes(self.lane_defaults.values().cloned())?;
-        for task in self.tasks.values_mut() {
-            let declared = task.declared_lane();
-            validate_key_revision(task.idempotency_policy())?;
-            let (effective, fallback) = config
-                .resolve_lane(&lanes, declared)
-                .map_err(|error| missing_lane_error(error, task.name(), declared, &lanes))?;
-            if fallback {
-                tracing::warn!(
-                    task = task.name(),
-                    declared_lane = %declared,
-                    effective_lane = %effective,
-                    "task lane is not configured; using the default lane"
-                );
-            }
-            task.resolve_lane(effective);
-        }
-        self.config = config;
-        self.lanes = lanes;
-        Ok(self)
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
-    }
-
-    /// Returns whether one registered handler consumes local task batches.
-    pub(crate) fn is_batch(&self, name: &str) -> bool {
-        self.tasks.get(name).is_some_and(RegisteredTask::is_batch)
-    }
-
-    pub(crate) fn register(&mut self, service: RegisteredTask) -> Result<(), TaskRuntimeError> {
-        let name = service.name().to_string();
-        validate_task_name(&name)?;
-        if self.tasks.contains_key(&name) || self.typed_map.contains_key(&service.type_id) {
-            return Err(TaskRuntimeError::AlreadyExists(name));
-        }
-        self.typed_map.insert(service.type_id, name.clone());
-        self.tasks.insert(name, service);
-        Ok(())
-    }
-
-    /// Adds one bundle-owned default for a named non-default task lane.
-    pub(crate) fn register_lane(
-        &mut self,
-        lane: super::TaskLaneConf,
-    ) -> Result<(), TaskRuntimeError> {
-        let name = lane.lane();
-        if name == super::DEFAULT_TASK_LANE {
-            return Err(TaskRuntimeError::InvalidConfig(
-                "bundles cannot configure the default task lane".into(),
-            ));
-        }
-        if self.lane_defaults.contains_key(&name) {
-            return Err(TaskRuntimeError::AlreadyExists(format!(
-                "task lane '{name}'"
-            )));
-        }
-        self.lane_defaults.insert(name, lane);
-        Ok(())
-    }
-
-    pub(crate) fn merge(&mut self, other: TaskRegistry) -> Result<(), TaskRuntimeError> {
-        for lane in other.lane_defaults.into_values() {
-            self.register_lane(lane)?;
-        }
-        for (name, task) in other.tasks {
-            validate_task_name(&name)?;
-            if self.tasks.contains_key(&name) {
-                return Err(TaskRuntimeError::AlreadyExists(name));
-            }
-            if self.typed_map.contains_key(&task.type_id) {
-                return Err(TaskRuntimeError::AlreadyExists(name));
-            }
-            self.typed_map.insert(task.type_id, name.clone());
-            self.tasks.insert(name, task);
-        }
-        Ok(())
-    }
-
-    /// Returns the complete validated lane set used by the runtime and store.
-    pub(crate) fn lanes(&self) -> &[super::TaskLaneConf] {
-        &self.lanes
-    }
-
-    /// Produces the finalized per-handler idempotency policy shared with stores.
-    pub(crate) fn idempotency_conf(
-        &self,
-    ) -> Result<Vec<super::store::TaskIdempotencyConf>, TaskRuntimeError> {
-        self.tasks
-            .values()
-            .filter_map(|task| {
-                task.idempotency_policy().map(|policy| {
-                    lane_retention(&self.lanes, task.effective_lane()).map(|retention| {
-                        super::store::TaskIdempotencyConf {
-                            handler: task.name.clone(),
-                            lane: task.effective_lane().to_string(),
-                            revision: policy.revision.into(),
-                            retention,
-                        }
-                    })
-                })
-            })
-            .collect()
-    }
-
-    /// Builds immutable store configuration before producers or workers use it.
-    pub(crate) fn store_conf(&self) -> Result<super::TaskStoreConf, TaskRuntimeError> {
-        Ok(super::TaskStoreConf {
-            max_all_children: self.config.all_limit(),
-            handlers: self
-                .tasks
-                .values()
-                .map(|task| (task.name.clone(), task.kind()))
-                .collect(),
-            lanes: self.lanes().to_vec(),
-            idempotency: self.idempotency_conf()?,
-            poll_interval: self.config.poll_interval_value(),
-        })
-    }
-
-    pub(crate) fn dispatcher<S: crate::tasks::store::AbstractTaskStore + Send + Sync + 'static>(
-        self: Arc<Self>,
-        store: Arc<S>,
-        schedules: Vec<super::store::TaskScheduleConf>,
-    ) -> TaskDispatcher<S> {
-        let metrics = Arc::new(super::TaskMetrics::new(
-            self.tasks.keys().cloned(),
-            self.lanes.iter().map(|lane| lane.lane().to_string()),
-        ));
-        TaskDispatcher {
-            store,
-            registry: self.clone(),
-            events: tokio::sync::broadcast::channel(self.config.batch_size_value()).0,
-            metrics,
-            health: super::TaskHealth::new(self.config.readiness_policy(), !self.is_empty()),
-            schedules: schedules.into(),
-        }
-    }
-
     pub(crate) async fn execute_many(
         &self,
         site: Site,
@@ -881,82 +484,6 @@ fn missing_results(records: Vec<Arc<TaskRecord>>, name: &str) -> Vec<TaskExecuti
             outcome: TaskOutcome::fail(format!("Task '{name}' not found")),
         })
         .collect()
-}
-
-impl Default for TaskRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn validate_task_name(name: &str) -> Result<(), TaskRuntimeError> {
-    if name.is_empty() || name.chars().count() > 191 {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task handler names must contain between 1 and 191 characters".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Validates the stable identifier used to distinguish idempotency-key semantics.
-fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskRuntimeError> {
-    let Some(policy) = policy else {
-        return Ok(());
-    };
-    let revision = policy.revision;
-    if revision.is_empty() || revision.len() > 64 {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task idempotency revisions must contain between 1 and 64 bytes".into(),
-        ));
-    }
-    if !revision.bytes().all(|byte| {
-        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-    }) {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task idempotency revisions use lowercase letters, digits, '-' or '_'".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Reads the already validated retention policy for one effective registered lane.
-fn lane_retention(
-    lanes: &[super::TaskLaneConf],
-    lane: super::TaskLane,
-) -> Result<super::IdempotencyRetention, TaskRuntimeError> {
-    lanes
-        .iter()
-        .find(|entry| entry.lane() == lane)
-        .map(super::TaskLaneConf::idempotency_policy)
-        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
-}
-
-/// Adds task-definition context when strict lane resolution rejects site construction.
-fn missing_lane_error(
-    error: TaskRuntimeError,
-    task: &str,
-    declared: super::TaskLane,
-    lanes: &[super::TaskLaneConf],
-) -> TaskRuntimeError {
-    if !matches!(error, TaskRuntimeError::UnknownLane(_)) {
-        return error;
-    }
-    let configured = lanes
-        .iter()
-        .map(|lane| lane.lane().as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    TaskRuntimeError::InvalidConfig(format!(
-        "task '{task}' declares lane '{declared}', but configured lanes are: {configured}"
-    ))
-}
-
-impl std::fmt::Debug for TaskRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskRegistry")
-            .field("tasks", &self.tasks.keys().collect::<Vec<_>>())
-            .finish()
-    }
 }
 
 #[cfg(test)]

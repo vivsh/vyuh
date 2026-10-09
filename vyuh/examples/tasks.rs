@@ -178,7 +178,7 @@ async fn main() -> Result<(), Error> {
 
     let task_conf = TaskConf::default()
         .concurrency(4)
-        .batch_size(50)
+        .commit_batch_size(50)
         .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 2))
         .lane(
             TaskLaneConf::new(EMAIL, 2)

@@ -1,12 +1,82 @@
 use super::*;
 
+/// Locked lanes and explicit opt-out cannot supply cached direct Flow resumption.
+#[test]
+fn local_sticky_gates() {
+    let ordinary = TaskLaneConf::new(FAST, 1);
+    assert!(ordinary.is_sticky());
+    assert!(ordinary.cache_bytes() > 0);
+    let disabled = ordinary.clone().sticky(false);
+    assert!(!disabled.is_sticky());
+    assert_eq!(disabled.cache_bytes(), 0);
+    let locked = ordinary.lock(TaskLaneLock::new(1));
+    assert!(!locked.is_sticky());
+    assert_eq!(locked.cache_bytes(), 0);
+}
+/// Explicit and implicit lanes inherit the centralized defaults without coupling the capacities.
+#[test]
+fn pipeline_capacity_defaults() -> Result<(), TaskRuntimeError> {
+    let config = TaskConf::default();
+    config.validate()?;
+    assert_eq!(config.commit_batch_size_value(), 1_024);
+    assert_eq!(config.ingress_capacity_value(), 4_096);
+    assert_eq!(TaskLaneConf::new(FAST, 1).claim_batch_size_value(), 1_024);
+    let lanes = config.resolve_lanes([])?;
+    assert_eq!(
+        lanes.first().map(TaskLaneConf::claim_batch_size_value),
+        Some(1_024)
+    );
+    Ok(())
+}
+
+/// Claim, output and ingress bounds finalize independently, including locked cohorts.
+#[test]
+fn independent_pipeline_limits() -> Result<(), TaskRuntimeError> {
+    let config = TaskConf::default()
+        .commit_batch_size(1)
+        .ingress_capacity(7)
+        .lane(
+            TaskLaneConf::new(DEFAULT_TASK_LANE, 10)
+                .claim_batch_size(32)
+                .lock(super::super::TaskLaneLock::new(32)),
+        );
+    let lanes = config.resolve_lanes([])?;
+    assert_eq!(config.commit_batch_size_value(), 1);
+    assert_eq!(config.ingress_capacity_value(), 7);
+    assert_eq!(
+        lanes.first().map(TaskLaneConf::claim_batch_size_value),
+        Some(32)
+    );
+    for value in [0, 10_001] {
+        assert!(
+            TaskConf::default()
+                .commit_batch_size(value)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            TaskConf::default()
+                .ingress_capacity(value)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            TaskConf::default()
+                .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 10).claim_batch_size(value))
+                .validate()
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
 /// All limits are finalized independently of the ordinary store batch size.
 #[test]
 fn all_limit_bounds() {
     for size in [1, 256, 10_000] {
         assert!(
             TaskConf::default()
-                .batch_size(1)
+                .commit_batch_size(1)
                 .max_all_children(size)
                 .validate()
                 .is_ok()
@@ -52,9 +122,11 @@ fn task_config_validates_lane_lock_policy() {
         Err(TaskRuntimeError::InvalidConfig(_))
     ));
 
-    let oversized = TaskConf::default()
-        .batch_size(1)
-        .lane(TaskLaneConf::new(FAST, 1).lock(TaskLaneLock::new(2)));
+    let oversized = TaskConf::default().lane(
+        TaskLaneConf::new(FAST, 1)
+            .claim_batch_size(1)
+            .lock(TaskLaneLock::new(2)),
+    );
     assert!(matches!(
         oversized.validate(),
         Err(TaskRuntimeError::InvalidConfig(_))
@@ -189,7 +261,7 @@ fn task_config_rejects_more_than_thirty_two_lanes() {
 fn task_config_accumulates_invalid_scalar_values() {
     let conf = TaskConf::default()
         .concurrency(0)
-        .batch_size(0)
+        .commit_batch_size(0)
         .poll_interval(Duration::ZERO);
     assert!(matches!(
         conf.validate(),

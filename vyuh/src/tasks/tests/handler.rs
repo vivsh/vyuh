@@ -1,5 +1,6 @@
 use crate::tasks::store::TestError;
 use std::sync::Arc;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use crate::{
     Data, SiteError,
     tasks::{
         DEFAULT_TASK_LANE, LaneClaim, TaskCommit, TaskId, TaskIdempotency, TaskOptions,
-        TaskReceipt, store::AbstractTaskStore, store::MemoryTaskStore,
+        TaskReceipt, store::MemoryTaskStore, store::TaskStore,
     },
 };
 
@@ -282,7 +283,7 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TestError> {
 
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
-    let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
+    let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
     let task_id = dispatcher.submit(DirectJob { id: 42 }).await?.id();
     let claimed = store
         .claim_tasks(
@@ -332,7 +333,7 @@ async fn task_options_defer_errors_to_submission() -> Result<(), TestError> {
         |_: Data<DirectJob>| async {},
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
-    let dispatcher = Arc::new(registry).dispatcher(store, Vec::new());
+    let dispatcher = Arc::new(registry).client(store, Vec::new());
     let oversized = TaskOptions::new().delay(Duration::from_secs(u64::MAX));
     assert!(matches!(
         dispatcher.submit_with(DirectJob { id: 1 }, oversized).await,
@@ -353,7 +354,7 @@ async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TestErro
         direct_job,
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
-    let dispatcher = Arc::new(registry).dispatcher(store, Vec::new());
+    let dispatcher = Arc::new(registry).client(store, Vec::new());
     let receipts = dispatcher
         .submit_many_with(
             [DirectJob { id: 1 }, DirectJob { id: 1 }],
@@ -412,7 +413,7 @@ async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TestError> {
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
-    let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
+    let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
 
     let receipts = dispatcher.submit_many(Vec::<DirectJob>::new()).await?;
 
@@ -566,7 +567,7 @@ async fn external_results_share_envelope() -> Result<(), TestError> {
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
-    let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
+    let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
     let id = dispatcher.submit(DirectJob { id: 8 }).await?.id();
     let claim = LaneClaim {
         lane: DEFAULT_TASK_LANE,
@@ -620,7 +621,7 @@ async fn external_result_limit_is_independent() -> Result<(), TestError> {
     ))?;
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
-    let dispatcher = Arc::new(registry).dispatcher(store.clone(), Vec::new());
+    let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
     let id = dispatcher.submit(DirectJob { id: 1 }).await?.id();
     suspend_fixture(&store, id).await?;
     assert!(matches!(

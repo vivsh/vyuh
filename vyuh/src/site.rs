@@ -12,7 +12,7 @@ use crate::observability::Observability;
 use crate::signals::SignalClient;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 use crate::tasks::MemoryTaskStore;
-use crate::tasks::{TaskDispatcher, TaskRunner, TaskStore, Tasks};
+use crate::tasks::{ConfiguredTaskStore, TaskClient, TaskRunner, Tasks};
 use crate::templates::{TemplateEngine, TemplateError, Templates};
 use crate::{services, watch};
 use axum::ServiceExt;
@@ -226,7 +226,16 @@ impl SiteBuilder {
     }
 
     /// Starts all site-owned background engines exactly once per site runtime.
-    async fn start_runtime(site: &Site) -> Result<(), SiteError> {
+    async fn start_runtime(
+        site: &Site,
+    ) -> Result<
+        Option<(
+            uuid::Uuid,
+            tokio::sync::mpsc::Sender<Arc<crate::tasks::TaskRecord>>,
+        )>,
+        SiteError,
+    > {
+        let mut ingress = None;
         let channels = site.inner.channels.clone();
         let channel_shutdown = site.shutdown_notifier();
         site.inner.joinset.lock().spawn(async move {
@@ -241,8 +250,9 @@ impl SiteBuilder {
         }
 
         if site.inner.task_engine.has_tasks() {
-            let task_runner = TaskRunner::new(site.inner.task_engine.clone())?;
+            let mut task_runner = TaskRunner::new(site.inner.task_engine.clone())?;
             task_runner.initialize().await?;
+            ingress = Some(task_runner.ingress());
 
             let signal_site = site.clone();
             let task_site = signal_site.clone();
@@ -265,7 +275,7 @@ impl SiteBuilder {
             .service_engine
             .start_workers(site.clone(), &mut site.inner.joinset.lock())?;
 
-        Ok(())
+        Ok(ingress)
     }
 
     async fn start_server(site: Site) -> Result<(), SiteError> {
@@ -556,21 +566,21 @@ impl SiteBuilder {
         let task_schedules = bundle.emitters.task_schedules(&task_registry)?;
 
         #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-        let task_store = TaskStore::new(
+        let task_store = ConfiguredTaskStore::new(
             pool.as_sqlx().clone(),
-            task_registry.config.batch_size_value(),
+            task_registry.config.commit_batch_size_value(),
             task_registry.config.lease_duration_value(),
             task_registry.store_conf()?,
         );
 
         #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
         let task_store = MemoryTaskStore::with_lease_duration(
-            task_registry.config.batch_size_value(),
+            task_registry.config.commit_batch_size_value(),
             task_registry.config.lease_duration_value(),
             task_registry.store_conf()?,
         );
 
-        let task_dispatcher = task_registry.dispatcher(Arc::new(task_store), task_schedules);
+        let task_client = task_registry.client(Arc::new(task_store), task_schedules);
 
         let signal_engine = bundle.signals.engine();
 
@@ -642,7 +652,7 @@ impl SiteBuilder {
             signal_engine,
             emitter_engine,
             commands: command_registry,
-            task_engine: task_dispatcher,
+            task_engine: task_client,
             #[cfg(feature = "email")]
             mail_delivery,
         };
@@ -674,9 +684,14 @@ struct SiteInner {
     commands: CommandRegistry,
     #[cfg(feature = "migrations")]
     migration_runner: Option<crate::commands::core::SharedMigrationRunner>,
-    task_engine: TaskDispatcher<TaskStore>,
+    task_engine: TaskClient<ConfiguredTaskStore>,
     service_engine: services::ServiceEngine,
-    runtime: OnceCell<()>,
+    runtime: OnceCell<
+        Option<(
+            uuid::Uuid,
+            tokio::sync::mpsc::Sender<Arc<crate::tasks::TaskRecord>>,
+        )>,
+    >,
     shutdown_notifier: CancellationNotifier,
     _logging_guard: LoggingGuard,
     joinset: Arc<parking_lot::Mutex<tokio::task::JoinSet<()>>>,
@@ -1220,7 +1235,9 @@ impl Site {
     /// Return the task client for submitting durable background work.
     /// Registered task handlers determine how submitted payloads are executed.
     pub fn tasks(&self) -> Tasks {
-        Tasks::new(self.inner.task_engine.clone())
+        let mut client = self.inner.task_engine.clone();
+        client.ingress = self.inner.runtime.get().cloned().flatten();
+        Tasks::new(client)
     }
 
     pub(crate) fn task_metrics(&self) -> String {

@@ -7,7 +7,7 @@ error[E0599]: no function or associated item named `retry` found for struct `vyu
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
- --> src/tasks/state.rs
+ --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -24,7 +24,7 @@ error[E0599]: no function or associated item named `fail` found for struct `vyuh
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
- --> src/tasks/state.rs
+ --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -44,7 +44,7 @@ note: if you're trying to build a new `vyuh::prelude::FlowState` consider using 
       vyuh::prelude::FlowState::<T>::spawn_with
       vyuh::prelude::FlowState::<T>::complete
       and $N others
- --> src/tasks/flow_state.rs
+ --> src/tasks/flow/state.rs
   |
   | /     pub fn all<I: DataValue, S: Serialize>(
   | |         children: Vec<I>,

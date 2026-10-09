@@ -1,8 +1,0 @@
-[2026-06-25 11:43:41 +0530] [41639] [INFO] Starting gunicorn 26.0.0
-[2026-06-25 11:43:41 +0530] [41639] [INFO] Listening at: http://127.0.0.1:9100 (41639)
-[2026-06-25 11:43:41 +0530] [41639] [INFO] Using worker: sync
-[2026-06-25 11:43:41 +0530] [41700] [INFO] Booting worker with pid: 41700
-[2026-06-25 11:43:43 +0530] [41639] [INFO] Control socket listening at /Users/vivek/.gunicorn/gunicorn.ctl
-[2026-06-25 11:44:55 +0530] [41639] [INFO] Handling signal: term
-[2026-06-25 01:14:55 -0500] [41700] [INFO] Worker exiting (pid: 41700)
-[2026-06-25 11:44:56 +0530] [41639] [INFO] Shutting down: Master

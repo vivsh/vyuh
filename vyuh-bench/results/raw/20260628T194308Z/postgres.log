@@ -1,5 +1,0 @@
-2026-06-28 19:50:24.649 UTC [9240] LOG:  starting PostgreSQL 15.18 (Debian 15.18-0+deb12u1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
-2026-06-28 19:50:24.651 UTC [9240] LOG:  listening on IPv6 address "::1", port 55432
-2026-06-28 19:50:24.651 UTC [9240] LOG:  listening on IPv4 address "127.0.0.1", port 55432
-2026-06-28 19:50:24.653 UTC [9240] FATAL:  could not create lock file "/var/run/postgresql/.s.PGSQL.55432.lock": Permission denied
-2026-06-28 19:50:24.654 UTC [9240] LOG:  database system is shut down

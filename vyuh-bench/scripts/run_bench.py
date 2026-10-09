@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from paths import RESULTS
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parent
@@ -450,7 +451,7 @@ def echo_findings(app: App, results: list[dict[str, Any]]) -> None:
 
 
 async def main() -> None:
-    raw = ROOT / "results" / "raw" / now_slug()
+    raw = RESULTS / "raw" / now_slug()
     raw.mkdir(parents=True)
     meta = {
         "created_at": datetime.now(timezone.utc).isoformat(),

@@ -55,7 +55,7 @@ async fn batches_persist_all_results() {
                 TaskConf::default()
                     .db_concurrency(limit)
                     .concurrency(8)
-                    .batch_size(8)
+                    .commit_batch_size(8)
                     .poll_interval(Duration::from_millis(5)),
             ),
             bundles::bundle([bundles::work_batch(
@@ -139,7 +139,7 @@ async fn gated(limit: usize) -> (TestSite, Arc<Notify>, Arc<AtomicUsize>) {
             TaskConf::default()
                 .db_concurrency(limit)
                 .concurrency(4)
-                .batch_size(4)
+                .commit_batch_size(4)
                 .poll_interval(Duration::from_millis(5))
                 .lane(TaskLaneConf::new(SLOW, 1)),
         ),

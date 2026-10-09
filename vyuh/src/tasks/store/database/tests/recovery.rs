@@ -1,4 +1,5 @@
 use super::*;
+use crate::tasks::TaskStatus;
 use crate::tasks::{TaskCommit, TaskId, TaskOutcome, TaskPoll};
 
 /// Creates committed claim evidence; the caller deliberately treats its acknowledgement as lost.
@@ -8,6 +9,7 @@ async fn claimed() -> Result<(DbTaskStore, uuid::Uuid, TaskPoll), String> {
     conf.handlers.extend([
         ("fixture".into(), crate::tasks::TaskKind::Work),
         ("child".into(), crate::tasks::TaskKind::Work),
+        ("flow".into(), crate::tasks::TaskKind::Flow),
     ]);
     let store = configured(store, conf);
     let node = uuid::Uuid::now_v7();
@@ -29,7 +31,7 @@ async fn claimed() -> Result<(DbTaskStore, uuid::Uuid, TaskPoll), String> {
 fn configured(store: DbTaskStore, conf: crate::tasks::TaskStoreConf) -> DbTaskStore {
     DbTaskStore::new(
         store.pool.as_sqlx().clone(),
-        store.batch_size,
+        store.commit_batch_size,
         store.lease_duration,
         conf,
     )
@@ -293,7 +295,7 @@ async fn assert_cancelled_join(
 /// Builds store-owned child requests without exposing lineage mutation to applications.
 async fn group(store: &DbTaskStore, poll: &TaskPoll, count: usize) -> Result<TaskCommit, String> {
     let mut parent = commit(poll)?;
-    db::sqlx::query("UPDATE vyuh_tasks SET kind = 1 WHERE id = ?")
+    db::sqlx::query("UPDATE vyuh_tasks SET kind = 1, name = 'flow' WHERE id = ?")
         .bind(parent.task_id().into_uuid())
         .execute(store.pool.as_sqlx())
         .await
@@ -469,6 +471,7 @@ async fn sqlite_recovery_uncommitted_flush() -> Result<(), String> {
     let result = crate::tasks::CommitResult {
         wake_lanes: Vec::new(),
         rejected: Vec::new(),
+        tasks: Vec::new(),
     };
     let recovered = store
         .recover_outputs(&node, &commits, result)
@@ -547,6 +550,7 @@ async fn sqlite_recovery_advanced_attempt() -> Result<(), String> {
     let result = crate::tasks::CommitResult {
         wake_lanes: Vec::new(),
         rejected: Vec::new(),
+        tasks: Vec::new(),
     };
     assert_eq!(
         store
@@ -612,6 +616,7 @@ async fn sqlite_recovery_cancelled_group() -> Result<(), String> {
     let result = crate::tasks::CommitResult {
         wake_lanes: Vec::new(),
         rejected: Vec::new(),
+        tasks: Vec::new(),
     };
     store
         .recover_outputs(&node, std::slice::from_ref(&parent), result)

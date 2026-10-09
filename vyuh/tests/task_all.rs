@@ -68,7 +68,7 @@ async fn all_registration_parity() -> Result<(), TestError> {
             vyuh::SiteConf::default().log_init(false).tasks(
                 TaskConf::default()
                     .db_concurrency(db_concurrency)
-                    .batch_size(1)
+                    .commit_batch_size(1)
                     .lane(vyuh::tasks::TaskLaneConf::new(WORK, 8))
                     .max_all_children(32)
                     .poll_interval(Duration::from_millis(5)),

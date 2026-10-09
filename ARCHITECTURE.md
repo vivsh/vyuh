@@ -8,6 +8,39 @@ be registered with direct APIs or macros.
 
 ## Task pipeline and ownership
 
+### Source organization
+
+Task code is grouped by declaration, process-local execution, and persistence:
+
+- `tasks/client.rs` implements the `Tasks` facade and its internal `TaskClient`.
+  Stateless input validation and preparation live in `submission.rs`.
+- `registry.rs` owns registration and finalization; `handler.rs` invokes the
+  registered Work, batch, or prepared Flow handler. `continuation.rs` decodes
+  immutable invocation snapshots, while `outcome.rs` defines the internal
+  lifecycle outcomes and their bounded normalization.
+- `work/` contains Work extraction and return conversion; `flow/` contains
+  immutable definitions, one-time factories, advancement, and the optional
+  Pravah adapter. Public types remain re-exported from `vyuh::tasks`.
+- `runner/engine.rs` owns the event loop and shared output buffer;
+  `runner/execution.rs` handles dispatch and permit-carrying completion;
+  `runner/lanes.rs` handles lane-local admission, cache, and hooks;
+  `runner/database.rs` handles asynchronous database requests and reconciliation.
+  These modules implement one `TaskRunner`, not separate stateful managers.
+- `store/contract.rs` defines `TaskStore` and its operation messages;
+  `store/lane.rs` contains the lane-lease protocol; `store/transitions.rs`
+  contains backend-independent workflow rules. `ConfiguredTaskStore` selects
+  the backend without hiding the trait behind an abstract-class name.
+- Database `submit`, `claim`, `commit`, `workflow`, `nodes`, and `recovery`
+  modules are siblings. `store.rs` owns construction and startup; workflow
+  helpers are shared explicitly by claim, commit, and reconciliation. The
+  memory reference store keeps its corresponding implementation under `memory/`.
+
+Module boundaries introduce no additional runtime state, queues, locks, or
+transactions. Only the store mutates durable lifecycle fields; reorganizing
+implementation files does not alter that boundary.
+
+### Execution and persistence
+
 The task runtime uses independent claim, commit, and lane-coordination
 transactions. Cancellation intentionally does not interrupt running handlers.
 Poll-paced recovery reconciles uncertain claim and commit acknowledgements.
@@ -24,7 +57,17 @@ or lane lifecycle state. Individual task lease columns and the old fingerprint
 storage are removed. Fresh installations use the desired schema directly.
 
 The runner owns lane-local input queues and one shared FIFO output buffer.
-Global and lane execution permits travel with a completion until the collector
+Lane `claim_batch_size` bounds each fetch, process `commit_batch_size` bounds
+shared flush admission, and process `ingress_capacity` bounds direct submission
+delivery. Claims and commits default to 1,024; ingress defaults to 4,096.
+These defaults live in task configuration and are validated independently;
+runner/store consumers read finalized settings rather than repeat defaults.
+Internal scheduler, control-channel and SQL chunk bounds remain separate policies.
+Store claims enforce
+the configured lane bound; output limits never reduce it. SQL chunking is an
+internal parameter-safe concern, not an ingress or claim limit. Existing
+uncommitted-work backpressure and atomic weighted `all` flushes remain in place.
+Work global and lane execution permits travel with a completion until the collector
 has buffered every accepted outcome. A separate database semaphore bounds
 requests through application of their responses. Claims and flushes can overlap
 without a combined store turn. An operation-local UUID correlates each immutable
@@ -34,9 +77,14 @@ UUID `node_id`, fenced with its lifetime attempt and running status.
 One bounded local broadcast channel replaces the wake notifier. Dispatcher clones
 send `Wake` after ingress and `Cancel(TaskId)` after acknowledged terminal cancellation;
 each runner subscribes. Its receiver replaces the existing wake branch in the
-seven-branch select (DB results, handler completions, hook completions, death
-deadline, controls, shutdown, scheduling deadline). Claimed inputs arrive through
-DB results, not a separate input channel. Notifications never bypass poll gates.
+eight-branch select (committed inputs, DB results, handler completions, hook completions,
+death deadline, controls, shutdown, scheduling deadline). A bounded, cloneable
+`mpsc::Sender<Arc<TaskRecord>>` accepts only already-committed Running records.
+Submission reserves nonblocking channel slots before writing; delayed, coordinated,
+globally Work-rate-limited or excess records retain ordinary Pending insertion.
+The existing site start guard publishes the endpoint after node registration;
+producer-only and pre-start dispatcher handles use ordinary insertion.
+Control notifications never bypass poll gates.
 Cancellation IDs are deduplicated in operation-local scratch and remove only
 queued snapshots. They create no outputs or uncommitted pressure: the store has
 already finalized cancellation. There is no retained cancellation set or queue
@@ -64,8 +112,10 @@ read and write fields; cancellation batches additionally persist the flag.
 
 The store alone changes task lifecycle fields. Each output flush atomically
 writes outcomes and workflow changes; each claim independently establishes
-ownership. Poll gates still control execution of newly committed children and
-resumed parents. Lane-owner leases and tokens remain centrally coordinated.
+ownership. Acknowledged immediately-ready children and matching cached scalar
+Flow resumes may enter the same lane queues directly, without a later claim.
+Other work retains poll gates. No handler executes recursively from a flush.
+Lane-owner leases and tokens remain centrally coordinated.
 Transient database errors retain requests for poll-paced retry or reconciliation;
 permanent database and internal protocol errors stop the runner. Graceful draining stops claims and queued dispatch, collects and persists
 executing work, and waits for every admitted database response. A final single
@@ -171,7 +221,7 @@ compatibility checks:
   are atomic. For `all`, child results and parent counter/readiness updates are
   atomic; ordered results are materialized separately in the parent's claim
   transaction. Children and resumed parents execute only through a later
-  eligible claim, never recursively during a flush.
+  eligible claim or acknowledged committed-input delivery, never recursively during a flush.
 
 The store owns these mutations; runner and handler task records are immutable
 snapshots. Removing runtime fingerprints does not remove these guarantees, and
@@ -182,6 +232,9 @@ external effects. Database contact, node retirement and lane polling may delay r
 
 - `vyuh/` contains the runtime framework crate.
 - `vyuh-macros/` contains procedural macros used by the runtime crate.
+- `vyuh-bench/` contains the HTTP comparison harness. Generated measurements,
+  database fixtures and reports belong outside the checkout, under
+  `~/Codex/vyuh/benchmarks/http/results` by default (`VYUH_BENCH_RESULTS` overrides it).
 - `docs/book/src/` contains the canonical documentation source for subsystem
   and product docs. `docs/book/` contains mdBook configuration and generated
   book support.
@@ -310,6 +363,41 @@ The `vyuh` crate is organized around these subsystems:
   store fencing, with cancellation taking precedence. Neither adds SQL or a
   separate recovery policy. Sync signatures restrict supported capabilities,
   not arbitrary Rust effects or blocking operations.
+  Flow advancement consumes neither Work concurrency permits nor Work rate tokens.
+  It remains bounded by input/output pressure, fair dispatch and lane lifecycle gates.
+  Ordinary lanes default to opportunistic local delivery (`sticky(true)`), not
+  durable node affinity. Pending, retrying, sleeping and suspended tasks are
+  ownerless; Running tasks remain owned through queuing, execution and commit.
+  Ready Spawn/All children targeting sticky unlocked lanes use reserved local
+  capacity; overflow, delayed and otherwise gated children stay ownerless.
+  Work retains its rate/concurrency gates. Locked lanes retain exclusive lane
+  coordination and never use direct child/cache admission.
+  Claims and wake hints use only the ownerless readiness predicate for Pending
+  or abandoned Running rows, with the existing ordering and lock policy.
+  There is no owned-Pending stream or per-candidate lateral payload lookup.
+  The offline `0017_local_sticky` migration clears legacy non-Running affinity
+  and removes its obsolete readiness index without rewriting execution state.
+  Each lane owns a disposable byte-bounded LRU of immutable Flow records (8 MiB
+  by default, zero disables it). Eviction never mutates durable state. Cached
+  suspended bases combine with the existing narrow, fenced parent write to admit
+  scalar resumes atomically, validating status/attempt and assigning a fresh node
+  owner. Waiting snapshots are ownerless; eviction needs no store mutation.
+  Misses use normal claims. Outcome acceptance still
+  reads authoritative rows. `all` still materializes results during claiming.
+  Commit acknowledgements carry existing `TaskRecord` snapshots, not another
+  lifecycle projection. Uncertain acknowledgements reconcile those exact IDs and
+  attempts before local delivery. Submission acknowledgement loss or an abandoned
+  caller can leave an owned row undelivered; existing node/startup recovery applies.
+  PostgreSQL ownerless pending mutations emit deduplicated generic wake hints
+  through the same write statement, without rereading routing state. The existing
+  notification transport retains generic and node-specific subscriptions. Parent
+  hints follow actual readiness, not each child completion. Retirement's conditional
+  DELETE emits one broad hint only if nodes were removed, after FK ownership release.
+  Each runner owns one additional listener session and reuses `db_notify` reconnect
+  handling; subscription/reconnection wakes normal polling through the existing
+  bounded control channel. Listener hints are advisory, not task lifecycle facts or
+  watchdog acknowledgements. Shutdown aborts the owned listener. Producer-only sites
+  start no listener, and non-PostgreSQL stores retain polling.
   The non-default `pravah` feature re-exports the selected dependency and prepares
   builders/compiled graphs through one adapter. A prepared graph owns only the
   immutable graph, shared dispatcher, and instruction budget. Each invocation

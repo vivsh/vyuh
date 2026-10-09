@@ -1,8 +1,30 @@
 //! Bounded workflow preparation and post-claim finalization in the store transaction.
+use super::store::DbTaskStore;
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Utc};
+
+use crate::{
+    db,
+    tasks::{
+        TaskCommit, TaskId, TaskOutcome, TaskReceipt, TaskRecord, TaskRuntimeError, TaskStatus,
+    },
+};
+
+use super::model::{TaskIdempotencyRow, TaskRow};
+
+use super::commit::lane_retry;
+use super::submit::{
+    PreparedWrite, load_key_owners, prepare_writes, replace_expired_owners, resolve_owner,
+    upsert_key_owners,
+};
+
 use crate::db::Model as _;
 use crate::tasks::TaskPoll;
+
+/// Bounds workflow key/result queries and ID-list mutations independently of pipeline capacities.
+const QUERY_CHUNK_SIZE: usize = 250;
 
 /// A narrow, operation-local parent write; never loads or rewrites checkpoint data.
 #[derive(Debug, Clone, db::Model)]
@@ -16,6 +38,10 @@ struct ParentWrite {
     ready_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
     remaining_completions: i32,
+    kind: i16,
+    node_id: Option<uuid::Uuid>,
+    attempts: i32,
+    step_attempts: i32,
 }
 
 /// Reserves child keys in bulk; conflicts fail their parent without aborting siblings.
@@ -26,14 +52,7 @@ pub(super) async fn prepare_children(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     batch_size: usize,
-) -> Result<
-    (
-        Vec<TaskRow>,
-        HashSet<TaskId>,
-        Vec<super::super::workflow::WaitWrite>,
-    ),
-    TaskRuntimeError,
-> {
+) -> Result<(Vec<TaskRow>, HashSet<TaskId>, Vec<self::WaitWrite>), TaskRuntimeError> {
     if !commands.values().any(|commit| {
         matches!(
             commit.outcome(),
@@ -56,7 +75,7 @@ pub(super) async fn prepare_children(
     };
     let (mut children, found) = resolve_children(prepared, owners)?;
     conflicts.extend(found);
-    super::super::workflow::release_rejected(tx, &children, &conflicts, batch_size).await?;
+    self::release_rejected(tx, &children, &conflicts, batch_size).await?;
     children.retain(|child| {
         !child
             .parent_id
@@ -80,7 +99,7 @@ fn prepare_groups(
     (
         Vec<crate::tasks::TaskWrite>,
         HashSet<TaskId>,
-        Vec<super::super::workflow::WaitWrite>,
+        Vec<self::WaitWrite>,
     ),
     TaskRuntimeError,
 > {
@@ -94,7 +113,7 @@ fn prepare_groups(
                 continue;
             }
             if crate::tasks::TaskKind::from_i16(row.kind)? != crate::tasks::TaskKind::Flow
-                || crate::tasks::store::workflow::validate_group(children, conf).is_err()
+                || crate::tasks::store::transitions::validate_group(children, conf).is_err()
             {
                 conflicts.insert(TaskId::new(row.id));
                 continue;
@@ -103,12 +122,7 @@ fn prepare_groups(
                 .iter()
                 .map(|child| child.record.id)
                 .collect::<Vec<_>>();
-            waits.push(super::super::workflow::WaitWrite::new(
-                row.id,
-                &row.lane_name,
-                &ids,
-                now,
-            )?);
+            waits.push(self::WaitWrite::new(row.id, &row.lane_name, &ids, now)?);
             writes.extend(children.iter().map(|child| child_write(row, child)));
             continue;
         }
@@ -128,7 +142,7 @@ async fn reserve_group_keys(
 ) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
     keys.sort_by(|a, b| (&a.task_name, &a.key_value).cmp(&(&b.task_name, &b.key_value)));
     let mut owners = Vec::with_capacity(keys.len());
-    for chunk in keys.chunks(batch.clamp(1, 250)) {
+    for chunk in keys.chunks(batch.clamp(1, QUERY_CHUNK_SIZE)) {
         upsert_key_owners(tx, chunk, batch).await?;
         let loaded = load_key_owners(tx, chunk).await?;
         owners.extend(replace_expired_owners(tx, loaded, chunk, now).await?);
@@ -152,7 +166,7 @@ fn prepare_child(
         return Ok(None);
     };
     let kind = crate::tasks::TaskKind::from_i16(row.kind)?;
-    if crate::tasks::store::workflow::capability_error(kind, outcome, &conf.handlers).is_some() {
+    if crate::tasks::store::transitions::capability_error(kind, outcome, &conf.handlers).is_some() {
         return Ok(None);
     }
     if child.ignore_conflicts {
@@ -168,6 +182,7 @@ fn child_write(row: &TaskRow, child: &crate::tasks::TaskWrite) -> crate::tasks::
     let mut child = child.clone();
     child.record.parent_id = Some(TaskId::new(row.id));
     child.record.root_id = Some(TaskId::new(row.root_id.unwrap_or(row.id)));
+    child.record.node_id = None;
     child.ignore_conflicts = true;
     child
 }
@@ -199,12 +214,12 @@ fn resolve_children(
 }
 
 /// Encodes a terminal accepted child transition for delivery after claim selection.
-pub(in super::super) fn queue_delivery(
+pub(super) fn queue_delivery(
     row: &TaskRow,
     deliveries: &mut Vec<(TaskId, String)>,
 ) -> Result<(), TaskRuntimeError> {
     if let Some(parent) = row.parent_id
-        && let Some(result) = crate::tasks::store::workflow::terminal_result(
+        && let Some(result) = crate::tasks::store::transitions::terminal_result(
             TaskStatus::from_i16(row.status)?,
             row.last_result.as_deref(),
         )?
@@ -215,28 +230,71 @@ pub(in super::super) fn queue_delivery(
 }
 
 /// Inserts children and resumes suspended parents in the originating transaction.
-pub(in super::super) async fn finalize_workflow(
+pub(super) async fn finalize_workflow(
     tx: &mut db::DbTransaction<'_>,
     children: &[TaskRow],
     deliveries: Vec<(TaskId, String)>,
-    waits: &[super::super::workflow::WaitWrite],
+    waits: &[self::WaitWrite],
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     batch_size: usize,
+) -> Result<Vec<crate::tasks::TaskLane>, TaskRuntimeError> {
+    finalize_admitted(
+        tx,
+        children,
+        deliveries,
+        waits,
+        conf,
+        now,
+        batch_size,
+        None,
+        &[],
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// Delivers committed snapshots without a second task-payload read or transaction.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn finalize_admitted(
+    tx: &mut db::DbTransaction<'_>,
+    children: &[TaskRow],
+    deliveries: Vec<(TaskId, String)>,
+    waits: &[self::WaitWrite],
+    conf: &crate::tasks::TaskStoreConf,
+    now: DateTime<Utc>,
+    batch_size: usize,
+    mut delivery: Option<(uuid::Uuid, usize)>,
+    cached: &[std::sync::Arc<TaskRecord>],
+    tasks: &mut Vec<std::sync::Arc<TaskRecord>>,
 ) -> Result<Vec<crate::tasks::TaskLane>, TaskRuntimeError> {
     let mut lanes = children
         .iter()
         .map(|child| child.lane_name.clone())
         .collect::<HashSet<_>>();
-    super::super::workflow::install(tx, waits, batch_size, &mut lanes).await?;
+    self::install(tx, waits, batch_size, &mut lanes).await?;
     if !children.is_empty() {
+        #[cfg(feature = "postgres")]
+        super::notify::insert(tx, children, batch_size, delivery.map(|(node, _)| node)).await?;
+        #[cfg(not(feature = "postgres"))]
         db::from(DbTaskStore::table())
             .insert_many(children)
             .batch_size(batch_size)
             .exec(&mut *tx)
             .await?;
     }
-    resume_parents(tx, deliveries, now, batch_size, &mut lanes).await?;
+    resume_parents(
+        tx,
+        deliveries,
+        now,
+        batch_size,
+        &mut lanes,
+        &mut delivery,
+        cached,
+        tasks,
+        conf,
+    )
+    .await?;
     Ok(conf
         .lanes
         .iter()
@@ -245,12 +303,17 @@ pub(in super::super) async fn finalize_workflow(
 }
 
 /// Updates only eligible parents using deterministic locks and narrow batched writes.
+#[allow(clippy::too_many_arguments)]
 async fn resume_parents(
     tx: &mut db::DbTransaction<'_>,
     deliveries: Vec<(TaskId, String)>,
     now: DateTime<Utc>,
     batch_size: usize,
     lanes: &mut HashSet<String>,
+    delivery: &mut Option<(uuid::Uuid, usize)>,
+    cached: &[std::sync::Arc<TaskRecord>],
+    tasks: &mut Vec<std::sync::Arc<TaskRecord>>,
+    conf: &crate::tasks::TaskStoreConf,
 ) -> Result<(), TaskRuntimeError> {
     let mut results = std::collections::BTreeMap::<TaskId, (usize, String)>::new();
     for (parent, result) in deliveries {
@@ -278,9 +341,58 @@ async fn resume_parents(
         let joins = parents
             .extract_if(.., |parent| joining.contains(&parent.id))
             .collect::<Vec<_>>();
-        persist_counters(tx, &joins, batch_size).await?;
-        persist_scalar(tx, &parents, batch_size).await?;
-        super::super::workflow::clear(tx, &invalid, batch_size).await?;
+        persist_counters(tx, &joins, batch_size, delivery.map(|(node, _)| node)).await?;
+        admit_parents(&mut parents, delivery, cached, tasks, now, conf)?;
+        persist_scalar(tx, &parents, batch_size, delivery.map(|(node, _)| node)).await?;
+        self::clear(tx, &invalid, batch_size).await?;
+    }
+    Ok(())
+}
+
+/// Establishes fresh ownership only for a current, ownerless cached parent checkpoint.
+fn admit_parents(
+    parents: &mut [ParentWrite],
+    delivery: &mut Option<(uuid::Uuid, usize)>,
+    cached: &[std::sync::Arc<TaskRecord>],
+    tasks: &mut Vec<std::sync::Arc<TaskRecord>>,
+    now: DateTime<Utc>,
+    conf: &crate::tasks::TaskStoreConf,
+) -> Result<(), TaskRuntimeError> {
+    let Some((node, remaining)) = delivery else {
+        return Ok(());
+    };
+    let bases = cached
+        .iter()
+        .map(|record| (record.id.into_uuid(), record))
+        .collect::<HashMap<_, _>>();
+    for parent in parents.iter_mut() {
+        if *remaining == 0
+            || parent.kind != 1
+            || parent.node_id.is_some()
+            || parent.attempts == i32::MAX
+            || parent.step_attempts == i32::MAX
+        {
+            continue;
+        }
+        let Some(base) = bases.get(&parent.id).filter(|record| {
+            crate::tasks::store::transitions::sticky(record, conf)
+                && record.node_id.is_none()
+                && record.attempts == parent.attempts
+                && record.status == TaskStatus::Suspended
+                && record.lane == parent.lane_name
+        }) else {
+            continue;
+        };
+        let mut record = (***base).clone();
+        record.resume_input = parent.resume_input.clone();
+        record.ready_at = parent.ready_at;
+        crate::tasks::store::transitions::admit(&mut record, *node, now)?;
+        parent.status = record.status.as_i16();
+        parent.node_id = record.node_id;
+        parent.attempts = record.attempts;
+        parent.step_attempts = record.step_attempts;
+        tasks.push(std::sync::Arc::new(record));
+        *remaining -= 1;
     }
     Ok(())
 }
@@ -305,7 +417,7 @@ fn deliver(
                 }
             }
             _ => {
-                parent.resume_input = Some(crate::tasks::store::workflow::failure(
+                parent.resume_input = Some(crate::tasks::store::transitions::failure(
                     TaskId::new(parent.id),
                     "All completion counter underflow",
                 ));
@@ -326,21 +438,40 @@ async fn persist_scalar(
     tx: &mut db::DbTransaction<'_>,
     parents: &[ParentWrite],
     batch: usize,
+    _origin: Option<uuid::Uuid>,
 ) -> Result<(), TaskRuntimeError> {
     if parents.is_empty() {
         return Ok(());
     }
     let table = ParentWrite::table();
+    use crate::db::queries::ColumnSet as _;
+    let mut columns = (
+        &table.status,
+        &table.resume_input,
+        &table.ready_at,
+        &table.updated_at,
+    )
+        .into_column_refs();
+    if parents
+        .iter()
+        .any(|parent| parent.status == TaskStatus::Running.as_i16())
+    {
+        columns.extend((&table.node_id, &table.attempts, &table.step_attempts).into_column_refs());
+    }
+    #[cfg(feature = "postgres")]
+    if parents
+        .iter()
+        .any(|parent| super::notify::needs_hint(parent.status, parent.node_id, _origin))
+    {
+        let mut names = vec!["status", "resume_input", "ready_at", "updated_at"];
+        if parents.iter().any(|parent| parent.status == 1) {
+            names.extend(["node_id", "attempts", "step_attempts"]);
+        }
+        super::notify::update(tx, parents, &names, batch).await?;
+        return Ok(());
+    }
     db::from(&table)
-        .update_many(
-            parents,
-            (
-                &table.status,
-                &table.resume_input,
-                &table.ready_at,
-                &table.updated_at,
-            ),
-        )
+        .update_many(parents, columns)
         .batch_size(batch)
         .exec(tx)
         .await?;
@@ -352,6 +483,7 @@ async fn persist_counters(
     tx: &mut db::DbTransaction<'_>,
     parents: &[ParentWrite],
     batch: usize,
+    _origin: Option<uuid::Uuid>,
 ) -> Result<(), TaskRuntimeError> {
     let table = ParentWrite::table();
     let (waiting, ready): (Vec<_>, Vec<_>) = parents
@@ -366,6 +498,26 @@ async fn persist_counters(
             .await?;
     }
     if !ready.is_empty() {
+        #[cfg(feature = "postgres")]
+        if ready
+            .iter()
+            .any(|parent| super::notify::needs_hint(parent.status, parent.node_id, _origin))
+        {
+            super::notify::update(
+                tx,
+                &ready,
+                &[
+                    "remaining_completions",
+                    "status",
+                    "ready_at",
+                    "updated_at",
+                    "resume_input",
+                ],
+                batch,
+            )
+            .await?;
+            return Ok(());
+        }
         db::from(&table)
             .update_many(
                 &ready,
@@ -406,9 +558,9 @@ async fn load_parents(
 /// Narrow authoritative wait installation, deferred until after claim selection.
 #[derive(db::Model)]
 #[table(name = "vyuh_tasks")]
-pub(in super::super) struct WaitWrite {
+pub(super) struct WaitWrite {
     #[column(primary_key)]
-    pub(in super::super) id: uuid::Uuid,
+    pub(super) id: uuid::Uuid,
     waiting_children: Option<String>,
     remaining_completions: i32,
     status: i16,
@@ -417,7 +569,7 @@ pub(in super::super) struct WaitWrite {
 }
 
 impl WaitWrite {
-    pub(in super::super) fn new(
+    pub(super) fn new(
         id: uuid::Uuid,
         lane: &str,
         children: &[TaskId],
@@ -466,7 +618,7 @@ struct ClearWait {
 }
 
 /// Releases only keys belonging to newly allocated children of rejected groups.
-pub(in super::super) async fn release_rejected(
+pub(super) async fn release_rejected(
     tx: &mut db::DbTransaction<'_>,
     children: &[TaskRow],
     rejected: &HashSet<TaskId>,
@@ -483,7 +635,7 @@ pub(in super::super) async fn release_rejected(
         .map(|row| row.id)
         .collect::<Vec<_>>();
     let table = DbTaskStore::idempotency_table();
-    for chunk in ids.chunks(batch.clamp(1, 250)) {
+    for chunk in ids.chunks(batch.clamp(1, QUERY_CHUNK_SIZE)) {
         db::from(&table)
             .filter(table.task_id.in_values(chunk.to_vec()))
             .delete()
@@ -494,7 +646,7 @@ pub(in super::super) async fn release_rejected(
 }
 
 /// Installs only accepted waits; empty groups become ready after this turn's claims.
-pub(in super::super) async fn install(
+pub(super) async fn install(
     tx: &mut db::DbTransaction<'_>,
     waits: &[WaitWrite],
     batch: usize,
@@ -504,6 +656,28 @@ pub(in super::super) async fn install(
         return Ok(());
     }
     let table = WaitWrite::table();
+    #[cfg(feature = "postgres")]
+    if waits.iter().any(|wait| wait.remaining_completions == 0) {
+        super::notify::update(
+            tx,
+            waits,
+            &[
+                "waiting_children",
+                "remaining_completions",
+                "status",
+                "ready_at",
+            ],
+            batch,
+        )
+        .await?;
+        lanes.extend(
+            waits
+                .iter()
+                .filter(|wait| wait.remaining_completions == 0)
+                .map(|wait| wait.lane_name.clone()),
+        );
+        return Ok(());
+    }
     db::from(&table)
         .update_many(
             waits,
@@ -527,7 +701,7 @@ pub(in super::super) async fn install(
 }
 
 /// Clears malformed or terminal waits without reading their ordered membership.
-pub(in super::super) async fn clear(
+pub(super) async fn clear(
     tx: &mut db::DbTransaction<'_>,
     ids: &[uuid::Uuid],
     batch: usize,
@@ -537,7 +711,7 @@ pub(in super::super) async fn clear(
         waiting_children: None,
         remaining_completions: 0,
     };
-    for chunk in ids.chunks(batch.clamp(1, 250)) {
+    for chunk in ids.chunks(batch.clamp(1, QUERY_CHUNK_SIZE)) {
         db::from(&table)
             .filter(table.id.in_values(chunk.to_vec()))
             .update(&patch)
@@ -548,7 +722,7 @@ pub(in super::super) async fn clear(
 }
 
 /// Materializes all selected lanes together; ordinary claims never enter a query here.
-pub(in super::super) async fn materialize(
+pub(super) async fn materialize(
     tx: &mut db::DbTransaction<'_>,
     waits: Vec<(TaskId, String, i32)>,
     poll: &mut TaskPoll,
@@ -580,7 +754,7 @@ pub(in super::super) async fn materialize(
     collect(tx, &members, &mut patches, &mut errors, batch).await?;
     for (index, patch) in patches.iter_mut().enumerate() {
         if let Some(error) = errors.get(&index) {
-            patch.resume_input = Some(crate::tasks::store::workflow::failure(
+            patch.resume_input = Some(crate::tasks::store::transitions::failure(
                 TaskId::new(patch.id),
                 error,
             ));
@@ -599,7 +773,7 @@ async fn collect(
     errors: &mut HashMap<usize, &'static str>,
     batch: usize,
 ) -> Result<(), TaskRuntimeError> {
-    for chunk in members.chunks(batch.clamp(1, 250)) {
+    for chunk in members.chunks(batch.clamp(1, QUERY_CHUNK_SIZE)) {
         let ids = chunk
             .iter()
             .filter(|(index, _)| !errors.contains_key(index))
@@ -626,7 +800,7 @@ async fn collect(
             let child = rows.remove(&id.into_uuid());
             let result = child.as_ref().and_then(|row| row.last_result.as_deref());
             if let Err(error) =
-                crate::tasks::store::workflow::append_result(buffer, result, child.is_some())
+                crate::tasks::store::transitions::append_result(buffer, result, child.is_some())
             {
                 buffer.clear();
                 errors.insert(*index, error);

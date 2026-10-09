@@ -8,5 +8,6 @@ services:
       BENCH_DURATION: ${BENCH_DURATION:-3}
       BENCH_WARMUP: ${BENCH_WARMUP:-1}
       BENCH_TIERS: ${BENCH_TIERS:-t2}
+      VYUH_BENCH_RESULTS: /results
     volumes:
-      - ./results:/work/vyuh-bench/results
+      - ${VYUH_BENCH_RESULTS:-${HOME}/Codex/vyuh/benchmarks/http/results}:/results

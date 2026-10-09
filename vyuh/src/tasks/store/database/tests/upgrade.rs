@@ -1,6 +1,75 @@
 use super::*;
 use db::gaman::{Migration, OfflinePlanner};
 
+/// The affinity upgrade changes only non-Running ownership, retaining every durable task byte.
+#[tokio::test]
+#[cfg(feature = "sqlite")]
+async fn sqlite_local_sticky_upgrade() -> Result<(), String> {
+    let pool = db::sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut migrations = history()?;
+    let upgrade = migrations.pop().ok_or("missing local upgrade")?;
+    let mut prior = Vec::new();
+    for migration in &migrations {
+        apply(&pool, &prior, migration).await?;
+        prior.push(migration.clone());
+    }
+    let owner = uuid::Uuid::now_v7();
+    seed_affinity(&pool, owner).await?;
+    let projection = "SELECT id, status, attempts, step_attempts, state, resume_input,
+        last_result, ready_at, created_at, updated_at, waiting_children, remaining_completions
+        FROM vyuh_tasks ORDER BY id";
+    let before = db::sqlx::query(projection)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    apply(&pool, &prior, &upgrade).await?;
+    let after = db::sqlx::query(projection)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(before.len(), after.len());
+    for (old, new) in before.iter().zip(&after) {
+        assert_checkpoint(old, new)?;
+    }
+    let rows: Vec<(i16, Option<uuid::Uuid>)> =
+        db::sqlx::query_as("SELECT status,node_id FROM vyuh_tasks")
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    assert_eq!(rows.len(), 5);
+    for (status, node) in rows {
+        assert_eq!(node, (status == 1).then_some(owner));
+    }
+    Ok(())
+}
+
+/// Seeds each lifecycle status with legacy ownership and nontrivial checkpoint/join data.
+#[cfg(feature = "sqlite")]
+async fn seed_affinity(pool: &db::sqlx::SqlitePool, owner: uuid::Uuid) -> Result<(), String> {
+    db::sqlx::query("INSERT INTO vyuh_task_nodes VALUES (?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+        .bind(owner)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    for status in 0..5_i16 {
+        db::sqlx::query(
+            "INSERT INTO vyuh_tasks
+            (id,name,input,status,attempts,step_attempts,node_id,ready_at,created_at,updated_at,
+             state,resume_input,last_result,waiting_children,remaining_completions)
+            VALUES (?,'fixture','null',?,17,3,?,'2099-01-01','2000-01-01','2001-01-01',
+             '{\"step\":1}','{\"Ok\":42}','{\"Ok\":null}','[]',0)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(status)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 /// Reconstructs only the predecessor schema; no legacy runtime adapter is retained.
 fn predecessor() -> Result<db::Schema, String> {
     let mut schema = task_schema().map_err(|e| e.to_string())?;
@@ -38,9 +107,12 @@ fn restore_task_columns(schema: &mut db::Schema) -> Result<(), String> {
     let tasks = schema.tables.get_mut("vyuh_tasks").ok_or("missing tasks")?;
     tasks.columns.retain(|column| column.name != "node_id");
     tasks.foreign_keys.clear();
-    tasks
-        .indexes
-        .retain(|index| index.name != "idx_vyuh_tasks_node");
+    tasks.indexes.retain(|index| {
+        !matches!(
+            index.name.as_str(),
+            "idx_vyuh_tasks_node" | "idx_vyuh_tasks_owned_ready"
+        )
+    });
     for index in &mut tasks.indexes {
         if index.name == "idx_vyuh_tasks_lane_pending_ready" {
             index.columns = ["lane_name", "status", "ready_at", "created_at", "id"]
@@ -93,20 +165,35 @@ fn templates() -> Result<Vec<Migration>, String> {
     let source = [
         include_str!("../../../../../migrations/task_protocol/postgres/0013_reset_tasks.yaml"),
         include_str!("../../../../../migrations/task_protocol/postgres/0014_node_pipeline.yaml"),
+        include_str!("../../../../../migrations/task_protocol/postgres/0015_sticky_flows.yaml"),
+        include_str!("../../../../../migrations/task_protocol/postgres/0016_sticky_tasks.yaml"),
+        include_str!("../../../../../migrations/task_protocol/postgres/0017_local_sticky.yaml"),
     ];
     #[cfg(feature = "sqlite")]
     let source = [
         include_str!("../../../../../migrations/task_protocol/sqlite/0013_reset_tasks.yaml"),
         include_str!("../../../../../migrations/task_protocol/sqlite/0014_node_pipeline.yaml"),
+        include_str!("../../../../../migrations/task_protocol/sqlite/0015_sticky_flows.yaml"),
+        include_str!("../../../../../migrations/task_protocol/sqlite/0016_sticky_tasks.yaml"),
+        include_str!("../../../../../migrations/task_protocol/sqlite/0017_local_sticky.yaml"),
     ];
     #[cfg(feature = "mysql")]
     let source = [
         include_str!("../../../../../migrations/task_protocol/mysql/0013_reset_tasks.yaml"),
         include_str!("../../../../../migrations/task_protocol/mysql/0014_node_pipeline.yaml"),
+        include_str!("../../../../../migrations/task_protocol/mysql/0015_sticky_flows.yaml"),
+        include_str!("../../../../../migrations/task_protocol/mysql/0016_sticky_tasks.yaml"),
+        include_str!("../../../../../migrations/task_protocol/mysql/0017_local_sticky.yaml"),
     ];
     source
         .into_iter()
-        .zip(["0013_reset_tasks", "0014_node_pipeline"])
+        .zip([
+            "0013_reset_tasks",
+            "0014_node_pipeline",
+            "0015_sticky_flows",
+            "0016_sticky_tasks",
+            "0017_local_sticky",
+        ])
         .map(|(yaml, id)| {
             let mut migration = Migration::from_yaml_str(yaml).map_err(|e| e.to_string())?;
             migration.id = id.into();
@@ -318,5 +405,40 @@ async fn verify_ownership(pool: &db::sqlx::SqlitePool) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     assert!(owner.is_none());
+    Ok(())
+}
+
+/// Compares every persisted checkpoint field without allowing a missing column to panic.
+#[cfg(feature = "sqlite")]
+fn assert_checkpoint(
+    old: &db::sqlx::sqlite::SqliteRow,
+    new: &db::sqlx::sqlite::SqliteRow,
+) -> Result<(), String> {
+    use db::sqlx::Row as _;
+    for field in [
+        "state",
+        "resume_input",
+        "last_result",
+        "ready_at",
+        "created_at",
+        "updated_at",
+        "waiting_children",
+    ] {
+        assert_eq!(
+            old.try_get::<String, _>(field).map_err(|e| e.to_string())?,
+            new.try_get::<String, _>(field).map_err(|e| e.to_string())?
+        );
+    }
+    for field in [
+        "status",
+        "attempts",
+        "step_attempts",
+        "remaining_completions",
+    ] {
+        assert_eq!(
+            old.try_get::<i64, _>(field).map_err(|e| e.to_string())?,
+            new.try_get::<i64, _>(field).map_err(|e| e.to_string())?
+        );
+    }
     Ok(())
 }

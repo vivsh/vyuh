@@ -18,7 +18,7 @@ note: if you're trying to build a new `vyuh::prelude::FlowState<_>` consider usi
       vyuh::prelude::FlowState::<T>::spawn_with
       vyuh::prelude::FlowState::<T>::complete
       and $N others
- --> src/tasks/flow_state.rs
+ --> src/tasks/flow/state.rs
   |
   | /     pub fn all<I: DataValue, S: Serialize>(
   | |         children: Vec<I>,

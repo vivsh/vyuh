@@ -7,7 +7,7 @@ error[E0308]: mismatched types
   |                                     arguments to this function are incorrect
   |
 note: associated function defined here
- --> src/tasks/state.rs
+ --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
   |            ^^^^^^^^
@@ -21,7 +21,7 @@ error[E0308]: mismatched types
   |                                     arguments to this function are incorrect
   |
 note: associated function defined here
- --> src/tasks/flow_state.rs
+ --> src/tasks/flow/state.rs
   |
   |     pub fn complete(output: T) -> Self {
   |            ^^^^^^^^

@@ -8,8 +8,8 @@ pub(crate) mod database;
 ))]
 mod memory;
 
-pub use super::handler::TaskOutcome;
 pub use super::models::TaskRecord;
+pub use super::outcome::TaskOutcome;
 pub use super::submission::TaskWrite;
 #[cfg(any(
     test,
@@ -27,5 +27,9 @@ pub(crate) type PgTaskStore = database::DbTaskStore;
 pub(crate) type SqliteTaskStore = database::DbTaskStore;
 
 mod contract;
+mod lane;
 pub use contract::*;
-pub(crate) mod workflow;
+pub use lane::*;
+pub(crate) mod transitions;
+
+pub(crate) use super::outcome::{normalize_outcome, truncate_utf8};

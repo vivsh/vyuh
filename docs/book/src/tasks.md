@@ -145,13 +145,15 @@ graphs through the same durable continuation boundary, not a second task schedul
 The durable execution boundary is always:
 
 ```text
-claim -> immutable handler snapshot -> outcome -> atomic store commit -> later claim
+store claim/insertion -> lane queue -> handler -> shared output buffer -> atomic store commit
 ```
 
 Returning a value or constructing an outcome is not a commit. Only the store
 mutates authoritative task state. New children and resumed parents become eligible
-when the output transaction commits; they execute only through an independently
-poll-paced claim, never synchronously from the parent or child handler. Another worker may claim the committed work afterward;
+when the output transaction commits. Immediately ready submissions/children and
+matching cached scalar Flow resumptions can enter a local lane queue after commit
+acknowledgement without another claim. Other work uses independently poll-paced
+claims. Nothing executes synchronously from a parent or child handler. Another worker may claim ownerless committed work afterward;
 there is no cluster-wide poll counter. Crashes before commit can replay a step.
 
 ## Registration
@@ -267,9 +269,69 @@ Use explicit `WorkError::retry` for retries; automatic `?` conversions are termi
 Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
 Flow handlers are synchronous and can complete, fail, suspend, sleep, spawn, or
 join a homogeneous group with `all`.
-Both use the same statuses, lanes, concurrency, rates, lane locks, node ownership,
-attempt counters, cancellation, and atomic outcome flushes. Neither executes
-a child or resumed parent recursively; those run after a later claim.
+Both use the same statuses, lanes, lane locks, node ownership, attempt counters,
+cancellation, and atomic outcome flushes. Work concurrency and rate limits do not
+apply to synchronous Flow advancement. Neither executes a child or resumed parent
+recursively; committed input delivery or an ordinary claim schedules its invocation.
+
+### Task placement and Flow caching
+
+Ordinary lanes default to `sticky(true)`: prefer local child delivery and cached
+Flow resumption when capacity is available. Stickiness never pins waiting work
+to a node. Only Running tasks have execution owners; retries, sleeps, suspended
+checkpoints and overflow children are ownerless.
+
+Immediately ready children may be persisted as Running and delivered locally
+after commit acknowledgement. Otherwise, any eligible node may claim them.
+Work still obeys its concurrency and rate limits. Locked lanes retain their
+existing exclusive lane-owner gates and never bypass them through local delivery.
+
+```rust
+TaskLaneConf::new(CHECKOUT, 8)
+    .sticky(true)
+    .flow_cache_bytes(8 * 1024 * 1024);
+```
+
+Use `.sticky(false)` to disable local child/cache preference. Zero cache bytes
+disables Flow caching without disabling local child delivery. The lane-local byte
+LRU contains immutable snapshots only; eviction neither loses work nor requires
+a database update. Cache presence is not execution ownership. A cached scalar
+resume must match the authoritative parent's suspended checkpoint and attempt;
+the store establishes fresh Running ownership in the child-completion transaction.
+A missing/stale cache or exhausted delivery capacity leaves an ownerless Pending parent.
+
+External resumes, scheduled sleeps, `all` result assembly and coordinated lanes
+retain normal claiming. Claims select ownerless Pending tasks and abandoned
+ownerless Running tasks. Outcome fencing still reads authoritative store state;
+caching is not a promise of completely read-free workflows. Flow advancement
+remains bounded by queue/output pressure and must be short and non-blocking.
+Node retirement clears abandoned Running ownership through the existing FK.
+Upgrades from durable affinity require stopped workers/writers and the
+`0017_local_sticky` migration; no checkpoints, results or attempts are rewritten.
+
+PostgreSQL runners subscribe to advisory generic and node-specific wakeups using
+Vyuh's LISTEN/NOTIFY transport. Committed pending submissions, actual parent
+readiness, external resumption and stale-node retirement wake normal polling.
+Ownerless pending work uses generic hints; directly admitted Running work needs
+no readiness notification. Notifications contain only a lane name (or a broad
+rescan hint), never task data.
+They are emitted inside the existing write statement and delivered after commit;
+they neither bypass readiness/rate/lane gates nor acknowledge task execution.
+Intermediate `all` completions do not wake the parent.
+
+Each PostgreSQL runner needs one additional dedicated, session-capable database
+connection; producer-only sites need none. The configured connection endpoint must
+support session-level LISTEN; a transaction-only pooling endpoint is insufficient.
+Reconnection triggers a rescan, and fallback polling remains the
+correctness path when hints are missed. Other backends retain polling and benefit
+from sticky child placement without PostgreSQL dependencies. Stickiness reduces
+cross-node handoffs but can concentrate work; use non-sticky child lanes when
+cross-node distribution is more important than locality.
+
+Immediate submission reserves bounded local delivery before committing ownership.
+Full/closed channels, producer-only sites and pre-start task handles use Pending
+insertion. A caller dropped during commit, or a lost submission acknowledgement,
+may leave undelivered owned work for the existing node/startup recovery path.
 
 | Capability | Work | Flow | Work batch |
 |---|---|---|---|
@@ -520,7 +582,7 @@ suspended children do not. No sibling is cancelled and no failure resumes the
 parent early. An empty group resumes on a later poll with `Ok([])`.
 
 Set `TaskConf::max_all_children(n)` to limit fan-out (default 256; valid 1–10,000).
-This is separate from concurrency and claim/commit `batch_size`. The full combined
+This is separate from concurrency, lane claim sizes, and `commit_batch_size`. The full combined
 resume JSON envelope must fit **32,768 bytes**, even when individual child results
 fit. Overflow or missing/malformed member results become an outer failure for
 the parent; children keep their own results. Prefer application-owned artifact
@@ -532,7 +594,8 @@ their durable counters. Completion does not read join membership or sibling
 results. It collects results only when the satisfied parent is actually claimed,
 persists `resume_input`,
 and clears the wait atomically. Crash recovery then reuses that persisted input.
-Groups use normal lanes, rates, scheduling, node ownership, retries, and cancellation.
+Groups use normal lanes, scheduling, node ownership, retries, and cancellation;
+Work children obey Work rates and concurrency, while Flow advancement is exempt.
 Cancellation of a parent does not cancel its children.
 
 Do not externally resume a parent awaiting `all`. Duplicate/conflicting child
@@ -658,7 +721,7 @@ before changing persisted checkpoint representations. Retained manual checkpoint
 must match the new implementation; they are never reinterpreted as Pravah snapshots.
 Pravah's own snapshot checks remain. Version-based task admission is not implemented.
 
-The integration uses the published Pravah 0.4.21 crate. Earlier Fetch-based snapshots
+The integration uses the published Pravah 0.4.24 crate. Earlier Fetch-based snapshots
 are incompatible with its Agent protocol. Drain old executions before upgrading;
 there is no automatic checkpoint conversion, task deletion, or task-table migration.
 
@@ -833,7 +896,7 @@ committed; retrying cancellation is safe and idempotent. Successful cancellation
 does **not** acknowledge that an already-running handler has stopped.
 
 A cancelled single child delivers its failure to its suspended `spawn` parent
-atomically; the parent continues on a subsequent poll. Within `all`, cancellation
+atomically; the parent continues through committed input delivery or a later claim. Within `all`, cancellation
 counts as one terminal child, but the parent still waits for every other member
 before receiving the ordered results.
 Cancelling a parent does not cancel its children, and their later results cannot
@@ -899,7 +962,10 @@ let receipt = site.tasks().submit(SendEmailJob {
 The receipt is `Queued`, `Existing`, or `Ignored` and always exposes the new or
 existing task ID through `.id()`.
 
-Use `submit_many` to enqueue inputs in one store transaction. Use
+Use `submit_many` to enqueue up to 10,000 inputs in one store transaction,
+independently of claim, commit, and ingress sizes. Larger batches are rejected
+before any input is written. A full ingress channel falls back to durable Pending
+insertion rather than rejecting a submission. Use
 `submit_many_with` for a shared initial delay and conflict policy:
 
 ```rust
@@ -954,28 +1020,34 @@ to that emitter; orchestration within each occurrence belongs to Flow.
 ## Lanes, Throughput, And Rate Limits
 
 Named lanes isolate slow work without introducing priority. Each lane owns a
-bounded local queue and per-worker concurrency quota. One dispatcher rotates
-the lanes fairly, while one global concurrency limit and one common outcome
-buffer bound the whole runner.
+bounded local queue and per-worker Work concurrency quota. One dispatcher rotates
+the lanes fairly. Work concurrency bounds effectful invocations; shared resident
+input/output accounting also bounds Flow advancement.
 
 These controls have different jobs:
 
 | Control | What it bounds or groups |
 |---|---|
-| `TaskConf::concurrency(n)` | Invocations through collection of their outcomes into the shared buffer |
+| `TaskConf::concurrency(n)` | Work invocations through collection of their outcomes into the shared buffer |
 | `TaskConf::db_concurrency(n)` | Runner-managed database operations through application of their responses; default 1 |
-| `TaskLaneConf::new(lane, n)` | Per-runner lane handler concurrency and refill capacity |
-| `TaskConf::batch_size(n)` | Store claim/commit batch bound, not handler batch size |
+| `TaskLaneConf::new(lane, n)` | Per-runner lane Work concurrency and ordinary Work refill capacity |
+| `TaskLaneConf::claim_batch_size(n)` | Maximum rows per lane claim; default 1,024 |
+| `TaskConf::commit_batch_size(n)` | Maximum outcomes per shared flush; default 1,024, not output-buffer capacity |
+| `TaskConf::ingress_capacity(n)` | Direct-submission channel capacity; default 4,096 |
 | `#[bundles::work_batch]` | Matching, eligible inputs already queued locally; never waits |
 | `TaskLaneLock::new(n).deadline(duration)` | Owner-held accumulation threshold before claiming a cohort |
 | `TaskConf::max_all_children(n)` | Maximum fan-out per `all`, not execution concurrency |
 
-Increasing the store batch size does not override concurrency, rates, poll gates,
+All three size settings accept 1–10,000. A lane lock's cohort size must fit that
+lane's claim batch size. Database bulk writes are chunked internally for backend
+parameter limits; channel capacity does not control SQL chunk size.
+
+Increasing a claim batch size does not override concurrency, rates, poll gates,
 or the availability of ready work. Ordinary lanes keep independent input queues;
 all lanes share the outcome buffer. Fan-out flushes additionally bound expanded
 child writes without splitting an `all` group across transactions.
 
-Queue prefetch uses a fixed hysteresis rule: Vyuh refills a lane only when its
+Work-only queue prefetch uses a fixed hysteresis rule: Vyuh refills a lane only when its
 queued work is below half of that lane's concurrency quota, then claims up to
 the lane's normal free capacity. Refill capacity subtracts running invocations,
 queued tasks, and completed-but-uncommitted task outcomes from the lane quota.
@@ -992,7 +1064,7 @@ The process-local pipeline is:
 DB claim → lane queue → execution → completion channel → shared output buffer → DB commit
 ```
 
-Completion messages carry their global and lane permits; the collector releases
+Work completion messages carry their global and lane permits; the collector releases
 them only after buffering all accepted outcomes. Database permits are separate,
 and external submissions and inspections do not consume that runner budget.
 
@@ -1000,7 +1072,7 @@ One FIFO output buffer serves all lanes. Its normal flush interval is independen
 of input-lane idle and rate deadlines. With `db_concurrency` above one, eligible
 claims and flushes can overlap. FIFO describes admission, not transaction commit
 order. A flush never recursively executes a child or forces an immediate claim.
-`batch_size` is an upper bound, not a minimum: a due flush can send a partial
+`commit_batch_size` is an upper bound, not a minimum: a due flush can send a partial
 batch. It does not wait for every lane or for a full buffer.
 
 Transient database errors retain their request and retry no earlier than the next
@@ -1029,7 +1101,8 @@ collection and independent operations.
 
 Startup reclaim and shutdown give-back preserve checkpoints, resume input,
 results, cancellation intent, join state, and retry counters. They clear task
-ownership and advance the internal readiness timer using database time. Returned
+ownership and advance Running tasks' internal readiness timer using database time.
+Waiting Flow checkpoints retain their status and scheduled readiness. Returned
 queued tasks retain their already-charged claim attempt; the next ordinary claim
 still enforces retry exhaustion and cancellation. These boundary updates add no
 hot-path queries and do not release or bypass durable lane locks: existing
@@ -1048,11 +1121,12 @@ const EXPORTS: TaskLane = TaskLane::new("exports");
 
 let tasks = TaskConf::default()
     .concurrency(10)
-    .batch_size(100)
+    .commit_batch_size(100)
+    .ingress_capacity(250)
     .poll_interval(Duration::from_secs(1))
     .fallback_poll_interval(Duration::from_secs(300))
     .lease_duration(Duration::from_secs(300))
-    .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 6))
+    .lane(TaskLaneConf::new(DEFAULT_TASK_LANE, 6).claim_batch_size(100))
     .lane(TaskLaneConf::new(EMAIL, 2)
             .retry(
                 TaskRetry::exponential(5, Duration::from_secs(10))
@@ -1074,8 +1148,9 @@ by `max_delay`. This policy cannot be overridden by a submission or handler.
 `attempts()` reports lifetime invocations; `step_attempts()` reports the current
 step's retry budget. A committed `suspend`, `sleep`, `spawn`, or `all` resets the step
 counter. Retries and abandoned-task reclaims do not reset it.
-`rate_limit` is an inexpensive in-memory token bucket owned by the local site
-runner. `global_rate_limit` coordinates starts across workers sharing a durable
+Both rate controls apply to Work, not Flow advancement. `rate_limit` is an
+inexpensive in-memory token bucket owned by the local site runner.
+`global_rate_limit` coordinates Work starts across workers sharing a durable
 task store. Configure either one independently, or configure both when each
 start must satisfy local smoothing and a shared external quota. Global permits
 are reserved with claimed rows in the same transaction and in batches, so a
@@ -1092,7 +1167,7 @@ before retries or additional checkpoints. Child insertion, result persistence,
 parent counters, and claim-time result collection all have a cost. Completion
 updates are batched by parent; there is no required SQL statement per child.
 
-Tune the actual child lane before increasing `max_all_children` or `batch_size`:
+Tune the actual child lane before increasing `max_all_children` or `commit_batch_size`:
 
 - Lane and global concurrency, rate permits, and uncommitted outcomes constrain
   refill capacity. A large claim bound cannot override those limits.
@@ -1229,14 +1304,15 @@ query early.
 
 Local submission, cancellation, resume, handler completion, and outcome commit mark the local
 runner for its next eligible operation; they never create an early background store
-query. Vyuh intentionally adds no distributed notification channel; work
-submitted by another process may wait until the fallback poll.
-Choose a smaller fallback when that cross-process discovery latency is unacceptable.
+query. PostgreSQL also supplies generic and owner-specific committed wake hints
+through LISTEN/NOTIFY. These shorten discovery without bypassing the normal poll
+gate. On other backends, or when a hint is missed, work submitted by another process
+may wait until fallback polling; choose that interval accordingly.
 
 Individual tasks have node ownership, not timed leases. Node retirement clears
 ownership, after which ordinary claims can reclaim abandoned Running tasks.
 Standalone startup instead returns prior running claims under its singleton
-deployment contract. Reclaiming consumes another attempt and rate permit.
+deployment contract. Reclaiming consumes another attempt and, for Work, a rate permit.
 A stale node or attempt cannot commit an outcome.
 
 When observability is enabled, Vyuh exports bounded-label task counters for

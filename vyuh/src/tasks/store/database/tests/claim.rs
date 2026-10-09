@@ -1,5 +1,44 @@
 use super::*;
 
+/// Database claims obey lane policy even when the output batch is smaller.
+#[tokio::test]
+#[cfg(all(feature = "sqlite", feature = "migrations"))]
+async fn independent_claim_bound() -> Result<(), String> {
+    use crate::tasks::TaskStore as _;
+    let original = fresh_store().await?;
+    let mut conf = (*original.runtime_conf).clone();
+    conf.lanes = vec![
+        crate::tasks::TaskLaneConf::new(crate::tasks::DEFAULT_TASK_LANE, 8).claim_batch_size(3),
+    ];
+    let store = DbTaskStore::new(
+        original.pool.as_sqlx().clone(),
+        1,
+        Duration::from_secs(300),
+        conf,
+    );
+    let node = uuid::Uuid::now_v7();
+    store
+        .register_node(&node)
+        .await
+        .map_err(|e| e.to_string())?;
+    insert(
+        &store,
+        (1..=5).map(|id| row(id, Utc::now(), None)).collect(),
+    )
+    .await?;
+    for expected in [3, 2] {
+        let poll = store
+            .claim_tasks(&node, &[request(32)])
+            .await
+            .map_err(|e| e.to_string())?;
+        assert_eq!(
+            poll.lanes.first().map(|lane| lane.tasks.len()),
+            Some(expected)
+        );
+    }
+    Ok(())
+}
+
 /// The optimized read loads payloads once and keeps lock policy and bounded ordering intact.
 #[test]
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -20,7 +59,9 @@ fn claim_projection_is_payload_once() {
     #[cfg(feature = "postgres")]
     {
         assert_eq!(sql.matches("FOR UPDATE OF t SKIP LOCKED").count(), 1);
-        assert!(sql.contains("SELECT t.cancelled, t.step_attempts, t.ready_at, t.created_at"));
+        assert!(
+            sql.contains("SELECT t.kind, t.cancelled, t.step_attempts, t.ready_at, t.created_at")
+        );
     }
     #[cfg(feature = "sqlite")]
     {
@@ -28,6 +69,91 @@ fn claim_projection_is_payload_once() {
         assert_eq!(sql.matches("FROM vyuh_tasks t").count(), 1);
         assert!(sql.contains("FROM selected"));
     }
+}
+
+/// Claims ignore owned rows of either kind and retain ownerless ordering and future hints.
+#[tokio::test]
+#[cfg(all(feature = "sqlite", feature = "migrations"))]
+async fn ownerless_order_and_hints() -> Result<(), String> {
+    use crate::tasks::TaskStore as _;
+    let store = fresh_store().await?;
+    let node = uuid::Uuid::now_v7();
+    let other = uuid::Uuid::now_v7();
+    for owner in [node, other] {
+        store
+            .register_node(&owner)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let now = Utc::now();
+    insert(&store, ownership_rows(now, node, other)).await?;
+    let mut tx = store.pool.begin().await.map_err(|e| e.to_string())?;
+    let (probes, selected, deadline) = read_after(&mut tx, &request(2), now, 32)
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(
+        selected.iter().map(|t| t.id.as_u128()).collect::<Vec<_>>(),
+        vec![1, 6]
+    );
+    assert_eq!(probes.len(), 2);
+    assert_eq!(deadline, Some(now + chrono::Duration::hours(2)));
+    let (_, selected, _) = read_after(&mut tx, &request(32), now, 32)
+        .await
+        .map_err(|e| e.to_string())?;
+    assert_eq!(
+        selected.iter().map(|t| t.id.as_u128()).collect::<Vec<_>>(),
+        vec![1, 6]
+    );
+    let (_, selected, deadline) = read_after(&mut tx, &request(0), now, 32)
+        .await
+        .map_err(|e| e.to_string())?;
+    assert!(selected.is_empty());
+    assert_eq!(deadline, Some(now + chrono::Duration::hours(2)));
+    tx.rollback().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Supplies ownerless/reclaimable work, ineligible ownership and future hints.
+#[cfg(all(any(feature = "sqlite", feature = "postgres"), feature = "migrations"))]
+pub(in crate::tasks::store::database) fn ownership_rows(
+    now: DateTime<Utc>,
+    node: uuid::Uuid,
+    other: uuid::Uuid,
+) -> Vec<TaskRow> {
+    (1..=9)
+        .map(|id| {
+            let mut task = row(
+                id,
+                now,
+                Some(now - chrono::Duration::seconds(10 - id as i64)),
+            );
+            match id {
+                2 | 5 | 7 => {
+                    task.kind = 1;
+                    task.node_id = Some(node);
+                }
+                3 | 9 => {
+                    task.kind = 1;
+                    task.node_id = Some(other);
+                }
+                4 => task.node_id = Some(node),
+                _ => {}
+            }
+            if id == 5 || id == 6 {
+                task.status = 1;
+            }
+            if id == 1 || id == 2 {
+                task.ready_at = None;
+            }
+            if id >= 7 {
+                task.ready_at = Some(now + chrono::Duration::hours((id - 6) as i64));
+            }
+            if id == 9 {
+                task.ready_at = Some(now + chrono::Duration::minutes(30));
+            }
+            task
+        })
+        .collect()
 }
 
 /// Typed probes contain only bounded eligibility evidence, not durable task payloads.
@@ -92,7 +218,7 @@ async fn empty_and_future_claim_reads() -> Result<(), String> {
 #[tokio::test]
 #[cfg(all(feature = "sqlite", feature = "migrations"))]
 async fn mixed_claims_preserve_transition_contract() -> Result<(), String> {
-    use crate::tasks::AbstractTaskStore as _;
+    use crate::tasks::TaskStore as _;
     let store = fresh_store().await?;
     let node = uuid::Uuid::now_v7();
     store
@@ -129,7 +255,7 @@ async fn mixed_claims_preserve_transition_contract() -> Result<(), String> {
 /// Cancelled/exhausted rows terminate while claimed and scheduled rows are not reclaimed early.
 #[cfg(all(feature = "sqlite", feature = "migrations"))]
 async fn assert_failed_and_drained(store: &DbTaskStore, node: uuid::Uuid) -> Result<(), String> {
-    use crate::tasks::AbstractTaskStore as _;
+    use crate::tasks::TaskStore as _;
     for id in [1, 2] {
         let task = store
             .get_task(crate::tasks::TaskId::new(uuid::Uuid::from_u128(id)))
@@ -151,7 +277,7 @@ async fn assert_failed_and_drained(store: &DbTaskStore, node: uuid::Uuid) -> Res
 #[tokio::test]
 #[cfg(all(feature = "sqlite", feature = "migrations"))]
 async fn rate_probe_preserves_permit_accounting() -> Result<(), String> {
-    use crate::tasks::AbstractTaskStore as _;
+    use crate::tasks::TaskStore as _;
     let store = fresh_store().await?;
     let node = uuid::Uuid::now_v7();
     store

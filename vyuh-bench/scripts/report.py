@@ -10,6 +10,7 @@ import subprocess
 from typing import Any
 
 import charts
+from paths import RESULTS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ def run(args: list[str], cwd: Path = ROOT) -> str:
 
 
 def latest_raw() -> Path | None:
-    raw_root = ROOT / "results" / "raw"
+    raw_root = RESULTS / "raw"
     dirs = [path for path in raw_root.glob("*") if path.is_dir() and (path / "results.json").exists()]
     return sorted(dirs)[-1] if dirs else None
 
@@ -330,7 +331,7 @@ def chart_gallery(chart_rows: list[dict[str, str]]) -> str:
     lines = [
         "## Charts",
         "",
-        "Reusable assets are written under `results/charts/<raw-run>/` and mirrored to `results/charts/latest/`.",
+        "Reusable assets are written under `charts/<raw-run>/` and mirrored to `charts/latest/` alongside this report.",
         "",
         "| chart | SVG | PNG |",
         "| --- | --- | --- |",
@@ -399,7 +400,7 @@ What the current data does support:
 
 {bullets}
 
-Raw data: `{raw.relative_to(ROOT)}/`.
+Raw data: `{raw.relative_to(RESULTS)}/`.
 """
 
 
@@ -409,13 +410,13 @@ def main() -> None:
         raise SystemExit("no raw results found")
     meta, rows = load(raw)
     metrics = dev_metrics()
-    chart_rows = charts.emit(rows, metrics, raw, ROOT)
+    chart_rows = charts.emit(rows, metrics, raw, RESULTS)
     loc = run(["python3", "scripts/loc.py"])
     content = "\n\n".join(
         [
             "# Framework Benchmark Summary",
             f"Generated: {datetime.now(timezone.utc).isoformat()}",
-            f"Raw run: `{raw.relative_to(ROOT)}`",
+            f"Raw run: `{raw.relative_to(RESULTS)}`",
             "## Methodology",
             "\n".join(
                 [
@@ -447,7 +448,7 @@ def main() -> None:
             "## Limitations\n\n- This is not yet a five-run median with min/max.\n- The standard-library runner is intentionally dependency-free but is not a replacement for `oha`, `wrk`, or `bombardier`.\n- The p99 values in Tier 2 contain repeated multi-second outliers across frameworks, so they are recorded but not used for ranking.\n- SSE/long-poll correctness routes exist in the apps, but this run measured HTTP read/write endpoints only; live subscriber fanout still needs a dedicated scenario.\n- Startup readiness is not reported for this raw run because the first harness version recorded it after readiness completed; the harness is fixed for future runs.\n- Python apps ran single worker/process baselines, matching the single-process Rust baseline.",
         ]
     )
-    out = ROOT / "results" / "summary.md"
+    out = RESULTS / "summary.md"
     out.write_text(content + "\n")
     print(out)
 

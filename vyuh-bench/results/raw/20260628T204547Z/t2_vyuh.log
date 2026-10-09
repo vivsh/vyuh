@@ -1,3 +1,0 @@
-Shutdown signal received. Gracefully shutting down.
-2026-06-28T20:52:46.035189Z  INFO vyuh::watch: Shutdown requested from Terminate
-2026-06-28T20:52:46.035339Z  INFO vyuh::emitters: EmitterEngine shutting down

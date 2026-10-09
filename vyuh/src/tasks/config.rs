@@ -10,10 +10,15 @@ use super::TaskRuntimeError;
 /// Framework-owned lane used when a submission does not select one.
 pub const DEFAULT_TASK_LANE: TaskLane = TaskLane::new("default");
 
+// Pipeline defaults are independent policies, even where their initial values match.
+const DEFAULT_CLAIM_BATCH_SIZE: usize = 1_024;
+const DEFAULT_COMMIT_BATCH_SIZE: usize = 1_024;
+const DEFAULT_INGRESS_CAPACITY: usize = 4_096;
+
 const MAX_TASK_LANES: usize = 32;
 const MAX_TASK_ATTEMPTS: u32 = 1_000;
 const MAX_CONCURRENCY: usize = 4_096;
-const MAX_BATCH_SIZE: usize = 10_000;
+pub(crate) const MAX_BATCH_SIZE: usize = 10_000;
 const MAX_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const MAX_LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -172,11 +177,14 @@ impl Default for TaskRetry {
 pub struct TaskLaneConf {
     lane: TaskLane,
     concurrency: usize,
+    claim_batch_size: usize,
     lane_lock: Option<super::TaskLaneLock>,
     rate: Option<TaskRate>,
     global_rate: Option<TaskRate>,
     retry: TaskRetry,
     idempotency_retention: IdempotencyRetention,
+    sticky: bool,
+    flow_cache_bytes: usize,
 }
 
 impl TaskLaneConf {
@@ -185,18 +193,59 @@ impl TaskLaneConf {
         Self {
             lane,
             concurrency,
+            claim_batch_size: DEFAULT_CLAIM_BATCH_SIZE,
             lane_lock: None,
             rate: None,
             global_rate: None,
             retry: DEFAULT_RETRY,
             idempotency_retention: IdempotencyRetention::ActiveOnly,
+            sticky: true,
+            flow_cache_bytes: 8 * 1024 * 1024,
         }
+    }
+
+    /// Bounds rows fetched in one claim for this lane, independently of output flushing.
+    /// Defaults to 1,024 rows; the runner does not wait to fill a batch.
+    /// Finalization accepts 1..=10,000; available capacity may reduce the actual claim.
+    pub const fn claim_batch_size(mut self, maximum: usize) -> Self {
+        self.claim_batch_size = maximum;
+        self
+    }
+
+    pub(crate) const fn claim_batch_size_value(&self) -> usize {
+        self.claim_batch_size
     }
 
     /// Enables durable single-owner coordination for this lane.
     pub fn lock(mut self, lane_lock: super::TaskLaneLock) -> Self {
         self.lane_lock = Some(lane_lock);
         self
+    }
+
+    /// Prefers local child delivery and cached Flow resumption when capacity is available.
+    /// Waiting and overflow tasks are ownerless; this never pins work to a node.
+    /// Locked lanes retain their exclusive-owner gates; Work limits still apply.
+    pub const fn sticky(mut self, enabled: bool) -> Self {
+        self.sticky = enabled;
+        self
+    }
+
+    /// Bounds this runner's disposable Flow snapshots in bytes; zero disables caching.
+    pub const fn flow_cache_bytes(mut self, bytes: usize) -> Self {
+        self.flow_cache_bytes = bytes;
+        self
+    }
+
+    pub(crate) const fn is_sticky(&self) -> bool {
+        self.sticky && self.lane_lock.is_none()
+    }
+
+    pub(crate) const fn cache_bytes(&self) -> usize {
+        if self.is_sticky() {
+            self.flow_cache_bytes
+        } else {
+            0
+        }
     }
 
     /// Limits task starts within this site's local runner.
@@ -333,7 +382,8 @@ pub struct TaskConf {
     fallback_poll_interval: Duration,
     concurrency: usize,
     db_concurrency: usize,
-    batch_size: usize,
+    commit_batch_size: usize,
+    ingress_capacity: usize,
     max_all_children: usize,
     lease_duration: Duration,
     max_payload_bytes: usize,
@@ -352,7 +402,8 @@ impl Default for TaskConf {
             fallback_poll_interval: Duration::from_secs(300),
             concurrency: 10,
             db_concurrency: 1,
-            batch_size: 250,
+            commit_batch_size: DEFAULT_COMMIT_BATCH_SIZE,
+            ingress_capacity: DEFAULT_INGRESS_CAPACITY,
             max_all_children: 256,
             lease_duration: Duration::from_secs(300),
             max_payload_bytes: 1024 * 1024,
@@ -416,10 +467,19 @@ impl TaskConf {
         self
     }
 
-    /// Bounds claim rows, outcome count, and bulk-write chunks.
+    /// Bounds outcomes admitted to one shared flush; valid values are 1..=10,000.
+    /// Defaults to 1,024 outcomes; flushing does not wait to fill a batch.
     /// An atomic `all` group may expand beyond this count up to `max_all_children`.
-    pub const fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size;
+    pub const fn commit_batch_size(mut self, maximum: usize) -> Self {
+        self.commit_batch_size = maximum;
+        self
+    }
+
+    /// Bounds the direct-submission channel, independently of claim and commit sizes.
+    /// Defaults to 4,096 tasks.
+    /// Finalization accepts 1..=10,000; a full channel falls back to durable polling.
+    pub const fn ingress_capacity(mut self, maximum: usize) -> Self {
+        self.ingress_capacity = maximum;
         self
     }
 
@@ -475,7 +535,7 @@ impl TaskConf {
     pub(crate) fn validate(&self) -> Result<(), TaskRuntimeError> {
         validate_scalars(self)?;
         validate_readiness(self.readiness)?;
-        validate_overrides(&self.lanes, self.batch_size)?;
+        validate_overrides(&self.lanes)?;
         Ok(())
     }
 
@@ -491,7 +551,7 @@ impl TaskConf {
         }
         insert_default_lane(&mut lanes, self.concurrency)?;
         let lanes = lanes.into_values().collect::<Vec<_>>();
-        validate_lanes(&lanes, self.concurrency, self.batch_size)?;
+        validate_lanes(&lanes, self.concurrency)?;
         Ok(lanes)
     }
 
@@ -516,8 +576,12 @@ impl TaskConf {
         self.concurrency
     }
 
-    pub(crate) const fn batch_size_value(&self) -> usize {
-        self.batch_size
+    pub(crate) const fn commit_batch_size_value(&self) -> usize {
+        self.commit_batch_size
+    }
+
+    pub(crate) const fn ingress_capacity_value(&self) -> usize {
+        self.ingress_capacity
     }
 
     pub(crate) const fn poll_interval_value(&self) -> Duration {
@@ -546,7 +610,7 @@ impl TaskConf {
 }
 
 /// Rejects duplicate or invalid application lane overrides before merging defaults.
-fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), TaskRuntimeError> {
+fn validate_overrides(lanes: &[TaskLaneConf]) -> Result<(), TaskRuntimeError> {
     if lanes.len() > MAX_TASK_LANES {
         return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lanes must contain at most {MAX_TASK_LANES} entries"
@@ -555,7 +619,7 @@ fn validate_overrides(lanes: &[TaskLaneConf], batch_size: usize) -> Result<(), T
     let mut names = HashSet::with_capacity(lanes.len());
     for lane in lanes {
         validate_lane(lane, &mut names)?;
-        validate_lock(lane, batch_size)?;
+        validate_lock(lane, lane.claim_batch_size)?;
     }
     Ok(())
 }
@@ -629,6 +693,7 @@ fn validate_database(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
 /// Rejects scalar limits that could disable progress or exceed bounded policy.
 fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
     validate_database(conf)?;
+    validate_capacity(conf)?;
     if conf.poll_interval.is_zero() || conf.fallback_poll_interval < conf.poll_interval {
         return Err(TaskRuntimeError::InvalidConfig(
             "task fallback interval must be at least the non-zero poll interval".into(),
@@ -638,16 +703,6 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
         return Err(TaskRuntimeError::InvalidConfig(
             "maximum all children must be in 1..=10,000".into(),
         ));
-    }
-    if conf.concurrency == 0 || conf.batch_size == 0 {
-        return Err(TaskRuntimeError::InvalidConfig(
-            "task concurrency and batch size must be non-zero".into(),
-        ));
-    }
-    if conf.concurrency > MAX_CONCURRENCY || conf.batch_size > MAX_BATCH_SIZE {
-        return Err(TaskRuntimeError::InvalidConfig(format!(
-            "task concurrency cannot exceed {MAX_CONCURRENCY} and batch size cannot exceed {MAX_BATCH_SIZE}"
-        )));
     }
     if conf.poll_interval > MAX_INTERVAL || conf.fallback_poll_interval > MAX_INTERVAL {
         return Err(TaskRuntimeError::InvalidConfig(
@@ -676,6 +731,23 @@ fn validate_scalars(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
     Ok(())
 }
 
+/// Validates independent process limits before constructing bounded channels or semaphores.
+fn validate_capacity(conf: &TaskConf) -> Result<(), TaskRuntimeError> {
+    if conf.concurrency == 0 || conf.concurrency > MAX_CONCURRENCY {
+        return Err(TaskRuntimeError::InvalidConfig(format!(
+            "task concurrency must be in 1..={MAX_CONCURRENCY}"
+        )));
+    }
+    if !(1..=MAX_BATCH_SIZE).contains(&conf.commit_batch_size)
+        || !(1..=MAX_BATCH_SIZE).contains(&conf.ingress_capacity)
+    {
+        return Err(TaskRuntimeError::InvalidConfig(
+            "commit batch size and ingress capacity must be in 1..=10,000".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Rejects readiness policies that could never transition deterministically.
 fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskRuntimeError> {
     if matches!(policy, TaskReadiness::AfterFailures(0)) {
@@ -687,11 +759,7 @@ fn validate_readiness(policy: TaskReadiness) -> Result<(), TaskRuntimeError> {
 }
 
 /// Validates the complete lane set against global concurrency and count limits.
-fn validate_lanes(
-    lanes: &[TaskLaneConf],
-    concurrency: usize,
-    batch_size: usize,
-) -> Result<(), TaskRuntimeError> {
+fn validate_lanes(lanes: &[TaskLaneConf], concurrency: usize) -> Result<(), TaskRuntimeError> {
     if lanes.is_empty() || lanes.len() > MAX_TASK_LANES {
         return Err(TaskRuntimeError::InvalidConfig(format!(
             "task lanes must contain between 1 and {MAX_TASK_LANES} entries"
@@ -706,7 +774,7 @@ fn validate_lanes(
     let mut total = 0_usize;
     for lane in lanes {
         validate_lane(lane, &mut names)?;
-        validate_lock(lane, batch_size)?;
+        validate_lock(lane, lane.claim_batch_size)?;
         total = total.checked_add(lane.concurrency()).ok_or_else(|| {
             TaskRuntimeError::InvalidConfig("task lane concurrency overflowed".into())
         })?;
@@ -753,9 +821,14 @@ fn validate_lane(
         && name
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if !valid_name || !names.insert(name) || conf.concurrency() == 0 {
+    if !valid_name
+        || !names.insert(name)
+        || conf.concurrency() == 0
+        || conf.claim_batch_size == 0
+        || conf.claim_batch_size > MAX_BATCH_SIZE
+    {
         return Err(TaskRuntimeError::InvalidConfig(format!(
-            "invalid or duplicate task lane '{name}'"
+            "invalid or duplicate task lane '{name}'; claim batch size must be in 1..=10,000"
         )));
     }
     for (label, rate) in [("local", conf.rate()), ("global", conf.global_rate())] {

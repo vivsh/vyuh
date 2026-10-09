@@ -114,7 +114,8 @@ fn spawn_notify_listener(
         run_notify_listener(
             pool,
             topics,
-            sender,
+            None,
+            move |notification| notification.is_none_or(|value| send_notification(&sender, value)),
             reconnect_initial,
             reconnect_max,
             shutdown,
@@ -124,17 +125,38 @@ fn spawn_notify_listener(
 }
 
 #[cfg(feature = "postgres")]
-async fn run_notify_listener(
+/// Shares subscription, bounded reconnects and shutdown handling between notification consumers.
+async fn run_notify_listener<F>(
     pool: crate::db::Pool,
     topics: Vec<String>,
-    sender: mpsc::Sender<Notify>,
+    mut listener: Option<crate::db::sqlx::postgres::PgListener>,
+    mut receive: F,
     reconnect_initial: std::time::Duration,
     reconnect_max: std::time::Duration,
     shutdown: CancellationNotifier,
-) {
+) where
+    F: FnMut(Option<Notify>) -> bool + Send,
+{
     let mut backoff = reconnect_initial;
     loop {
-        match listen_until_disconnect(&pool, &topics, &sender, &shutdown).await {
+        let connected = match listener.take() {
+            Some(listener) => Ok(listener),
+            None => connect_listener(&pool, &topics).await,
+        };
+        let outcome = match connected {
+            Ok(mut listener) => {
+                if !receive(None) {
+                    break;
+                }
+                backoff = reconnect_initial;
+                receive_notifications(&mut listener, &mut receive, &shutdown).await
+            }
+            Err(error) => {
+                tracing::warn!("notification listener connection failed: {error}");
+                NotifyLoop::Disconnected
+            }
+        };
+        match outcome {
             NotifyLoop::Shutdown | NotifyLoop::Closed => break,
             NotifyLoop::Disconnected => {}
         }
@@ -154,58 +176,38 @@ enum NotifyLoop {
 }
 
 #[cfg(feature = "postgres")]
-async fn listen_until_disconnect(
+/// Establishes every subscription before exposing the session to its consumer.
+async fn connect_listener(
     pool: &crate::db::Pool,
     topics: &[String],
-    sender: &mpsc::Sender<Notify>,
-    shutdown: &CancellationNotifier,
-) -> NotifyLoop {
-    let mut listener = match crate::db::sqlx::postgres::PgListener::connect_with(pool).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::warn!("notification listener connect failed: {}", err);
-            return NotifyLoop::Disconnected;
-        }
-    };
-    if !listen_topics(&mut listener, topics).await {
-        return NotifyLoop::Disconnected;
-    }
-    receive_notifications(&mut listener, sender, shutdown).await
-}
-
-#[cfg(feature = "postgres")]
-async fn listen_topics(
-    listener: &mut crate::db::sqlx::postgres::PgListener,
-    topics: &[String],
-) -> bool {
+) -> Result<crate::db::sqlx::postgres::PgListener, crate::db::sqlx::Error> {
+    let mut listener = crate::db::sqlx::postgres::PgListener::connect_with(pool).await?;
     for topic in topics {
-        if let Err(err) = listener.listen(topic).await {
-            tracing::warn!(
-                channel = topic.as_str(),
-                "notification listener LISTEN failed: {}",
-                err
-            );
-            return false;
-        }
+        listener.listen(topic).await?;
     }
-    true
+    Ok(listener)
 }
 
 #[cfg(feature = "postgres")]
-async fn receive_notifications(
+/// Reports disconnects to the reconnect loop so task consumers can rescan afterward.
+async fn receive_notifications<F>(
     listener: &mut crate::db::sqlx::postgres::PgListener,
-    sender: &mpsc::Sender<Notify>,
+    receive: &mut F,
     shutdown: &CancellationNotifier,
-) -> NotifyLoop {
+) -> NotifyLoop
+where
+    F: FnMut(Option<Notify>) -> bool + Send,
+{
     loop {
         tokio::select! {
             _ = shutdown.notified() => return NotifyLoop::Shutdown,
-            notif = listener.recv() => match notif {
-                Ok(notification) => {
-                    if !send_notification(sender, notification) {
+            notif = listener.try_recv() => match notif {
+                Ok(Some(notification)) => {
+                    if !receive(Some(Notify { channel: notification.channel().into(), payload: notification.payload().into() })) {
                         return NotifyLoop::Closed;
                     }
                 }
+                Ok(None) => return NotifyLoop::Disconnected,
                 Err(err) => {
                     tracing::warn!("notification listener receive failed: {}", err);
                     return NotifyLoop::Disconnected;
@@ -216,14 +218,7 @@ async fn receive_notifications(
 }
 
 #[cfg(feature = "postgres")]
-fn send_notification(
-    sender: &mpsc::Sender<Notify>,
-    notification: crate::db::sqlx::postgres::PgNotification,
-) -> bool {
-    let notify = Notify {
-        channel: notification.channel().into(),
-        payload: notification.payload().into(),
-    };
+fn send_notification(sender: &mpsc::Sender<Notify>, notify: Notify) -> bool {
     match sender.try_send(notify) {
         Ok(()) => true,
         Err(TrySendError::Full(notify)) => {
@@ -235,6 +230,33 @@ fn send_notification(
         }
         Err(TrySendError::Closed(_)) => false,
     }
+}
+
+/// Starts an owned listener only after subscriptions succeed, using a separate session pool.
+/// `None` tells the consumer to rescan after initial subscription or reconnection.
+#[cfg(feature = "postgres")]
+pub(crate) async fn listen_owned<F>(
+    pool: &crate::db::Pool,
+    topics: Vec<String>,
+    receive: F,
+    shutdown: CancellationNotifier,
+) -> Result<tokio::task::JoinHandle<()>, DbError>
+where
+    F: FnMut(Option<Notify>) -> bool + Send + 'static,
+{
+    let pool = crate::db::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*pool.connect_options()).clone());
+    let listener = connect_listener(&pool, &topics).await?;
+    Ok(tokio::spawn(run_notify_listener(
+        pool,
+        topics,
+        Some(listener),
+        receive,
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(5),
+        shutdown,
+    )))
 }
 
 #[cfg(feature = "postgres")]

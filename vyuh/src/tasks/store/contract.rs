@@ -6,7 +6,7 @@ use crate::tasks::{
     IdempotencyRetention, TaskFilter, TaskId, TaskLane, TaskLaneConf, TaskReceipt, TaskRuntimeError,
 };
 
-use super::{TaskOutcome, TaskRecord, TaskWrite};
+use super::{LaneOwnerPoll, LaneOwnerRequest, TaskOutcome, TaskRecord, TaskWrite};
 
 /// Preserves acknowledgement evidence without publishing an uncommitted response.
 #[derive(Debug, thiserror::Error)]
@@ -100,86 +100,6 @@ pub struct LaneClaim {
     pub owner: Option<LaneOwnerRequest>,
 }
 
-/// Runner evidence supplied while coordinating one locked lane.
-#[derive(Debug, Clone)]
-pub struct LaneOwnerRequest {
-    /// Token currently held by this runner, when any.
-    pub token: Option<String>,
-    /// Whether the runner has no queued, running, or uncommitted lane work.
-    pub quiescent: bool,
-    /// Whether this scheduler turn has global batch budget to claim a cohort.
-    pub allow_claim: bool,
-    /// Whether handler work completed since the last acknowledged owner turn.
-    pub completed_work: bool,
-    /// Completed lifecycle hook waiting for a fenced durable transition.
-    pub hook: Option<LaneHookResult>,
-}
-
-/// Result returned by one non-blocking lane lifecycle hook.
-#[derive(Debug, Clone)]
-pub struct LaneHookResult {
-    /// Lifecycle generation passed to the hook.
-    pub generation: i64,
-    /// Hook edge that completed.
-    pub action: LaneHookAction,
-    /// Success or one bounded diagnostic failure.
-    pub result: Result<(), String>,
-}
-
-/// Lifecycle hook requested for one durably owned lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LaneHookAction {
-    /// Reconcile the lane's external capacity to stopped.
-    Idle,
-    /// Reconcile the lane's external capacity to running.
-    Busy,
-}
-
-/// Durable phase of one locked lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i16)]
-pub enum LaneOwnerPhase {
-    Active = 0,
-    Idling = 1,
-    Idle = 2,
-    Busying = 3,
-    IdleFailed = 4,
-    BusyFailed = 5,
-}
-
-#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-impl LaneOwnerPhase {
-    /// Converts one stable persisted phase value.
-    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskRuntimeError> {
-        match value {
-            0 => Ok(Self::Active),
-            1 => Ok(Self::Idling),
-            2 => Ok(Self::Idle),
-            3 => Ok(Self::Busying),
-            4 => Ok(Self::IdleFailed),
-            5 => Ok(Self::BusyFailed),
-            _ => Err(TaskRuntimeError::TaskExecutionError(format!(
-                "invalid task lane owner phase {value}"
-            ))),
-        }
-    }
-}
-
-/// Store response for one locked lane owner turn.
-#[derive(Debug, Clone)]
-pub struct LaneOwnerPoll {
-    /// Current owner token, omitted when this runner no longer owns the lane.
-    pub token: Option<String>,
-    /// Current lifecycle generation.
-    pub generation: i64,
-    /// Current durable lifecycle phase.
-    pub phase: LaneOwnerPhase,
-    /// Hook the runner must spawn without blocking its scheduler.
-    pub action: Option<LaneHookAction>,
-    /// Whether this turn replaced an expired prior owner token.
-    pub takeover: bool,
-}
-
 /// Claimed work and saturation evidence for one lane.
 #[derive(Debug, Clone)]
 pub struct LanePoll {
@@ -214,6 +134,8 @@ pub struct CommitResult {
     pub wake_lanes: Vec<TaskLane>,
     /// Stale outputs and missing/already-terminal cancellation targets; none were mutated.
     pub rejected: Vec<TaskId>,
+    /// Authoritative snapshots returned by acknowledged transitions and direct admission.
+    pub tasks: Vec<Arc<TaskRecord>>,
 }
 
 #[cfg(test)]
@@ -314,7 +236,7 @@ impl TaskCommit {
     }
 
     pub(crate) fn weight(&self) -> usize {
-        self.outcome().map_or(1, super::workflow::weight)
+        self.outcome().map_or(1, super::transitions::weight)
     }
 }
 
@@ -398,7 +320,18 @@ impl TaskStoreConf {
 
 /// Persistence and coordination boundary for durable task execution.
 #[allow(dead_code)]
-pub(crate) trait AbstractTaskStore {
+pub(crate) trait TaskStore {
+    /// Subscribes to advisory wakes before claims; non-database stores have no listener.
+    #[cfg(feature = "postgres")]
+    fn start_notifications(
+        &self,
+        _node: uuid::Uuid,
+        _events: tokio::sync::broadcast::Sender<crate::tasks::client::RunnerEvent>,
+        _shutdown: crate::notifiers::CancellationNotifier,
+    ) -> impl Future<Output = Result<Option<tokio::task::JoinHandle<()>>, TaskRuntimeError>> + Send
+    {
+        async { Ok(None) }
+    }
     /// Registers a runner using store time; duplicate registration preserves timestamps.
     fn register_node<'a>(
         &'a self,
@@ -466,6 +399,30 @@ pub(crate) trait AbstractTaskStore {
         writes: Vec<TaskWrite>,
     ) -> impl Future<Output = Result<Vec<TaskReceipt>, TaskRuntimeError>> + Send + '_;
 
+    /// Inserts immediate tasks under the registered receiver's node when delivery slots exist.
+    /// Producers without an endpoint retain ordinary pending insertion.
+    fn store_admitted<'a>(
+        &'a self,
+        writes: Vec<TaskWrite>,
+        _node: &'a uuid::Uuid,
+        _limit: usize,
+    ) -> impl Future<Output = Result<(Vec<TaskReceipt>, Vec<TaskRecord>), TaskRuntimeError>> + Send + 'a
+    {
+        let future = self.store_tasks(writes);
+        async move { Ok((future.await?, Vec::new())) }
+    }
+
+    /// Reuses ordinary atomic commits with operation-local cached Flow bases and input capacity.
+    fn commit_admitted<'a>(
+        &'a self,
+        commits: &'a [TaskCommit],
+        _node: &'a uuid::Uuid,
+        _limit: usize,
+        _cached: &'a [Arc<TaskRecord>],
+    ) -> impl Future<Output = Result<CommitResult, StoreFailure<CommitResult>>> + Send + 'a {
+        self.commit_tasks(commits)
+    }
+
     /// Reads durable cursors and the store-relative current time in one snapshot.
     fn schedule_snapshot<'a>(
         &'a self,
@@ -505,9 +462,37 @@ pub(crate) trait AbstractTaskStore {
     ) -> impl Future<Output = Result<Option<TaskRecord>, TaskRuntimeError>> + Send + '_;
 }
 
-impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
+impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
+    async fn store_admitted(
+        &self,
+        writes: Vec<TaskWrite>,
+        node: &uuid::Uuid,
+        limit: usize,
+    ) -> Result<(Vec<TaskReceipt>, Vec<TaskRecord>), TaskRuntimeError> {
+        (**self).store_admitted(writes, node, limit).await
+    }
+
+    async fn commit_admitted(
+        &self,
+        commits: &[TaskCommit],
+        node: &uuid::Uuid,
+        limit: usize,
+        cached: &[Arc<TaskRecord>],
+    ) -> Result<CommitResult, StoreFailure<CommitResult>> {
+        (**self).commit_admitted(commits, node, limit, cached).await
+    }
     async fn register_node(&self, node: &uuid::Uuid) -> Result<(), TaskRuntimeError> {
         (**self).register_node(node).await
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn start_notifications(
+        &self,
+        node: uuid::Uuid,
+        events: tokio::sync::broadcast::Sender<crate::tasks::client::RunnerEvent>,
+        shutdown: crate::notifiers::CancellationNotifier,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>, TaskRuntimeError> {
+        (**self).start_notifications(node, events, shutdown).await
     }
 
     async fn heartbeat(
@@ -606,56 +591,6 @@ impl<T: AbstractTaskStore + Send + Sync + ?Sized> AbstractTaskStore for Arc<T> {
     async fn get_task(&self, id: TaskId) -> Result<Option<TaskRecord>, TaskRuntimeError> {
         (**self).get_task(id).await
     }
-}
-
-/// Bounds handler-controlled lifecycle data before it reaches any store.
-pub(crate) fn normalize_outcome(
-    outcome: TaskOutcome,
-    payload_limit: usize,
-    error_limit: usize,
-) -> TaskOutcome {
-    match outcome {
-        TaskOutcome::Spawn { ref state, .. } | TaskOutcome::All { ref state, .. }
-            if state.len() > payload_limit =>
-        {
-            TaskOutcome::fail("Task continuation state exceeded the configured limit")
-        }
-        TaskOutcome::CompleteWith { ref output }
-            if crate::tasks::result::validate_output(output).is_err() =>
-        {
-            TaskOutcome::fail(
-                "Task output was invalid JSON or exceeded the 32768-byte result limit",
-            )
-        }
-        TaskOutcome::Suspend { state } if state.len() > payload_limit => {
-            TaskOutcome::fail("Task continuation state exceeded the configured limit")
-        }
-        TaskOutcome::Sleep { state, .. } if state.len() > payload_limit => {
-            TaskOutcome::fail("Task continuation state exceeded the configured limit")
-        }
-        TaskOutcome::Sleep { delay, .. } if delay > crate::tasks::config::MAX_TASK_DELAY => {
-            TaskOutcome::fail("Task sleep duration exceeded the configured limit")
-        }
-        TaskOutcome::Retry { error } => TaskOutcome::Retry {
-            error: truncate_utf8(error, error_limit),
-        },
-        TaskOutcome::Fail { error } => TaskOutcome::Fail {
-            error: truncate_utf8(error, error_limit),
-        },
-        other => other,
-    }
-}
-
-pub(crate) fn truncate_utf8(mut value: String, limit: usize) -> String {
-    if value.len() <= limit {
-        return value;
-    }
-    let mut end = limit;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
-    value
 }
 
 /// Rejects claim-capable requests at the maintenance-only store boundary.

@@ -1,7 +1,0 @@
-2026-06-28 20:01:32.585 UTC [9240] LOG:  starting PostgreSQL 15.18 (Debian 15.18-0+deb12u1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
-2026-06-28 20:01:32.587 UTC [9240] LOG:  listening on IPv6 address "::1", port 55432
-2026-06-28 20:01:32.587 UTC [9240] LOG:  listening on IPv4 address "127.0.0.1", port 55432
-2026-06-28 20:01:32.592 UTC [9240] LOG:  could not set permissions of file "/work/vyuh-bench/results/raw/20260628T195354Z/pgsocket/.s.PGSQL.55432": Invalid argument
-2026-06-28 20:01:32.592 UTC [9240] WARNING:  could not create Unix-domain socket in directory "/work/vyuh-bench/results/raw/20260628T195354Z/pgsocket"
-2026-06-28 20:01:32.592 UTC [9240] FATAL:  could not create any Unix-domain sockets
-2026-06-28 20:01:32.594 UTC [9240] LOG:  database system is shut down

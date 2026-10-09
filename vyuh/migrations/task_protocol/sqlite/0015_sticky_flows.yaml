@@ -1,0 +1,11 @@
+# Apply offline with workers and writers stopped; task data is unchanged.
+dependencies: [0014_node_pipeline]
+atomic: true
+operations:
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_flow_ready
+      columns: [node_id, lane_name, ready_at, created_at, id]
+      unique: false
+      predicate: "kind = 1 AND status = 0 AND node_id IS NOT NULL"

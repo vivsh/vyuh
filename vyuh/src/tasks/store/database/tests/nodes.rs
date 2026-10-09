@@ -1,10 +1,17 @@
 use super::super::model::TaskNodeRow;
 use super::*;
-use crate::tasks::AbstractTaskStore;
+use crate::tasks::TaskStatus;
+use crate::tasks::TaskStore;
+use crate::tasks::store::database::model::TaskRow;
+use chrono::Utc;
 
 #[cfg(feature = "sqlite")]
 #[path = "recovery.rs"]
 mod recovery;
+
+#[cfg(feature = "sqlite")]
+#[path = "delivery.rs"]
+mod delivery;
 
 /// FK retirement preserves task data, normal claims reclaim it, and old outputs remain fenced.
 #[tokio::test]
@@ -487,7 +494,7 @@ async fn claim_return_contract() -> Result<(), String> {
             .return_claims(Some(node))
             .await
             .map_err(|e| e.to_string())?,
-        1
+        3
     );
     assert_eq!(
         store
@@ -586,7 +593,7 @@ async fn assert_untouched(store: &DbTaskStore, id: uuid::Uuid) -> Result<(), Str
     let untouched: i64 = db::sqlx::query_scalar(
         "SELECT COUNT(*) FROM vyuh_tasks WHERE status != 1 AND node_id IS NOT NULL AND updated_at = created_at"
     ).fetch_one(store.pool.as_sqlx()).await.map_err(|e| e.to_string())?;
-    assert_eq!(untouched, 4);
+    assert_eq!(untouched, 2);
     let wait: String =
         db::sqlx::query_scalar("SELECT waiting_children FROM vyuh_tasks WHERE id = ?")
             .bind(id)

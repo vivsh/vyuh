@@ -1,6 +1,27 @@
 # Coordinated task upgrades
 
-## Current upgrade: node-owned task pipeline
+## Current placement upgrade: local stickiness
+
+Apply `0017_local_sticky` after `0016_sticky_tasks`, with **all workers and
+writers stopped**. Sticky now means local delivery preference, not durable node
+affinity. The migration clears `node_id` on non-Running rows and drops the
+obsolete owned-Pending readiness index. It preserves Running ownership, task
+status, scheduling, checkpoints, results, attempts, lineage and join metadata.
+No tasks are deleted. Old/new placement runtimes must not share the store.
+
+PostgreSQL/SQLite apply it atomically through the migration ledger. MySQL/MariaDB
+DDL is non-atomic: if interrupted, inspect whether the data update and index drop
+committed before reconciling the ledger. The data update is idempotent; the index
+drop must not be blindly replayed. Back up before upgrading.
+
+Historical `0015_sticky_flows` and `0016_sticky_tasks` identities are unchanged:
+apply them in order before `0017` on retained installations. Fresh installations
+use the desired schema directly and have no owned-Pending readiness index.
+The ordinary node FK index remains for retirement cleanup. No runtime migration
+or repair query is added, and notification transport is unchanged.
+
+## Node-owned task pipeline upgrade
+
 
 This is a **destructive, breaking upgrade** from the lease-owned runtime.
 `0013_reset_tasks` deletes **every old task**, including pending/running work,

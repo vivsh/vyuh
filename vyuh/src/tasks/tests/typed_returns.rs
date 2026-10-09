@@ -68,7 +68,7 @@ async fn application_result_is_data() -> Result<(), String> {
 #[test]
 fn unit_erasure_fast_path() {
     assert_eq!(
-        crate::tasks::returns::erase_outcome(TaskOutcome::Complete).payload_type_id(),
+        crate::tasks::outcome::erase_outcome(TaskOutcome::Complete).payload_type_id(),
         std::any::TypeId::of::<()>()
     );
     assert_eq!(

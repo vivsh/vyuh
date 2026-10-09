@@ -17,10 +17,13 @@ use crate::{
     },
 };
 
-use super::common::StoreRow;
+use super::queries::{
+    MAINTENANCE_BATCH_SIZE, StoreRow, WRITE_CHUNK_SIZE, configured_lane, deadline,
+    effective_lane_wake, parameter, probe_columns,
+};
 use super::{
-    common::DbTaskStore,
     model::{RatePatch, TaskClaimRow, TaskProbeRow, TaskRateRow, TaskReadyRow, TaskRow},
+    store::DbTaskStore,
 };
 use crate::db::{DbSession as _, Record as _};
 
@@ -50,14 +53,14 @@ impl DbTaskStore {
         let (now, mut poll, new_idle) = self
             .poll_claims(&mut transaction, runner_id, claims, conf, &mut deliveries)
             .await?;
-        let wake = super::flush::finalize_workflow(
+        let wake = super::workflow::finalize_workflow(
             &mut transaction,
             &[],
             deliveries,
             &[],
             conf,
             now,
-            self.batch_size,
+            WRITE_CHUNK_SIZE,
         )
         .await?;
         super::lane_owner::reconcile_workflow(&mut transaction, &mut poll, &wake, &new_idle, now)
@@ -89,10 +92,15 @@ impl DbTaskStore {
             return Ok((now, poll, Vec::new()));
         }
         let (now, preloaded) = if let Some(claim) = eligible(conf, claims) {
-            let (now, probe, selected, deadline) = read(tx, claim, self.batch_size).await?;
+            let (now, probe, selected, deadline) = read(
+                tx,
+                claim,
+                configured_lane(conf, claim.lane)?.claim_batch_size_value(),
+            )
+            .await?;
             (now, Some((probe, selected, deadline)))
         } else {
-            (super::runtime::statement_now(tx).await?, None)
+            (super::queries::statement_now(tx).await?, None)
         };
         let (poll, idle) = self
             .claim_tasks_tx(tx, node, claims, conf, now, deliveries, preloaded)
@@ -159,7 +167,7 @@ impl DbTaskStore {
             lanes.push(lane);
         }
         if self.maintenance_due() {
-            super::flush::delete_expired_owners(transaction, now, self.batch_size).await?;
+            super::submit::delete_expired_owners(transaction, now, MAINTENANCE_BATCH_SIZE).await?;
         }
         lanes.sort_by_key(|lane| {
             claims
@@ -171,7 +179,7 @@ impl DbTaskStore {
             lanes,
             wake_lanes: Vec::new(),
         };
-        super::workflow::materialize(transaction, waits, &mut poll, self.batch_size).await?;
+        super::workflow::materialize(transaction, waits, &mut poll, WRITE_CHUNK_SIZE).await?;
         Ok((poll, new_idle))
     }
 
@@ -184,8 +192,13 @@ impl DbTaskStore {
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         if eligible(turn.conf, std::slice::from_ref(turn.claim)).is_some() {
-            let (probe, selected, deadline) =
-                read_after(transaction, turn.claim, turn.now, self.batch_size).await?;
+            let (probe, selected, deadline) = read_after(
+                transaction,
+                turn.claim,
+                turn.now,
+                configured_lane(turn.conf, turn.claim.lane)?.claim_batch_size_value(),
+            )
+            .await?;
             return self
                 .claim_preloaded(
                     transaction,
@@ -210,11 +223,14 @@ impl DbTaskStore {
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
-        let limit = turn.claim.limit.min(self.batch_size);
+        let limit = turn
+            .claim
+            .limit
+            .min(configured_lane(turn.conf, turn.claim.lane)?.claim_batch_size_value());
         let probed =
             probe_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
         let saturated = limit > 0 && probed.len() == limit;
-        let runnable_count = runnable_count(&probed, turn.retry)?;
+        let runnable_count = runnable_work(&probed, turn.retry)?;
         let (permits, rate_wake) = self
             .reserve_rate(
                 transaction,
@@ -224,8 +240,14 @@ impl DbTaskStore {
                 turn.now,
             )
             .await?;
-        let selected =
-            select_candidates(transaction, turn.now, turn.claim.lane.as_str(), limit).await?;
+        let selected = select_candidates(
+            transaction,
+            turn.now,
+            turn.claim.lane.as_str(),
+            limit,
+            (turn.rate.is_some() && permits == 0).then_some(turn.retry.max_attempts() as i32),
+        )
+        .await?;
         let (tasks, reclaimed) = self
             .finish_claim(transaction, &turn, selected, permits, deliveries, waits)
             .await?;
@@ -236,7 +258,15 @@ impl DbTaskStore {
             tasks,
             reclaimed,
             saturated,
-            next_wake_in: effective_lane_wake(rate_blocked, rate_wake, task_wake),
+            next_wake_in: effective_lane_wake(
+                rate_blocked,
+                rate_wake,
+                task_wake,
+                turn.conf
+                    .handlers
+                    .iter()
+                    .any(|(_, kind)| *kind == crate::tasks::TaskKind::Flow),
+            ),
             owner: None,
         })
     }
@@ -255,9 +285,19 @@ impl DbTaskStore {
         self.fail_exhausted(tx, &mut exhausted, turn.conf, turn.now)
             .await?;
         for row in &exhausted {
-            super::flush::queue_delivery(row, deliveries)?;
+            super::workflow::queue_delivery(row, deliveries)?;
         }
-        candidates.truncate(permits);
+        let mut available = permits;
+        candidates.retain(|row| {
+            if row.kind == 1 {
+                return true;
+            }
+            if available == 0 {
+                return false;
+            }
+            available -= 1;
+            true
+        });
         let reclaimed = candidates
             .iter()
             .filter(|row| row.status == TaskStatus::Running.as_i16())
@@ -279,7 +319,10 @@ impl DbTaskStore {
         deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
-        let limit = turn.claim.limit.min(self.batch_size);
+        let limit = turn
+            .claim
+            .limit
+            .min(configured_lane(turn.conf, turn.claim.lane)?.claim_batch_size_value());
         let saturated = limit > 0 && probe.len() == limit;
         let permits = runnable_count(&probe, turn.retry)?;
         let (tasks, reclaimed) = self
@@ -308,7 +351,7 @@ impl DbTaskStore {
             return Ok(());
         }
         for row in rows.iter_mut() {
-            super::flush::apply_outcome(
+            super::commit::apply_outcome(
                 row,
                 &crate::tasks::TaskOutcome::fail("Maximum task attempts exhausted"),
                 TaskRetry::default(),
@@ -317,8 +360,8 @@ impl DbTaskStore {
             row.node_id = None;
             row.updated_at = now;
         }
-        super::flush::update_idempotency_batch(transaction, rows, conf, now).await?;
-        super::flush::batch_update_rows(transaction, rows, self.batch_size).await
+        super::commit::update_idempotency_batch(transaction, rows, conf, now).await?;
+        super::commit::batch_update_rows(transaction, rows, WRITE_CHUNK_SIZE).await
     }
 
     /// Persists ownership for a locked candidate set in one bounded update.
@@ -356,7 +399,7 @@ impl DbTaskStore {
                     &table.updated_at,
                 ),
             )
-            .batch_size(self.batch_size)
+            .batch_size(WRITE_CHUNK_SIZE)
             .exec(transaction)
             .await?;
         if changed != candidates.len() as u64 {
@@ -448,6 +491,15 @@ fn runnable_count(rows: &[TaskProbeRow], retry: TaskRetry) -> Result<usize, Task
     Ok(count)
 }
 
+/// Only Work rows consume durable rate permits; Flow remains subject to recovery budgets.
+fn runnable_work(rows: &[TaskProbeRow], retry: TaskRetry) -> Result<usize, TaskRuntimeError> {
+    rows.iter()
+        .filter(|row| row.kind == 0)
+        .try_fold(0, |count, row| {
+            Ok(count + usize::from(!row.cancelled && !retry.exhausted(row.step_attempts)?))
+        })
+}
+
 fn split_exhausted(
     rows: Vec<TaskRow>,
     retry: TaskRetry,
@@ -462,16 +514,6 @@ fn split_exhausted(
         }
     }
     Ok((exhausted, runnable))
-}
-
-pub(super) fn configured_lane(
-    conf: &crate::tasks::TaskStoreConf,
-    lane: crate::tasks::TaskLane,
-) -> Result<&crate::tasks::TaskLaneConf, TaskRuntimeError> {
-    conf.lanes
-        .iter()
-        .find(|entry| entry.lane() == lane)
-        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
 }
 
 /// Writes one lane's reserved fixed-point balance while its row is locked.
@@ -518,18 +560,6 @@ pub(super) async fn next_task_deadline(
         .and_then(|value| (value - now).to_std().ok()))
 }
 
-/// Combines future work and token readiness without polling a blocked lane early.
-fn effective_lane_wake(
-    rate_blocked: bool,
-    rate_wake: Option<Duration>,
-    task_wake: Option<Duration>,
-) -> Option<Duration> {
-    if rate_blocked {
-        return rate_wake;
-    }
-    task_wake.map(|task| rate_wake.map_or(task, |permit| permit.max(task)))
-}
-
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 /// Locks one backend-supported candidate batch without waiting on peer workers.
 async fn select_candidates(
@@ -537,15 +567,28 @@ async fn select_candidates(
     now: DateTime<Utc>,
     lane: &str,
     limit: usize,
+    blocked: Option<i32>,
 ) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
     use crate::db::backend::{LockWaitExt as _, RowLockExt as _};
     let table = DbTaskStore::table();
-    Ok(db::from(&table)
+    let query = db::from(&table)
         .filter(table.lane_name.eq(db::val(lane.to_string())))
-        .filter(DbTaskStore::due_predicate(&table, now))
+        .filter(DbTaskStore::due_predicate(&table, now));
+    let query = if let Some(maximum) = blocked {
+        query.filter(
+            table
+                .kind
+                .eq(db::val(1_i16))
+                .or(table.cancelled.eq(db::val(true)))
+                .or(table.step_attempts.gte(db::val(maximum))),
+        )
+    } else {
+        query
+    };
+    Ok(query
         .sort(table.ready_at.asc())
         .sort(table.created_at.asc())
         .sort(table.id.asc())
@@ -566,14 +609,27 @@ async fn select_candidates(
     now: DateTime<Utc>,
     lane: &str,
     limit: usize,
+    blocked: Option<i32>,
 ) -> Result<Vec<TaskRow>, TaskRuntimeError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
     let table = DbTaskStore::table();
-    Ok(db::from(&table)
+    let query = db::from(&table)
         .filter(table.lane_name.eq(db::val(lane.to_string())))
-        .filter(DbTaskStore::due_predicate(&table, now))
+        .filter(DbTaskStore::due_predicate(&table, now));
+    let query = if let Some(maximum) = blocked {
+        query.filter(
+            table
+                .kind
+                .eq(db::val(1_i16))
+                .or(table.cancelled.eq(db::val(true)))
+                .or(table.step_attempts.gte(db::val(maximum))),
+        )
+    } else {
+        query
+    };
+    Ok(query
         .sort(table.ready_at.asc())
         .sort(table.created_at.asc())
         .sort(table.id.asc())
@@ -651,7 +707,7 @@ pub(super) async fn read(
     }
     let (probe, selected, deadline) = decode(rows, claim)?;
     Ok((
-        now.ok_or_else(super::runtime::missing_clock)?,
+        now.ok_or_else(super::queries::missing_clock)?,
         probe,
         selected,
         deadline,
@@ -793,37 +849,4 @@ fn projection(lane: &str, include_clock: bool) -> String {
          UNION ALL SELECT 4, NULL, {deadline_columns}, {} FROM clock",
         deadline(lane)
     )
-}
-
-/// Pads metadata in the mixed projection without loading or decoding task payloads.
-fn probe_columns(columns: &[String]) -> String {
-    let probe_names = TaskProbeRow::record_column_names();
-    columns
-        .iter()
-        .map(|name| {
-            if probe_names.contains(name) {
-                format!("probes.{name}")
-            } else {
-                "NULL".into()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Uses an ordered index seek, never an aggregate over the task backlog.
-fn deadline(lane: &str) -> String {
-    format!(
-        "(SELECT ready_at FROM vyuh_tasks WHERE lane_name = {lane}
-        AND status IN (0, 1) AND node_id IS NULL AND ready_at > clock.now ORDER BY ready_at LIMIT 1)"
-    )
-}
-
-/// Numbers shared parameters on the two backends that support the optimized claim read.
-pub(super) fn parameter(index: usize) -> String {
-    if cfg!(feature = "postgres") {
-        format!("${index}")
-    } else {
-        format!("?{index}")
-    }
 }

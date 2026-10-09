@@ -1,4 +1,5 @@
 //! Durable single-owner coordination for opt-in task lanes.
+use super::store::DbTaskStore;
 
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ use crate::{
 
 use super::{
     claim::{next_task_deadline, probe_candidates},
-    common::{DbTaskStore, add_time},
     model::{TaskLaneLockPatch, TaskLaneLockRow, TaskProbeRow},
+    queries::add_time,
 };
 
 struct OwnerTurn<'a> {

@@ -72,6 +72,7 @@ pub(super) struct TaskRow {
 #[derive(db::Record)]
 #[table(name = "vyuh_tasks")]
 pub(super) struct TaskProbeRow {
+    pub(super) kind: i16,
     pub(super) cancelled: bool,
     pub(super) step_attempts: i32,
     pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,

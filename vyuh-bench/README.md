@@ -23,8 +23,12 @@ counts.
 | `sql/t2_postgres.sql` | Tier 2 schema |
 | `scripts/loc.py` | LOC counter for implementation files |
 | `scripts/report.py` | Markdown summary and chart generator |
-| `results/raw/<timestamp>/` | Raw benchmark output |
-| `results/charts/<timestamp>/` | SVG/PNG chart assets for reports, blog posts, and landing pages |
+
+Generated output is kept outside the repository in
+`~/Codex/vyuh/benchmarks/http/results/`: `raw/<timestamp>/` contains measurements,
+`charts/<timestamp>/` contains SVG/PNG charts, and `summary.md` contains the report.
+Set `VYUH_BENCH_RESULTS` to an absolute directory to override that location in
+native, Docker, or Compose runs. Do not commit generated results or database files.
 
 ## Running
 
@@ -37,8 +41,8 @@ Run the full benchmark in Docker with one command:
 This builds a single container image with Rust, Python, Postgres tools, and the
 PNG renderer. The container runs `scripts/run_bench.py`, starts an ephemeral
 local Postgres cluster inside the container, writes raw results back to the host
-under `results/raw/<timestamp>/`, refreshes `results/summary.md`, and writes
-chart assets under `results/charts/<timestamp>/`.
+under the external results directory, refreshes its `summary.md`, and writes
+chart assets under its `charts/<timestamp>/` subdirectory.
 
 Docker defaults to the Postgres-backed Tier 2 benchmark:
 
@@ -97,9 +101,9 @@ PYTHONPATH=python gunicorn drf_t1.wsgi:application --bind 127.0.0.1:8000
 - Run Python apps as single-process/single-worker baselines first.
 - Warm each server before measurement.
 - Run each scenario at least five times and report median with min/max.
-- Store raw JSON/CSV under `results/raw/<timestamp>/`.
-- Store reusable SVG/PNG charts under `results/charts/<timestamp>/` with a
-  stable mirror at `results/charts/latest/`.
+- Store raw JSON/CSV under the external results directory's `raw/<timestamp>/`.
+- Store reusable SVG/PNG charts under its `charts/<timestamp>/` with a
+  stable mirror at `charts/latest/`.
 
 Recommended scenarios:
 

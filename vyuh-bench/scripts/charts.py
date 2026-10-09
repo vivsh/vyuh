@@ -195,7 +195,7 @@ def chart_specs(rows: list[dict[str, Any]], metrics: list[dict[str, Any]]) -> li
 
 
 def emit(rows: list[dict[str, Any]], metrics: list[dict[str, Any]], raw: Path, root: Path) -> list[dict[str, str]]:
-    charts_root = root / "results" / "charts"
+    charts_root = root / "charts"
     raw_dir = charts_root / raw.name
     latest_dir = charts_root / "latest"
     raw_dir.mkdir(parents=True, exist_ok=True)

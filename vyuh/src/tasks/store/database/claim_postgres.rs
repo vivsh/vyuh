@@ -1,9 +1,10 @@
 //! PostgreSQL ownership assignment and claim evidence in one bounded statement.
+use super::store::DbTaskStore;
 
 use super::{
-    claim::{ClaimTurn, configured_lane},
-    common::DbTaskStore,
+    claim::ClaimTurn,
     model::{TaskClaimRow, TaskRow},
+    queries::configured_lane,
 };
 use crate::db::{DbSession as _, Record as _};
 use crate::{
@@ -14,7 +15,7 @@ use chrono::{DateTime, Utc};
 
 #[cfg(test)]
 #[path = "tests/claim_postgres.rs"]
-mod tests;
+pub(super) mod tests;
 
 /// Operation-local evidence distinguishes locked fallback rows from completed claim writes.
 #[allow(clippy::large_enum_variant)]
@@ -67,7 +68,7 @@ impl DbTaskStore {
         deliveries: &mut Vec<(TaskId, String)>,
     ) -> Result<(DateTime<Utc>, TaskPoll), TaskRuntimeError> {
         let lane = configured_lane(conf, claim.lane)?;
-        let limit = claim.limit.min(self.batch_size);
+        let limit = claim.limit.min(lane.claim_batch_size_value());
         let rows = tx
             .fetch_all::<PgClaimRow>(statement(
                 node,
@@ -98,7 +99,9 @@ impl DbTaskStore {
     ) -> Result<(DateTime<Utc>, TaskPoll), TaskRuntimeError> {
         let (now, next, remaining, fast) = hints(&rows)?;
         let claim = turn.claim;
-        let limit = claim.limit.min(self.batch_size);
+        let limit = claim
+            .limit
+            .min(configured_lane(turn.conf, claim.lane)?.claim_batch_size_value());
         let (selected, tasks, reclaimed) = decode(rows, fast)?;
         let saturated = limit > 0 && (selected.len() + tasks.len() == limit || remaining);
         let mut waits = Vec::new();
@@ -120,9 +123,11 @@ impl DbTaskStore {
             wake_lanes: Vec::new(),
         };
         if self.maintenance_due() {
-            super::flush::delete_expired_owners(tx, now, self.batch_size).await?;
+            super::submit::delete_expired_owners(tx, now, super::queries::MAINTENANCE_BATCH_SIZE)
+                .await?;
         }
-        super::workflow::materialize(tx, waits, &mut poll, self.batch_size).await?;
+        super::workflow::materialize(tx, waits, &mut poll, super::queries::WRITE_CHUNK_SIZE)
+            .await?;
         Ok((now, poll))
     }
 }
@@ -140,7 +145,7 @@ fn hints(
         } => Some((*now, *next_ready_at, *ready_remaining, *fast_path)),
         _ => None,
     });
-    let result = hints.next().ok_or_else(super::runtime::missing_clock)?;
+    let result = hints.next().ok_or_else(super::queries::missing_clock)?;
     if hints.next().is_some() {
         return Err(invalid());
     }
@@ -200,7 +205,7 @@ fn statement(
         .bind(i64::from(max_attempts))
 }
 
-/// Materializes one ordered page; no unlocked candidate page or payload reread is needed.
+/// Streams ordered identities into one bounded locking step; payloads are loaded once.
 fn selection() -> String {
     let columns = TaskClaimRow::record_column_names()
         .iter()
@@ -260,14 +265,16 @@ fn projection() -> String {
     )
 }
 
-fn deadline() -> &'static str {
-    "(SELECT ready_at FROM vyuh_tasks WHERE lane_name = $1 AND node_id IS NULL
-        AND status IN (0, 1) AND ready_at > clock.now ORDER BY ready_at LIMIT 1)"
+fn deadline() -> String {
+    super::queries::deadline("$1")
 }
 
 /// Under contention, a short page must not turn visible ready work into a long fallback wait.
 fn remaining() -> String {
-    format!("CASE WHEN $2 > 0 AND NOT EXISTS (SELECT 1 FROM selected OFFSET GREATEST($2 - 1, 0) LIMIT 1)
-        THEN EXISTS (SELECT 1 FROM vyuh_tasks t WHERE {} AND NOT EXISTS
-            (SELECT 1 FROM selected s WHERE s.id = t.id)) ELSE FALSE END", due())
+    "CASE WHEN $2 > 0 AND NOT EXISTS (SELECT 1 FROM selected OFFSET GREATEST($2 - 1, 0) LIMIT 1)
+        THEN EXISTS (SELECT 1 FROM vyuh_tasks t WHERE t.lane_name = $1 AND t.node_id IS NULL
+            AND t.status IN (0, 1) AND (t.ready_at IS NULL OR t.ready_at <= (SELECT now FROM clock))
+            AND NOT EXISTS (SELECT 1 FROM selected s WHERE s.id = t.id))
+        ELSE FALSE END"
+        .into()
 }

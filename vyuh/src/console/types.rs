@@ -524,7 +524,8 @@ impl ConfigOut {
                 poll_interval_ms: duration_ms(conf.tasks.poll_interval_value()),
                 fallback_poll_interval_ms: duration_ms(conf.tasks.fallback_interval()),
                 concurrency: conf.tasks.concurrency_value(),
-                batch_size: conf.tasks.batch_size_value(),
+                commit_batch_size: conf.tasks.commit_batch_size_value(),
+                ingress_capacity: conf.tasks.ingress_capacity_value(),
                 lease_duration_ms: duration_ms(conf.tasks.lease_duration_value()),
                 readiness: conf.tasks.readiness_policy().as_str().to_string(),
                 lanes: site
@@ -631,7 +632,9 @@ pub struct TaskConfigOut {
     pub poll_interval_ms: u64,
     pub fallback_poll_interval_ms: u64,
     pub concurrency: usize,
-    pub batch_size: usize,
+    pub commit_batch_size: usize,
+    /// Capacity of the direct-submission channel.
+    pub ingress_capacity: usize,
     pub lease_duration_ms: u64,
     pub readiness: String,
     pub lanes: Vec<TaskLaneConfigOut>,
@@ -646,6 +649,8 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
 pub struct TaskLaneConfigOut {
     pub name: String,
     pub concurrency: usize,
+    /// Maximum rows fetched in one lane claim.
+    pub claim_batch_size: usize,
     pub rate_limit: Option<String>,
     pub global_rate_limit: Option<String>,
 }
@@ -655,6 +660,7 @@ impl From<crate::tasks::TaskLaneConf> for TaskLaneConfigOut {
         Self {
             name: conf.lane().to_string(),
             concurrency: conf.concurrency(),
+            claim_batch_size: conf.claim_batch_size_value(),
             rate_limit: conf.rate().map(format_task_rate),
             global_rate_limit: conf.global_rate().map(format_task_rate),
         }
