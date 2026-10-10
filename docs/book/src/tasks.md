@@ -721,9 +721,11 @@ before changing persisted checkpoint representations. Retained manual checkpoint
 must match the new implementation; they are never reinterpreted as Pravah snapshots.
 Pravah's own snapshot checks remain. Version-based task admission is not implemented.
 
-The integration uses the published Pravah 0.4.24 crate. Earlier Fetch-based snapshots
-are incompatible with its Agent protocol. Drain old executions before upgrading;
-there is no automatic checkpoint conversion, task deletion, or task-table migration.
+The integration uses the published Pravah 0.4.25 crate (snapshot format 16 and
+JSON wire format 12). Checkpoints from Pravah 0.4.24 and earlier, including
+Fetch-based snapshots, are incompatible. Drain existing Pravah executions before
+upgrading and stop incompatible workers and writers; there is no automatic
+checkpoint conversion, task deletion, or task-table migration.
 
 ## Retained Results
 

@@ -342,7 +342,7 @@ fn history_policy_is_checkpointed() -> Result<(), String> {
     Ok(())
 }
 
-/// A legacy snapshot fails closed rather than having its version rewritten during restore.
+/// Fetch-era and 0.4.24 snapshots fail closed instead of being rewritten during restore.
 #[test]
 fn old_snapshot_version_rejected() -> Result<(), String> {
     let compiled = pravah::compile(|root: pravah::Flow<u32>| root.suspend::<u32>())
@@ -352,19 +352,21 @@ fn old_snapshot_version_rejected() -> Result<(), String> {
     runtime.next().map_err(|e| e.to_string())?;
     let mut value = serde_json::to_value(runtime.snapshot().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    *value.get_mut("snapshot_version").ok_or("missing version")? = serde_json::json!(12);
-    let snapshot = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let prepared = compiled
         .into_flow(Arc::new(()), 256)
         .map_err(|e| e.to_string())?;
-    assert!(
-        prepared
-            .advance(
-                TaskId::new(id),
-                Data(Arc::new(3)),
-                continuation(Some(snapshot), Some(Ok(serde_json::json!(4))))?
-            )
-            .is_err()
-    );
+    for version in [12, 15] {
+        *value.get_mut("snapshot_version").ok_or("missing version")? = serde_json::json!(version);
+        let snapshot = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        assert!(
+            prepared
+                .advance(
+                    TaskId::new(id),
+                    Data(Arc::new(3)),
+                    continuation(Some(snapshot), Some(Ok(serde_json::json!(4))))?
+                )
+                .is_err()
+        );
+    }
     Ok(())
 }
