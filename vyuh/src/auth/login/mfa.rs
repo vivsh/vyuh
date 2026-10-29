@@ -91,14 +91,18 @@ impl LoginCompletion for MfaResponse {}
 /// Resolves available factors and verifies one application identity challenge.
 pub trait MfaVerifier: Send + Sync + 'static {
     /// Returns factor methods currently available to the accepted user.
+    /// Borrows the invoking site for current factor enrollment lookup.
     fn methods<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
     ) -> impl Future<Output = Result<Vec<MfaMethod>, AuthError>> + Send + 'a;
 
     /// Verifies and optionally refreshes the identity after the selected factor.
+    /// Borrows the invoking site for factor verification and current account policy.
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
         response: &'a MfaResponse,
     ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
@@ -107,11 +111,13 @@ pub trait MfaVerifier: Send + Sync + 'static {
 trait ErasedMfaVerifier: Send + Sync {
     fn methods<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
     ) -> BoxFuture<'a, Result<Vec<MfaMethod>, AuthError>>;
 
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
         response: &'a MfaResponse,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
@@ -120,17 +126,19 @@ trait ErasedMfaVerifier: Send + Sync {
 impl<T: MfaVerifier> ErasedMfaVerifier for T {
     fn methods<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
     ) -> BoxFuture<'a, Result<Vec<MfaMethod>, AuthError>> {
-        Box::pin(MfaVerifier::methods(self, user))
+        Box::pin(MfaVerifier::methods(self, site, user))
     }
 
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         user: &'a AuthUser,
         response: &'a MfaResponse,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(MfaVerifier::verify(self, user, response))
+        Box::pin(MfaVerifier::verify(self, site, user, response))
     }
 }
 
@@ -239,6 +247,7 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
 
     fn begin<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -246,11 +255,12 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
         _secrets: &'a SecretRing,
         _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, LoginChallenge> {
-        Box::pin(async move { self.begin_inner(method, input, target, codec).await })
+        Box::pin(async move { self.begin_inner(site, method, input, target, codec).await })
     }
 
     fn complete<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         codec: &'a ChallengeCodec,
@@ -258,13 +268,18 @@ impl ErasedLoginRuntime for PasswordMfaRuntime {
         state_store: Option<&'a LoginStateStoreRuntime>,
         _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
-        Box::pin(async move { self.complete_inner(method, input, codec, state_store).await })
+        Box::pin(async move {
+            self.complete_inner(site, method, input, codec, state_store)
+                .await
+        })
     }
 }
 
 impl PasswordMfaRuntime {
+    /// Verifies primary credentials and discovers factors using the invoking site.
     async fn begin_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -274,9 +289,9 @@ impl PasswordMfaRuntime {
         let input = downcast_primary(input, self.input)?;
         input.validate()?;
         let (username, password) = input.parts();
-        let user = self.primary.verify(username, password).await?;
+        let user = self.primary.verify(site, username, password).await?;
         user.validate()?;
-        let methods = self.available_methods(&user).await?;
+        let methods = self.available_methods(site, &user).await?;
         let pending = PendingMfa {
             subject: user.subject().to_owned(),
             scopes: user.scopes().to_vec(),
@@ -301,8 +316,10 @@ impl PasswordMfaRuntime {
         ))
     }
 
+    /// Validates the sealed challenge before site-aware factor verification.
     async fn complete_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         codec: &ChallengeCodec,
@@ -320,7 +337,7 @@ impl PasswordMfaRuntime {
             return Err(AuthError::InvalidCredential);
         }
         let user = AuthUser::new(&pending.subject).with_scopes(pending.scopes);
-        let user = self.factors.verifier.verify(&user, &response).await?;
+        let user = self.factors.verifier.verify(site, &user, &response).await?;
         let store = state_store.ok_or(AuthError::InvalidLoginState)?;
         store.consume(&state).await?;
         let login = VerifiedLogin {
@@ -335,8 +352,13 @@ impl PasswordMfaRuntime {
         })
     }
 
-    async fn available_methods(&self, user: &AuthUser) -> Result<Vec<MfaMethod>, AuthError> {
-        let available = self.factors.verifier.methods(user).await?;
+    /// Restricts the site's enrolled factors to this login method's configured methods.
+    async fn available_methods(
+        &self,
+        site: &crate::Site,
+        user: &AuthUser,
+    ) -> Result<Vec<MfaMethod>, AuthError> {
+        let available = self.factors.verifier.methods(site, user).await?;
         let methods = available
             .into_iter()
             .filter(|value| self.factors.allowed.contains(value))

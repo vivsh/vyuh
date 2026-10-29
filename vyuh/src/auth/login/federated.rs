@@ -135,8 +135,10 @@ impl FederatedIdentity {
 /// Maps a protocol-verified federated identity to an application user.
 pub trait FederatedUserMapper: Send + Sync + 'static {
     /// Links or resolves the external identity after protocol checks pass.
+    /// Borrows the invoking site for account lookups through `site.db()`.
     fn map<'a>(
         &'a self,
+        site: &'a crate::Site,
         identity: &'a FederatedIdentity,
     ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
 }
@@ -144,6 +146,7 @@ pub trait FederatedUserMapper: Send + Sync + 'static {
 trait ErasedFederatedMapper: Send + Sync {
     fn map<'a>(
         &'a self,
+        site: &'a crate::Site,
         identity: &'a FederatedIdentity,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
 }
@@ -151,9 +154,10 @@ trait ErasedFederatedMapper: Send + Sync {
 impl<T: FederatedUserMapper> ErasedFederatedMapper for T {
     fn map<'a>(
         &'a self,
+        site: &'a crate::Site,
         identity: &'a FederatedIdentity,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(FederatedUserMapper::map(self, identity))
+        Box::pin(FederatedUserMapper::map(self, site, identity))
     }
 }
 
@@ -303,6 +307,7 @@ impl ErasedLoginRuntime for FederatedRuntime {
 
     fn begin<'a>(
         &'a self,
+        _site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -315,6 +320,7 @@ impl ErasedLoginRuntime for FederatedRuntime {
 
     fn complete<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         codec: &'a ChallengeCodec,
@@ -322,7 +328,10 @@ impl ErasedLoginRuntime for FederatedRuntime {
         state_store: Option<&'a LoginStateStoreRuntime>,
         _passwordless_store: Option<&'a super::PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
-        Box::pin(async move { self.complete_inner(method, input, codec, state_store).await })
+        Box::pin(async move {
+            self.complete_inner(site, method, input, codec, state_store)
+                .await
+        })
     }
 }
 
@@ -364,8 +373,10 @@ impl FederatedRuntime {
         Ok(LoginChallenge::redirect(url, self.conf.ttl_seconds))
     }
 
+    /// Verifies the callback proof, then resolves its account with the invoking site.
     async fn complete_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         codec: &ChallengeCodec,
@@ -404,7 +415,7 @@ impl FederatedRuntime {
             }
         };
         let mapper = self.mapper()?;
-        let user = mapper.map(&identity).await?;
+        let user = mapper.map(site, &identity).await?;
         let store = state_store.ok_or(AuthError::InvalidLoginState)?;
         store.consume(&state).await?;
         let login = verified_federated(user, &identity);

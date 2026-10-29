@@ -66,11 +66,12 @@ impl ProviderRuntimeContract for KeyRuntime {
 
     fn authenticate<'a>(
         &'a self,
+        site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
         audience: &'a AudienceId,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(KeyRuntime::authenticate(self, raw, parts, audience))
+        Box::pin(KeyRuntime::authenticate(self, site, raw, parts, audience))
     }
 
     fn login<'a>(
@@ -83,6 +84,7 @@ impl ProviderRuntimeContract for KeyRuntime {
 
     fn refresh<'a>(
         &'a self,
+        _site: &'a crate::Site,
         _raw: &'a str,
         _parts: &'a Parts,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
@@ -102,6 +104,7 @@ impl KeyRuntime {
     /// Validates one opaque credential and assigns this accepting provider to the identity.
     async fn authenticate(
         &self,
+        site: &crate::Site,
         raw: &str,
         parts: &Parts,
         audience: &AudienceId,
@@ -110,7 +113,11 @@ impl KeyRuntime {
         validate_csrf(self.definition.csrf.as_ref(), parts)?;
         let request = KeyRequest::new(audience.as_str());
         let presented = PresentedCredential::new(raw);
-        let user = self.definition.verifier.verify(&presented, request).await?;
+        let user = self
+            .definition
+            .verifier
+            .verify(site, &presented, request)
+            .await?;
         validate_subject(&user)?;
         Ok(user.set_provider(self.id.clone()))
     }

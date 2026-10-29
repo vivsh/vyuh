@@ -43,6 +43,7 @@ struct DemoPasswords;
 impl PasswordVerifier for DemoPasswords {
     async fn verify(
         &self,
+        _site: &Site,
         username: &str,
         password: &PresentedSecret,
     ) -> Result<AuthUser, AuthError> {
@@ -89,7 +90,7 @@ async fn login(
         .auth()
         .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD)
-        .login(credentials, &[WEB])
+        .login(&site, credentials, &[WEB])
         .await?)
 }
 
@@ -102,7 +103,7 @@ async fn refresh(
     Ok(site
         .auth()
         .using(vyuh::auth::DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await?)
 }
 

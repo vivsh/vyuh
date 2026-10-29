@@ -36,7 +36,10 @@ async fn provider_request_errors_are_terminal() -> Result<(), AuthError> {
         .map_err(auth_error)?;
     let parts = empty_parts();
     assert!(matches!(
-        site.auth().using(UNKNOWN_PROVIDER).refresh(&parts).await,
+        site.auth()
+            .using(UNKNOWN_PROVIDER)
+            .refresh(&site, &parts)
+            .await,
         Err(AuthError::ProviderNotFound(_))
     ));
     assert!(matches!(
@@ -59,13 +62,14 @@ async fn flow_provider_errors_are_terminal() -> Result<(), AuthError> {
     let selected = site.auth().using(UNKNOWN_PROVIDER).via(PASSWORD_MFA);
     let begin = selected
         .begin(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
         .await;
     assert!(matches!(begin, Err(AuthError::ProviderNotFound(_))));
     let complete = selected
-        .complete(MfaResponse::totp("opaque-state", "123456"))
+        .complete(&site, MfaResponse::totp("opaque-state", "123456"))
         .await;
     assert!(matches!(complete, Err(AuthError::ProviderNotFound(_))));
     Ok(())
@@ -82,6 +86,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
         .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_PASSWORD)
         .login(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -92,6 +97,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
         .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_MFA)
         .begin(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -101,7 +107,7 @@ async fn login_method_errors_are_terminal() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(UNKNOWN_MFA)
-        .complete(MfaResponse::totp("opaque-state", "123456"))
+        .complete(&site, MfaResponse::totp("opaque-state", "123456"))
         .await;
     assert!(matches!(complete, Err(AuthError::LoginMethodNotFound(_))));
     Ok(())
@@ -128,11 +134,17 @@ async fn default_refresh_does_not_probe_other_providers() -> Result<(), AuthErro
     assert!(matches!(
         site.auth()
             .using(DEFAULT_AUTH_PROVIDER)
-            .refresh(&parts)
+            .refresh(&site, &parts)
             .await,
         Err(AuthError::ProviderNotFound(_))
     ));
-    assert!(site.auth().using(ALTERNATE).refresh(&parts).await.is_ok());
+    assert!(
+        site.auth()
+            .using(ALTERNATE)
+            .refresh(&site, &parts)
+            .await
+            .is_ok()
+    );
     Ok(())
 }
 

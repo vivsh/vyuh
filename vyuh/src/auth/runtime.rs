@@ -6,6 +6,7 @@ mod indexes;
 mod key_runtime;
 mod registry;
 #[cfg(test)]
+#[path = "tests/runtime_session_contract.rs"]
 mod session_contract_tests;
 mod token_runtime;
 mod validation;
@@ -77,8 +78,10 @@ impl Authenticator {
         }
     }
 
+    /// Selects one access credential and borrows the invoking site for identity mapping.
     pub(crate) async fn authenticate(
         &self,
+        site: &crate::Site,
         parts: &Parts,
         audience: &AudienceId,
     ) -> Result<AuthUser, AuthError> {
@@ -101,7 +104,9 @@ impl Authenticator {
         if provider.access_location().is_cookie() && scan.has_authorization() {
             return Err(AuthError::MalformedLocation);
         }
-        let result = provider.authenticate(raw.as_ref(), parts, audience).await;
+        let result = provider
+            .authenticate(site, raw.as_ref(), parts, audience)
+            .await;
         self.record(provider.id(), &result);
         result
     }
@@ -273,7 +278,12 @@ impl<'a> ProviderAuth<'a> {
     }
 
     /// Rotates a refresh credential accepted only by this provider.
-    pub async fn refresh(&self, parts: &Parts) -> Result<LoginResponse, AuthError> {
+    /// Borrows the invoking site for current account verification after token validation.
+    pub async fn refresh(
+        &self,
+        site: &crate::Site,
+        parts: &Parts,
+    ) -> Result<LoginResponse, AuthError> {
         let result = async {
             let provider = self.provider()?;
             if !provider.capabilities().refresh {
@@ -283,7 +293,7 @@ impl<'a> ProviderAuth<'a> {
                 .refresh_location()
                 .ok_or(AuthError::UnsupportedProviderCapability)?;
             let raw = location.extract(parts)?.ok_or(AuthError::NoCredential)?;
-            provider.refresh(&raw, parts).await
+            provider.refresh(site, &raw, parts).await
         }
         .await;
         self.record(&result);
@@ -346,8 +356,10 @@ impl ProviderRuntime {
         self.0.login(user, audiences).await
     }
 
+    /// Enforces provider capabilities before request-scoped identity authentication.
     async fn authenticate(
         &self,
+        site: &crate::Site,
         raw: &str,
         parts: &Parts,
         audience: &AudienceId,
@@ -358,11 +370,16 @@ impl ProviderRuntime {
         if !self.audiences().supports(audience) {
             return Err(AuthError::AudienceMismatch);
         }
-        self.0.authenticate(raw, parts, audience).await
+        self.0.authenticate(site, raw, parts, audience).await
     }
 
-    async fn refresh(&self, raw: &str, parts: &Parts) -> Result<LoginResponse, AuthError> {
-        self.0.refresh(raw, parts).await
+    async fn refresh(
+        &self,
+        site: &crate::Site,
+        raw: &str,
+        parts: &Parts,
+    ) -> Result<LoginResponse, AuthError> {
+        self.0.refresh(site, raw, parts).await
     }
 
     async fn logout(

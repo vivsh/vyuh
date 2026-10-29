@@ -652,6 +652,10 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
    immutable credential-provider, selector, metric, and typed login-method
    registries plus the site-secret key ring. OAuth resource, external ID-token,
    and federated discovery/JWKS state is initialized before the site starts.
+   Account-resolution callbacks borrow the invoking `Site` for application
+   lookups through `site.db()`. Method login, flow initiation/completion, and
+   refresh pass `&site` as their first terminal argument; callback runtimes do
+   not retain a site. Claim conversion and codecs remain context-free.
    Application-owned routes select identity proof with `.via(...)`, while
    password, Basic, MFA, and optional federated methods delegate successful
    proof to the selected credential provider.

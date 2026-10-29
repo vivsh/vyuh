@@ -184,12 +184,13 @@ async fn basic_exchange(
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC)
-        .login(credentials, &[REPORTS])
+        .login(&site, credentials, &[REPORTS])
         .await?)
 }
 
 fn config() -> SiteConf {
     SiteConf::default()
+        .timezone("Asia/Kolkata")
         .secret_key("auth-test-secret-minimum-32-chars")
         .log_init(false)
         .auth(AuthConf::development())
@@ -260,6 +261,22 @@ fn auth_error(error: impl std::fmt::Display) -> AuthError {
     AuthError::Internal(error.to_string())
 }
 
+/// Checks the invoking site's configuration and executes a query when SQLite is enabled.
+async fn check_account_site(site: &Site) -> Result<(), AuthError> {
+    assert_eq!(site.timezone(), chrono_tz::Asia::Kolkata);
+    let pool = site.db();
+    #[cfg(feature = "sqlite")]
+    {
+        let value: i64 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(pool.as_sqlx())
+            .await
+            .map_err(auth_error)?;
+        assert_eq!(value, 1);
+    }
+    let _ = pool;
+    Ok(())
+}
+
 fn bearer_parts(value: &str) -> Result<axum::http::request::Parts, AuthError> {
     let request = axum::http::Request::builder()
         .header("authorization", format!("Bearer {value}"))
@@ -273,7 +290,8 @@ struct StaticKeyVerifier;
 struct CurrentScopeVerifier;
 
 impl TokenVerifier for CurrentScopeVerifier {
-    async fn verify(&self, token: &AuthToken) -> Result<AuthUser, AuthError> {
+    async fn verify(&self, site: &Site, token: &AuthToken) -> Result<AuthUser, AuthError> {
+        check_account_site(site).await?;
         Ok(AuthUser::new(token.subject()).with_scope(REPORTS_WRITE))
     }
 }
@@ -294,9 +312,11 @@ impl KeyLifecycle for KeyRevoker {
 impl KeyVerifier for StaticKeyVerifier {
     async fn verify(
         &self,
+        site: &Site,
         credential: &PresentedCredential<'_>,
         request: KeyRequest<'_>,
     ) -> Result<AuthUser, AuthError> {
+        check_account_site(site).await?;
         if credential.expose() != "service-secret" || request.audience() != REPORTS.as_str() {
             return Err(AuthError::InvalidCredential);
         }
@@ -398,9 +418,11 @@ struct TestPasswords;
 impl PasswordVerifier for TestPasswords {
     async fn verify(
         &self,
+        site: &Site,
         username: &str,
         password: &PresentedSecret,
     ) -> Result<AuthUser, AuthError> {
+        check_account_site(site).await?;
         if username != "user@example.com" || password.expose() != "correct-password" {
             return Err(AuthError::InvalidCredential);
         }
@@ -412,7 +434,7 @@ impl PasswordVerifier for TestPasswords {
 struct UnavailableVerifier;
 
 impl TokenVerifier for UnavailableVerifier {
-    async fn verify(&self, _token: &AuthToken) -> Result<AuthUser, AuthError> {
+    async fn verify(&self, _site: &Site, _token: &AuthToken) -> Result<AuthUser, AuthError> {
         Err(AuthError::ProviderUnavailable)
     }
 }
@@ -421,11 +443,18 @@ impl TokenVerifier for UnavailableVerifier {
 struct TestFactors;
 
 impl MfaVerifier for TestFactors {
-    async fn methods(&self, _user: &AuthUser) -> Result<Vec<MfaMethod>, AuthError> {
+    async fn methods(&self, site: &Site, _user: &AuthUser) -> Result<Vec<MfaMethod>, AuthError> {
+        check_account_site(site).await?;
         Ok(vec![MfaMethod::Totp, MfaMethod::RecoveryCode])
     }
 
-    async fn verify(&self, user: &AuthUser, response: &MfaResponse) -> Result<AuthUser, AuthError> {
+    async fn verify(
+        &self,
+        site: &Site,
+        user: &AuthUser,
+        response: &MfaResponse,
+    ) -> Result<AuthUser, AuthError> {
+        check_account_site(site).await?;
         let accepted = match response.method() {
             MfaMethod::Totp => response.answer().expose() == "123456",
             MfaMethod::RecoveryCode => response.answer().expose() == "recovery-code",
@@ -444,8 +473,19 @@ struct TestOidcMapper;
 
 #[cfg(feature = "federated")]
 impl FederatedUserMapper for TestOidcMapper {
-    async fn map(&self, identity: &FederatedIdentity) -> Result<AuthUser, AuthError> {
-        Ok(AuthUser::new(identity.subject()))
+    async fn map(&self, site: &Site, identity: &FederatedIdentity) -> Result<AuthUser, AuthError> {
+        assert_eq!(site.timezone(), chrono_tz::Asia::Kolkata);
+        let pool = site.db();
+        #[cfg(feature = "sqlite")]
+        {
+            let value: i64 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(pool.as_sqlx())
+                .await
+                .map_err(auth_error)?;
+            assert_eq!(value, 1);
+        }
+        let _ = pool;
+        Ok(AuthUser::new(identity.subject()).with_extra(site.timezone()))
     }
 }
 
@@ -577,7 +617,7 @@ async fn manual_login_rejects_invalid_identity_scopes() -> Result<(), AuthError>
     Ok(())
 }
 
-/// Verifies refresh replacements carry the current scopes returned by the verifier.
+/// Verifies access and refresh verifiers use the invoking site and preserve current grants.
 #[tokio::test]
 async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), AuthError> {
     let provider = TokenProvider::new(Jwt::hs256_site_secret())
@@ -585,7 +625,7 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
         .refresh(TokenConf::bearer())
         .verifier(CurrentScopeVerifier);
     let auth = AuthConf::default().provider(DEFAULT_AUTH_PROVIDER, provider);
-    let site = Site::build(config().auth(auth), bundles::Bundle::default())
+    let site = Site::build(config().auth(auth), bundle())
         .await
         .map_err(auth_error)?;
     let login = site
@@ -604,7 +644,7 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
     let replacement = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
@@ -616,6 +656,12 @@ async fn refresh_uses_verifier_scopes_for_replacement_tokens() -> Result<(), Aut
     .map_err(auth_error)?;
 
     assert_eq!(decoded.claims.scopes(), &[REPORTS_WRITE]);
+    TestSite::new(site)
+        .get("/me")
+        .with_login(&replacement)
+        .send()
+        .await
+        .assert_status(vyuh::routes::StatusCode::OK);
     Ok(())
 }
 
@@ -748,6 +794,7 @@ async fn password_login_issues_default_credentials() -> Result<(), AuthError> {
         .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD)
         .login(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -846,6 +893,7 @@ async fn password_login_uses_explicit_credential_provider() -> Result<(), AuthEr
         .using(ALTERNATE)
         .via(PASSWORD)
         .login(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -868,6 +916,7 @@ async fn login_method_type_mismatch_is_rejected() -> Result<(), AuthError> {
         .using(DEFAULT_AUTH_PROVIDER)
         .via(WRONG_PASSWORD)
         .login(
+            &site,
             BasicCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -949,13 +998,14 @@ async fn password_mfa_completes_with_assurance() -> Result<(), AuthError> {
     let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(PASSWORD_MFA);
     let challenge = selected
         .begin(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
         .await?;
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
     let login = selected
-        .complete(MfaResponse::totp(token, "123456"))
+        .complete(&site, MfaResponse::totp(token, "123456"))
         .await?;
     let response = TestSite::new(site)
         .get("/assurance")
@@ -989,6 +1039,7 @@ async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
         .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC_MFA)
         .begin(
+            &site,
             BasicCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -998,7 +1049,7 @@ async fn basic_mfa_completes_with_assurance() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(BASIC_MFA)
-        .complete(MfaResponse::totp(token, "123456"))
+        .complete(&site, MfaResponse::totp(token, "123456"))
         .await?;
     assert!(login.credentials().access().len() > 32);
     Ok(())
@@ -1017,13 +1068,14 @@ async fn mfa_state_store_rejects_replay() -> Result<(), AuthError> {
     let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(PASSWORD_MFA);
     let challenge = selected
         .begin(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
         .await?;
     let token = challenge.token().ok_or(AuthError::InvalidLoginState)?;
-    let first = selected.complete(MfaResponse::totp(token, "123456"));
-    let second = selected.complete(MfaResponse::totp(token, "123456"));
+    let first = selected.complete(&site, MfaResponse::totp(token, "123456"));
+    let second = selected.complete(&site, MfaResponse::totp(token, "123456"));
     let (first, second) = tokio::join!(first, second);
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     assert!(
@@ -1054,6 +1106,7 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
         .using(ALTERNATE)
         .via(PASSWORD_MFA)
         .begin(
+            &site,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -1063,7 +1116,7 @@ async fn mfa_completion_cannot_switch_credential_provider() -> Result<(), AuthEr
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
-        .complete(MfaResponse::totp(token, "123456"))
+        .complete(&site, MfaResponse::totp(token, "123456"))
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("credential provider switch succeeded".into()))?;
@@ -1093,6 +1146,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
         .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
         .begin(
+            &old,
             PasswordCredentials::new("user@example.com", "correct-password"),
             &[REPORTS],
         )
@@ -1117,7 +1171,7 @@ async fn login_challenge_accepts_site_secret_fallback() -> Result<(), AuthError>
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(PASSWORD_MFA)
-        .complete(MfaResponse::totp(token, "123456"))
+        .complete(&rotated, MfaResponse::totp(token, "123456"))
         .await?;
     assert!(!login.credentials().access().is_empty());
     Ok(())
@@ -1153,7 +1207,11 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OIDC)
-        .begin(FederatedStart::new().return_to("/dashboard"), &[REPORTS])
+        .begin(
+            &site,
+            FederatedStart::new().return_to("/dashboard"),
+            &[REPORTS],
+        )
         .await?;
     let url = challenge
         .redirect_url()
@@ -1189,11 +1247,16 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
     let auth = AuthConf::development()
         .method(OIDC, login)
         .login_state_store(ReplayStore::default());
-    let site = Site::build(config().auth(auth), bundles::Bundle::default())
-        .await
-        .map_err(auth_error)?;
+    let site = Site::build(
+        config().auth(auth).timezone("Asia/Kolkata"),
+        bundles::Bundle::default(),
+    )
+    .await
+    .map_err(auth_error)?;
     let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(OIDC);
-    let challenge = selected.begin(FederatedStart::new(), &[REPORTS]).await?;
+    let challenge = selected
+        .begin(&site, FederatedStart::new(), &[REPORTS])
+        .await?;
     let redirect = url::Url::parse(
         challenge
             .redirect_url()
@@ -1217,7 +1280,7 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         "state": state,
     }))
     .map_err(auth_error)?;
-    let completed = selected.complete(callback).await?;
+    let completed = selected.complete(&site, callback).await?;
     assert!(!completed.credentials().access().is_empty());
     server.abort();
     Ok(())

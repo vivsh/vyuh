@@ -470,12 +470,13 @@ async fn handle_mcp(runtime: Arc<McpRuntime>, site: Site, request: Request) -> R
         return status.into_response();
     }
     let user = match (runtime.conf.auth, runtime.audience.as_ref()) {
-        (Some(predicate), Some(audience)) => match site.auth().authenticate(&parts, audience).await
-        {
-            Ok(user) if predicate(&user) => Some(user),
-            Ok(_) => return StatusCode::FORBIDDEN.into_response(),
-            Err(error) => return auth_error(&runtime, error),
-        },
+        (Some(predicate), Some(audience)) => {
+            match site.auth().authenticate(&site, &parts, audience).await {
+                Ok(user) if predicate(&user) => Some(user),
+                Ok(_) => return StatusCode::FORBIDDEN.into_response(),
+                Err(error) => return auth_error(&runtime, error),
+            }
+        }
         (Some(_), None) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         (None, _) => None,
     };

@@ -78,7 +78,7 @@ impl FromRequestParts<Site> for AuthUser {
             .ok_or_else(|| AuthRejection::plain(AuthError::MissingAudienceContext))?;
         let user = site
             .auth()
-            .authenticate(parts, audience)
+            .authenticate(site, parts, audience)
             .await
             .map_err(|error| site.auth().rejection(error, audience))?;
         user.validate()

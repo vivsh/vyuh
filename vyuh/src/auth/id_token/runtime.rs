@@ -99,6 +99,7 @@ impl IdTokenRuntime {
     /// Verifies protocol claims before invoking the application identity mapper.
     async fn authenticate(
         &self,
+        site: &crate::Site,
         raw: &str,
         parts: &Parts,
         audience: &AudienceId,
@@ -112,7 +113,7 @@ impl IdTokenRuntime {
         validate_authorized_party(&validated, &resource.authorized_party)?;
         let authentication = authentication(&validated)?;
         let claims = normalize_claims(validated)?;
-        let user = self.mapper.map(&claims).await?;
+        let user = self.mapper.map(site, &claims).await?;
         user.validate()?;
         Ok(user
             .set_provider(self.id.clone())
@@ -406,11 +407,12 @@ impl ProviderRuntimeContract for IdTokenRuntime {
 
     fn authenticate<'a>(
         &'a self,
+        site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
         audience: &'a AudienceId,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(self.authenticate(raw, parts, audience))
+        Box::pin(self.authenticate(site, raw, parts, audience))
     }
 
     fn login<'a>(
@@ -423,6 +425,7 @@ impl ProviderRuntimeContract for IdTokenRuntime {
 
     fn refresh<'a>(
         &'a self,
+        _site: &'a crate::Site,
         _: &'a str,
         _: &'a Parts,
     ) -> BoxFuture<'a, Result<crate::auth::LoginResponse, AuthError>> {
@@ -435,4 +438,5 @@ impl ProviderRuntimeContract for IdTokenRuntime {
 }
 
 #[cfg(test)]
+#[path = "tests/runtime.rs"]
 mod tests;

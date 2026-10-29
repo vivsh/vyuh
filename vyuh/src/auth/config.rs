@@ -82,19 +82,29 @@ impl fmt::Debug for KeySource {
 /// Resolves one authenticated token into the identity exposed to handlers.
 pub trait TokenVerifier: Send + Sync + 'static {
     /// Rejects, resolves, or enriches a token after framework validation.
+    /// Borrows the invoking site for account lookups and application policy checks.
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         token: &'a AuthToken,
     ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
 }
 
 pub(crate) trait ErasedTokenVerifier: Send + Sync {
-    fn verify<'a>(&'a self, token: &'a AuthToken) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
+    fn verify<'a>(
+        &'a self,
+        site: &'a crate::Site,
+        token: &'a AuthToken,
+    ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
 }
 
 impl<T: TokenVerifier> ErasedTokenVerifier for T {
-    fn verify<'a>(&'a self, token: &'a AuthToken) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(TokenVerifier::verify(self, token))
+    fn verify<'a>(
+        &'a self,
+        site: &'a crate::Site,
+        token: &'a AuthToken,
+    ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
+        Box::pin(TokenVerifier::verify(self, site, token))
     }
 }
 
@@ -102,7 +112,7 @@ impl<T: TokenVerifier> ErasedTokenVerifier for T {
 struct EmbeddedVerifier;
 
 impl TokenVerifier for EmbeddedVerifier {
-    async fn verify(&self, token: &AuthToken) -> Result<AuthUser, AuthError> {
+    async fn verify(&self, _site: &crate::Site, token: &AuthToken) -> Result<AuthUser, AuthError> {
         Ok(token.embedded_user())
     }
 }
@@ -126,8 +136,10 @@ impl<'a> KeyRequest<'a> {
 /// Resolves an opaque key through application-controlled storage and policy.
 pub trait KeyVerifier: Send + Sync + 'static {
     /// Returns the accepted identity or rejects the opaque credential.
+    /// Borrows the invoking site for key lookup and current account policy.
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         credential: &'a super::PresentedCredential<'a>,
         request: KeyRequest<'a>,
     ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
@@ -136,6 +148,7 @@ pub trait KeyVerifier: Send + Sync + 'static {
 pub(crate) trait ErasedKeyVerifier: Send + Sync {
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         credential: &'a super::PresentedCredential<'a>,
         request: KeyRequest<'a>,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
@@ -144,10 +157,11 @@ pub(crate) trait ErasedKeyVerifier: Send + Sync {
 impl<T: KeyVerifier> ErasedKeyVerifier for T {
     fn verify<'a>(
         &'a self,
+        site: &'a crate::Site,
         credential: &'a super::PresentedCredential<'a>,
         request: KeyRequest<'a>,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(KeyVerifier::verify(self, credential, request))
+        Box::pin(KeyVerifier::verify(self, site, credential, request))
     }
 }
 

@@ -92,6 +92,7 @@ impl ProviderRuntimeContract for MockSessionRuntime {
     }
     fn authenticate<'a>(
         &'a self,
+        _site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
         audience: &'a AudienceId,
@@ -107,6 +108,7 @@ impl ProviderRuntimeContract for MockSessionRuntime {
     }
     fn refresh<'a>(
         &'a self,
+        _site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
@@ -139,6 +141,12 @@ fn request_parts() -> Parts {
 /// Verifies a stateful provider can implement every private authenticator operation.
 #[tokio::test]
 async fn stateful_provider_fits_runtime_contract() -> Result<(), AuthError> {
+    let site = crate::Site::build(
+        crate::SiteConf::default().log_init(false),
+        crate::bundles::Bundle::default(),
+    )
+    .await
+    .map_err(|error| AuthError::Internal(error.to_string()))?;
     let runtime = ProviderRuntime::new(MockSessionRuntime::new()?);
     let parts = request_parts();
     let audience = AudienceId::new("api")?;
@@ -153,10 +161,10 @@ async fn stateful_provider_fits_runtime_contract() -> Result<(), AuthError> {
         .await?;
     assert_eq!(login.credentials().access(), "session-id");
     let user = runtime
-        .authenticate("session-id", &parts, &audience)
+        .authenticate(&site, "session-id", &parts, &audience)
         .await?;
     assert_eq!(user.subject(), "session-user");
-    let refreshed = runtime.refresh("session-id", &parts).await?;
+    let refreshed = runtime.refresh(&site, "session-id", &parts).await?;
     assert_eq!(refreshed.credentials().access(), "session-id");
     assert!(runtime.logout(&parts).await?.is_empty());
     Ok(())

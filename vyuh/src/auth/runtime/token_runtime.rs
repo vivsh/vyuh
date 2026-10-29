@@ -97,11 +97,12 @@ impl ProviderRuntimeContract for TokenRuntime {
 
     fn authenticate<'a>(
         &'a self,
+        site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
         audience: &'a AudienceId,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(TokenRuntime::authenticate(self, raw, parts, audience))
+        Box::pin(TokenRuntime::authenticate(self, site, raw, parts, audience))
     }
 
     fn login<'a>(
@@ -114,10 +115,11 @@ impl ProviderRuntimeContract for TokenRuntime {
 
     fn refresh<'a>(
         &'a self,
+        site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>> {
-        Box::pin(TokenRuntime::refresh(self, raw, parts))
+        Box::pin(TokenRuntime::refresh(self, site, raw, parts))
     }
 
     fn logout<'a>(
@@ -133,6 +135,7 @@ impl TokenRuntime {
     /// Decodes and accepts one access credential for the requested route audience.
     async fn authenticate(
         &self,
+        site: &crate::Site,
         raw: &str,
         parts: &Parts,
         audience: &AudienceId,
@@ -140,8 +143,13 @@ impl TokenRuntime {
         validate_credential_size(raw, self.access.max_credential_bytes)?;
         let token = self.normalize(self.access.codec.decode(raw).await?)?;
         validate_csrf(self.access.csrf.as_ref(), parts)?;
-        self.accept(&token, TokenKind::Access, std::slice::from_ref(audience))
-            .await
+        self.accept(
+            site,
+            &token,
+            TokenKind::Access,
+            std::slice::from_ref(audience),
+        )
+        .await
     }
 
     /// Issues this provider's configured access and optional refresh credentials.
@@ -156,7 +164,12 @@ impl TokenRuntime {
     }
 
     /// Verifies one refresh credential and rotates the complete credential pair.
-    async fn refresh(&self, raw: &str, parts: &Parts) -> Result<LoginResponse, AuthError> {
+    async fn refresh(
+        &self,
+        site: &crate::Site,
+        raw: &str,
+        parts: &Parts,
+    ) -> Result<LoginResponse, AuthError> {
         let refresh = self
             .refresh
             .as_ref()
@@ -170,7 +183,7 @@ impl TokenRuntime {
             .to_vec();
         self.audiences.validate_requested(&audiences)?;
         let user = self
-            .accept(&current, TokenKind::Refresh, &audiences)
+            .accept(site, &current, TokenKind::Refresh, &audiences)
             .await?;
         let pair = self.tokens(&user, audiences, current.family_id().map(str::to_owned))?;
         let (response, replacement) = self.response(pair).await?;
@@ -181,6 +194,7 @@ impl TokenRuntime {
     /// Applies provider, lifecycle, and application identity validation.
     async fn accept(
         &self,
+        site: &crate::Site,
         token: &AuthToken,
         kind: TokenKind,
         audiences: &[AudienceId],
@@ -204,7 +218,7 @@ impl TokenRuntime {
             lifecycle.validate(token).await?;
         }
         let authentication = token.authentication();
-        let user = self.verifier.verify(token).await?;
+        let user = self.verifier.verify(site, token).await?;
         validate_subject(&user)?;
         Ok(user
             .set_provider(self.id.clone())

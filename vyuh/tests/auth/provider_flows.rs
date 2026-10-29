@@ -137,7 +137,7 @@ async fn refresh_rotates_pair() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await?;
     assert_ne!(rotated.credentials().access(), login.credentials().access());
     assert_ne!(
@@ -162,7 +162,7 @@ async fn refresh_rejects_access() -> Result<(), AuthError> {
     let error = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("access refresh unexpectedly succeeded".into()))?;
@@ -189,7 +189,7 @@ async fn refresh_preserves_all_audiences() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await?;
     let header = format!("Bearer {}", rotated.credentials().access());
     let test = TestSite::new(site);
@@ -330,7 +330,7 @@ async fn mixed_access_and_refresh_codecs_rotate() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(MIXED)
-        .refresh(&bearer_parts(refresh)?)
+        .refresh(&site, &bearer_parts(refresh)?)
         .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
@@ -495,11 +495,11 @@ async fn lifecycle_rejects_replay() -> Result<(), AuthError> {
         .refresh()
         .ok_or(AuthError::UnsupportedProviderCapability)?;
     let parts = bearer_parts(refresh)?;
-    site.auth().using(ROTATING).refresh(&parts).await?;
+    site.auth().using(ROTATING).refresh(&site, &parts).await?;
     let error = site
         .auth()
         .using(ROTATING)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await
         .err()
         .ok_or_else(|| AuthError::Internal("refresh replay unexpectedly succeeded".into()))?;
@@ -575,7 +575,7 @@ async fn verify_only_token_provider_is_not_an_issuer() -> Result<(), AuthError> 
     let refresh = site
         .auth()
         .using(EXTERNAL)
-        .refresh(&bearer_parts("externally-verified")?)
+        .refresh(&site, &bearer_parts("externally-verified")?)
         .await;
     assert!(matches!(
         refresh,
@@ -702,7 +702,7 @@ async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
     assert!(matches!(
         site.auth()
             .using(DEFAULT_AUTH_PROVIDER)
-            .refresh(&missing)
+            .refresh(&site, &missing)
             .await,
         Err(AuthError::InvalidCsrfToken)
     ));
@@ -710,7 +710,7 @@ async fn refresh_cookie_requires_csrf() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&valid)
+        .refresh(&site, &valid)
         .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
@@ -896,7 +896,7 @@ async fn refresh_empty_audiences_uses_site_default() -> Result<(), AuthError> {
     let rotated = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&bearer_parts(refresh)?)
+        .refresh(&site, &bearer_parts(refresh)?)
         .await?;
     assert!(rotated.credentials().refresh().is_some());
     Ok(())
@@ -1129,7 +1129,7 @@ async fn duplicate_bearer_values_are_rejected() -> Result<(), AuthError> {
     let result = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&request.into_parts().0)
+        .refresh(&site, &request.into_parts().0)
         .await;
     assert!(matches!(result, Err(AuthError::MalformedLocation)));
     Ok(())
@@ -1151,7 +1151,7 @@ async fn duplicate_query_credentials_are_rejected() -> Result<(), AuthError> {
     let result = site
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&request.into_parts().0)
+        .refresh(&site, &request.into_parts().0)
         .await;
     assert!(matches!(result, Err(AuthError::MalformedLocation)));
     Ok(())

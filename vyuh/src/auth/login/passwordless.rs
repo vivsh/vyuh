@@ -196,8 +196,10 @@ impl fmt::Debug for OtpResponse {
 #[cfg(feature = "email")]
 pub trait EmailLoginResolver: Send + Sync + 'static {
     /// Returns the current account identity, or `None` when no account is linked.
+    /// Borrows the invoking site for account lookup during initiation and completion.
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         email: &'a EmailAddress,
     ) -> impl Future<Output = Result<Option<AuthUser>, AuthError>> + Send + 'a;
 }
@@ -268,8 +270,10 @@ impl fmt::Debug for PasswordlessAddress {
 /// Resolves an existing application identity from a passwordless address.
 pub trait OtpLoginResolver: Send + Sync + 'static {
     /// Returns the current account identity, or `None` when no account is linked.
+    /// Borrows the invoking site for account lookup during initiation and completion.
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         address: &'a PasswordlessAddress,
     ) -> impl Future<Output = Result<Option<AuthUser>, AuthError>> + Send + 'a;
 }
@@ -278,6 +282,7 @@ pub trait OtpLoginResolver: Send + Sync + 'static {
 trait ErasedEmailResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         email: &'a EmailAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>>;
 }
@@ -286,15 +291,17 @@ trait ErasedEmailResolver: Send + Sync {
 impl<T: EmailLoginResolver> ErasedEmailResolver for T {
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         email: &'a EmailAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>> {
-        Box::pin(EmailLoginResolver::resolve(self, email))
+        Box::pin(EmailLoginResolver::resolve(self, site, email))
     }
 }
 
 trait ErasedOtpResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         address: &'a PasswordlessAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>>;
 }
@@ -302,9 +309,10 @@ trait ErasedOtpResolver: Send + Sync {
 impl<T: OtpLoginResolver> ErasedOtpResolver for T {
     fn resolve<'a>(
         &'a self,
+        site: &'a crate::Site,
         address: &'a PasswordlessAddress,
     ) -> BoxFuture<'a, Result<Option<AuthUser>, AuthError>> {
-        Box::pin(OtpLoginResolver::resolve(self, address))
+        Box::pin(OtpLoginResolver::resolve(self, site, address))
     }
 }
 
@@ -426,6 +434,7 @@ impl ErasedLoginRuntime for MagicLinkRuntime {
     }
     fn begin<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -434,12 +443,13 @@ impl ErasedLoginRuntime for MagicLinkRuntime {
         store: Option<&'a PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, LoginChallenge> {
         Box::pin(async move {
-            self.begin_inner(method, input, target, codec, secrets, store)
+            self.begin_inner(site, method, input, target, codec, secrets, store)
                 .await
         })
     }
     fn complete<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         codec: &'a ChallengeCodec,
@@ -448,7 +458,7 @@ impl ErasedLoginRuntime for MagicLinkRuntime {
         store: Option<&'a PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
         Box::pin(async move {
-            self.complete_inner(method, input, codec, secrets, store)
+            self.complete_inner(site, method, input, codec, secrets, store)
                 .await
         })
     }
@@ -466,6 +476,7 @@ impl ErasedLoginRuntime for OtpRuntime {
     }
     fn begin<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -474,12 +485,13 @@ impl ErasedLoginRuntime for OtpRuntime {
         store: Option<&'a PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, LoginChallenge> {
         Box::pin(async move {
-            self.begin_inner(method, input, target, codec, secrets, store)
+            self.begin_inner(site, method, input, target, codec, secrets, store)
                 .await
         })
     }
     fn complete<'a>(
         &'a self,
+        site: &'a crate::Site,
         method: &'a LoginMethodId,
         input: BoxLoginInput,
         codec: &'a ChallengeCodec,
@@ -488,7 +500,7 @@ impl ErasedLoginRuntime for OtpRuntime {
         store: Option<&'a PasswordlessStoreRuntime>,
     ) -> LoginFuture<'a, CompletedLogin> {
         Box::pin(async move {
-            self.complete_inner(method, input, codec, secrets, store)
+            self.complete_inner(site, method, input, codec, secrets, store)
                 .await
         })
     }
@@ -496,8 +508,10 @@ impl ErasedLoginRuntime for OtpRuntime {
 
 #[cfg(feature = "email")]
 impl MagicLinkRuntime {
+    /// Resolves the account through the invoking site before creating a login link.
     async fn begin_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -509,7 +523,7 @@ impl MagicLinkRuntime {
             .downcast::<EmailAddress>()
             .map_err(|_| AuthError::InvalidCredential)?;
         email.validate()?;
-        let user = self.conf.resolver.resolve(&email).await?;
+        let user = self.conf.resolver.resolve(site, &email).await?;
         if !self.conf.stateful {
             let url = user
                 .as_ref()
@@ -536,8 +550,10 @@ impl MagicLinkRuntime {
         Ok(prepared.challenge_response(start, false))
     }
 
+    /// Validates the link proof before resolving the current account through the site.
     async fn complete_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         codec: &ChallengeCodec,
@@ -559,7 +575,7 @@ impl MagicLinkRuntime {
         let user = self
             .conf
             .resolver
-            .resolve(&email)
+            .resolve(site, &email)
             .await?
             .ok_or(AuthError::InvalidCredential)?;
         complete_user(user, pending, target, "email").await
@@ -619,8 +635,10 @@ impl MagicLinkRuntime {
 }
 
 impl OtpRuntime {
+    /// Resolves the account through the invoking site before creating an OTP challenge.
     async fn begin_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         target: LoginTarget,
@@ -635,7 +653,7 @@ impl OtpRuntime {
         let store = store.ok_or(AuthError::InvalidProviderConfig(
             "passwordless login requires AuthConf::passwordless_store".into(),
         ))?;
-        let user = self.conf.resolver.resolve(&address).await?;
+        let user = self.conf.resolver.resolve(site, &address).await?;
         let mut prepared = PreparedChallenge::new(
             method,
             target,
@@ -654,8 +672,10 @@ impl OtpRuntime {
         Ok(prepared.challenge_response(start, user.is_some()))
     }
 
+    /// Consumes the OTP proof before resolving the current account through the site.
     async fn complete_inner(
         &self,
+        site: &crate::Site,
         method: &LoginMethodId,
         input: BoxLoginInput,
         codec: &ChallengeCodec,
@@ -678,7 +698,7 @@ impl OtpRuntime {
         let user = self
             .conf
             .resolver
-            .resolve(&address)
+            .resolve(site, &address)
             .await?
             .ok_or(AuthError::InvalidCredential)?;
         complete_user(user, pending, target, "otp").await

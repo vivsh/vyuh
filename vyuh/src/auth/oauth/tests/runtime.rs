@@ -39,7 +39,18 @@ const APP_READ: Scope = Scope::of("app:read");
 struct ScopedMapper;
 
 impl OAuthIdentityMapper for ScopedMapper {
-    async fn map(&self, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
+    async fn map(&self, site: &crate::Site, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
+        assert_eq!(site.timezone(), chrono_tz::Asia::Kolkata);
+        let pool = site.db();
+        #[cfg(feature = "sqlite")]
+        {
+            let value: i64 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(pool.as_sqlx())
+                .await
+                .map_err(|_| AuthError::InvalidCredential)?;
+            assert_eq!(value, 1);
+        }
+        let _ = pool;
         Ok(AuthUser::new(&claims.subject).with_scope(APP_READ))
     }
 }
@@ -47,7 +58,7 @@ impl OAuthIdentityMapper for ScopedMapper {
 struct InvalidMapper;
 
 impl OAuthIdentityMapper for InvalidMapper {
-    async fn map(&self, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
+    async fn map(&self, _site: &crate::Site, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
         Ok(AuthUser::new(&claims.subject).with_scope(Scope::new("invalid scope")))
     }
 }
@@ -363,7 +374,9 @@ async fn authenticate_token(
     token: &str,
 ) -> Result<Result<AuthUser, AuthError>, TestError> {
     let audience = AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?;
-    Ok(runtime.authenticate(token, &parts(token)?, &audience).await)
+    Ok(runtime
+        .authenticate(&invoking_site().await?, token, &parts(token)?, &audience)
+        .await)
 }
 
 /// RFC 8414 discovery initializes one shared JWKS verifier and validates a signed token.
@@ -377,6 +390,7 @@ async fn validates_signed_oauth_token() -> Result<(), TestError> {
     let token = token(&key, Some("key-1"), "api.read", now()?.saturating_add(300))?;
     let user = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -465,6 +479,7 @@ async fn accepts_missing_kid_when_key_is_unambiguous() -> Result<(), TestError> 
     assert!(
         runtime
             .authenticate(
+                &invoking_site().await?,
                 &token,
                 &parts(&token)?,
                 &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -485,6 +500,7 @@ async fn maps_expired_tokens() -> Result<(), TestError> {
     let token = token(&key, Some("key-1"), "", now()?.saturating_sub(60))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -606,6 +622,7 @@ async fn rejects_insufficient_upstream_scope() -> Result<(), TestError> {
     let token = token(&key, Some("key-1"), "api.read", now()?.saturating_add(300))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -625,6 +642,7 @@ async fn rejects_duplicate_claim_names() -> Result<(), TestError> {
     let token = token_with_duplicate_subject(&key, now()?.saturating_add(300))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -661,6 +679,7 @@ async fn invalid_signature_does_not_refresh_jwks() -> Result<(), TestError> {
     let token = token(&forged, Some("key-1"), "", now()?.saturating_add(300))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -703,6 +722,7 @@ async fn rejects_missing_kid_with_ambiguous_keys() -> Result<(), TestError> {
     let token = token(&first, None, "", now()?.saturating_add(300))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -735,6 +755,7 @@ async fn refreshes_jwks_for_unknown_key() -> Result<(), TestError> {
     assert!(
         runtime
             .authenticate(
+                &invoking_site().await?,
                 &token,
                 &parts(&token)?,
                 &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -782,6 +803,7 @@ async fn custom_mapper_assigns_application_scopes() -> Result<(), TestError> {
     let token = token(&key, Some("key-1"), "api.read", now()?.saturating_add(300))?;
     let user = runtime
         .authenticate(
+            &invoking_site().await?,
             &token,
             &parts(&token)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -819,6 +841,7 @@ async fn rejects_oversized_credentials_before_validation() -> Result<(), TestErr
     let placeholder = token(&key, Some("key-1"), "", now()?.saturating_add(300))?;
     let result = runtime
         .authenticate(
+            &invoking_site().await?,
             &presented,
             &parts(&placeholder)?,
             &AudienceId::declared(API).map_err(|_| TestError::UnexpectedUri)?,
@@ -826,4 +849,16 @@ async fn rejects_oversized_credentials_before_validation() -> Result<(), TestErr
         .await;
     assert!(matches!(result, Err(AuthError::InvalidCredential)));
     Ok(())
+}
+
+/// Supplies a site to request-time account mapping without retaining it in the verifier.
+async fn invoking_site() -> Result<crate::Site, TestError> {
+    crate::Site::build(
+        crate::SiteConf::default()
+            .log_init(false)
+            .timezone("Asia/Kolkata"),
+        crate::bundles::Bundle::default(),
+    )
+    .await
+    .map_err(|_| TestError::UnexpectedUri)
 }

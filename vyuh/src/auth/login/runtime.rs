@@ -67,12 +67,17 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    fn login<'a>(&'a self, _input: BoxLoginInput) -> LoginFuture<'a, VerifiedLogin> {
+    fn login<'a>(
+        &'a self,
+        _site: &'a crate::Site,
+        _input: BoxLoginInput,
+    ) -> LoginFuture<'a, VerifiedLogin> {
         Box::pin(async { Err(AuthError::UnsupportedProviderCapability) })
     }
 
     fn begin<'a>(
         &'a self,
+        _site: &'a crate::Site,
         _method: &'a LoginMethodId,
         _input: BoxLoginInput,
         _target: LoginTarget,
@@ -85,6 +90,7 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
 
     fn complete<'a>(
         &'a self,
+        _site: &'a crate::Site,
         _method: &'a LoginMethodId,
         _input: BoxLoginInput,
         _codec: &'a ChallengeCodec,
@@ -101,28 +107,28 @@ pub(crate) trait ErasedLoginRuntime: Send + Sync {
 /// One-step methods do not expose flow completion:
 ///
 /// ```compile_fail
-/// use vyuh::auth::{Authenticator, LoginMethod, PasswordCredentials};
+/// use vyuh::{Site, auth::{Authenticator, LoginMethod, PasswordCredentials}};
 ///
 /// const PASSWORD: LoginMethod<PasswordCredentials> = LoginMethod::new("password");
 ///
-/// fn cannot_complete(auth: &Authenticator, input: PasswordCredentials) {
+/// fn cannot_complete(auth: &Authenticator, site: &Site, input: PasswordCredentials) {
 ///     let selected = auth.via(PASSWORD);
-///     let _ = selected.complete(input);
+///     let _ = selected.complete(site, input);
 /// }
 /// ```
 ///
 /// Multi-step methods do not expose one-step login:
 ///
 /// ```compile_fail
-/// use vyuh::auth::{Audience, Authenticator, LoginMethod, MfaResponse, PasswordCredentials};
+/// use vyuh::{Site, auth::{Audience, Authenticator, LoginMethod, MfaResponse, PasswordCredentials}};
 ///
 /// const API: Audience = Audience::new("api");
 /// const PASSWORD_MFA: LoginMethod<PasswordCredentials, MfaResponse> =
 ///     LoginMethod::new("password-mfa");
 ///
-/// fn cannot_login_once(auth: &Authenticator, input: PasswordCredentials) {
+/// fn cannot_login_once(auth: &Authenticator, site: &Site, input: PasswordCredentials) {
 ///     let selected = auth.via(PASSWORD_MFA);
-///     let _ = selected.login(input, &[API]);
+///     let _ = selected.login(site, input, &[API]);
 /// }
 /// ```
 pub struct LoginAuth<'a, Start, Complete = NoChallenge> {
@@ -172,15 +178,17 @@ where
     Start: Send + 'static,
 {
     /// Proves identity once and returns credentials from the selected provider.
+    /// Borrows the invoking site for account resolution and returns proof or policy failures.
     pub async fn login(
         &self,
+        site: &crate::Site,
         input: Start,
         audiences: &[Audience],
     ) -> Result<LoginResponse, AuthError> {
         let result = async {
             let resolved = self.resolve()?;
             let audiences = self.authenticator.resolve_audiences(audiences)?;
-            let verified = resolved.runtime.login(Box::new(input)).await?;
+            let verified = resolved.runtime.login(site, Box::new(input)).await?;
             self.authenticator
                 .login_verified(&resolved.provider, verified, audiences)
                 .await
@@ -198,8 +206,10 @@ where
     Complete: LoginCompletion,
 {
     /// Starts a multi-step login and binds its credential provider and audiences.
+    /// Borrows the invoking site for primary proof, factor discovery, and account resolution.
     pub async fn begin(
         &self,
+        site: &crate::Site,
         input: Start,
         audiences: &[Audience],
     ) -> Result<LoginChallenge, AuthError> {
@@ -212,6 +222,7 @@ where
             resolved
                 .runtime
                 .begin(
+                    site,
                     &resolved.method,
                     Box::new(input),
                     target,
@@ -227,12 +238,20 @@ where
     }
 
     /// Completes a multi-step login and issues the credentials bound at `begin`.
-    pub async fn complete(&self, input: Complete) -> Result<LoginResponse, AuthError> {
+    ///
+    /// Borrows the invoking site for verified federated account mapping. Returns an error
+    /// if identity proof, account policy, continuation state, or credential issuance fails.
+    pub async fn complete(
+        &self,
+        site: &crate::Site,
+        input: Complete,
+    ) -> Result<LoginResponse, AuthError> {
         let result = async {
             let resolved = self.resolve()?;
             let completed = resolved
                 .runtime
                 .complete(
+                    site,
                     &resolved.method,
                     Box::new(input),
                     self.authenticator.challenge_codec(),

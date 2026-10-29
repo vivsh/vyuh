@@ -23,8 +23,10 @@ use crate::{
 /// Resolves username/password credentials into an application identity.
 pub trait PasswordVerifier: Send + Sync + 'static {
     /// Returns an accepted user without revealing account lookup details on failure.
+    /// Borrows the invoking site for account lookup and password verification.
     fn verify<'a>(
         &'a self,
+        site: &'a Site,
         username: &'a str,
         password: &'a PresentedSecret,
     ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
@@ -33,6 +35,7 @@ pub trait PasswordVerifier: Send + Sync + 'static {
 pub(crate) trait ErasedPasswordVerifier: Send + Sync {
     fn verify<'a>(
         &'a self,
+        site: &'a Site,
         username: &'a str,
         password: &'a PresentedSecret,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
@@ -41,10 +44,11 @@ pub(crate) trait ErasedPasswordVerifier: Send + Sync {
 impl<T: PasswordVerifier> ErasedPasswordVerifier for T {
     fn verify<'a>(
         &'a self,
+        site: &'a Site,
         username: &'a str,
         password: &'a PresentedSecret,
     ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(PasswordVerifier::verify(self, username, password))
+        Box::pin(PasswordVerifier::verify(self, site, username, password))
     }
 }
 
@@ -102,12 +106,12 @@ impl ErasedLoginRuntime for PasswordRuntime {
         false
     }
 
-    fn login<'a>(&'a self, input: BoxLoginInput) -> LoginFuture<'a, VerifiedLogin> {
+    fn login<'a>(&'a self, site: &'a Site, input: BoxLoginInput) -> LoginFuture<'a, VerifiedLogin> {
         Box::pin(async move {
             let credentials = downcast_credentials(input, self.input)?;
             credentials.validate()?;
             let (username, password) = credentials.parts();
-            let user = self.verifier.verify(username, password).await?;
+            let user = self.verifier.verify(site, username, password).await?;
             let method = match self.input {
                 PasswordInputKind::Password => "password",
                 PasswordInputKind::Basic => "basic",

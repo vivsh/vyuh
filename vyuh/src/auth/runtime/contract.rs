@@ -74,6 +74,7 @@ pub(crate) trait ProviderRuntimeContract: Send + Sync {
     }
     fn authenticate<'a>(
         &'a self,
+        site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
         audience: &'a AudienceId,
@@ -85,6 +86,7 @@ pub(crate) trait ProviderRuntimeContract: Send + Sync {
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>>;
     fn refresh<'a>(
         &'a self,
+        _site: &'a crate::Site,
         raw: &'a str,
         parts: &'a Parts,
     ) -> BoxFuture<'a, Result<LoginResponse, AuthError>>;

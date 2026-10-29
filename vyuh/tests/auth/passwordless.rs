@@ -16,27 +16,31 @@ struct Accounts;
 
 #[cfg(feature = "email")]
 impl EmailLoginResolver for Accounts {
-    fn resolve(
+    async fn resolve(
         &self,
+        site: &Site,
         email: &EmailAddress,
-    ) -> impl std::future::Future<Output = Result<Option<AuthUser>, AuthError>> + Send + '_ {
+    ) -> Result<Option<AuthUser>, AuthError> {
+        check_account_site(site).await?;
         let known = email.as_str() == "user@example.com";
-        async move { Ok(known.then(|| AuthUser::new("email-user"))) }
+        Ok(known.then(|| AuthUser::new("email-user")))
     }
 }
 
 impl OtpLoginResolver for Accounts {
-    fn resolve(
+    async fn resolve(
         &self,
+        site: &Site,
         address: &PasswordlessAddress,
-    ) -> impl std::future::Future<Output = Result<Option<AuthUser>, AuthError>> + Send + '_ {
+    ) -> Result<Option<AuthUser>, AuthError> {
+        check_account_site(site).await?;
         let user = match address.as_str() {
             "+15551234567" => Some(AuthUser::new("phone-user")),
             #[cfg(feature = "email")]
             "user@example.com" => Some(AuthUser::new("email-user")),
             _ => None,
         };
-        async move { Ok(user) }
+        Ok(user)
     }
 }
 
@@ -115,7 +119,11 @@ async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> 
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::phone("+15551234567"),
+            &[REPORTS],
+        )
         .await?;
     let token = challenge
         .token()
@@ -130,7 +138,7 @@ async fn otp_completes_through_the_selected_provider() -> Result<(), AuthError> 
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .complete(Otp::new(token, code))
+        .complete(&site, Otp::new(token, code))
         .await?;
 
     assert!(!login.credentials().access().is_empty());
@@ -151,7 +159,11 @@ async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::phone("+15551234567"),
+            &[REPORTS],
+        )
         .await?;
     let token = challenge
         .token()
@@ -164,8 +176,8 @@ async fn otp_challenge_is_consumed_once() -> Result<(), AuthError> {
         .to_owned();
 
     let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(OTP);
-    let first = selected.complete(Otp::new(token.clone(), code.clone()));
-    let second = selected.complete(Otp::new(token, code));
+    let first = selected.complete(&site, Otp::new(token.clone(), code.clone()));
+    let second = selected.complete(&site, Otp::new(token, code));
     let (first, second) = tokio::join!(first, second);
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     assert!(first.is_err() || second.is_err());
@@ -213,7 +225,11 @@ async fn unknown_otp_address_has_no_delivery_value() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::phone("+15550000000"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::phone("+15550000000"),
+            &[REPORTS],
+        )
         .await?;
 
     assert!(challenge.token().is_some());
@@ -237,7 +253,11 @@ async fn base32_otp_policy_generates_a_bounded_code() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::phone("+15551234567"),
+            &[REPORTS],
+        )
         .await?;
     let delivery = challenge
         .take_otp_delivery()
@@ -268,7 +288,11 @@ async fn otp_challenge_json_never_contains_a_code() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::phone("+15551234567"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::phone("+15551234567"),
+            &[REPORTS],
+        )
         .await?;
     let body = to_bytes(challenge.into_response().into_body(), 1024)
         .await
@@ -294,7 +318,11 @@ async fn otp_delivery_is_application_owned() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(OTP)
-        .begin(PasswordlessAddress::email("user@example.com"), &[REPORTS])
+        .begin(
+            &site,
+            PasswordlessAddress::email("user@example.com"),
+            &[REPORTS],
+        )
         .await?;
 
     assert_eq!(challenge.kind(), LoginChallengeKind::Code);
@@ -342,7 +370,7 @@ async fn magic_link_is_one_time_by_default() -> Result<(), AuthError> {
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(EMAIL_LINK)
-        .begin(EmailAddress::new("user@example.com"), &[REPORTS])
+        .begin(&site, EmailAddress::new("user@example.com"), &[REPORTS])
         .await?;
     let url = url::Url::parse(
         challenge
@@ -356,8 +384,8 @@ async fn magic_link_is_one_time_by_default() -> Result<(), AuthError> {
         .map(|(_, value)| value.into_owned())
         .ok_or(AuthError::InvalidCredential)?;
     let selected = site.auth().using(DEFAULT_AUTH_PROVIDER).via(EMAIL_LINK);
-    let first = selected.complete(MagicLinkCallback::new(token.clone()));
-    let second = selected.complete(MagicLinkCallback::new(token));
+    let first = selected.complete(&site, MagicLinkCallback::new(token.clone()));
+    let second = selected.complete(&site, MagicLinkCallback::new(token));
     let (first, second) = tokio::join!(first, second);
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     Ok(())
@@ -382,7 +410,7 @@ async fn stateless_magic_link_completes_without_a_store() -> Result<(), AuthErro
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(EMAIL_LINK)
-        .begin(EmailAddress::new("user@example.com"), &[REPORTS])
+        .begin(&site, EmailAddress::new("user@example.com"), &[REPORTS])
         .await?;
     let url = url::Url::parse(
         challenge
@@ -399,7 +427,7 @@ async fn stateless_magic_link_completes_without_a_store() -> Result<(), AuthErro
         .auth()
         .using(DEFAULT_AUTH_PROVIDER)
         .via(EMAIL_LINK)
-        .complete(MagicLinkCallback::new(token))
+        .complete(&site, MagicLinkCallback::new(token))
         .await?;
     assert!(!login.credentials().access().is_empty());
     Ok(())

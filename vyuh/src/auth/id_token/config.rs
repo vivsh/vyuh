@@ -115,19 +115,29 @@ impl IdTokenClaims {
 /// Maps a verified external identity token to an application identity.
 pub trait IdTokenMapper: Send + Sync + 'static {
     /// Applies application identity and account policy after protocol validation.
-    fn map(
-        &self,
-        claims: &IdTokenClaims,
-    ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send;
+    /// Borrows the invoking site for account lookups through `site.db()`.
+    fn map<'a>(
+        &'a self,
+        site: &'a crate::Site,
+        claims: &'a IdTokenClaims,
+    ) -> impl Future<Output = Result<AuthUser, AuthError>> + Send + 'a;
 }
 
 pub(crate) trait ErasedIdTokenMapper: Send + Sync {
-    fn map<'a>(&'a self, claims: &'a IdTokenClaims) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
+    fn map<'a>(
+        &'a self,
+        site: &'a crate::Site,
+        claims: &'a IdTokenClaims,
+    ) -> BoxFuture<'a, Result<AuthUser, AuthError>>;
 }
 
 impl<T: IdTokenMapper> ErasedIdTokenMapper for T {
-    fn map<'a>(&'a self, claims: &'a IdTokenClaims) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
-        Box::pin(IdTokenMapper::map(self, claims))
+    fn map<'a>(
+        &'a self,
+        site: &'a crate::Site,
+        claims: &'a IdTokenClaims,
+    ) -> BoxFuture<'a, Result<AuthUser, AuthError>> {
+        Box::pin(IdTokenMapper::map(self, site, claims))
     }
 }
 

@@ -158,6 +158,18 @@ login methods carry their authenticated assurance through access-token issuance
 and refresh. Assurance describes identity proof; audiences and scopes remain the
 authorization controls.
 
+## Account resolution
+
+All account-resolution callbacks receive `&Site` immediately after `&self`:
+`TokenVerifier::verify`, `KeyVerifier::verify`, `OAuthIdentityMapper::map`,
+`IdTokenMapper::map`, `FederatedUserMapper::map`, `PasswordVerifier::verify`,
+`MfaVerifier::methods` and `verify`, `EmailLoginResolver::resolve`, and
+`OtpLoginResolver::resolve`. They may await account lookups through `site.db()`.
+The site is borrowed from the invoking operation and is never retained by auth
+configuration or callback runtimes. Token and federated mappers run after
+provider proof validation; passwordless completion re-resolves the account after
+proof consumption. `TokenClaims` and codecs remain context-free format adapters.
+
 ## Login methods
 
 `AuthProvider` answers *which credential system issues the result*.
@@ -175,7 +187,7 @@ let auth = AuthConf::development().method(
 site.auth()
     .using(DEFAULT_AUTH_PROVIDER)
     .via(PASSWORD)
-    .login(credentials, &[API])
+    .login(&site, credentials, &[API])
     .await?;
 ```
 
@@ -185,7 +197,7 @@ For a non-default token provider, compose both selectors:
 site.auth()
     .using(APP_AUTH)
     .via(PASSWORD)
-    .login(credentials, &[API])
+    .login(&site, credentials, &[API])
     .await?;
 ```
 
@@ -235,7 +247,7 @@ let auth = AuthConf::development()
 
 The first route calls `begin(credentials, &[API])` and returns
 `LoginChallenge`. The completion route calls
-`complete(MfaResponse::totp(challenge, code))`. No credential is issued before
+`complete(&site, MfaResponse::totp(challenge, code))`. No credential is issued before
 the factor succeeds. `AuthConf::login_state_store` is required and atomically
 consumes continuation IDs before successful completion.
 
@@ -254,12 +266,33 @@ let google = FederatedLogin::google()
 
 `FederatedLogin::oidc(issuer)`, `google()`, `github()`, and `facebook()` share
 the same `begin` and `complete` handler API. The start route calls
-`using(APP_AUTH).via(GOOGLE).begin(FederatedStart::new(), &[API])`; the callback
-calls `using(APP_AUTH).via(GOOGLE).complete(callback)`. OIDC and Google validate discovery,
+`using(APP_AUTH).via(GOOGLE).begin(&site, FederatedStart::new(), &[API])`; the callback
+calls `using(APP_AUTH).via(GOOGLE).complete(&site, callback)`. OIDC and Google validate discovery,
 Authorization Code, PKCE-S256, state, nonce, ID-token signature, issuer,
 audience, expiry, and access-token hash. GitHub and Facebook use their
 provider-specific code exchange and bounded authenticated profile APIs. A
 mapper is always required and provider access tokens are never exposed.
+
+Account mappers borrow the invoking `Site`, so they can query `site.db()` without
+keeping a pool in their own fields:
+
+```rust,ignore
+impl FederatedUserMapper for GoogleAccountMapper {
+    async fn map(
+        &self,
+        site: &Site,
+        identity: &FederatedIdentity,
+    ) -> Result<AuthUser, AuthError> {
+        resolve_google_account(site.db(), identity.subject()).await
+    }
+}
+```
+
+Login terminals borrow the invoking site: `login(&site, credentials, audiences)`,
+`begin(&site, input, audiences)`, and `complete(&site, input)`. Refresh similarly
+uses `refresh(&site, parts)`. Update password/Basic, MFA, OTP, and magic-link
+handlers to pass the site. `issue(user, audiences)` and `logout(parts)` keep
+their existing signatures.
 
 MFA and federated continuation state is AES-256-GCM sealed with a domain-separated
 site-secret key. New state uses the active secret and in-flight state accepts
@@ -297,7 +330,7 @@ SMS, or other channel:
 let mut challenge = site.auth()
     .using(DEFAULT_AUTH_PROVIDER)
     .via(OTP)
-    .begin(PasswordlessAddress::email(input.email), &[API])
+    .begin(&site, PasswordlessAddress::email(input.email), &[API])
     .await?;
 
 if let Some(otp) = challenge.take_otp_delivery() {
@@ -400,7 +433,7 @@ async fn refresh(site: Site, request: Request) -> Result<LoginResponse, Error> {
     let (parts, _) = request.into_parts();
     Ok(site.auth()
         .using(DEFAULT_AUTH_PROVIDER)
-        .refresh(&parts)
+        .refresh(&site, &parts)
         .await?)
 }
 ```
@@ -410,7 +443,7 @@ Every credential operation selects a provider explicitly:
 ```rust
 site.auth()
     .using(APP_AUTH)
-    .refresh(&parts)
+    .refresh(&site, &parts)
     .await?;
 ```
 
@@ -491,7 +524,7 @@ site.auth()
 
 site.auth()
     .using(APP_AUTH)
-    .refresh(&parts)
+    .refresh(&site, &parts)
     .await?;
 ```
 
@@ -668,7 +701,7 @@ mapper decides which Vyuh application scopes to grant:
 struct AppIdentityMapper;
 
 impl OAuthIdentityMapper for AppIdentityMapper {
-    async fn map(&self, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
+    async fn map(&self, site: &Site, claims: &OAuthClaims) -> Result<AuthUser, AuthError> {
         Ok(AuthUser::new(&claims.subject).with_scope(API_READ))
     }
 }
@@ -705,6 +738,21 @@ same bearer, header, cookie, and explicit unsafe-query extraction vocabulary as
 other providers. The mapper receives bounded verified claims and performs
 application checks such as service-account email or hosted domain. It never
 receives the raw credential.
+
+```rust,ignore
+impl IdTokenMapper for GmailSystemIdentity {
+    async fn map(
+        &self,
+        site: &Site,
+        claims: &IdTokenClaims,
+    ) -> Result<AuthUser, AuthError> {
+        resolve_service_account(site.db(), claims.subject()).await
+    }
+}
+```
+
+The mapper receives the invoking site only after the identity-token proof passes
+validation. Both mapping traits may await database lookups using that borrowed site.
 
 ### External JSON claims
 
@@ -825,13 +873,13 @@ audiences, and CSRF. It may reject a user, replace stale scopes, or add
 runtime extras:
 
 ```rust
-use vyuh::auth::{AuthError, AuthToken, AuthUser, Scope, TokenVerifier};
+use vyuh::{Site, auth::{AuthError, AuthToken, AuthUser, Scope, TokenVerifier}};
 
 struct ActiveAccount;
 
 impl TokenVerifier for ActiveAccount {
-    async fn verify(&self, token: &AuthToken) -> Result<AuthUser, AuthError> {
-        let account = load_account(token.subject()).await?;
+    async fn verify(&self, site: &Site, token: &AuthToken) -> Result<AuthUser, AuthError> {
+        let account = load_account(site.db(), token.subject()).await?;
         if !account.active {
             return Err(AuthError::InvalidCredential);
         }
@@ -852,9 +900,9 @@ before a refreshed `LoginResponse` is returned.
 lookup, expiry, revocation, tenant checks, and application-scope resolution:
 
 ```rust
-use vyuh::auth::{
+use vyuh::{Site, auth::{
     AuthError, AuthKey, AuthProvider, AuthUser, KeyRequest, KeyVerifier,
-};
+}};
 
 const API_KEY: AuthProvider = AuthProvider::new("api-key");
 
@@ -863,10 +911,11 @@ struct ApiKeyVerifier;
 impl KeyVerifier for ApiKeyVerifier {
     async fn verify(
         &self,
+        site: &Site,
         credential: &vyuh::auth::PresentedCredential<'_>,
         request: KeyRequest<'_>,
     ) -> Result<AuthUser, AuthError> {
-        let record = load_api_key(credential.expose(), request.audience()).await?;
+        let record = load_api_key(site.db(), credential.expose(), request.audience()).await?;
         Ok(AuthUser::new(record.subject)
             .with_scopes(record.scopes)
             .with_extra(record))

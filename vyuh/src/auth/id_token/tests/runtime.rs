@@ -58,11 +58,21 @@ impl HttpClient for FakeClient {
 struct Mapper;
 
 impl IdTokenMapper for Mapper {
-    async fn map(&self, claims: &IdTokenClaims) -> Result<AuthUser, AuthError> {
+    async fn map(&self, site: &crate::Site, claims: &IdTokenClaims) -> Result<AuthUser, AuthError> {
         if claims.claim("email").and_then(serde_json::Value::as_str) != Some("system@example.com") {
             return Err(AuthError::InvalidCredential);
         }
-        Ok(AuthUser::new(claims.subject()))
+        let pool = site.db();
+        #[cfg(feature = "sqlite")]
+        {
+            let value: i64 = sqlx::query_scalar("SELECT 1")
+                .fetch_one(pool.as_sqlx())
+                .await
+                .map_err(|_| AuthError::InvalidCredential)?;
+            assert_eq!(value, 1);
+        }
+        let _ = pool;
+        Ok(AuthUser::new(claims.subject()).with_extra(site.timezone()))
     }
 }
 
@@ -193,24 +203,29 @@ async fn runtime_with_conf(key: &TestKey, conf: IdToken) -> Result<IdTokenRuntim
     .await
 }
 
-/// A signed external token is normalized and mapped without exposing its credential.
+/// A verified token mapper receives the invoking site's context and database handle.
 #[tokio::test]
 async fn authenticates_signed_identity_token() -> Result<(), TestError> {
     let key = TestKey::generate()?;
     let runtime = runtime(&key).await.map_err(|_| TestError::Runtime)?;
     let token = token(&key, TOKEN_AUDIENCE, now()?.saturating_add(300))?;
     let audience = AudienceId::declared(API).map_err(|_| TestError::Runtime)?;
-    let user = runtime
-        .authenticate(&token, &parts(&token)?, &audience)
-        .await
-        .map_err(|_| TestError::Runtime)?;
-    assert_eq!(user.subject(), "system-user");
+    for timezone in ["Asia/Kolkata", "UTC"] {
+        let site = invoking_site(timezone).await?;
+        let user = runtime
+            .authenticate(&site, &token, &parts(&token)?, &audience)
+            .await
+            .map_err(|_| TestError::Runtime)?;
+        assert_eq!(user.subject(), "system-user");
+        assert_eq!(user.extra::<chrono_tz::Tz>(), Some(&site.timezone()));
+    }
     Ok(())
 }
 
 /// Authorized-party validation rejects mismatches and requires `azp` for multi-audience tokens.
 #[tokio::test]
 async fn validates_authorized_party() -> Result<(), TestError> {
+    let site = invoking_site("Asia/Kolkata").await?;
     let key = TestKey::generate()?;
     let conf = IdToken::discovery(ISSUER)
         .resource(
@@ -225,21 +240,21 @@ async fn validates_authorized_party() -> Result<(), TestError> {
     let valid = party_token(&key, serde_json::json!(TOKEN_AUDIENCE), Some("client-id"))?;
     assert!(
         runtime
-            .authenticate(&valid, &parts(&valid)?, &audience)
+            .authenticate(&site, &valid, &parts(&valid)?, &audience)
             .await
             .is_ok()
     );
     let mismatched = party_token(&key, serde_json::json!(TOKEN_AUDIENCE), Some("other"))?;
     assert!(matches!(
         runtime
-            .authenticate(&mismatched, &parts(&mismatched)?, &audience)
+            .authenticate(&site, &mismatched, &parts(&mismatched)?, &audience)
             .await,
         Err(AuthError::InvalidCredential)
     ));
     let missing = party_token(&key, serde_json::json!([TOKEN_AUDIENCE, "secondary"]), None)?;
     assert!(matches!(
         runtime
-            .authenticate(&missing, &parts(&missing)?, &audience)
+            .authenticate(&site, &missing, &parts(&missing)?, &audience)
             .await,
         Err(AuthError::InvalidCredential)
     ));
@@ -289,6 +304,7 @@ async fn cookie_logout_is_validated_and_response_ready() -> Result<(), TestError
 /// External audience and expiry checks run before application identity mapping.
 #[tokio::test]
 async fn rejects_wrong_audience_and_expiry() -> Result<(), TestError> {
+    let site = invoking_site("Asia/Kolkata").await?;
     let key = TestKey::generate()?;
     let runtime = runtime(&key).await.map_err(|_| TestError::Runtime)?;
     let audience = AudienceId::declared(API).map_err(|_| TestError::Runtime)?;
@@ -300,13 +316,13 @@ async fn rejects_wrong_audience_and_expiry() -> Result<(), TestError> {
     let expired = token(&key, TOKEN_AUDIENCE, now()?.saturating_sub(60))?;
     assert!(matches!(
         runtime
-            .authenticate(&wrong, &parts(&wrong)?, &audience)
+            .authenticate(&site, &wrong, &parts(&wrong)?, &audience)
             .await,
         Err(AuthError::InvalidCredential)
     ));
     assert!(matches!(
         runtime
-            .authenticate(&expired, &parts(&expired)?, &audience)
+            .authenticate(&site, &expired, &parts(&expired)?, &audience)
             .await,
         Err(AuthError::ExpiredCredential)
     ));
@@ -331,4 +347,17 @@ enum TestError {
     Clock,
     #[error("test runtime failed")]
     Runtime,
+}
+
+/// Builds the invoking site, using an isolated in-memory database for SQLite checks.
+async fn invoking_site(timezone: &str) -> Result<crate::Site, TestError> {
+    let conf = crate::SiteConf::default()
+        .log_init(false)
+        .timezone(timezone);
+    #[cfg(feature = "sqlite")]
+    let conf = conf
+        .database(crate::db::DbConf::from_url("sqlite::memory:").map_err(|_| TestError::Runtime)?);
+    crate::Site::build(conf, crate::bundles::Bundle::default())
+        .await
+        .map_err(|_| TestError::Runtime)
 }
