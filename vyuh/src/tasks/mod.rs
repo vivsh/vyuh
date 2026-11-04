@@ -30,8 +30,8 @@ pub use failure::{TaskFailure, TaskRuntimeError, TaskStatus};
 pub use flow::FlowConf;
 #[doc(hidden)]
 pub use flow::FlowContext;
-pub use flow::FlowState;
 pub use flow::{Flow, IntoFlow};
+pub use flow::{FlowAllIn, FlowAllOut, FlowState};
 #[doc(hidden)]
 pub use flow::{FlowArguments, FlowReturn};
 #[cfg(feature = "pravah")]

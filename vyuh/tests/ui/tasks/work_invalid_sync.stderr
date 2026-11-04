@@ -6,13 +6,13 @@ warning: unused import: `tasks::TaskDefinition`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-error[E0277]: the trait bound `fn(vyuh::Data<Job>) {handler}: WorkCallable<_>` is not satisfied
+error[E0277]: the trait bound `fn(vyuh::Data<Job>) {handler}: vyuh::tasks::WorkCallable<_>` is not satisfied
  --> tests/ui/tasks/work_invalid_sync.rs:5:4
   |
 4 | #[bundles::work]
   | ---------------- required by a bound introduced by this call
 5 | fn handler(_: Data<Job>) {}
-  |    ^^^^^^^ the trait `WorkCallable<_>` is not implemented for fn item `fn(vyuh::Data<Job>) {handler}`
+  |    ^^^^^^^ the trait `vyuh::tasks::WorkCallable<_>` is not implemented for fn item `fn(vyuh::Data<Job>) {handler}`
   |
 note: required by a bound in `work`
  --> src/bundles/part.rs

@@ -41,3 +41,12 @@ fn work_flow_capabilities() {
     tests.pass("tests/ui/tasks/typed_outputs.rs");
     tests.compile_fail("tests/ui/tasks/typed_invalid_*.rs");
 }
+
+/// Mixed child inputs preserve typed bounds without proc-macro syntax detection.
+#[test]
+fn all_input_capabilities() {
+    let tests = trybuild::TestCases::new();
+    tests.pass("tests/ui/tasks/all_inputs.rs");
+    tests.compile_fail("tests/ui/tasks/all_invalid_input.rs");
+    tests.compile_fail("tests/ui/tasks/all_invalid_tuple.rs");
+}

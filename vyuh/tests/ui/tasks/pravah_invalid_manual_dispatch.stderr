@@ -1,4 +1,4 @@
-error[E0277]: the trait bound `Manual: FlowReturn<_, Dispatcher, tasks::flow::factory::Definition>` is not satisfied
+error[E0277]: the trait bound `Manual: vyuh::tasks::FlowReturn<_, Dispatcher, tasks::flow::factory::Definition>` is not satisfied
   --> tests/ui/tasks/pravah_invalid_manual_dispatch.rs:10:27
    |
 10 |     let _ = bundles::flow(|| support::Manual, FlowConf::new("manual").dispatch::<Dispatcher>());
@@ -11,10 +11,16 @@ help: the trait `IntoFlow<_, Dispatcher>` is not implemented for `Manual`
    |
    | pub struct Manual;
    | ^^^^^^^^^^^^^^^^^
-   = help: the following other types implement trait `IntoFlow<I, E>`:
-             CompiledFlow<I, O>
-             vyuh::pravah::Flow<O>
-   = note: required for `Manual` to implement `FlowReturn<_, Dispatcher, tasks::flow::factory::Definition>`
+help: the following other types implement trait `IntoFlow<I, E>`
+  --> src/tasks/flow/pravah.rs
+   |
+   |   impl<I: DataValue, O: DataValue, E: PravahDispatcher> IntoFlow<I, E> for pravah::Flow<O> {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `vyuh::pravah::Flow<O>`
+...
+   | / impl<I: DataValue, O: DataValue, E: PravahDispatcher> IntoFlow<I, E>
+   | |     for pravah::CompiledFlow<I, O>
+   | |__________________________________^ `CompiledFlow<I, O>`
+   = note: required for `Manual` to implement `vyuh::tasks::FlowReturn<_, Dispatcher, tasks::flow::factory::Definition>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |

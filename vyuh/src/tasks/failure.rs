@@ -50,6 +50,19 @@ pub enum TaskRuntimeError {
     #[error("Task result is {actual} bytes; the limit is {limit} bytes")]
     ResultTooLarge { actual: usize, limit: usize },
 
+    /// An all-settled result was requested outside the group's ordered bounds.
+    #[error("Flow all result index {index} is out of bounds for {len} results")]
+    FlowAllIndex { index: usize, len: usize },
+
+    /// A successful child value could not decode into the requested type.
+    /// Display omits payload details; the JSON error remains available as a source.
+    #[error("Flow all result at index {index} could not be decoded")]
+    FlowAllDecode {
+        index: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("Type mismatch: expected {0}, got {1}")]
     TypeMismatch(String, String),
 

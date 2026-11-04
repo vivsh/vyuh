@@ -5,6 +5,9 @@ use std::time::Duration;
 use vyuh::prelude::*;
 use vyuh::tasks::{TaskConf, TaskDefinition, TaskStatus};
 
+#[path = "task_all/mixed.rs"]
+mod mixed;
+
 const WORK: TaskLane = TaskLane::new("all-work");
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -37,7 +40,10 @@ impl Flow for GroupFlow {
         continuation: Continuation<(), Vec<Result<u32, vyuh::tasks::TaskFailure>>>,
     ) -> Result<FlowState<u32>, FlowError> {
         match continuation.into_parts() {
-            (None, _) => Ok(FlowState::all((0..input.0.0).map(Item).collect(), ())?),
+            (None, _) => Ok(FlowState::all(
+                (0..input.0.0).map(Item).collect::<Vec<_>>(),
+                (),
+            )?),
             (Some(()), Some(results)) => {
                 let sum = results?
                     .into_iter()
@@ -110,4 +116,6 @@ enum TestError {
     Runtime(#[from] TaskRuntimeError),
     #[error(transparent)]
     Timeout(#[from] tokio::time::error::Elapsed),
+    #[error(transparent)]
+    Failure(#[from] TaskFailure),
 }

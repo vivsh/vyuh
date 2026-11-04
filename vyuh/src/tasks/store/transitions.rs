@@ -141,9 +141,6 @@ pub(super) fn validate_group(
                 .initial_delay
                 .is_some_and(|delay| delay > crate::tasks::config::MAX_TASK_DELAY)
             || !ids.insert(record.id)
-            || children
-                .first()
-                .is_some_and(|first| first.record.name != record.name)
             || !conf
                 .handlers
                 .iter()

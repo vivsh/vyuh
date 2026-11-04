@@ -268,7 +268,7 @@ Use explicit `WorkError::retry` for retries; automatic `?` conversions are termi
 
 Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
 Flow handlers are synchronous and can complete, fail, suspend, sleep, spawn, or
-join a homogeneous group with `all`.
+join an ordered group of same- or mixed-type children with `all`.
 Both use the same statuses, lanes, lane locks, node ownership, attempt counters,
 cancellation, and atomic outcome flushes. Work concurrency and rate limits do not
 apply to synchronous Flow advancement. Neither executes a child or resumed parent
@@ -523,8 +523,9 @@ do not receive a child's result. Value-only batch handlers cannot spawn children
 ## Parallel Children With `all`
 
 `FlowState::all(children, checkpoint)` atomically checkpoints a Flow and creates
-a group of children of one registered input type. It never submits work while
-constructing the outcome. Use the same `#[bundles::flow]` registration, or the
+an ordered group of children. It accepts a homogeneous `Vec<I>`, a heterogeneous
+tuple of one through sixteen inputs, or a dynamic `FlowAllIn`. It never submits
+work while constructing the outcome. Use the same `#[bundles::flow]` registration, or the
 equivalent direct registration shown after this example:
 
 ```rust
@@ -600,8 +601,87 @@ Cancellation of a parent does not cancel its children.
 
 Do not externally resume a parent awaiting `all`. Duplicate/conflicting child
 idempotency keys reject the entire group without adopting existing tasks. Children
-use registered policies and default scheduling; per-child options and heterogeneous
-groups are not supported. Work and batch handlers cannot return `all`.
+use registered policies and default scheduling; per-child options are not
+supported. Work and batch handlers cannot return `all`.
+
+### Mixed Children and Lanes
+
+Pass a tuple for a fixed group, or use `FlowAllIn` when choosing children dynamically:
+
+```rust,ignore
+// Each input resolves to its original registered handler and lane.
+FlowState::all((RenderImage { /* ... */ }, FetchDocument { /* ... */ }), checkpoint)?;
+
+let mut children = FlowAllIn::new().with(RenderImage { /* ... */ });
+children.push(FetchDocument { /* ... */ });
+FlowState::all(children, checkpoint)?;
+```
+
+Register each actual child normally, using macros or equivalent direct APIs:
+
+```rust,ignore
+#[bundles::work(lane = GPU)]
+async fn render(input: Data<RenderImage>) -> ImageResult { /* ... */ }
+
+#[bundles::work(lane = NETWORK)]
+async fn fetch(input: Data<FetchDocument>) -> DocumentResult { /* ... */ }
+
+// Equivalent registrations:
+bundles::work(render, TaskDefinition::new("render").lane(GPU));
+bundles::work(fetch, TaskDefinition::new("fetch").lane(NETWORK));
+```
+
+There is no wrapper task or manual dispatcher. Concrete input identity selects
+the registration, including its kind, lane, idempotency, and retry policy.
+Work admission still obeys that lane's rates, concurrency, and lock controls.
+Every tuple element or `push` is one child; nested tuples are not recursively
+flattened. An application enum used to choose which input to push is not itself
+submitted. Existing homogeneous vectors remain supported. With the generic
+constructor, use `collect::<Vec<_>>()` when a bare `collect()` is ambiguous;
+explicit generic calls now name the collection, such as `all::<Vec<Item>, _>`.
+
+### Mixed Result Extraction
+
+For a fixed group, declare a typed tuple as the parent Flow's resume type:
+
+```rust,ignore
+type Resume = (
+    Result<ImageResult, TaskFailure>,
+    Result<DocumentResult, TaskFailure>,
+);
+// In advance, after checking the checkpoint and presence of resume input:
+let (image, document) = continuation.into_parts().1
+    .ok_or_else(|| FlowError::fail("Missing child results"))??;
+```
+
+The outer result still reports join assembly failure. Tuple members retain
+individual child outcomes, ordered by the original input, not completion time.
+Tuple extraction decodes directly through the existing continuation machinery.
+Wrong arity or incompatible output types fail continuation decoding; the tuple
+does not establish a compile-time input/output association.
+
+For dynamic heterogeneous groups, use `type Resume = FlowAllOut`:
+
+```rust,ignore
+let outputs = continuation.into_parts().1
+    .ok_or_else(|| FlowError::fail("Missing child results"))??;
+let image: ImageResult = outputs.decode(0)??;
+let document: DocumentResult = outputs.decode(1)??;
+```
+
+The first `?` on `decode` handles an invalid index or incompatible successful
+JSON; the second propagates the child's `TaskFailure`. Match the inner result
+instead when retaining partial failures. `len()` and `is_empty()` support dynamic
+groups; keep ordered job descriptors in your checkpoint when result types vary
+by invocation. Empty groups use `FlowAllIn::new()` or `Vec::<I>::new()` and can
+resume into `FlowAllOut` or a vector, not the unit type `()`.
+
+`FlowAllOut` owns raw successful JSON and decodes only requested values. It
+preserves numeric precision, but requires owned buffers and reparses a value on
+each `decode` call. Prefer direct typed tuples or vectors when the result shape
+is known. These views change neither persisted results nor the aggregate 32 KiB
+limit, and they perform no database calls. Neither collection provides result
+names, per-child callbacks, or automatic output-type inference.
 
 Completed tasks remain stored; this feature adds no retention policy. Any future
 deletion feature must preserve results still needed by active joins. Upgrade using
@@ -1496,10 +1576,11 @@ and a complete `all` handler pair above.
 - No exactly-once guarantee.
 - No retained topic events.
 - No durable per-attempt audit history.
-- Manual Flow supports sequential, nested, and homogeneous parallel `all` joins.
+- Manual Flow supports sequential, nested, and homogeneous or mixed-type parallel
+  `all` joins.
   Optional Pravah graphs use the same runtime; graph parallelism is not automatically
   converted into durable `all` groups.
-- No first-completion `select`, heterogeneous `all`, or per-child `all` options.
+- No first-completion `select` or per-child `all` options.
 - Child input types are registered, but their output types are not associated at
   compile time; a mismatched continuation result type fails decoding at runtime.
 - Result and resume envelopes are bounded to 32 KiB, including all joined results.

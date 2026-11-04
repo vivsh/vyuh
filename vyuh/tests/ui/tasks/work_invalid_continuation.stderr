@@ -18,8 +18,8 @@ error[E0277]: the trait bound `vyuh::prelude::Continuation<()>: FromSite` is not
             Site
             SiteConfig
             Templates
-  = note: required for `vyuh::prelude::Continuation<()>` to implement `FromContextParts<BatchWorkContext>`
-  = note: required for `callables::specs::Tuple2<vyuh::prelude::Continuation<()>, vyuh::Data<vyuh::prelude::Batch<Job>>>` to implement `FromContext<BatchWorkContext>`
+  = note: required for `vyuh::prelude::Continuation<()>` to implement `FromContextParts<vyuh::tasks::BatchWorkContext>`
+  = note: required for `callables::specs::Tuple2<vyuh::prelude::Continuation<()>, vyuh::Data<vyuh::prelude::Batch<Job>>>` to implement `FromContext<vyuh::tasks::BatchWorkContext>`
 note: required by a bound in `work_batch`
  --> src/bundles/part.rs
   |

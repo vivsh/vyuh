@@ -57,3 +57,51 @@ fn bounded_buffer_capacity() {
     assert!(buffer.len() <= crate::tasks::result::RESULT_LIMIT);
     assert!(crate::tasks::result::validate_resume(&buffer).is_ok());
 }
+
+/// Mixed registered handlers and kinds remain valid without weakening per-child validation.
+#[test]
+fn mixed_group_validation() {
+    use crate::tasks::store::memory::tests::{conf, flow_record, record, write};
+    let configuration = conf();
+    let valid = vec![write(record()), write(flow_record())];
+    assert!(validate_group(&valid, &configuration).is_ok());
+    let changes: [fn(&mut TaskWrite); 8] = [
+        |child| child.record.name = "unregistered".into(),
+        |child| child.record.kind = crate::tasks::TaskKind::Work,
+        |child| child.record.lane = "unconfigured".into(),
+        |child| child.record.status = TaskStatus::Running,
+        |child| child.record.cancelled = true,
+        |child| child.ignore_conflicts = true,
+        |child| child.record.idempotency_key = Some("missing fingerprint".into()),
+        |child| {
+            child.initial_delay =
+                Some(crate::tasks::config::MAX_TASK_DELAY + std::time::Duration::from_secs(1))
+        },
+    ];
+    for change in changes {
+        let mut children = valid.clone();
+        if let Some(child) = children.get_mut(1) {
+            change(child);
+        }
+        assert!(validate_group(&children, &configuration).is_err());
+    }
+    let duplicate = write(record());
+    assert!(validate_group(&[duplicate.clone(), duplicate], &configuration).is_err());
+}
+
+/// Idempotency uniqueness remains handler-scoped in mixed groups, never group-wide by key alone.
+#[test]
+fn mixed_group_idempotency() {
+    use crate::tasks::store::memory::tests::{conf, flow_record, record, write};
+    let mut children = vec![write(record()), write(flow_record())];
+    for child in &mut children {
+        child.record.idempotency_key = Some("same-key".into());
+        child.record.idempotency_fingerprint = Some("fingerprint".into());
+    }
+    assert!(validate_group(&children, &conf()).is_ok());
+    if let Some(child) = children.get_mut(1) {
+        child.record.name = "workflow".into();
+        child.record.kind = crate::tasks::TaskKind::Work;
+    }
+    assert!(validate_group(&children, &conf()).is_err());
+}

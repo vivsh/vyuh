@@ -1,10 +1,12 @@
 //! Immutable workflow definitions, one-time factories, and synchronous advancement.
+mod all;
 mod definition;
 pub(in crate::tasks) mod factory;
 pub(in crate::tasks) mod handler;
 #[cfg(feature = "pravah")]
 mod pravah;
 mod state;
+pub use all::{FlowAllIn, FlowAllOut};
 pub use definition::{Flow, FlowConf, IntoFlow};
 pub use factory::{FlowArguments, FlowReturn};
 pub use handler::FlowContext;

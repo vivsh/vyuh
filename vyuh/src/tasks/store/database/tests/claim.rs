@@ -1,5 +1,20 @@
 use super::*;
 
+/// Database joins preserve mixed lanes/kinds, cancellation, duplicate fencing and durable replay.
+#[tokio::test]
+#[cfg(all(any(feature = "sqlite", feature = "postgres"), feature = "migrations"))]
+async fn mixed_join_contract() -> Result<(), String> {
+    use crate::tasks::store::memory::tests::all_mixed;
+    let mut store = fresh_store().await?;
+    store.runtime_conf = std::sync::Arc::new(all_mixed::configuration());
+    for cancel in [false, true] {
+        all_mixed::contract(&store, cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// Database claims obey lane policy even when the output batch is smaller.
 #[tokio::test]
 #[cfg(all(feature = "sqlite", feature = "migrations"))]

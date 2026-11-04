@@ -42,6 +42,9 @@ async fn independent_store_limits() -> Result<(), crate::tasks::store::TestError
 #[path = "pipeline.rs"]
 mod pipeline;
 
+#[path = "all_mixed.rs"]
+pub(crate) mod all_mixed;
+
 #[path = "delivery.rs"]
 pub(crate) mod delivery;
 

@@ -1,0 +1,90 @@
+error[E0277]: the trait bound `NotTask: DataValue` is not satisfied
+ --> tests/ui/tasks/all_invalid_input.rs:6:35
+  |
+6 |     let _ = FlowAllIn::new().with(NotTask);
+  |                              ---- ^^^^^^^ unsatisfied trait bound
+  |                              |
+  |                              required by a bound introduced by this call
+  |
+help: the trait `schemars::JsonSchema` is not implemented for `NotTask`
+ --> tests/ui/tasks/all_invalid_input.rs:3:1
+  |
+3 | struct NotTask;
+  | ^^^^^^^^^^^^^^
+  = help: the following other types implement trait `schemars::JsonSchema`:
+            &'a T
+            &'a mut T
+            ()
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+            (T0, T1, T2, T3, T4)
+            (T0, T1, T2, T3, T4, T5)
+          and $N others
+  = note: required for `NotTask` to implement `DataValue`
+note: required by a bound in `vyuh::prelude::FlowAllIn::with`
+ --> src/tasks/flow/all.rs
+  |
+  |     pub fn with<I: DataValue>(mut self, input: I) -> Self {
+  |                    ^^^^^^^^^ required by this bound in `FlowAllIn::with`
+
+error[E0277]: the trait bound `NotTask: DataValue` is not satisfied
+ --> tests/ui/tasks/all_invalid_input.rs:6:35
+  |
+6 |     let _ = FlowAllIn::new().with(NotTask);
+  |                              ---- ^^^^^^^ unsatisfied trait bound
+  |                              |
+  |                              required by a bound introduced by this call
+  |
+help: the trait `vyuh::prelude::Serialize` is not implemented for `NotTask`
+ --> tests/ui/tasks/all_invalid_input.rs:3:1
+  |
+3 | struct NotTask;
+  | ^^^^^^^^^^^^^^
+  = help: the following other types implement trait `vyuh::prelude::Serialize`:
+            &'a T
+            &'a mut T
+            ()
+            (T,)
+            (T0, T1)
+            (T0, T1, T2)
+            (T0, T1, T2, T3)
+            (T0, T1, T2, T3, T4)
+          and $N others
+  = note: required for `NotTask` to implement `DataValue`
+note: required by a bound in `vyuh::prelude::FlowAllIn::with`
+ --> src/tasks/flow/all.rs
+  |
+  |     pub fn with<I: DataValue>(mut self, input: I) -> Self {
+  |                    ^^^^^^^^^ required by this bound in `FlowAllIn::with`
+
+error[E0277]: the trait bound `NotTask: DataValue` is not satisfied
+ --> tests/ui/tasks/all_invalid_input.rs:6:35
+  |
+6 |     let _ = FlowAllIn::new().with(NotTask);
+  |                              ---- ^^^^^^^ unsatisfied trait bound
+  |                              |
+  |                              required by a bound introduced by this call
+  |
+help: the trait `for<'de> vyuh::prelude::Deserialize<'de>` is not implemented for `NotTask`
+ --> tests/ui/tasks/all_invalid_input.rs:3:1
+  |
+3 | struct NotTask;
+  | ^^^^^^^^^^^^^^
+  = help: the following other types implement trait `vyuh::prelude::Deserialize<'de>`:
+            `&'a JsonRawValue` implements `vyuh::prelude::Deserialize<'de>`
+            `&'a [u8]` implements `vyuh::prelude::Deserialize<'de>`
+            `&'a std::path::Path` implements `vyuh::prelude::Deserialize<'de>`
+            `&'a str` implements `vyuh::prelude::Deserialize<'de>`
+            `()` implements `vyuh::prelude::Deserialize<'de>`
+            `(T,)` implements `vyuh::prelude::Deserialize<'de>`
+            `(T0, T1)` implements `vyuh::prelude::Deserialize<'de>`
+            `(T0, T1, T2)` implements `vyuh::prelude::Deserialize<'de>`
+          and $N others
+  = note: required for `NotTask` to implement `DeserializeOwned`
+  = note: required for `NotTask` to implement `DataValue`
+note: required by a bound in `vyuh::prelude::FlowAllIn::with`
+ --> src/tasks/flow/all.rs
+  |
+  |     pub fn with<I: DataValue>(mut self, input: I) -> Self {
+  |                    ^^^^^^^^^ required by this bound in `FlowAllIn::with`

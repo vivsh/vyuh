@@ -8,6 +8,8 @@ use crate::callables::{DataBox, DataValue};
 
 use crate::tasks::{TaskOptions, TaskOutcome, TaskRuntimeError};
 
+use super::FlowAllIn;
+
 /// Orchestration outcome returned by synchronous flow handlers.
 ///
 /// Returning a spawn request checkpoints this task and creates a child atomically.
@@ -56,15 +58,19 @@ impl<T> FlowState<T> {
     }
 
     /// Requests an ordered, all-settled group without submitting any work.
+    /// Accepts a homogeneous vector, a tuple of one through sixteen typed inputs,
+    /// or a dynamic [`FlowAllIn`]. Every child retains its registered lane/policies.
     /// Checkpoint serialization can fail here; registration, size, and fan-out
     /// limits are checked during framework preparation after the handler returns.
-    pub fn all<I: DataValue, S: Serialize>(
-        children: Vec<I>,
+    /// Results retain input order and may decode as a typed vector/tuple or
+    /// [`super::FlowAllOut`]. Input tuples do not infer child output types.
+    pub fn all<C: Into<FlowAllIn>, S: Serialize>(
+        children: C,
         checkpoint: S,
     ) -> Result<Self, TaskRuntimeError> {
         Ok(Self {
             inner: FlowValue::All {
-                inputs: children.into_iter().map(DataBox::new_data).collect(),
+                inputs: children.into().inputs,
                 state: serde_json::to_string(&checkpoint)?,
             },
         })

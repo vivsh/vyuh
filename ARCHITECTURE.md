@@ -421,7 +421,14 @@ The `vyuh` crate is organized around these subsystems:
   transient wake lanes respect each lane's existing poll eligibility. Public
   resume remains independent. Per-step retries reset at successful checkpoints,
   while lifetime invocation counts remain intact. `FlowState::all` uses the same
-  transition engine. The store owns ordered `waiting_children` and a completion
+  transition engine. Its API accepts homogeneous vectors, heterogeneous tuples,
+  or `FlowAllIn`; each payload retains its concrete type for the existing registry
+  to select its original handler, kind and lane. The shared group validator checks
+  each child independently rather than requiring a common handler name.
+  `FlowAllOut` is an invocation-local ordered result view retaining successful raw
+  JSON for selective typed decoding; fixed result tuples decode directly through
+  `Continuation`. Neither collection adds durable state, queries, or scheduling.
+  The store owns ordered `waiting_children` and a completion
   counter; memory storage owns these in its private wait map. Neither is part of
   runner/handler snapshots. Fenced first-terminal child transitions decrement
   counters without membership or sibling-result reads. Satisfied parents become
