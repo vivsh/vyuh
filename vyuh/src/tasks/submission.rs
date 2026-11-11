@@ -87,7 +87,7 @@ impl fmt::Debug for TaskOptions {
 /// Result of submitting one task intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskReceipt {
-    /// A new task was durably stored.
+    /// A new task was durably stored, or staged until commit in a caller-owned transaction.
     Queued(TaskId),
     /// An identical idempotent task already exists.
     Existing(TaskId),

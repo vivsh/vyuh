@@ -1116,6 +1116,35 @@ task-targeted cron or periodic emitter stores one durable `vyuh_schedules`
 cursor and coalesces missed occurrences after restart. Recurring creation belongs
 to that emitter; orchestration within each occurrence belongs to Flow.
 
+### Submit inside an application transaction
+
+Use `submit_tx` or `submit_many_tx` to commit application changes and task
+submission together. Both use default options and the same typed registration
+and idempotency rules as ordinary submission.
+
+```rust
+let pool = site.db();
+let mut tx = pool.begin().await?;
+// Write the order using &mut tx, then stage its receipt task.
+let receipt = site.tasks().submit_tx(&mut tx, SendReceipt { order_id }).await?;
+tx.commit().await?;
+let task_id = receipt.id();
+```
+
+These methods require a database backend and a transaction targeting the site's
+task database and schema. Vyuh does not begin, commit, roll back, or retry the
+transaction. A new receipt is provisional until commit. On submission error or
+cancellation, roll back the transaction or a savepoint created before submission
+before continuing; an idempotency reservation may have been written.
+
+Workers can claim newly submitted tasks only after commit. PostgreSQL's existing
+wake notification is delivered on commit. Without a wake hint, an idle worker
+discovers the task on its next fallback poll (`fallback_poll_interval`, five
+minutes by default). Transactional submissions do not use immediate local
+delivery. Submit near the end of the transaction and commit promptly, since inserts and
+idempotency checks hold their database locks until the transaction ends.
+Ordinary `submit` and `submit_many` still commit independently.
+
 ## Lanes, Throughput, And Rate Limits
 
 Named lanes isolate slow work without introducing priority. Each lane owns a

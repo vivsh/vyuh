@@ -134,6 +134,55 @@ impl Tasks {
         self.client.submit_many_with(inputs, options).await
     }
 
+    /// Stages one typed task with default options in the caller's transaction.
+    ///
+    /// The transaction must target this site's task database and schema. A new
+    /// receipt is provisional until commit. If the call errors or its future
+    /// is cancelled, roll back the transaction or a caller-created savepoint
+    /// before continuing.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub async fn submit_tx<T: Serialize + 'static>(
+        &self,
+        tx: &mut crate::db::DbTransaction<'_>,
+        input: T,
+    ) -> Result<TaskReceipt, TaskRuntimeError> {
+        let mut receipts = self.submit_many_tx(tx, [input]).await?;
+        receipts.pop().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("task store omitted a submission receipt".into())
+        })
+    }
+
+    /// Stages up to 10,000 typed tasks with default options and ordered receipts.
+    ///
+    /// Uses the same transaction and rollback contract as [`Self::submit_tx`].
+    /// Empty batches do no database work. New tasks are not delivered before commit.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub async fn submit_many_tx<T: Serialize + 'static>(
+        &self,
+        tx: &mut crate::db::DbTransaction<'_>,
+        inputs: impl IntoIterator<Item = T>,
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
+        let mut inputs = inputs.into_iter().peekable();
+        if inputs.peek().is_none() {
+            return Ok(Vec::new());
+        }
+        let client = &self.client;
+        let name = client.task_name::<T>()?;
+        let service = client
+            .registry
+            .tasks
+            .get(name)
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.to_string()))?;
+        let writes = build_writes(
+            service,
+            name,
+            inputs,
+            &TaskOptions::new(),
+            &client.registry.config,
+        )?;
+        client.store.store_tasks_tx(tx, writes).await
+    }
+
     /// Resumes an ordinary suspension with success and wakes the local runner.
     /// Do not externally resume a parent waiting for a child. Returns false if not suspended.
     pub async fn resume<T: Serialize>(

@@ -1,7 +1,7 @@
 //! Batched submission preparation and idempotency arbitration.
 use super::store::DbTaskStore;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
 
@@ -25,7 +25,23 @@ use super::queries::statement_now;
 #[path = "tests/submit.rs"]
 mod tests;
 
+#[cfg(all(test, feature = "migrations", feature = "test-support"))]
+#[path = "tests/submit_tx.rs"]
+mod tx_tests;
+
 impl DbTaskStore {
+    /// Stages ownerless tasks in the caller's transaction without local delivery.
+    pub(crate) async fn store_tasks_tx(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        writes: Vec<TaskWrite>,
+    ) -> Result<Vec<TaskReceipt>, TaskRuntimeError> {
+        validate_write_lanes(self, &writes)?;
+        let now = statement_now(tx).await?;
+        let (receipts, _) = self.store_writes_tx(tx, writes, now, None).await?;
+        Ok(receipts)
+    }
+
     /// Executes an independent submission or control transaction.
     pub(super) async fn store_tasks_impl(
         &self,
@@ -475,19 +491,60 @@ pub(super) fn owner_scope(
     rows: &[TaskIdempotencyRow],
 ) -> Result<db::queries::QueryScope, TaskRuntimeError> {
     let table = DbTaskStore::idempotency_table();
-    let predicate = rows
-        .iter()
-        .map(|row| {
+    let predicate = owner_predicate(&table, rows).ok_or_else(|| {
+        TaskRuntimeError::TaskExecutionError("idempotency owner set is empty".into())
+    })?;
+    Ok(db::from(&table).filter(predicate))
+}
+
+/// Keeps the common single-handler lookup flat and preserves exact handler/key pairs.
+fn owner_predicate(
+    table: &db::queries::ModelTable<TaskIdempotencyRow>,
+    rows: &[TaskIdempotencyRow],
+) -> Option<db::queries::Predicate> {
+    let (first, rest) = rows.split_first()?;
+    if rest.is_empty() {
+        return Some(
             table
                 .task_name
-                .eq(db::val(row.task_name.clone()))
-                .and(table.key_value.eq(db::val(row.key_value.clone())))
+                .eq(db::val(first.task_name.clone()))
+                .and(table.key_value.eq(db::val(first.key_value.clone()))),
+        );
+    }
+    if rest.iter().all(|row| row.task_name == first.task_name) {
+        return Some(
+            table.task_name.eq(db::val(first.task_name.clone())).and(
+                table
+                    .key_value
+                    .in_values(rows.iter().map(|row| row.key_value.clone())),
+            ),
+        );
+    }
+
+    let mut keys_by_handler = BTreeMap::<&str, Vec<String>>::new();
+    for row in rows {
+        keys_by_handler
+            .entry(&row.task_name)
+            .or_default()
+            .push(row.key_value.clone());
+    }
+    let mut groups = keys_by_handler
+        .into_iter()
+        .map(|(handler, keys)| {
+            table
+                .task_name
+                .eq(db::val(handler.to_owned()))
+                .and(table.key_value.in_values(keys))
         })
-        .reduce(db::queries::Predicate::or)
-        .ok_or_else(|| {
-            TaskRuntimeError::TaskExecutionError("idempotency owner set is empty".into())
-        })?;
-    Ok(db::from(&table).filter(predicate))
+        .collect::<VecDeque<_>>();
+    // Merge groups pairwise so many distinct handlers cannot recreate a deep OR chain.
+    while let Some(left) = groups.pop_front() {
+        let Some(right) = groups.pop_front() else {
+            return Some(left);
+        };
+        groups.push_back(left.or(right));
+    }
+    None
 }
 
 /// Replaces expired owners in one delete and insert pair while rows are locked.

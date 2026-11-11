@@ -318,6 +318,13 @@ The `vyuh` crate is organized around these subsystems:
   lane and optional key rule; reusable bundles may contribute complete lane
   defaults, while site configuration resolves or strictly rejects missing
   lanes.
+  Caller-owned submission uses the existing pending-row insert and idempotency
+  path without local ingress. The caller alone ends the transaction; rollback
+  discards both task and key writes. PostgreSQL wake hints remain commit-coupled.
+  This does not change ordinary admission or the runner.
+  The shared key-owner lookup groups keys by handler in flat `IN` lists,
+  preserving exact pairs, ID ordering, and existing row-lock clauses. Unkeyed
+  submissions skip the lookup and single-key lookups retain equality predicates.
   PostgreSQL's partial readiness index orders ownerless Pending and Running
   tasks by lane, readiness, creation time, and ID. Status belongs only in its
   predicate so selecting both statuses does not break the claim's index ordering.
