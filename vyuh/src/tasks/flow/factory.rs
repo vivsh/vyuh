@@ -128,8 +128,9 @@ fn executable<F: Flow, H>(definition: F) -> Callable<FlowContext, crate::Error> 
                     .payload
                     .downcast_arc::<F::Input>()
                     .ok_or(callables::CallError::TypeMismatch)?;
-                let continuation = crate::tasks::Continuation::decode(&context.record)?;
-                let result = definition.advance(context.record.id(), Data(input), continuation);
+                let task_id = context.record.id();
+                let continuation = crate::tasks::Continuation::decode(context.record)?;
+                let result = definition.advance(task_id, Data(input), continuation);
                 Ok(match result {
                     Ok(state) => state.prepare().erase(),
                     Err(error) => crate::tasks::outcome::erase_outcome(error.into_outcome()),

@@ -352,6 +352,9 @@ The `vyuh` crate is organized around these subsystems:
   Both kinds receive continuations and support suspension; only Flow can sleep
   or spawn children (one child or an `all` group). Runtime site/service and
   operation identity extraction remain unavailable to Flow.
+  The persisted idempotency key is read-only invocation data. Single-item Work
+  can extract `IdempotencyKey`; Flow borrows it from its `Continuation` snapshot.
+  Neither consults the store or re-evaluates the key rule.
   Task-only return conversion serializes before type erasure through the existing
   single callable future. WorkError chooses retry/failure, FlowError permits
   only failure, and TaskRuntimeError describes infrastructure/API failures.

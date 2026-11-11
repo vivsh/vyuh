@@ -69,3 +69,28 @@ impl callables::IntoArgPart for crate::tasks::TaskId {
         callables::ArgPart::Ignore
     }
 }
+
+/// The persisted idempotency key of a single Work task, if configured.
+///
+/// Extraction copies the stored key only when requested by a handler. It never
+/// recomputes the key or checks its reservation in the store.
+pub struct IdempotencyKey(Option<String>);
+
+impl IdempotencyKey {
+    /// Borrows the task's key, or returns `None` for an unkeyed task.
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl callables::FromContextParts<WorkContext> for IdempotencyKey {
+    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
+        Ok(Self(context.record.idempotency_key.clone()))
+    }
+}
+
+impl callables::IntoArgPart for IdempotencyKey {
+    fn into_arg_part() -> callables::ArgPart {
+        callables::ArgPart::Ignore
+    }
+}

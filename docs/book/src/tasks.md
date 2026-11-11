@@ -1093,6 +1093,23 @@ entries and returns `Ignored` for conflicts. Retention is lane policy: without
 `.idempotency_retention(...)`, a terminal task releases its key; a retained key
 remains unavailable from terminal completion until the configured duration.
 
+A single-item Work handler can opt in to `IdempotencyKey` before its `Data<T>`
+argument. The extractor works with `#[bundles::work]` and direct `bundles::work`
+registration:
+
+```rust
+async fn send_email(key: IdempotencyKey, Data(job): Data<SendEmailJob>) -> Result<(), WorkError> {
+    send_to_provider(&job, key.as_deref()).await
+}
+```
+
+In a manual `Flow::advance`, use `continuation.idempotency_key()`. Both accessors
+return `Option<&str>`: `None` means the task has no key. They read the stored key
+without querying the store or recomputing the rule. A child uses its own key, not
+its parent's. Batch handlers do not expose a single key for the invocation.
+Vyuh scopes keys to the registered task; namespace them if a downstream provider
+uses a wider scope.
+
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
 `FlowState::sleep`, and recurring creation belongs in emitters. A
 task-targeted cron or periodic emitter stores one durable `vyuh_schedules`

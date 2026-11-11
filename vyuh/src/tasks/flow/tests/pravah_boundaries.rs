@@ -15,7 +15,7 @@ fn continuation(
         .map(|r| serde_json::to_string(&r))
         .transpose()
         .map_err(|e| e.to_string())?;
-    Continuation::decode(&record).map_err(|e| e.to_string())
+    Continuation::decode(Arc::new(record)).map_err(|e| e.to_string())
 }
 
 fn outcome<T: serde::Serialize + 'static>(state: FlowState<T>) -> Result<Arc<TaskOutcome>, String> {

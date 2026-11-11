@@ -6,4 +6,4 @@ pub use batch::{Batch, IntoWorkBatchOutcomePart};
 pub use returns::IntoWorkOutcomePart;
 pub use state::WorkState;
 mod handler;
-pub use handler::{BatchWorkContext, WorkContext};
+pub use handler::{BatchWorkContext, IdempotencyKey, WorkContext};

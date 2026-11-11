@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 use vyuh::prelude::*;
-use vyuh::tasks::{TaskConf, TaskDefinition, TaskStatus};
+use vyuh::tasks::{TaskConf, TaskIdempotency, TaskStatus};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct Parent(u32);
@@ -60,6 +60,10 @@ impl Flow for Manual {
         input: Data<Parent>,
         continuation: Continuation<(), u32>,
     ) -> Result<FlowState<u32>, FlowError> {
+        let expected = parent_key(&input);
+        if continuation.idempotency_key() != Some(expected.as_str()) {
+            return Err(FlowError::fail("Flow did not receive its persisted key"));
+        }
         match continuation.into_parts() {
             (None, None) => Ok(FlowState::spawn(Child(input.0.0), ())?),
             (Some(()), Some(result)) => Ok(FlowState::complete(result? + 1)),
@@ -68,17 +72,24 @@ impl Flow for Manual {
     }
 }
 
+fn parent_key(input: &Parent) -> String {
+    format!("parent:{}", input.0)
+}
+
 #[bundles::flow]
 fn parent() -> impl Flow<Input = Parent, Output = u32> {
     Manual
 }
 
 #[bundles::work]
-async fn child(input: Data<Child>) -> u32 {
-    input.0.0 * 2
+async fn child(key: IdempotencyKey, input: Data<Child>) -> Result<u32, WorkError> {
+    if key.as_deref().is_some() {
+        return Err(WorkError::fail("Child inherited the parent's key"));
+    }
+    Ok(input.0.0 * 2)
 }
 
-/// An immutable definition is built once, but each submission advances independently.
+/// A definition is built once, but each submission keeps its own key across advancements.
 #[tokio::test]
 async fn manual_child_round_trip() -> Result<(), TestError> {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -89,9 +100,9 @@ async fn manual_child_round_trip() -> Result<(), TestError> {
                 counted.fetch_add(1, Ordering::SeqCst);
                 Manual
             },
-            FlowConf::new("parent"),
+            FlowConf::new("parent").idempotency(TaskIdempotency::new("1", parent_key)),
         ),
-        bundles::work(child, TaskDefinition::new("child")),
+        __bundle_part_child(),
     ]);
     let site = Site::build(
         SiteConf::default()

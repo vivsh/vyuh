@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 use vyuh::prelude::*;
-use vyuh::tasks::{TaskConf, TaskStatus};
+use vyuh::tasks::{TaskConf, TaskDefinition, TaskIdempotency, TaskStatus};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct Calculate(u32);
@@ -15,11 +15,14 @@ async fn calculate(input: Data<Calculate>) -> u32 {
     input.0.0 * 2
 }
 
-#[bundles::work]
 async fn await_response(
+    key: IdempotencyKey,
     continuation: Continuation<u32, u32>,
     _: Data<AwaitResponse>,
 ) -> Result<WorkState<u32>, WorkError> {
+    if key.as_deref() != Some("response:✓") {
+        return Err(WorkError::fail("Work did not receive its persisted key"));
+    }
     match continuation.into_parts() {
         (None, _) => Ok(WorkState::suspend(7u32)?),
         (Some(checkpoint), Some(response)) => Ok(WorkState::complete(checkpoint + response?)),
@@ -27,14 +30,21 @@ async fn await_response(
     }
 }
 
-/// Drives actual registration, polling, invocation, and persistence through public APIs.
+/// Verifies typed Work returns and persisted key extraction before and after resumption.
 #[tokio::test]
 async fn direct_output_and_external_resume() -> Result<(), TestError> {
     let site = vyuh::Site::build(
         vyuh::SiteConf::default()
             .log_init(false)
             .tasks(TaskConf::default().poll_interval(Duration::from_millis(10))),
-        bundles::bundle([__bundle_part_calculate(), __bundle_part_await_response()]),
+        bundles::bundle([
+            __bundle_part_calculate(),
+            bundles::work(
+                await_response,
+                TaskDefinition::new("await_response")
+                    .idempotency(TaskIdempotency::new("1", |_| "response:✓".into())),
+            ),
+        ]),
     )
     .await?;
     let client = vyuh::testing::TestSite::new(site.clone());

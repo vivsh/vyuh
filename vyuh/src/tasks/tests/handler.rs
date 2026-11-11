@@ -506,12 +506,13 @@ async fn task_state_unit_uses_fast_path() -> Result<(), String> {
     Ok(())
 }
 
-/// Verifies continuations expose borrowed state and resume input without cloning.
+/// Verifies continuations decode state and resume input and borrow the original key bytes.
 #[tokio::test]
 async fn continuation_decodes_state_and_resume_input() -> Result<(), String> {
     let mut record =
         record("direct_job", &DirectJob { id: 7 }).map_err(|error| error.to_string())?;
     let mutable = Arc::get_mut(&mut record).ok_or("task record unexpectedly shared")?;
+    mutable.idempotency_key = Some("invocation-key".into());
     mutable.state = Some(serde_json::to_string(&"waiting").map_err(|e| e.to_string())?);
     mutable.resume_input = Some(
         serde_json::to_string(&Ok::<_, super::super::TaskFailure>(42_u32))
@@ -526,6 +527,23 @@ async fn continuation_decodes_state_and_resume_input() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     assert_eq!(continuation.state().map(String::as_str), Some("waiting"));
     assert_eq!(continuation.resume(), Some(&Ok(42)));
+    let key = continuation.idempotency_key().ok_or("key missing")?;
+    let stored = context
+        .record
+        .idempotency_key
+        .as_deref()
+        .ok_or("fixture missing key")?;
+    assert_eq!(key, stored);
+    assert!(std::ptr::eq(key, stored));
+    Ok(())
+}
+
+/// A continuation without an idempotency rule exposes no key and needs no key allocation.
+#[test]
+fn continuation_without_key() -> Result<(), String> {
+    let record = record("direct_job", &DirectJob { id: 7 }).map_err(|e| e.to_string())?;
+    let continuation = Continuation::<()>::decode(record).map_err(|e| e.to_string())?;
+    assert_eq!(continuation.idempotency_key(), None);
     Ok(())
 }
 

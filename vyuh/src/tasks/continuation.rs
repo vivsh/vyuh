@@ -1,4 +1,6 @@
 //! Typed, invocation-local views of persisted checkpoints and resume results.
+use std::sync::Arc;
+
 use super::{FlowContext, TaskRecord, WorkContext};
 use crate::callables;
 
@@ -6,6 +8,7 @@ use crate::callables;
 pub struct Continuation<S, R = ()> {
     state: Option<S>,
     resume: Option<Result<R, super::TaskFailure>>,
+    record: Arc<TaskRecord>,
 }
 
 impl<S, R> callables::FromContextParts<FlowContext> for Continuation<S, R>
@@ -14,10 +17,7 @@ where
     R: serde::de::DeserializeOwned + Send,
 {
     fn from_context_parts(ctx: &FlowContext) -> Result<Self, callables::CallError> {
-        Ok(Self {
-            state: decode_optional(ctx.record.state.as_deref())?,
-            resume: decode_optional(ctx.record.resume_input.as_deref())?,
-        })
+        Self::decode(Arc::clone(&ctx.record))
     }
 }
 
@@ -27,10 +27,7 @@ where
     R: serde::de::DeserializeOwned + Send,
 {
     fn from_context_parts(ctx: &WorkContext) -> Result<Self, callables::CallError> {
-        Ok(Self {
-            state: decode_optional(ctx.record.state.as_deref())?,
-            resume: decode_optional(ctx.record.resume_input.as_deref())?,
-        })
+        Self::decode(Arc::clone(&ctx.record))
     }
 }
 
@@ -51,7 +48,7 @@ impl<S, R> callables::IntoArgPart for Continuation<S, R> {
 
 impl<S, R> Continuation<S, R> {
     /// Decodes invocation-local continuation values from the immutable store snapshot.
-    pub(super) fn decode(record: &TaskRecord) -> Result<Self, callables::CallError>
+    pub(super) fn decode(record: Arc<TaskRecord>) -> Result<Self, callables::CallError>
     where
         S: serde::de::DeserializeOwned,
         R: serde::de::DeserializeOwned,
@@ -59,6 +56,7 @@ impl<S, R> Continuation<S, R> {
         Ok(Self {
             state: decode_optional(record.state.as_deref())?,
             resume: decode_optional(record.resume_input.as_deref())?,
+            record,
         })
     }
 
@@ -70,6 +68,11 @@ impl<S, R> Continuation<S, R> {
     /// Returns the input that resumed this suspended execution.
     pub const fn resume(&self) -> Option<&Result<R, super::TaskFailure>> {
         self.resume.as_ref()
+    }
+
+    /// Borrows this task's persisted idempotency key, if it was submitted with one.
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.record.idempotency_key.as_deref()
     }
 
     /// Consumes the extractor into its optional state and resume input.

@@ -70,4 +70,4 @@ pub(crate) type ConfiguredTaskStore = store::MySqlTaskStore;
 pub(crate) type ConfiguredTaskStore = store::SqliteTaskStore;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
 pub(crate) type ConfiguredTaskStore = store::MemoryTaskStore;
-pub use work::{Batch, IntoWorkBatchOutcomePart};
+pub use work::{Batch, IdempotencyKey, IntoWorkBatchOutcomePart};
