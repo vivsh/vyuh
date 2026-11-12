@@ -315,6 +315,15 @@ For route-level tests, use `vyuh::testing::test_site` to provision a complete
 `vyuh::testing::TestSite::new(site)` or `vyuh::testing::router(&site)`. Use
 `.log_init(false)` in tests when test output should stay quiet.
 
+Enable `email` and `test-support` to capture outgoing mail automatically. After
+requesting a route that sends an email, inspect the same site's outbox.
+
+```rust,ignore
+let message = site.mail_outbox().single().expect("one email");
+assert!(message.source().contains("Subject: Welcome"));
+assert_eq!(message.idempotency_key(), Some("welcome/ada"));
+```
+
 `TestSite` is inert by default. Tests that deliberately cover task workers,
 emitters, PgNotify listeners, or service workers opt in explicitly:
 

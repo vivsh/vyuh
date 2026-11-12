@@ -503,9 +503,11 @@ The `vyuh` crate is organized around these subsystems:
   a validated site-wide static URL, server-side templates, private bundle
   resources, desired-schema assets, and the shared web asset surface used by
   the built-in console.
-- `email` is an optional SMTP facade built on Lettre. It renders bundle-owned
-  templates through the site template engine, produces text alternatives for
-  HTML mail, and keeps SMTP transport details outside application APIs.
+- `email` prepares rendered messages for one site-owned `MailDelivery` shared
+  by application mail and the admin reporter. Site assembly selects the backend
+  once. `SmtpDelivery` owns the Lettre pool and builds MIME at submission;
+  JSON adapters consume structured fields directly. The delivery backend owns
+  any provider idempotency mapping and the provider owns deduplication.
 - `utils` provides small framework-neutral helpers for common web application
   tasks. Subsystem-specific helpers stay in their owning modules.
 - `collectors` provides URL metadata, asset collection, and selected page
@@ -565,7 +567,7 @@ The `vyuh` crate is organized around these subsystems:
 - `logging` configures structured tracing output. Console log inspection reads
   only configured JSON file sinks through bounded per-site reverse readers;
   optional `mail_admins` sinks enqueue bounded error reports for the existing
-  site-owned SMTP delivery runtime and use lossy per-sink delivery throttles.
+  site-owned mail delivery runtime and use lossy per-sink delivery throttles.
   Neither facility creates a second log store or process-global log cache.
 
 ## Macro Crate

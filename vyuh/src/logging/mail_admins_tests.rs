@@ -165,8 +165,8 @@ fn test_reporter() -> Result<crate::email::MailReporter, crate::email::EmailErro
         sender: Some("Vyuh <noreply@example.com>".into()),
         ..crate::email::MailConf::default()
     };
-    let delivery = crate::email::delivery(&conf)?;
-    Ok(crate::email::reporter(&conf, delivery))
+    let delivery = crate::email::select_delivery(&conf, None, false)?;
+    Ok(crate::email::MailReporter::new(conf.sender, delivery))
 }
 
 #[cfg(all(feature = "email", feature = "test-support"))]

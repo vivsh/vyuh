@@ -154,7 +154,7 @@ pub struct SiteConf {
     /// Template environment behavior. Template files are registered through bundles.
     pub templates: TemplateConf,
 
-    /// Outbound SMTP email configuration.
+    /// SMTP connection settings and the default sender for outbound email.
     pub mail: MailConf,
 
     /// absolute or relative to project_dir
@@ -436,6 +436,11 @@ impl SiteConf {
 
     /// Validate config. Returns Ok(()) if valid, or Err(ConfError::Many) with all errors.
     pub fn validate(&self) -> Result<(), ConfError> {
+        self.validate_with_mail(self.mail.enabled)
+    }
+
+    /// Validates the site using the backend availability resolved by its builder.
+    pub(crate) fn validate_with_mail(&self, mail_available: bool) -> Result<(), ConfError> {
         let mut errors = Vec::new();
 
         self.validate_required(&mut errors);
@@ -448,7 +453,10 @@ impl SiteConf {
         self.console.validate(&mut errors);
         self.observability.validate(&mut errors);
         self.mail.validate(&mut errors);
-        self.validate_logging(&mut errors);
+        if !self.mail.enabled && mail_available {
+            self.mail.sender_errors(&mut errors);
+        }
+        self.validate_logging(mail_available, &mut errors);
         self.validate_production(&mut errors);
 
         if errors.is_empty() {
@@ -471,15 +479,27 @@ impl SiteConf {
         }
     }
 
-    fn validate_logging(&self, errors: &mut Vec<ConfError>) {
+    fn validate_logging(&self, mail_available: bool, errors: &mut Vec<ConfError>) {
         if let Err(error) = self.logging.validate() {
             errors.push(ConfError::Logging(error));
         }
         if let Err(error) = self
             .logging
-            .validate_mail_admins(self.log_init, self.mail.enabled)
+            .validate_mail_admins(self.log_init, mail_available)
         {
             errors.push(ConfError::Logging(error));
+        } else if self.logging.has_mail_admins()
+            && self
+                .mail
+                .sender
+                .as_deref()
+                .is_none_or(|sender| sender.trim().is_empty())
+            && !self.mail.enabled
+        {
+            errors.push(ConfError::RequiredField {
+                field: "mail.sender".into(),
+                reason: "mail-admins logging requires a default sender".into(),
+            });
         }
     }
 

@@ -61,7 +61,7 @@ pub use file_storage::{
     FileStorageError, LocalStorage, SavedFile, StorageBackend, StorageName, UploadConf,
 };
 pub use serde;
-pub use site::{PartialSite, Site, SiteConfig, SiteError};
+pub use site::{PartialSite, Site, SiteBuilder, SiteConfig, SiteError};
 pub use slash::SiteService;
 pub use validation::{
     Valid, ValidRejection, Validate, ValidationError, ValidationReport, ValidationSchema,

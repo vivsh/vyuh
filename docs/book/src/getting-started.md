@@ -110,6 +110,22 @@ emitter, a signal handler, command registration, provider-protected handlers, an
 OpenAPI. `main` stays small because the feature wiring already lives with the
 feature.
 
+## Preview Email Locally
+
+With the optional `email` feature, development apps can preview outgoing email
+on stdout. Provide a default sender through `conf.mail.sender`, or set `.from(...)`
+on each message.
+
+```rust
+Site::builder(conf)
+    .console_mail_fallback()
+    .run(bundle)
+    .await?;
+```
+
+Use this entrypoint for local development. See [Email](email.md) for SMTP and
+custom delivery setup.
+
 ## What To Notice
 
 - One bundle holds the feature surface instead of scattering setup across

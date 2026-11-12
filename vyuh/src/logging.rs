@@ -390,11 +390,7 @@ impl LoggingConf {
         log_init: bool,
         mail_enabled: bool,
     ) -> Result<(), LoggingError> {
-        let has_admins = self
-            .rules
-            .iter()
-            .any(|rule| matches!(rule.sink, LogSink::MailAdmins(_)));
-        if !has_admins {
+        if !self.has_mail_admins() {
             return Ok(());
         }
         if !log_init {
@@ -418,6 +414,12 @@ impl LoggingConf {
             }
             Ok(())
         }
+    }
+
+    pub(crate) fn has_mail_admins(&self) -> bool {
+        self.rules
+            .iter()
+            .any(|rule| matches!(rule.sink, LogSink::MailAdmins(_)))
     }
 }
 

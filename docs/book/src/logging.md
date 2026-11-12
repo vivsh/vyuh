@@ -157,8 +157,8 @@ partial when their fixed scan budget is reached.
 
 ### Administrator email reports
 
-With Vyuh's optional `email` feature and enabled `MailConf`, a rule can send
-error reports to administrators through the site's existing SMTP transport:
+With Vyuh's optional `email` feature and an active backend, a rule can send
+error reports to administrators through the site's selected mail backend:
 
 ```rust
 use std::time::Duration;
@@ -198,7 +198,7 @@ caps both alert bursts and sustained failure noise. Use `.unthrottled()` before
 adding custom policies, as shown above. Multiple `.throttle(...)` calls compose
 independently.
 
-The tracing callback never waits for SMTP. It places bounded error metadata on
+The tracing callback never waits for mail delivery. It places bounded error metadata on
 a site-owned queue; when the queue or active-report limit is full, newest
 reports are dropped rather than slowing application work. Mail is best-effort:
 Vyuh does not persist or retry reports, and a mail delivery failure logs at
@@ -228,8 +228,8 @@ Logging configuration is validated during site build:
   must start with an uppercase letter.
 - Filters must parse as valid tracing filter directives unless they disable the
   rule with `off`, `0`, `false`, or `no`.
-- `mail_admins` requires `log_init(true)`, the `email` feature, enabled valid
-  SMTP configuration, one or more valid recipients, a debounce from 1ms to
+- `mail_admins` requires `log_init(true)`, the `email` feature, an active mail
+  backend with a default sender, one or more valid recipients, a debounce from 1ms to
   24 hours, and at most eight distinct delivery-throttle windows.
 
 Invalid logging configuration fails site construction with a configuration error
@@ -268,7 +268,7 @@ environment override names.
 - File sink directory creation errors return `LoggingError::DirCreation`.
 - A second global tracing initialization returns `LoggingError::SubscriberInit`.
 - A competing global `log` logger returns `LoggingError::SubscriberInit`.
-- A mail-admin sink without SMTP, email support, recipients, or logging
+- A mail-admin sink without a mail backend, email support, recipients, or logging
   initialization fails site construction with a clear logging configuration error.
 
 ## Current Limitations

@@ -216,13 +216,76 @@ impl fmt::Debug for SiteError {
     }
 }
 
-struct SiteBuilder {
+/// Configures site-owned runtime components before building or running a site.
+pub struct SiteBuilder {
     conf: SiteConf,
+    #[cfg(feature = "email")]
+    mail_delivery: Option<crate::email::SharedMailDelivery>,
+    #[cfg(feature = "email")]
+    console_mail: bool,
 }
 
 impl SiteBuilder {
     fn new(conf: SiteConf) -> Self {
-        Self { conf }
+        Self {
+            conf,
+            #[cfg(feature = "email")]
+            mail_delivery: None,
+            #[cfg(feature = "email")]
+            console_mail: false,
+        }
+    }
+
+    /// Registers the site's mail backend. Test-support builds capture mail in the outbox.
+    #[cfg(feature = "email")]
+    pub fn mail_delivery(mut self, delivery: impl crate::email::MailDelivery + 'static) -> Self {
+        self.mail_delivery = Some(Arc::new(delivery));
+        self
+    }
+
+    /// Enables stdout previews in development when no SMTP or custom backend is configured.
+    /// Production sites reject this setting at build time.
+    #[cfg(feature = "email")]
+    pub fn console_mail_fallback(mut self) -> Self {
+        self.console_mail = true;
+        self
+    }
+
+    /// Builds an inert site with the configured runtime components.
+    pub async fn build(self, bundle: impl IntoBundle) -> Result<Site, SiteError> {
+        Ok(Site::from_inner(self.assemble(None, bundle).await?))
+    }
+
+    /// Runs the selected application command, defaulting to `serve`.
+    pub async fn run(self, bundle: impl IntoBundle) -> Result<(), SiteError> {
+        self.run_with_args(bundle, std::env::args().skip(1)).await
+    }
+
+    fn mail_available(&self) -> bool {
+        #[cfg(feature = "email")]
+        {
+            cfg!(feature = "test-support")
+                || self.mail_delivery.is_some()
+                || self.conf.mail.enabled
+                || self.console_mail
+        }
+        #[cfg(not(feature = "email"))]
+        false
+    }
+
+    #[cfg(feature = "email")]
+    fn select_mail(&self) -> Result<crate::email::SharedMailDelivery, crate::email::EmailError> {
+        if self.console_mail && self.conf.deployment == conf::DeploymentMode::Production {
+            return Err(crate::email::EmailError::Invalid {
+                field: "mail.console",
+                reason: "console mail is only available in development".into(),
+            });
+        }
+        crate::email::select_delivery(
+            &self.conf.mail,
+            self.mail_delivery.clone(),
+            self.console_mail,
+        )
     }
 
     /// Starts all site-owned background engines exactly once per site runtime.
@@ -363,21 +426,22 @@ impl SiteBuilder {
         while site.inner.joinset.lock().try_join_next().is_some() {}
     }
 
-    async fn build(
+    async fn assemble(
         &self,
         pool: Option<Pool>,
         bundle: impl IntoBundle,
     ) -> Result<SiteInner, SiteError> {
-        self.conf.validate()?;
+        self.conf.validate_with_mail(self.mail_available())?;
         let asset_urls = crate::assets::AssetUrls::parse(&self.conf.static_url)
             .map_err(|error| conf::ConfError::Other(error.to_string()))?;
 
         #[cfg(feature = "email")]
-        let mail_delivery = crate::email::delivery(&self.conf.mail).map_err(|error| {
+        let mail_delivery = self.select_mail().map_err(|error| {
             conf::ConfError::Other(format!("mail configuration error: {error}"))
         })?;
         #[cfg(feature = "email")]
-        let mail_reporter = crate::email::reporter(&self.conf.mail, mail_delivery.clone());
+        let mail_reporter =
+            crate::email::MailReporter::new(self.conf.mail.sender.clone(), mail_delivery.clone());
 
         let bundle = bundle.into_bundle();
 
@@ -429,7 +493,7 @@ impl SiteBuilder {
             .map_err(conf::ConfError::Auth)?;
         let mut effective_conf = self.conf.clone();
         effective_conf.auth = auth_conf.clone();
-        effective_conf.validate()?;
+        effective_conf.validate_with_mail(self.mail_available())?;
 
         let observability = Observability::new(self.conf.observability.clone());
         validate_observability_paths(&bundle, &observability)?;
@@ -767,6 +831,10 @@ impl std::fmt::Debug for Site {
 }
 
 impl Site {
+    /// Starts site assembly with optional source-owned runtime components.
+    pub fn builder(conf: SiteConf) -> SiteBuilder {
+        SiteBuilder::new(conf)
+    }
     /// Wraps finalized immutable site state.
     fn from_inner(inner: SiteInner) -> Self {
         Self {
@@ -779,9 +847,7 @@ impl Site {
     /// The site exposes its router, database, services, and commands, but does
     /// not start task workers, emitters, PgNotify listeners, or service workers.
     pub async fn build(conf: SiteConf, bundle: impl IntoBundle) -> Result<Self, SiteError> {
-        let builder = SiteBuilder::new(conf);
-        let inner = builder.build(None, bundle).await?;
-        Ok(Self::from_inner(inner))
+        Self::builder(conf).build(bundle).await
     }
 
     /// Runs Vyuh's standard command-aware application entrypoint.
@@ -789,7 +855,7 @@ impl Site {
     /// With no command arguments this runs the built-in `serve` command. Other
     /// commands execute against an inert site and do not start background work.
     pub async fn run(conf: SiteConf, bundle: impl IntoBundle) -> Result<(), SiteError> {
-        Self::run_with_args(conf, bundle, std::env::args().skip(1)).await
+        Self::builder(conf).run(bundle).await
     }
 
     /// Builds the site and starts the HTTP server directly.
@@ -812,7 +878,7 @@ impl Site {
         pool: Pool,
     ) -> Result<Self, SiteError> {
         let builder = SiteBuilder::new(conf);
-        let inner = builder.build(Some(pool), bundle).await?;
+        let inner = builder.assemble(Some(pool), bundle).await?;
         Ok(Self::from_inner(inner))
     }
 
@@ -835,15 +901,27 @@ impl Site {
             .map(|_| ())
     }
 
+    #[cfg(test)]
     pub(crate) async fn run_with_args(
         conf: SiteConf,
         bundle: impl IntoBundle,
         args: impl IntoIterator<Item = String>,
     ) -> Result<(), SiteError> {
+        Self::builder(conf).run_with_args(bundle, args).await
+    }
+}
+
+impl SiteBuilder {
+    /// Executes a command against the configured site unless it only needs command metadata.
+    async fn run_with_args(
+        self,
+        bundle: impl IntoBundle,
+        args: impl IntoIterator<Item = String>,
+    ) -> Result<(), SiteError> {
         let args: Vec<String> = args.into_iter().collect();
-        let (command_name, command_args) = Self::command_from_args(&args);
+        let (command_name, command_args) = Site::command_from_args(&args);
         let bundle = bundle.into_bundle();
-        let preview_commands = Self::command_registry_for_bundle(&bundle)?;
+        let preview_commands = Site::command_registry_for_bundle(&bundle)?;
         let command_arg_refs: Vec<&str> = command_args.iter().map(String::as_str).collect();
         if let Some(output) = preview_commands.early_output(&command_name, &command_arg_refs) {
             match output {
@@ -852,7 +930,7 @@ impl Site {
                     return Ok(());
                 }
                 Err(err) => {
-                    let output = conf.errors.render_command(
+                    let output = self.conf.errors.render_command(
                         crate::errors::ErrorCommandContext {
                             command: command_name,
                             args: command_args,
@@ -864,7 +942,7 @@ impl Site {
             }
         }
 
-        let site = Self::build(conf, bundle).await?;
+        let site = self.build(bundle).await?;
         if let Err(err) = site.execute_command(&command_name, &command_arg_refs).await {
             let output = site.inner.conf.errors.render_command(
                 crate::errors::ErrorCommandContext {
@@ -877,7 +955,9 @@ impl Site {
         }
         Ok(())
     }
+}
 
+impl Site {
     fn command_registry_for_bundle(
         bundle: &crate::bundles::Bundle,
     ) -> Result<crate::commands::CommandRegistry, crate::commands::CommandError> {
@@ -1047,7 +1127,7 @@ impl Site {
         Templates::new(self.clone())
     }
 
-    /// Return the outbound SMTP mail facade configured for this site.
+    /// Returns the outbound mail facade for the site's selected backend.
     #[cfg(feature = "email")]
     pub fn mail(&self) -> crate::email::Mailer {
         crate::email::Mailer::new(self.clone(), self.inner.mail_delivery.clone())

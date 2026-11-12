@@ -1,7 +1,8 @@
 # Email
 
-Vyuh's optional `email` feature sends transactional email through SMTP. It uses
-Lettre internally, but application code works only with Vyuh mail types.
+Vyuh's optional `email` feature sends transactional email through SMTP or a
+custom backend. Both receive the same validated, rendered message. SMTP uses
+Lettre internally.
 
 ```toml
 [dependencies]
@@ -81,3 +82,68 @@ site.mail().send(email).await?;
 
 Use `Attachment::bytes` for generated content and `Attachment::file` for a
 runtime path. Attachments are nested correctly with the text/HTML body.
+
+## Custom delivery
+
+Implement `vyuh::email::MailDelivery` and register one backend at site startup.
+For a JSON provider, use `PreparedEmail` accessors for addresses, rendered text
+and HTML, custom headers, and attachment bytes. A raw-message provider can
+read the envelope recipients and then call `PreparedEmail::into_mime()`.
+Bcc recipients are available separately from the serialized headers.
+
+```rust
+let site = Site::builder(conf)
+    .mail_delivery(provider_backend)
+    .build(bundle)
+    .await?;
+```
+
+Set `conf.mail.sender` for a default sender or use `.from(...)` on each mail.
+Admin mail shares the same backend and requires the default sender.
+`Delivery` reports the message ID, the outcome (accepted, printed, or captured),
+and an optional provider submission ID. Acceptance is acknowledgement by the
+relay or provider. Delivery failures surface as `EmailError::Delivery`, with
+separate cases for temporary failure, permanent rejection, and unknown acceptance.
+
+## Idempotent submissions
+
+Use `.idempotency_key(...)` for a logical send. A backend receives the key as
+submission metadata. A JSON adapter can forward it as an HTTP header or API
+field. Plain SMTP rejects a keyed message before connecting. When your SMTP
+relay documents a deduplication header, configure its exact name explicitly.
+
+```rust
+use vyuh::email::{Mail, SmtpDelivery};
+
+let relay = SmtpDelivery::with_idempotency_header(
+    &conf.mail,
+    "Resend-Idempotency-Key",
+)?;
+let site = Site::builder(conf).mail_delivery(relay).build(bundle).await?;
+let email = Mail::new()
+    .to("customer@example.com")
+    .subject("Your receipt")
+    .text("Thanks for your order.")
+    .idempotency_key("receipt/order-123")
+    .build()?;
+let delivery = site.mail().send(email).await?;
+```
+
+Keys are 1–256 bytes without whitespace or control characters. The SMTP
+mapping requires ASCII so the relay receives the key without MIME encoding.
+A keyed SMTP submission fails if a custom header already uses the mapped name.
+Use the same key and provider payload on retry, within the relay's documented
+deduplication window. Give an intentional resend a new key. `send` awaits one
+submission attempt. For durable retries, persist the key and stable payload in
+an application task.
+
+## Development and tests
+
+`Site::builder(conf).console_mail_fallback()` opts into stdout previews in
+development when neither a custom backend nor SMTP is configured. Previews can
+contain sensitive message content. Production rejects the fallback setting.
+Without a backend or fallback, `send` returns `EmailError::Disabled`.
+
+With `email` and `test-support`, sites automatically capture mail in memory,
+ahead of every configured backend. Inspect it through `site.mail_outbox()`.
+See [Site testing](site.md#testing) for an example.
