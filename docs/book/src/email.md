@@ -21,7 +21,7 @@ SMTP_URL=smtps://mailer:secret@mail.example.com?sender=noreply%40example.com
 `smtp://` uses STARTTLS and port `587` by default. `smtps://` uses TLS from the
 start and port `465`. URL user-info provides the SMTP username and password.
 The optional query parameters are `sender`, `tls` (`start_tls`, `tls`, or
-`none`), and `timeout_seconds`.
+`none`), `timeout_seconds`, and `idempotency_header`.
 
 The sender can also be configured explicitly when it should not be kept with
 the SMTP URL:
@@ -112,14 +112,17 @@ submission metadata. A JSON adapter can forward it as an HTTP header or API
 field. Plain SMTP rejects a keyed message before connecting. When your SMTP
 relay documents a deduplication header, configure its exact name explicitly.
 
-```rust
-use vyuh::email::{Mail, SmtpDelivery};
+Set `idempotency_header` in `SMTP_URL` and load configuration as usual with
+`SiteConf::from_env()`. The URL sets the header name. Each message supplies
+its own key.
 
-let relay = SmtpDelivery::with_idempotency_header(
-    &conf.mail,
-    "Resend-Idempotency-Key",
-)?;
-let site = Site::builder(conf).mail_delivery(relay).build(bundle).await?;
+```dotenv
+SMTP_URL="smtps://mailer:secret@mail.example.com?sender=noreply%40example.com&idempotency_header=Resend-Idempotency-Key"
+```
+
+```rust
+use vyuh::email::Mail;
+
 let email = Mail::new()
     .to("customer@example.com")
     .subject("Your receipt")
@@ -128,6 +131,10 @@ let email = Mail::new()
     .build()?;
 let delivery = site.mail().send(email).await?;
 ```
+
+In Rust, set `MailConf::idempotency_header` or pass an explicit header to
+`SmtpDelivery::with_idempotency_header(...)`. Invalid and reserved header names
+fail configuration validation before SMTP connects.
 
 Keys are 1–256 bytes without whitespace or control characters. The SMTP
 mapping requires ASCII so the relay receives the key without MIME encoding.

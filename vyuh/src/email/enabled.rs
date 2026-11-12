@@ -3,7 +3,7 @@ use std::path::Path;
 use lettre::message::{Attachment as LettreAttachment, Mailbox, SinglePart, header::HeaderName};
 use serde::Serialize;
 
-use super::{MailConf, MailTls};
+use super::{MailConf, MailTls, header_name_issue};
 #[path = "delivery.rs"]
 mod delivery;
 use crate::{
@@ -385,27 +385,10 @@ fn validate_name(value: &str, field: &'static str) -> Result<(), EmailError> {
 }
 
 fn validate_header(name: &str, value: &str) -> Result<(), EmailError> {
-    let _ = header_name(name)?;
-    let lower = name.to_ascii_lowercase();
-    if lower.starts_with("content-")
-        || matches!(
-            lower.as_str(),
-            "from"
-                | "sender"
-                | "to"
-                | "cc"
-                | "bcc"
-                | "reply-to"
-                | "return-path"
-                | "subject"
-                | "date"
-                | "message-id"
-                | "mime-version"
-        )
-    {
+    if let Some(reason) = header_name_issue(name) {
         return Err(EmailError::Invalid {
             field: "header.name",
-            reason: "reserved for the email envelope or MIME builder".into(),
+            reason: reason.into(),
         });
     }
     if value.contains(['\r', '\n']) {
@@ -418,15 +401,6 @@ fn validate_header(name: &str, value: &str) -> Result<(), EmailError> {
 }
 
 fn header_name(value: &str) -> Result<HeaderName, EmailError> {
-    if !value
-        .bytes()
-        .all(|byte| byte.is_ascii_graphic() && byte != b':')
-    {
-        return Err(EmailError::Invalid {
-            field: "header.name",
-            reason: "must contain only visible ASCII characters other than ':'".into(),
-        });
-    }
     HeaderName::new_from_ascii(value.into()).map_err(|error| EmailError::Invalid {
         field: "header.name",
         reason: error.to_string(),

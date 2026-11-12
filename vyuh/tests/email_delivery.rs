@@ -114,18 +114,16 @@ fn keyed_mail() -> Mail {
         .idempotency_key("receipt/123")
 }
 
-/// Verifies the explicit SMTP mapping, envelope-only Bcc, and actual MIME identifier.
+/// Verifies the SMTP URL mapping, envelope-only Bcc, and actual MIME identifier.
 #[tokio::test]
-async fn smtp_maps_key() -> Result<(), TestError> {
+async fn smtp_url_maps_key() -> Result<(), TestError> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let backend = SmtpDelivery::with_idempotency_header(
-        &smtp_conf(listener.local_addr()?.port()),
-        "Resend-Idempotency-Key",
-    )?;
-    let site = Site::builder(conf())
-        .mail_delivery(backend)
-        .build(bundles::bundle([]))
-        .await?;
+    let port = listener.local_addr()?.port();
+    let mail = MailConf::from_url(&format!(
+        "smtp://127.0.0.1:{port}?tls=none&sender=orders%40example.com&idempotency_header=Resend-Idempotency-Key"
+    ))
+    .map_err(vyuh::SiteError::from)?;
+    let site = Site::build(conf().mail(mail), bundles::bundle([])).await?;
     let server = tokio::spawn(smtp_fixture(listener, Some("250 queued\r\n")));
     let delivery = site.mail().send(keyed_mail().build()?).await?;
     let (envelope, source) = tokio::time::timeout(Duration::from_secs(3), server).await???;

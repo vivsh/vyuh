@@ -87,15 +87,20 @@ pub struct SmtpDelivery {
 }
 
 impl SmtpDelivery {
-    /// Builds a pooled SMTP backend. Keyed submissions require an explicit relay mapping.
+    /// Builds a pooled SMTP backend with the relay mapping from `MailConf`, if set.
+    /// Invalid connection options or header names fail before connecting.
     pub fn new(conf: &MailConf) -> Result<Self, EmailError> {
+        if let Some(name) = &conf.idempotency_header {
+            return Self::with_idempotency_header(conf, name);
+        }
         Ok(Self {
             transport: transport(conf)?,
             idempotency_header: None,
         })
     }
 
-    /// Builds a pooled backend for a relay documented to honor the specified header.
+    /// Builds a pooled backend using the supplied header in place of any mapping in `MailConf`.
+    /// Use only with a relay documented to honor the specified header.
     pub fn with_idempotency_header(
         conf: &MailConf,
         name: impl Into<String>,

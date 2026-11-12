@@ -29,6 +29,9 @@ pub struct MailConf {
     #[serde(skip_serializing)]
     pub password: Option<String>,
     pub sender: Option<String>,
+    /// Relay-specific header used for a message's idempotency key, when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_header: Option<String>,
     #[serde(default)]
     pub tls: MailTls,
     pub timeout_seconds: u64,
@@ -43,6 +46,7 @@ impl Default for MailConf {
             username: None,
             password: None,
             sender: None,
+            idempotency_header: None,
             tls: MailTls::StartTls,
             timeout_seconds: 30,
         }
@@ -54,7 +58,8 @@ impl MailConf {
     ///
     /// `smtp://` defaults to STARTTLS and port 587; `smtps://` defaults to
     /// TLS and port 465. The URL user-info supplies SMTP credentials. Optional
-    /// `sender`, `tls`, and `timeout_seconds` query parameters refine it.
+    /// `sender`, `tls`, `timeout_seconds`, and `idempotency_header` query parameters refine it.
+    /// An invalid or reserved idempotency header fails parsing.
     pub fn from_url(value: &str) -> Result<Self, ConfError> {
         let url = url::Url::parse(value)
             .map_err(|error| ConfError::Other(format!("invalid SMTP URL: {error}")))?;
@@ -81,16 +86,25 @@ impl MailConf {
             }),
             username: (!url.username().is_empty()).then(|| url.username().into()),
             password: url.password().map(Into::into),
-            sender: None,
             tls,
-            timeout_seconds: 30,
+            ..Self::default()
         };
+        conf.apply_url_options(&url)?;
+        Ok(conf)
+    }
+
+    /// Applies supported SMTP URL options and validates any relay header name.
+    fn apply_url_options(&mut self, url: &url::Url) -> Result<(), ConfError> {
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
-                "sender" => conf.sender = Some(value.into_owned()),
-                "tls" => conf.tls = parse_tls(&value)?,
+                "sender" => self.sender = Some(value.into_owned()),
+                "tls" => self.tls = parse_tls(&value)?,
+                "idempotency_header" => {
+                    validate_idempotency_header(&value)?;
+                    self.idempotency_header = Some(value.into_owned());
+                }
                 "timeout_seconds" => {
-                    conf.timeout_seconds = value.parse::<u64>().map_err(|_| {
+                    self.timeout_seconds = value.parse::<u64>().map_err(|_| {
                         ConfError::Other(format!(
                             "SMTP URL timeout_seconds must be a u64, got: {value}"
                         ))
@@ -103,11 +117,16 @@ impl MailConf {
                 }
             }
         }
-        Ok(conf)
+        Ok(())
     }
 
-    /// Adds configuration errors when an enabled SMTP transport cannot connect safely.
+    /// Validates the relay header and checks connection settings when SMTP is enabled.
     pub(crate) fn validate(&self, errors: &mut Vec<ConfError>) {
+        if let Some(name) = &self.idempotency_header
+            && let Err(error) = validate_idempotency_header(name)
+        {
+            errors.push(error);
+        }
         if !self.enabled {
             return;
         }
@@ -168,6 +187,50 @@ impl MailConf {
     }
 }
 
+fn validate_idempotency_header(name: &str) -> Result<(), ConfError> {
+    match header_name_issue(name) {
+        Some(reason) => Err(invalid(
+            "mail.idempotency_header",
+            reason,
+            "an unreserved SMTP header name",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Checks the header syntax accepted by the MIME builder and excludes its reserved fields.
+fn header_name_issue(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name.len() > 76 {
+        return Some("must be between 1 and 76 ASCII characters");
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic() && byte != b':')
+    {
+        return Some("must contain only visible ASCII characters other than ':'");
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("content-")
+        || matches!(
+            lower.as_str(),
+            "from"
+                | "sender"
+                | "to"
+                | "cc"
+                | "bcc"
+                | "reply-to"
+                | "return-path"
+                | "subject"
+                | "date"
+                | "message-id"
+                | "mime-version"
+        )
+    {
+        return Some("reserved for the email envelope or MIME builder");
+    }
+    None
+}
+
 fn required(value: &str, field: &str, errors: &mut Vec<ConfError>) {
     if value.trim().is_empty() {
         errors.push(ConfError::RequiredField {
@@ -219,34 +282,5 @@ pub use enabled::{MailOutbox, OutboxMessage};
 pub(crate) use enabled::{MailReporter, SharedMailDelivery, select_delivery, validate_recipient};
 
 #[cfg(test)]
-mod conf_tests {
-    use super::*;
-
-    /// Verifies enabled SMTP configuration requires a host and default sender.
-    #[test]
-    fn enabled_mail_requires_connection_fields() {
-        let conf = MailConf {
-            enabled: true,
-            ..MailConf::default()
-        };
-        let mut errors = Vec::new();
-        conf.validate(&mut errors);
-        assert_eq!(errors.len(), 2);
-    }
-
-    /// Verifies SMTP URLs supply transport credentials and URL options.
-    #[test]
-    fn smtp_url_builds_mail_configuration() -> Result<(), ConfError> {
-        let conf = MailConf::from_url(
-            "smtps://mailer:secret@mail.example.com?sender=noreply%40example.com&timeout_seconds=10",
-        )?;
-        assert!(conf.enabled);
-        assert_eq!(conf.host, "mail.example.com");
-        assert_eq!(conf.port, 465);
-        assert_eq!(conf.username.as_deref(), Some("mailer"));
-        assert_eq!(conf.password.as_deref(), Some("secret"));
-        assert_eq!(conf.sender.as_deref(), Some("noreply@example.com"));
-        assert_eq!(conf.timeout_seconds, 10);
-        Ok(())
-    }
-}
+#[path = "tests/email.rs"]
+mod tests;
