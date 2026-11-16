@@ -29,7 +29,8 @@ fn job(key: u32) -> Job {
 }
 
 /// The live-backend tests provision a fresh database from the task schema.
-async fn fixture() -> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
+pub(in crate::tasks::store::database) async fn fixture()
+-> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
     #[cfg(feature = "sqlite")]
     let (conf, dialect) = (db::DbConf::default(), db::Dialect::Sqlite);
     #[cfg(any(feature = "postgres", feature = "mysql"))]

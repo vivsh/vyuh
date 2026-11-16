@@ -27,7 +27,7 @@ mod tests;
 
 #[cfg(all(test, feature = "migrations", feature = "test-support"))]
 #[path = "tests/submit_tx.rs"]
-mod tx_tests;
+pub(super) mod tx_tests;
 
 impl DbTaskStore {
     /// Stages ownerless tasks in the caller's transaction without local delivery.

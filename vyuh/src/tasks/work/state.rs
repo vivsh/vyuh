@@ -1,10 +1,11 @@
-//! Typed Work completion and external-suspension requests.
+//! Typed Work completion, sleep, and external-suspension requests.
 
 use crate::tasks::outcome::completion;
 use crate::tasks::{TaskOutcome, TaskRuntimeError};
 use serde::Serialize;
+use std::time::Duration;
 
-/// Successful output or suspension returned by an asynchronous Work handler.
+/// Successful output, sleep, or suspension returned by an asynchronous Work handler.
 /// Retry and failure decisions use WorkError instead.
 pub struct WorkState<T = ()> {
     inner: WorkValue<T>,
@@ -13,6 +14,7 @@ pub struct WorkState<T = ()> {
 enum WorkValue<T> {
     Complete(T),
     Suspend(String),
+    Sleep { state: String, delay: Duration },
 }
 
 impl<T> WorkState<T> {
@@ -31,6 +33,18 @@ impl<T> WorkState<T> {
             inner: WorkValue::Suspend(serde_json::to_string(&state)?),
         })
     }
+
+    /// Saves a checkpoint and schedules a later invocation, without requesting a retry.
+    /// Returns serialization errors; the store validates checkpoint size and delay.
+    /// Single-item Work only; batch handlers reject sleep.
+    pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
+        Ok(Self {
+            inner: WorkValue::Sleep {
+                state: serde_json::to_string(&state)?,
+                delay,
+            },
+        })
+    }
 }
 
 impl<T: Serialize + 'static> WorkState<T> {
@@ -38,6 +52,11 @@ impl<T: Serialize + 'static> WorkState<T> {
         match self.inner {
             WorkValue::Complete(output) => completion(output),
             WorkValue::Suspend(state) => TaskOutcome::Suspend { state },
+            WorkValue::Sleep { state, delay } => TaskOutcome::Sleep { state, delay },
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/state.rs"]
+mod tests;

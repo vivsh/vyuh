@@ -9,3 +9,14 @@ fn batch_collection_preserves_order() {
     assert_eq!(batch.as_ref(), &[1, 2, 3]);
     assert_eq!(batch.into_vec(), vec![1, 2, 3]);
 }
+
+/// A Work sleep outcome is rejected when returned through batch registration.
+#[test]
+fn batch_rejects_sleep() -> Result<(), crate::tasks::TaskRuntimeError> {
+    let state = WorkState::<()>::sleep(42, std::time::Duration::ZERO)?;
+    assert!(matches!(
+        batch_safe(state.into_outcome()),
+        TaskOutcome::Fail { .. }
+    ));
+    Ok(())
+}

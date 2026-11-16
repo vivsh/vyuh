@@ -121,8 +121,8 @@ Each accepted claim supplies an immutable snapshot to the handler:
 input + state + resume_input -> handler -> Output | WorkState<Output> | FlowState<Output>
 ```
 
-Work can return a serializable value directly, or `WorkState<T>` for completion
-or suspension. Use `Result<_, WorkError>` for explicit failure/retry decisions.
+Work can return a serializable value directly, or `WorkState<T>` for completion,
+sleep, or suspension. Use `Result<_, WorkError>` for explicit failure/retry decisions.
 Flow factories build once per site; each invocation calls the definition's
 `advance` method, returning `Result<FlowState<T>, FlowError>`.
 Infrastructure APIs return `TaskRuntimeError`; these are not handler decisions.
@@ -266,7 +266,8 @@ Use explicit `WorkError::retry` for retries; automatic `?` conversions are termi
 
 ## Work And Flow
 
-Work handlers are asynchronous and can complete, suspend, fail, or explicitly retry.
+Single-item Work handlers are asynchronous and can complete, suspend, sleep,
+fail, or explicitly retry.
 Flow handlers are synchronous and can complete, fail, suspend, sleep, spawn, or
 join an ordered group of same- or mixed-type children with `all`.
 Both use the same statuses, lanes, lane locks, node ownership, attempt counters,
@@ -311,7 +312,7 @@ Upgrades from durable affinity require stopped workers/writers and the
 
 PostgreSQL runners subscribe to advisory generic and node-specific wakeups using
 Vyuh's LISTEN/NOTIFY transport. Committed pending submissions, actual parent
-readiness, external resumption and stale-node retirement wake normal polling.
+readiness, external resumption, explicit wakes, and stale-node retirement wake normal polling.
 Ownerless pending work uses generic hints; directly admitted Running work needs
 no readiness notification. Notifications contain only a lane name (or a broad
 rescan hint), never task data.
@@ -340,7 +341,8 @@ may leave undelivered owned work for the existing node/startup recovery path.
 | Success | Direct `T` or `WorkState<T>` | `FlowState<T>` | Unit, uniform state, or ordered states |
 | Handler error | `WorkError` (`Retry` or `Fail`) | `FlowError` (terminal) | `WorkError`, uniform or per item |
 | External suspension | Yes, with `Continuation<S, R>` | Yes, with `Continuation<S, R>` | No |
-| Sleep, spawn, `all` | No | Yes | No |
+| Sleep | Yes | Yes | No |
+| Spawn, `all` | No | Yes | No |
 | Site/service extraction | Yes | No | Yes |
 
 Use `Result<Success, HandlerError>` for fallible forms. `WorkState<T>` and
@@ -367,7 +369,7 @@ Factories and dispatcher construction must not perform blocking I/O.
 `Flow::advance` receives read-only `TaskId`, `Data<Self::Input>`, and
 `Continuation<Self::Checkpoint, Self::Resume>`. It does not receive site/services
 or operation identity. Work can also extract
-`Continuation<S, R>` and suspend, but cannot sleep or spawn. There is no Flow
+`Continuation<S, R>`, suspend, and sleep, but cannot spawn. There is no Flow
 batch registration.
 
 A synchronous signature is not a purity sandbox. Flow code must be short,
@@ -900,7 +902,7 @@ use vyuh::tasks::WorkState;
 
 let done = WorkState::complete(());
 let suspended = WorkState::<()>::suspend(state)?;
-let sleeping = FlowState::<()>::sleep(state, Duration::from_secs(30))?;
+let sleeping = WorkState::<()>::sleep(state, Duration::from_secs(30))?;
 let retry = WorkError::retry("try again using the lane's backoff policy");
 let failed = WorkError::fail("permanent failure");
 ```
@@ -1013,22 +1015,38 @@ with workers and writers stopped.
 
 ## Sleep And Continuation
 
-Sleep is for timed Flow continuation. The handler saves state, chooses a delay, and
-Vyuh wakes the task after that delay:
+Sleep is a durable checkpoint for single-item Work and Flow. The handler saves
+state and chooses a delay before the task becomes eligible for another claim:
 
 ```rust
-FlowState::sleep(state, Duration::from_secs(30))?
+WorkState::sleep(state, Duration::from_secs(30))?
 ```
 
-Use sleep between Work children for polling an external system, processing
-another chunk, or staged work where the next step is time-based rather than
-event-based. Keep I/O in Work handlers; Flow only chooses the next transition.
-For transient failures within one Work step, use `WorkError::retry` and the
-lane's backoff policy instead of treating sleep as a Work retry API.
+Flow uses the equivalent `FlowState::sleep` when coordinating Work children.
+Use Work sleep to poll an external system or process another chunk later.
+On the next invocation, `Continuation::state()` contains the checkpoint and
+there is no resume value. Sleep starts a new step; it does not consume the old
+step's retry budget. Use `WorkError::retry` for a transient failure within a step.
 
 Sleep is durable. If the process exits while a task is sleeping, the task
 remains pending with a future `ready_at` time and can be claimed after that
 time when workers are running again.
+
+### Wake a pending task early
+
+`site.tasks().wake(task_id).await?` advances a future `ready_at` on a Pending,
+ownerless, non-cancelled task and returns `true` if it changed the timer. It
+works for sleep, delayed submission, or retry backoff. Already-due, missing,
+running, suspended, and terminal tasks are not changed. Wake doesn't carry a
+resume value or make the handler run inline. Existing notifications prompt a
+poll; lane gates still apply.
+
+For webhook-assisted polling, persist the external result first, then call
+`wake`. The next Work invocation checks the result for the operation in its
+checkpoint. A stale webhook can trigger an early check, but cannot supply a
+result to the wrong wait. Wakes while a task is running aren't buffered; the
+next scheduled check is the fallback. Keep an absolute deadline in the
+checkpoint if an early check shouldn't extend the wait.
 
 ## Submit Tasks
 
@@ -1111,7 +1129,7 @@ Vyuh scopes keys to the registered task; namespace them if a downstream provider
 uses a wider scope.
 
 Initial delayed execution is `TaskOptions::delay`, timed continuation is
-`FlowState::sleep`, and recurring creation belongs in emitters. A
+`WorkState::sleep` or `FlowState::sleep`, and recurring creation belongs in emitters. A
 task-targeted cron or periodic emitter stores one durable `vyuh_schedules`
 cursor and coalesces missed occurrences after restart. Recurring creation belongs
 to that emitter; orchestration within each occurrence belongs to Flow.

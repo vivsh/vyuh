@@ -395,6 +395,7 @@ impl TaskStore for Store {
     forward!(schedule_snapshot(names: &[String]) -> TaskScheduleSnapshot);
     forward!(store_scheduled(write: ScheduledTaskWrite) -> Option<TaskReceipt>);
     forward!(reassign_lane(from: &str, to: &str) -> u64);
+    forward!(wake(id: TaskId) -> bool);
     forward!(resume(id: TaskId, input: String) -> bool);
     forward!(list_tasks(filter: TaskFilter) -> crate::routes::Page<TaskRecord>);
     forward!(get_task(id: TaskId) -> Option<TaskRecord>);

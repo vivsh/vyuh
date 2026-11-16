@@ -22,6 +22,35 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 impl DbTaskStore {
+    /// Changes only readiness in one statement, using the claim clock format on SQLite.
+    pub(super) async fn wake_impl(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        #[cfg(feature = "postgres")]
+        let (clock, parameter) = ("statement_timestamp()", "$1");
+        #[cfg(feature = "mysql")]
+        let (clock, parameter) = ("CURRENT_TIMESTAMP(6)", "?");
+        #[cfg(feature = "sqlite")]
+        let (clock, parameter) = (
+            "strftime('%Y-%m-%dT%H:%M:%S+00:00', CURRENT_TIMESTAMP)",
+            "?",
+        );
+        let pending = TaskStatus::Pending.as_i16();
+        let sql = format!(
+            "UPDATE vyuh_tasks SET ready_at = {clock} WHERE id = {parameter} AND status = {pending} \
+             AND node_id IS NULL AND NOT cancelled AND ready_at > {clock}"
+        );
+        #[cfg(feature = "postgres")]
+        let sql = super::notify::notifying(&sql);
+        let statement = db::Statement::raw(&sql).bind(id.into_uuid());
+        #[cfg(feature = "postgres")]
+        let changed = {
+            let (count, _): (i64, i64) = self.pool.clone().fetch_one(statement).await?;
+            count > 0
+        };
+        #[cfg(not(feature = "postgres"))]
+        let changed = self.pool.clone().execute(statement).await? > 0;
+        Ok(changed)
+    }
+
     /// Executes an independent submission or control transaction.
     pub(super) async fn resume_impl(
         &self,
@@ -208,6 +237,10 @@ impl DbTaskStore {
         Ok((children, deliveries, waits, rejected, tasks))
     }
 }
+
+#[cfg(all(test, feature = "migrations", feature = "test-support"))]
+#[path = "tests/wake.rs"]
+mod wake_tests;
 
 fn locked_lane(conf: &crate::tasks::TaskStoreConf, lane_name: &str) -> bool {
     conf.lanes

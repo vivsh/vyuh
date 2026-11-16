@@ -244,6 +244,10 @@ impl TaskStore for DbTaskStore {
         self.reassign_lane_impl(from, to).await
     }
 
+    async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        self.wake_impl(id).await
+    }
+
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         self.resume_impl(id, input).await
     }

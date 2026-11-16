@@ -442,6 +442,9 @@ pub(crate) trait TaskStore {
         to: &'a str,
     ) -> impl Future<Output = Result<u64, TaskRuntimeError>> + Send + 'a;
 
+    /// Advances only the readiness of a future, ownerless Pending task.
+    fn wake(&self, id: TaskId) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + '_;
+
     /// Resumes one suspended task with typed serialized input.
     fn resume<'a>(
         &'a self,
@@ -575,6 +578,10 @@ impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
 
     async fn reassign_lane(&self, from: &str, to: &str) -> Result<u64, TaskRuntimeError> {
         (**self).reassign_lane(from, to).await
+    }
+
+    async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        (**self).wake(id).await
     }
 
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {

@@ -183,6 +183,14 @@ impl Tasks {
         client.store.store_tasks_tx(tx, writes).await
     }
 
+    /// Brings forward a future, ownerless Pending task without supplying a resume value.
+    /// Returns false if there is no eligible row. This can shorten retry backoff
+    /// or a submission delay, but cannot wake a Suspended or running task.
+    /// Store errors propagate; normal polling and lane limits still apply.
+    pub async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        self.client.wake(id).await
+    }
+
     /// Resumes an ordinary suspension with success and wakes the local runner.
     /// Do not externally resume a parent waiting for a child. Returns false if not suspended.
     pub async fn resume<T: Serialize>(
@@ -394,6 +402,15 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             permit.send(Arc::new(record));
         }
         Ok(receipts)
+    }
+
+    /// Signals the local runner only after the store acknowledges an earlier deadline.
+    async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        let changed = self.store.wake(id).await?;
+        if changed {
+            self.notify(RunnerEvent::Wake);
+        }
+        Ok(changed)
     }
 
     /// Resumes an ordinary suspension with success and wakes local workers when it changed.

@@ -387,6 +387,23 @@ impl TaskStore for MemoryTaskStore {
         Ok(changed)
     }
 
+    async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
+        let mut state = self.state.lock().await;
+        let now = chrono::Utc::now();
+        let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
+            return Ok(false);
+        };
+        if task.status != TaskStatus::Pending
+            || task.node_id.is_some()
+            || task.cancelled
+            || !task.ready_at.is_some_and(|ready_at| ready_at > now)
+        {
+            return Ok(false);
+        }
+        task.ready_at = Some(now);
+        Ok(true)
+    }
+
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         crate::tasks::result::validate_resume(&input)?;
         let mut state = self.state.lock().await;

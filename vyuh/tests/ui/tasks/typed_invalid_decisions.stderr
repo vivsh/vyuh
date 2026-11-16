@@ -7,6 +7,7 @@ error[E0599]: no associated function or constant named `retry` found for struct 
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
+      vyuh::prelude::WorkState::<T>::sleep
  --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
@@ -14,6 +15,9 @@ note: if you're trying to build a new `vyuh::prelude::WorkState` consider using 
 ...
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::WorkState<T>` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:4:30
@@ -24,6 +28,7 @@ error[E0599]: no associated function or constant named `fail` found for struct `
 note: if you're trying to build a new `vyuh::prelude::WorkState` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
+      vyuh::prelude::WorkState::<T>::sleep
  --> src/tasks/work/state.rs
   |
   |     pub fn complete(output: T) -> Self {
@@ -31,6 +36,9 @@ note: if you're trying to build a new `vyuh::prelude::WorkState` consider using 
 ...
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0599]: no associated function or constant named `fail` found for struct `vyuh::prelude::FlowState<T>` in the current scope
  --> tests/ui/tasks/typed_invalid_decisions.rs:5:30

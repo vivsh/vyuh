@@ -85,6 +85,10 @@ globally Work-rate-limited or excess records retain ordinary Pending insertion.
 The existing site start guard publishes the endpoint after node registration;
 producer-only and pre-start dispatcher handles use ordinary insertion.
 Control notifications never bypass poll gates.
+An explicit task wake advances only future `ready_at` on an eligible ownerless
+Pending row. The store commits a single conditional write and reuses the
+existing wake hints. This changes neither the claim predicate nor suspension
+and resume; sleeping Work and Flow use the same checkpoint transition.
 Cancellation IDs are deduplicated in operation-local scratch and remove only
 queued snapshots. They create no outputs or uncommitted pressure: the store has
 already finalized cancellation. There is no retained cancellation set or queue
@@ -356,8 +360,8 @@ The `vyuh` crate is organized around these subsystems:
   handle only); execution receives input, read-only task identity and continuation.
   Execution metadata comes from `Flow::Input`, not factory arguments. Factory
   errors and panics fail construction before workers start.
-  Both kinds receive continuations and support suspension; only Flow can sleep
-  or spawn children (one child or an `all` group). Runtime site/service and
+  Both kinds receive continuations and support suspension and sleep; only Flow
+  can spawn children (one child or an `all` group). Runtime site/service and
   operation identity extraction remain unavailable to Flow.
   The persisted idempotency key is read-only invocation data. Single-item Work
   can extract `IdempotencyKey`; Flow borrows it from its `Continuation` snapshot.
@@ -528,7 +532,7 @@ The `vyuh` crate is organized around these subsystems:
   deployment fingerprint or policy-row lock. Task schemas are
   migration-owned and are never created or altered during site startup. Store
   internals are framework-owned; the ordinary site facade exposes only typed
-  submission, cancellation, resume, reassignment, and read-only inspection.
+  submission, cancellation, wake, resume, reassignment, and read-only inspection.
   Store configuration is supplied during inert site construction, without task SQL,
   and shared as an immutable `Arc<TaskStoreConf>` without a configuration lock or
   uninitialized state. Producers use it directly: there is no lazy task-store `OnceCell`.
