@@ -481,7 +481,10 @@ pub(in crate::tasks::store::database) async fn insert(
 }
 
 /// Provides stable IDs and ordering with representative checkpoint/result bytes.
-#[cfg(all(any(feature = "sqlite", feature = "postgres"), feature = "migrations"))]
+#[cfg(any(
+    feature = "mysql",
+    all(any(feature = "sqlite", feature = "postgres"), feature = "migrations")
+))]
 pub(in crate::tasks::store::database) fn row(
     id: u128,
     now: DateTime<Utc>,

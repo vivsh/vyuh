@@ -360,7 +360,8 @@ impl DbTaskStore {
             row.node_id = None;
             row.updated_at = now;
         }
-        super::commit::update_idempotency_batch(transaction, rows, conf, now).await?;
+        self.update_idempotency_batch(transaction, rows, conf, now)
+            .await?;
         super::commit::batch_update_rows(transaction, rows, WRITE_CHUNK_SIZE).await
     }
 

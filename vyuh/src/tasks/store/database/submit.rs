@@ -156,8 +156,16 @@ impl DbTaskStore {
         }
         let (prepared, key_rows) = prepare_writes(writes, now)?;
         upsert_key_owners(transaction, &key_rows, super::queries::WRITE_CHUNK_SIZE).await?;
-        let owners = load_key_owners(transaction, &key_rows).await?;
-        let (mut rows, receipts) = resolve_writes(prepared, owners)?;
+        #[cfg(feature = "mysql")]
+        let (mut rows, receipts) = {
+            let reserved = load_reserved_tasks(transaction, &key_rows).await?;
+            resolve_reserved_writes(prepared, &reserved)
+        };
+        #[cfg(not(feature = "mysql"))]
+        let (mut rows, receipts) = {
+            let owners = load_key_owners(transaction, &key_rows).await?;
+            resolve_writes(prepared, owners)?
+        };
         let tasks = self.admit_rows(&mut rows, delivery, now)?;
         if !rows.is_empty() {
             #[cfg(feature = "postgres")]
@@ -405,6 +413,7 @@ pub(super) fn load_active_lane_scope(lane: &str) -> db::queries::QueryScope {
 }
 
 /// Resolves every prepared intent against the owner snapshot in input order.
+#[cfg(not(feature = "mysql"))]
 pub(super) fn resolve_writes(
     prepared: Vec<PreparedWrite>,
     owners: Vec<TaskIdempotencyRow>,
@@ -427,6 +436,55 @@ pub(super) fn resolve_writes(
         receipts.push(receipt);
     }
     Ok((rows, receipts))
+}
+
+/// Projects only the task identity from a successfully inserted reservation.
+#[cfg(feature = "mysql")]
+#[derive(db::Record)]
+#[table(name = "vyuh_task_idempotency")]
+struct ReservedTask {
+    task_id: uuid::Uuid,
+}
+
+/// Reads this submission's own inserts, skipping existing owners on conflict.
+#[cfg(feature = "mysql")]
+async fn load_reserved_tasks(
+    transaction: &mut db::DbTransaction<'_>,
+    candidates: &[TaskIdempotencyRow],
+) -> Result<HashSet<uuid::Uuid>, TaskRuntimeError> {
+    if candidates.is_empty() {
+        return Ok(HashSet::new());
+    }
+    // A duplicate-key upsert updates the old row's timestamp, not its primary
+    // key. A consistent read sees our own inserts even with an older snapshot.
+    let table = DbTaskStore::idempotency_table();
+    let ids = candidates.iter().map(|row| row.id).collect::<Vec<_>>();
+    let rows = db::from(&table)
+        .filter(table.id.in_values(ids))
+        .all::<ReservedTask>()
+        .exec(transaction)
+        .await?;
+    Ok(rows.into_iter().map(|row| row.task_id).collect())
+}
+
+/// Admits all unkeyed writes and only newly reserved keyed writes, in input order.
+#[cfg(feature = "mysql")]
+fn resolve_reserved_writes(
+    prepared: Vec<PreparedWrite>,
+    reserved: &HashSet<uuid::Uuid>,
+) -> (Vec<TaskRow>, Vec<TaskReceipt>) {
+    let mut rows = Vec::with_capacity(prepared.len());
+    let mut receipts = Vec::with_capacity(prepared.len());
+    for prepared in prepared {
+        let record = prepared.write.record;
+        if prepared.owner_key.is_none() || reserved.contains(&record.id.into_uuid()) {
+            receipts.push(TaskReceipt::Queued(record.id));
+            rows.push(TaskRow::from(record));
+        } else {
+            receipts.push(TaskReceipt::KeyHeld);
+        }
+    }
+    (rows, receipts)
 }
 
 pub(super) fn resolve_owner(

@@ -100,6 +100,10 @@ impl DbTaskStore {
         &self,
         commits: &[TaskCommit],
     ) -> Result<crate::tasks::CommitResult, StoreFailure<crate::tasks::CommitResult>> {
+        #[cfg(feature = "mysql")]
+        if !commits.is_empty() {
+            self.detect_mysql_server().await?;
+        }
         self.commit_admitted_impl(commits, None, &[]).await
     }
 
@@ -223,7 +227,8 @@ impl DbTaskStore {
         )
         .await?;
         let deliveries = apply_owned_outcomes(&mut rows, &mut commands, &conflicts, conf, now)?;
-        update_idempotency_batch(transaction, &mut rows, conf, now).await?;
+        self.update_idempotency_batch(transaction, &mut rows, conf, now)
+            .await?;
         batch_update_rows(transaction, &rows, super::queries::WRITE_CHUNK_SIZE).await?;
         let rejected = commands.keys().copied().collect();
         let tasks = rows
@@ -506,78 +511,136 @@ pub(super) fn finish(
     row.completed_at = Some(now);
 }
 
-/// Releases or archives every terminal key through one set-based mutation.
-pub(super) async fn update_idempotency_batch(
-    transaction: &mut db::DbTransaction<'_>,
-    rows: &mut [TaskRow],
-    conf: &crate::tasks::TaskStoreConf,
-    now: DateTime<Utc>,
-) -> Result<(), TaskRuntimeError> {
-    #[cfg(any(feature = "postgres", feature = "sqlite"))]
-    {
-        let _ = transaction;
-        return super::held::finish(rows, conf, now);
-    }
-    #[cfg(feature = "mysql")]
-    {
-        let table = DbTaskStore::idempotency_table();
-        let (active, retained) = retention_groups(rows, conf)?;
-        if !active.is_empty() {
-            db::from(&table)
-                .filter(table.task_id.in_values(active))
-                .delete()
-                .exec(transaction)
-                .await?;
+impl DbTaskStore {
+    /// Releases or archives terminal keys in the current task mutation transaction.
+    pub(super) async fn update_idempotency_batch(
+        &self,
+        transaction: &mut db::DbTransaction<'_>,
+        rows: &mut [TaskRow],
+        conf: &crate::tasks::TaskStoreConf,
+        now: DateTime<Utc>,
+    ) -> Result<(), TaskRuntimeError> {
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        {
+            let _ = transaction;
+            return super::held::finish(rows, conf, now);
         }
-        for (duration, ids) in retained {
-            let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
-            let patch = IdempotencyExpiryPatch {
-                expires_at: Some(expires),
-                updated_at: now,
-            };
-            db::from(&table)
-                .filter(table.task_id.in_values(ids))
-                .update(&patch)
-                .exec(transaction)
-                .await?;
-            apply_expiry(rows, conf, duration, expires)?;
+        #[cfg(feature = "mysql")]
+        {
+            if self.uses_mariadb() {
+                return retain_mariadb(transaction, rows, conf, now).await;
+            }
+            let table = DbTaskStore::idempotency_table();
+            let (active, retained) = retention_groups(rows, conf, |_, row| row.id)?;
+            if !active.is_empty() {
+                db::from(&table)
+                    .filter(table.task_id.in_values(active))
+                    .delete()
+                    .exec(transaction)
+                    .await?;
+            }
+            for (duration, ids) in retained {
+                let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
+                let patch = IdempotencyExpiryPatch {
+                    expires_at: Some(expires),
+                    updated_at: now,
+                };
+                db::from(&table)
+                    .filter(table.task_id.in_values(ids))
+                    .update(&patch)
+                    .exec(transaction)
+                    .await?;
+                apply_expiry(rows, conf, duration, expires)?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 
 #[cfg(feature = "mysql")]
-type RetentionGroup = (Duration, Vec<uuid::Uuid>);
+type RetentionGroup<K> = (Duration, Vec<K>);
 #[cfg(feature = "mysql")]
-type RetentionGroups = (Vec<uuid::Uuid>, Vec<RetentionGroup>);
+type RetentionGroups<K> = (Vec<K>, Vec<RetentionGroup<K>>);
 
 /// Groups terminal idempotent rows by the retention policy of their stored lane.
 #[cfg(feature = "mysql")]
-fn retention_groups(
+fn retention_groups<K>(
     rows: &mut [TaskRow],
     conf: &crate::tasks::TaskStoreConf,
-) -> Result<RetentionGroups, TaskRuntimeError> {
+    identify: impl Fn(usize, &TaskRow) -> K,
+) -> Result<RetentionGroups<K>, TaskRuntimeError> {
     let mut active = Vec::new();
-    let mut retained: Vec<RetentionGroup> = Vec::new();
-    for row in rows.iter_mut() {
+    let mut retained: Vec<RetentionGroup<K>> = Vec::new();
+    for (index, row) in rows.iter_mut().enumerate() {
         if !is_terminal_idempotent(row)? {
             continue;
         }
         match retention_for(row, conf)? {
             IdempotencyRetention::ActiveOnly => {
                 row.idempotency_expires_at = None;
-                active.push(row.id);
+                active.push(identify(index, row));
             }
             IdempotencyRetention::RetainFor(duration) => {
                 if let Some((_, ids)) = retained.iter_mut().find(|(value, _)| *value == duration) {
-                    ids.push(row.id);
+                    ids.push(identify(index, row));
                 } else {
-                    retained.push((duration, vec![row.id]));
+                    retained.push((duration, vec![identify(index, row)]));
                 }
             }
         }
     }
     Ok((active, retained))
+}
+
+#[cfg(feature = "mysql")]
+const MARIADB_RESERVATION_BATCH: &str =
+    "JSON_TABLE(?, '$[*]' COLUMNS (item JSON PATH '$')) AS batch
+    STRAIGHT_JOIN vyuh_task_idempotency AS owner FORCE INDEX (idx_vyuh_task_idempotency_owner)
+    ON owner.task_name = JSON_VALUE(batch.item, '$[0]')
+    AND owner.key_value = JSON_VALUE(batch.item, '$[1]')
+    AND owner.task_id = UNHEX(REPLACE(JSON_VALUE(batch.item, '$[2]'), '-', ''))";
+
+/// Keeps the existing mutation groups, but drives MariaDB writes from exact owner keys.
+#[cfg(feature = "mysql")]
+async fn retain_mariadb(
+    tx: &mut db::DbTransaction<'_>,
+    rows: &mut [TaskRow],
+    conf: &crate::tasks::TaskStoreConf,
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
+    let (active, retained) = retention_groups(rows, conf, |index, _| index)?;
+    if !active.is_empty() {
+        let sql = format!("DELETE owner FROM {MARIADB_RESERVATION_BATCH}");
+        tx.execute(db::Statement::raw(&sql).bind(reservation_keys(rows, &active)?))
+            .await?;
+    }
+    for (duration, indices) in retained {
+        let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
+        let sql = format!(
+            "UPDATE {MARIADB_RESERVATION_BATCH} SET owner.expires_at = ?, owner.updated_at = ?"
+        );
+        let statement = db::Statement::raw(&sql)
+            .bind(reservation_keys(rows, &indices)?)
+            .bind(expires)
+            .bind(now);
+        tx.execute(statement).await?;
+        apply_expiry(rows, conf, duration, expires)?;
+    }
+    Ok(())
+}
+
+/// Binds only handler, key, and task ID from the already-fenced rows.
+#[cfg(feature = "mysql")]
+fn reservation_keys(rows: &[TaskRow], indices: &[usize]) -> Result<String, TaskRuntimeError> {
+    let keys = indices
+        .iter()
+        .map(|index| {
+            let row = rows.get(*index)?;
+            Some((row.name.as_str(), row.idempotency_key.as_deref()?, row.id))
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("missing reservation key".into()))?;
+    Ok(serde_json::to_string(&keys)?)
 }
 
 /// Reflects one set-based retained-key write in the loaded task rows.
@@ -859,3 +922,7 @@ fn parameter(index: usize) -> String {
 ))]
 #[path = "tests/commit.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mysql"))]
+#[path = "tests/reservation_keys.rs"]
+mod reservation_tests;

@@ -331,6 +331,12 @@ impl TaskStoreConf {
 /// Persistence and coordination boundary for durable task execution.
 #[allow(dead_code)]
 pub(crate) trait TaskStore {
+    /// Recognizes a native conflict not covered by the shared database error categories.
+    #[cfg(feature = "mysql")]
+    fn retryable_conflict(&self, _error: &crate::db::DbError) -> bool {
+        false
+    }
+
     /// Subscribes to advisory wakes before claims; non-database stores have no listener.
     #[cfg(feature = "postgres")]
     fn start_notifications(
@@ -476,6 +482,11 @@ pub(crate) trait TaskStore {
 }
 
 impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
+    #[cfg(feature = "mysql")]
+    fn retryable_conflict(&self, error: &crate::db::DbError) -> bool {
+        (**self).retryable_conflict(error)
+    }
+
     async fn store_admitted(
         &self,
         writes: Vec<TaskWrite>,

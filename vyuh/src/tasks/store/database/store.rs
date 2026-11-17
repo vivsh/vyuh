@@ -21,6 +21,9 @@ pub struct DbTaskStore {
     pub(super) lease_duration: std::time::Duration,
     pub(super) runtime_conf: std::sync::Arc<crate::tasks::TaskStoreConf>,
     pub(super) maintenance_turn: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    // MySQL and MariaDB share a driver. This is server identity, not task state.
+    #[cfg(feature = "mysql")]
+    mysql_server: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl DbTaskStore {
@@ -86,6 +89,8 @@ impl DbTaskStore {
             lease_duration,
             runtime_conf: conf.into(),
             maintenance_turn: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "mysql")]
+            mysql_server: Default::default(),
         }
     }
 
@@ -107,6 +112,19 @@ impl DbTaskStore {
 }
 
 impl TaskStore for DbTaskStore {
+    #[cfg(feature = "mysql")]
+    fn retryable_conflict(&self, error: &db::DbError) -> bool {
+        // SQLSTATE HY000 is generic; only MariaDB's native ER_CHECKREAD is retryable.
+        let db::DbError::Database { source, .. } = error else {
+            return false;
+        };
+        self.uses_mariadb()
+            && source
+                .as_database_error()
+                .and_then(|error| error.try_downcast_ref::<db::sqlx::mysql::MySqlDatabaseError>())
+                .is_some_and(|error| error.number() == 1020)
+    }
+
     #[cfg(feature = "postgres")]
     async fn start_notifications(
         &self,
@@ -270,12 +288,61 @@ impl DbTaskStore {
     pub(super) async fn initialize_impl(&self) -> Result<(), TaskRuntimeError> {
         let conf = &self.runtime_conf;
         let mut transaction = self.pool.begin().await?;
+        #[cfg(not(feature = "mysql"))]
         let now = statement_now(&mut transaction).await?;
+        #[cfg(feature = "mysql")]
+        let (now, version): (chrono::DateTime<Utc>, String) = {
+            use db::DbSession as _;
+            transaction
+                .fetch_one(db::Statement::raw("SELECT CURRENT_TIMESTAMP, VERSION()"))
+                .await?
+        };
         reject_orphaned_tasks(&mut transaction, conf).await?;
         initialize_rate_rows(&mut transaction, conf, now).await?;
         initialize_lock_rows(&mut transaction, conf, now).await?;
         transaction.commit().await?;
+        #[cfg(feature = "mysql")]
+        self.record_mysql_server(&version);
         Ok(())
+    }
+}
+
+#[cfg(feature = "mysql")]
+const MYSQL_SERVER: u8 = 1;
+#[cfg(feature = "mysql")]
+const MARIADB_SERVER: u8 = 2;
+
+#[cfg(feature = "mysql")]
+impl DbTaskStore {
+    /// Resolves server identity for producer-only cancellation before taking task locks.
+    pub(super) async fn detect_mysql_server(&self) -> Result<(), TaskRuntimeError> {
+        use db::DbSession as _;
+        use std::sync::atomic::Ordering;
+
+        if self.mysql_server.load(Ordering::Relaxed) == 0 {
+            let version: String = self
+                .pool
+                .clone()
+                .fetch_scalar(db::Statement::raw("SELECT VERSION()"))
+                .await?;
+            self.record_mysql_server(&version);
+        }
+        Ok(())
+    }
+
+    fn record_mysql_server(&self, version: &str) {
+        let server = if version.contains("MariaDB") {
+            MARIADB_SERVER
+        } else {
+            MYSQL_SERVER
+        };
+        self.mysql_server
+            .store(server, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Selects the MariaDB-only reservation statement without querying on the flush path.
+    pub(super) fn uses_mariadb(&self) -> bool {
+        self.mysql_server.load(std::sync::atomic::Ordering::Relaxed) == MARIADB_SERVER
     }
 }
 /// Inserts missing opt-in lane rows without disturbing active ownership.
@@ -465,3 +532,7 @@ impl DbTaskStore {
 #[cfg(all(test, any(feature = "postgres", feature = "sqlite")))]
 #[path = "tests/store.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mysql"))]
+#[path = "tests/mysql_retry.rs"]
+mod mysql_retry_tests;

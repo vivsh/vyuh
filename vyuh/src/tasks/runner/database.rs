@@ -213,7 +213,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskRunner<S> {
         self.health.store_failed();
         self.metrics.store_failure();
         crate::tasks::diagnostics::log_runtime_error(&error, "task database operation failed");
-        if !retryable(&error) {
+        if !retryable(&*self.store, &error) {
             self.mode = RunMode::Faulted;
             self.discard_work();
             return;
@@ -293,7 +293,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskRunner<S> {
 }
 
 /// Only classified operational failures are retried; permanent failures terminate safely.
-fn retryable(error: &TaskRuntimeError) -> bool {
+fn retryable(_store: &impl TaskStore, error: &TaskRuntimeError) -> bool {
     match error {
         TaskRuntimeError::DatabaseError(error) => matches!(
             error,
@@ -303,16 +303,18 @@ fn retryable(error: &TaskRuntimeError) -> bool {
                 | crate::db::sqlx::Error::PoolClosed
                 | crate::db::sqlx::Error::WorkerCrashed
         ),
-        TaskRuntimeError::StoreError(error) => matches!(
-            error.code(),
+        TaskRuntimeError::StoreError(error) => match error.code() {
             "connection_error"
-                | "timeout"
-                | "serialization_failure"
-                | "deadlock"
-                | "cancelled"
-                | "database_busy"
-                | "database_locked"
-        ),
+            | "timeout"
+            | "serialization_failure"
+            | "deadlock"
+            | "cancelled"
+            | "database_busy"
+            | "database_locked" => true,
+            #[cfg(feature = "mysql")]
+            "database_error" => _store.retryable_conflict(error),
+            _ => false,
+        },
         _ => false,
     }
 }
