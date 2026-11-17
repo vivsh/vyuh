@@ -118,7 +118,7 @@ pub(super) fn owner_schema() -> Result<db::Schema, String> {
             )
         });
         let mut owner = db::schema()
-            .model::<super::TaskIdempotencyRow>()
+            .model::<crate::tasks::store::database::model::TaskIdempotencyRow>()
             .build()
             .map_err(|e| e.to_string())?;
         let mut table = owner
