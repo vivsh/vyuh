@@ -120,7 +120,14 @@ async fn manual_child_round_trip() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for value in [2, 7] {
-        let id = site.tasks().submit(Parent(value)).await?.id();
+        let id = site
+            .tasks()
+            .submit(Parent(value))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         assert_eq!(wait_output(&site, id).await?, Some(Ok(value * 2 + 1)));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);

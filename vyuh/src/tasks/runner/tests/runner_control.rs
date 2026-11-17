@@ -16,7 +16,7 @@ fn connected() -> Result<(TaskRunner<Store>, TaskClient<Store>, Arc<Probe>), Tas
 #[tokio::test]
 async fn request_is_idempotent() -> Result<(), TestError> {
     let (mut runner, client, _) = connected()?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     runner.collect_events();
     let (): () = client.cancel(id).await?;
     assert!(matches!(runner.events.try_recv(), Ok(RunnerEvent::Cancel(value)) if value == id));
@@ -41,7 +41,7 @@ async fn request_is_idempotent() -> Result<(), TestError> {
 #[tokio::test]
 async fn failed_request_does_not_notify() -> Result<(), TestError> {
     let (mut runner, client, probe) = connected()?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     runner.collect_events();
     probe.failure.store(18, Ordering::SeqCst);
     assert!(client.cancel(id).await.is_err());
@@ -138,7 +138,7 @@ async fn batch_cancellation(running: bool) -> Result<(), TestError> {
         .submit_many(vec![Job, Job, Job])
         .await?
         .into_iter()
-        .map(|r| r.id())
+        .filter_map(|r| r.id())
         .collect::<Vec<_>>();
     let site = site().await;
     runner.admit();
@@ -183,7 +183,7 @@ async fn batch_cancellation(running: bool) -> Result<(), TestError> {
 async fn queued_cancel_needs_no_flush() -> Result<(), TestError> {
     let (mut runner, client, probe) = connected()?;
     runner.initialize().await?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     apply(&mut runner, &site).await;
@@ -221,7 +221,7 @@ async fn queued_cancel_needs_no_flush() -> Result<(), TestError> {
 async fn running_cancel_never_aborts() -> Result<(), TestError> {
     let (mut runner, client, probe) = connected()?;
     runner.initialize().await?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     apply(&mut runner, &site).await;
@@ -260,7 +260,7 @@ async fn running_cancel_never_aborts() -> Result<(), TestError> {
 async fn separate_channel_is_best_effort() -> Result<(), TestError> {
     let (mut runner, client, probe) = connected()?;
     runner.initialize().await?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     apply(&mut runner, &site).await;
@@ -292,7 +292,7 @@ async fn separate_channel_is_best_effort() -> Result<(), TestError> {
 async fn cancellation_before_claim_response_can_miss_queue() -> Result<(), TestError> {
     let (mut runner, client, _) = connected()?;
     runner.initialize().await?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     let response = runner.operations.next().await.ok_or_else(failure)?;
@@ -319,7 +319,7 @@ async fn cancellation_before_claim_response_can_miss_queue() -> Result<(), TestE
 #[tokio::test(start_paused = true)]
 async fn lag_and_closure_are_notification_only() -> Result<(), TestError> {
     let (mut runner, client, probe) = connected()?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     client.cancel(id).await?;
     for _ in 0..SCHEDULER_BUDGET * 4 {
         let _ = client.events.send(RunnerEvent::Wake);
@@ -370,7 +370,7 @@ async fn wake_preserves_poll_gates() -> Result<(), TestError> {
 async fn draining_and_give_back_boundary() -> Result<(), TestError> {
     let (mut runner, client, _) = connected()?;
     runner.initialize().await?;
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     apply(&mut runner, &site).await;

@@ -507,6 +507,8 @@ pub(in crate::tasks::store::database) fn row(
         idempotency_key: None,
         idempotency_fingerprint: None,
         idempotency_expires_at: None,
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        idempotency_held: true,
         node_id: None,
         ready_at,
         created_at: now,

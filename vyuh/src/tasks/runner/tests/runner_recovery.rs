@@ -72,7 +72,7 @@ async fn claim_ack_recovery() -> Result<(), TestError> {
         .registry
         .clone()
         .client(runner.store.clone(), Vec::new());
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     probe.failure.store(12, Ordering::SeqCst);
     let site = site().await;
     runner.admit();
@@ -113,7 +113,7 @@ async fn flush_ack_recovery() -> Result<(), TestError> {
         .registry
         .clone()
         .client(runner.store.clone(), Vec::new());
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let site = site().await;
     runner.admit();
     apply(&mut runner, &site).await;

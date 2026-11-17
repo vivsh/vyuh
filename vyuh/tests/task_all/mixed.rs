@@ -342,13 +342,24 @@ async fn mixed_lane_round_trip() -> Result<(), TestError> {
         let runtime = vyuh::testing::TestSite::new(site.clone());
         runtime.start_runtime().await?;
         for failed in [false, true] {
-            let mut ids = vec![site.tasks().submit(TupleGroup(failed)).await?.id()];
+            let mut ids = vec![
+                site.tasks()
+                    .submit(TupleGroup(failed))
+                    .await?
+                    .id()
+                    .ok_or_else(|| {
+                        TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+                    })?,
+            ];
             for mode in [0, 1] {
                 ids.push(
                     site.tasks()
                         .submit(DynamicGroup { mode, failed })
                         .await?
-                        .id(),
+                        .id()
+                        .ok_or_else(|| {
+                            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+                        })?,
                 );
             }
             for id in ids {
@@ -379,7 +390,10 @@ async fn empty_and_invalid_groups() -> Result<(), TestError> {
                 failed: false,
             })
             .await?
-            .id();
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let result = wait_result::<Summary>(&site, id).await?;
         assert_eq!(result.is_ok(), mode == 2);
         assert!(
@@ -408,7 +422,8 @@ async fn all_child_lane_overrides() -> Result<(), TestError> {
             failed: false,
         })
         .await?
-        .id();
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     assert_eq!(
         wait_result(&site, parent).await?,
         Ok(Summary {
@@ -443,7 +458,14 @@ async fn mixed_flow_and_batch() -> Result<(), TestError> {
         let site = Site::build(mixed_conf(), mixed_bundle(direct)).await?;
         let runtime = vyuh::testing::TestSite::new(site.clone());
         runtime.start_runtime().await?;
-        let parent = site.tasks().submit(ExtendedGroup).await?.id();
+        let parent = site
+            .tasks()
+            .submit(ExtendedGroup)
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         assert_eq!(
             wait_result(&site, parent).await?,
             Ok(("nested-5".to_owned(), 14_u32, 18_u32))

@@ -120,7 +120,7 @@ impl DbTaskStore {
             .await?;
         let mut wake_lanes = super::workflow::finalize_workflow(
             &mut tx,
-            &children,
+            children,
             deliveries,
             &waits,
             conf,
@@ -165,7 +165,7 @@ impl DbTaskStore {
         poll.wake_lanes.extend(
             super::workflow::finalize_workflow(
                 tx,
-                &children,
+                children,
                 deliveries,
                 &waits,
                 conf,

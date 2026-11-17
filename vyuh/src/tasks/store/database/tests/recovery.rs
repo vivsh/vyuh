@@ -320,7 +320,6 @@ async fn group(store: &DbTaskStore, poll: &TaskPoll, count: usize) -> Result<Tas
             record.last_result = None;
             crate::tasks::TaskWrite {
                 record,
-                ignore_conflicts: false,
                 initial_delay: None,
             }
         })

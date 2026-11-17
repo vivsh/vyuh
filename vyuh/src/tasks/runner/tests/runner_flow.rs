@@ -458,7 +458,6 @@ fn delivery_spawn(node: uuid::Uuid) -> Result<TaskCommit, String> {
             state: "null".into(),
             child: crate::tasks::TaskWrite {
                 record,
-                ignore_conflicts: false,
                 initial_delay: None,
             },
         },

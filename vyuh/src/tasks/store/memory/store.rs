@@ -28,6 +28,7 @@ pub(super) struct MemoryState {
     pub(super) nodes:
         HashMap<uuid::Uuid, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     pub(super) tasks: Vec<TaskRecord>,
+    pub(super) key_holds: HashMap<(String, String), TaskId>,
     pub(super) conf: Option<TaskStoreConf>,
     pub(super) rates: HashMap<String, RateBucket>,
     pub(super) schedules: HashMap<String, chrono::DateTime<chrono::Utc>>,
@@ -185,6 +186,7 @@ impl TaskStore for MemoryTaskStore {
             )
             .into());
         }
+        let now = chrono::Utc::now();
         let (poll, _) = workflow::atomic_operation(
             &mut state,
             Some(node),
@@ -192,8 +194,11 @@ impl TaskStore for MemoryTaskStore {
             &[],
             self.commit_batch_size,
             self.lease_duration,
-            chrono::Utc::now(),
+            now,
         )?;
+        if !claims.is_empty() {
+            sweep_keys(&mut state, now);
+        }
         Ok(poll)
     }
 
@@ -306,10 +311,10 @@ impl TaskStore for MemoryTaskStore {
         let mut staged = Vec::with_capacity(writes.len());
         let mut receipts = Vec::with_capacity(writes.len());
         for write in writes {
-            let receipt = stage_write(&state.tasks, &mut staged, write, now)?;
+            let receipt = stage_write(&state, &mut staged, write, now)?;
             receipts.push(receipt);
         }
-        state.tasks.extend(staged);
+        append_tasks(&mut state, staged);
         Ok(receipts)
     }
 
@@ -357,8 +362,8 @@ impl TaskStore for MemoryTaskStore {
         validate_write_lanes(&state, std::slice::from_ref(&scheduled.write))?;
         let now = chrono::Utc::now();
         let mut staged = Vec::with_capacity(1);
-        let receipt = stage_write(&state.tasks, &mut staged, scheduled.write, now)?;
-        state.tasks.extend(staged);
+        let receipt = stage_write(&state, &mut staged, scheduled.write, now)?;
+        append_tasks(&mut state, staged);
         state
             .schedules
             .insert(scheduled.name, now.max(scheduled.occurrence));
@@ -840,7 +845,7 @@ pub(super) fn configured_retry(
 
 /// Applies one submission to a cloned batch so conflicts remain atomic.
 pub(super) fn stage_write(
-    existing: &[TaskRecord],
+    state: &MemoryState,
     staged: &mut Vec<TaskRecord>,
     mut write: TaskWrite,
     now: chrono::DateTime<chrono::Utc>,
@@ -851,52 +856,85 @@ pub(super) fn stage_write(
         Some(delay) => checked_deadline(now, delay)?,
         None => Some(now),
     };
-    if existing
+    if state
+        .tasks
         .iter()
         .chain(staged.iter())
         .any(|task| task.id == write.record.id)
     {
         return Err(TaskRuntimeError::AlreadyExists(write.record.id.to_string()));
     }
-    if let Some(owner) = matching_key(existing, staged, &write.record, now) {
-        let same = owner.idempotency_fingerprint == write.record.idempotency_fingerprint;
-        return if same {
-            Ok(TaskReceipt::Existing(owner.id))
-        } else if write.ignore_conflicts {
-            Ok(TaskReceipt::Ignored(owner.id))
-        } else {
-            Err(TaskRuntimeError::IdempotencyConflict(owner.id))
-        };
+    if key_held(state, staged, &write.record) {
+        return Ok(TaskReceipt::KeyHeld);
     }
     let id = write.record.id;
     staged.push(write.record);
     Ok(TaskReceipt::Queued(id))
 }
 
-/// Finds the newest still-held handler-scoped idempotency key.
-pub(super) fn matching_key<'a>(
-    existing: &'a [TaskRecord],
-    staged: &'a [TaskRecord],
-    record: &TaskRecord,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<&'a TaskRecord> {
-    let key = record.idempotency_key.as_deref()?;
-    staged
-        .iter()
-        .rev()
-        .chain(existing.iter().rev())
-        .find(|task| {
-            task.name == record.name
-                && task.idempotency_key.as_deref() == Some(key)
-                && idempotency_held(task, now)
-        })
+/// Checks store-owned holds and earlier successful inputs in the uncommitted batch.
+pub(super) fn key_held(state: &MemoryState, staged: &[TaskRecord], record: &TaskRecord) -> bool {
+    let Some(key) = record_key(record) else {
+        return false;
+    };
+    state.key_holds.contains_key(&key)
+        || staged
+            .iter()
+            .any(|task| task.name == key.0 && task.idempotency_key.as_ref() == Some(&key.1))
 }
 
-pub(super) fn idempotency_held(task: &TaskRecord, now: chrono::DateTime<chrono::Utc>) -> bool {
-    is_active(task.status)
-        || task
-            .idempotency_expires_at
-            .is_some_and(|expiry| expiry > now)
+fn record_key(task: &TaskRecord) -> Option<(String, String)> {
+    task.idempotency_key
+        .as_ref()
+        .map(|key| (task.name.clone(), key.clone()))
+}
+
+/// Publishes authoritative holds only after staging and placement have succeeded.
+pub(super) fn append_tasks(state: &mut MemoryState, staged: Vec<TaskRecord>) {
+    for task in &staged {
+        if let Some(key) = record_key(task) {
+            state.key_holds.insert(key, task.id);
+        }
+    }
+    state.tasks.extend(staged);
+}
+
+/// Releases zero-retention keys from accepted terminal transitions only.
+pub(super) fn release_keys(state: &mut MemoryState, changed: &[TaskRecord]) {
+    for prior in changed.iter().filter(|row| row.idempotency_key.is_some()) {
+        let Some(task) = state.tasks.iter().find(|row| row.id == prior.id) else {
+            continue;
+        };
+        if !is_active(task.status)
+            && task.idempotency_expires_at.is_none()
+            && let Some(key) = record_key(task)
+            && state.key_holds.get(&key) == Some(&task.id)
+        {
+            state.key_holds.remove(&key);
+        }
+    }
+}
+
+/// Drops a bounded number of due holds without modifying historical expiry or task snapshots.
+pub(super) fn sweep_keys(state: &mut MemoryState, now: chrono::DateTime<chrono::Utc>) {
+    if state.key_holds.is_empty() {
+        return;
+    }
+    let limit = 250;
+    let mut removed = 0;
+    for task in &state.tasks {
+        if !is_active(task.status)
+            && task.idempotency_expires_at.is_some_and(|due| due <= now)
+            && let Some(key) = record_key(task)
+            && state.key_holds.get(&key) == Some(&task.id)
+        {
+            state.key_holds.remove(&key);
+            removed += 1;
+            if removed == limit {
+                break;
+            }
+        }
+    }
 }
 
 /// Applies a lifecycle transition to an owned task record.

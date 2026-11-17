@@ -135,10 +135,9 @@ pub(super) fn validate_group(
     let mut ids = std::collections::HashSet::new();
     for child in children {
         let record = &child.record;
-        if child.ignore_conflicts
-            || child
-                .initial_delay
-                .is_some_and(|delay| delay > crate::tasks::config::MAX_TASK_DELAY)
+        if child
+            .initial_delay
+            .is_some_and(|delay| delay > crate::tasks::config::MAX_TASK_DELAY)
             || !ids.insert(record.id)
             || !conf
                 .handlers

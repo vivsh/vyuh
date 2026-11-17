@@ -60,6 +60,9 @@ pub(super) struct TaskRow {
     #[column(type = "varchar(64)")]
     pub(super) idempotency_fingerprint: Option<String>,
     pub(super) idempotency_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    #[column(default = "true", insertable = false)]
+    pub(super) idempotency_held: bool,
     /// Schema-owned nullable FK; deleting a node clears only this ownership field.
     pub(super) node_id: Option<uuid::Uuid>,
     pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -127,6 +130,8 @@ impl From<TaskRecord> for TaskRow {
             idempotency_key: record.idempotency_key,
             idempotency_fingerprint: record.idempotency_fingerprint,
             idempotency_expires_at: record.idempotency_expires_at,
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
+            idempotency_held: true,
             node_id: record.node_id,
             ready_at: record.ready_at,
             created_at: record.created_at,
@@ -261,6 +266,7 @@ pub(super) struct RatePatch {
 }
 
 /// Mutable idempotency retention fields.
+#[cfg(feature = "mysql")]
 #[derive(Debug, Clone, db::Record)]
 #[table(name = "vyuh_task_idempotency")]
 pub(super) struct IdempotencyExpiryPatch {

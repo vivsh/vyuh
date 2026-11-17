@@ -55,7 +55,7 @@ impl DbTaskStore {
             .await?;
         let wake = super::workflow::finalize_workflow(
             &mut transaction,
-            &[],
+            Vec::new(),
             deliveries,
             &[],
             conf,

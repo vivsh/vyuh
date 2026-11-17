@@ -11,7 +11,7 @@ use super::{
     TaskReceipt, TaskRecord, TaskRegistry, TaskRuntimeError, TaskScheduleConf, TaskStore,
     TaskWrite,
     submission::{
-        build_box_write, build_writes, validate_filter, validate_payload, validate_spawn_options,
+        build_box_write, build_writes, validate_filter, validate_options, validate_payload,
     },
 };
 
@@ -286,7 +286,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
         state: &str,
         options: &TaskOptions,
     ) -> Result<super::TaskOutcome, TaskRuntimeError> {
-        validate_spawn_options(options)?;
+        validate_options(options)?;
         validate_payload(state, self.registry.config.payload_limit())?;
         let mut child = self.prepare_box_write(input, options.lane)?;
         child.initial_delay = options.initial_delay;

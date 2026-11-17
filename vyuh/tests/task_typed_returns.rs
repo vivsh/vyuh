@@ -47,24 +47,37 @@ async fn work_sleep_and_wake() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     let tasks = site.tasks();
-    let id = tasks.submit(PollWork(60_000)).await?.id();
+    let id =
+        tasks.submit(PollWork(60_000)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     let sleeping = wait_sleep(&site, id).await?;
     assert_eq!(sleeping.state::<u32>()?, Some(42));
     assert_eq!(sleeping.node_id(), None);
     assert_eq!(sleeping.step_attempts(), 0);
     assert_eq!(sleeping.attempts(), 1);
     assert!(!tasks.resume(id, ()).await?);
-    let unrelated = tasks.submit(Calculate(7)).await?.id();
+    let unrelated =
+        tasks.submit(Calculate(7)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     wait_status(&site, unrelated, TaskStatus::Succeeded).await?;
-    let fallback = tasks.submit(PollWork(100)).await?.id();
-    let zero_delay = tasks.submit(PollWork(0)).await?.id();
+    let fallback =
+        tasks.submit(PollWork(100)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
+    let zero_delay =
+        tasks.submit(PollWork(0)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     let delayed = tasks
         .submit_with(
             Calculate(9),
             TaskOptions::new().delay(Duration::from_secs(60)),
         )
         .await?
-        .id();
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     assert!(tasks.wake(delayed).await?);
     assert!(tasks.wake(id).await?);
     assert!(!tasks.wake(id).await?);
@@ -124,11 +137,15 @@ async fn typed_submission_routes_to_lane() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     let tasks = site.tasks();
-    let default = tasks.submit(Calculate(1)).await?.id();
+    let default =
+        tasks.submit(Calculate(1)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     let routed = tasks
         .submit_with(Calculate(2), TaskOptions::new().lane(BULK))
         .await?
-        .id();
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     let batch = tasks
         .submit_many_with(
             [Calculate(3), Calculate(2)],
@@ -136,8 +153,11 @@ async fn typed_submission_routes_to_lane() -> Result<(), TestError> {
         )
         .await?;
     assert_eq!(batch.len(), 2);
-    assert_eq!(batch.get(1), Some(&TaskReceipt::Existing(routed)));
-    let bulk = batch.first().ok_or(TestError::Missing)?.id();
+    assert_eq!(batch.get(1), Some(&TaskReceipt::KeyHeld));
+    let bulk = batch
+        .first()
+        .and_then(|receipt| receipt.id())
+        .ok_or(TestError::Missing)?;
     runtime.start_runtime().await?;
     for (id, lane, value) in [
         (default, DEFAULT_TASK_LANE, 2),
@@ -147,10 +167,7 @@ async fn typed_submission_routes_to_lane() -> Result<(), TestError> {
         wait_status(&site, id, TaskStatus::Succeeded).await?;
         assert_routed_result(&tasks, id, lane, value, retention).await?;
     }
-    assert_eq!(
-        tasks.submit(Calculate(2)).await?,
-        TaskReceipt::Existing(routed)
-    );
+    assert_eq!(tasks.submit(Calculate(2)).await?, TaskReceipt::KeyHeld);
     let replacement = tasks
         .submit_with(Calculate(1), TaskOptions::new().lane(BULK))
         .await?;
@@ -215,8 +232,18 @@ async fn direct_output_and_external_resume() -> Result<(), TestError> {
     .await?;
     let client = vyuh::testing::TestSite::new(site.clone());
     client.start_runtime().await?;
-    let direct = site.tasks().submit(Calculate(21)).await?.id();
-    let suspended = site.tasks().submit(AwaitResponse).await?.id();
+    let direct = site
+        .tasks()
+        .submit(Calculate(21))
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
+    let suspended = site
+        .tasks()
+        .submit(AwaitResponse)
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     wait_status(&site, direct, TaskStatus::Succeeded).await?;
     wait_status(&site, suspended, TaskStatus::Suspended).await?;
     assert_eq!(

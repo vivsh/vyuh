@@ -55,8 +55,59 @@ pub(super) async fn listen(
 
 /// Adds routing from changed rows only; the final aggregate forces notification evaluation.
 pub(super) fn notifying(mutation: &str) -> String {
+    notification_sql(
+        mutation,
+        "vyuh_tasks.node_id, vyuh_tasks.lane_name, vyuh_tasks.status",
+        "SELECT (SELECT count(*) FROM changed), (SELECT count(*) FROM notified)",
+    )
+}
+
+/// Returns only actually inserted IDs while keeping the existing committed wake semantics.
+pub(super) fn notifying_ids(mutation: &str) -> String {
+    notification_sql(
+        mutation,
+        "id, node_id, lane_name, status",
+        "SELECT id, (SELECT count(*) FROM notified) FROM changed",
+    )
+}
+
+/// Emits transactional hints from accepted final rows without rereading tasks.
+pub(super) async fn pending<'a>(
+    tx: &mut db::DbTransaction<'_>,
+    rows: impl IntoIterator<Item = &'a TaskRow>,
+) -> Result<(), TaskRuntimeError> {
+    let mut hints = std::collections::BTreeSet::new();
+    for row in rows.into_iter().filter(|row| row.status == 0) {
+        let channel = row.node_id.map_or_else(
+            || CHANNEL.to_owned(),
+            |id| format!("{CHANNEL}_{}", id.simple()),
+        );
+        let mut payload = serde_json::to_string(&row.lane_name)
+            .map_err(|error| TaskRuntimeError::TaskExecutionError(error.to_string()))?;
+        if payload.len() >= 7900 {
+            payload = "null".into();
+        }
+        hints.insert((channel, payload));
+    }
+    let hints = hints.into_iter().collect::<Vec<_>>();
+    let limit = super::queries::WRITE_CHUNK_SIZE.min(db::backend::PARAMETER_LIMIT / 2);
+    for chunk in hints.chunks(limit) {
+        let slots = values(&["channel", "payload"], chunk.len());
+        let query = format!(
+            "SELECT pg_notify(channel,payload) FROM (VALUES {slots}) AS h(channel,payload)"
+        );
+        let mut statement = db::Statement::raw(&query);
+        for (channel, payload) in chunk {
+            statement = statement.bind(channel.clone()).bind(payload.clone());
+        }
+        tx.execute(statement).await?;
+    }
+    Ok(())
+}
+
+fn notification_sql(mutation: &str, returning: &str, result: &str) -> String {
     format!(
-        "WITH changed AS ({mutation} RETURNING vyuh_tasks.node_id, vyuh_tasks.lane_name, vyuh_tasks.status),
+        "WITH changed AS ({mutation} RETURNING {returning}),
          targets AS (SELECT DISTINCT
            CASE WHEN node_id IS NULL THEN 'vyuh_tasks'
                 ELSE 'vyuh_tasks_' || replace(node_id::text, '-', '') END AS channel,
@@ -64,7 +115,7 @@ pub(super) fn notifying(mutation: &str) -> String {
                 THEN to_json(lane_name)::text ELSE 'null' END AS payload
            FROM changed WHERE status = 0),
          notified AS MATERIALIZED (SELECT pg_notify(channel, payload) FROM targets)
-         SELECT (SELECT count(*) FROM changed), (SELECT count(*) FROM notified)"
+         {result}"
     )
 }
 
@@ -141,7 +192,7 @@ pub(super) async fn update<T: db::Record>(
 }
 
 /// Renders schema-owned task column casts; no application strings enter SQL syntax.
-fn values(columns: &[&str], rows: usize) -> String {
+pub(super) fn values(columns: &[&str], rows: usize) -> String {
     (0..rows)
         .map(|row| {
             let fields = columns
@@ -152,7 +203,7 @@ fn values(columns: &[&str], rows: usize) -> String {
                         "id" | "parent_id" | "root_id" | "node_id" => "uuid",
                         "kind" | "status" => "smallint",
                         "attempts" | "step_attempts" | "remaining_completions" => "integer",
-                        "cancelled" => "boolean",
+                        "cancelled" | "idempotency_held" => "boolean",
                         "ready_at"
                         | "created_at"
                         | "updated_at"

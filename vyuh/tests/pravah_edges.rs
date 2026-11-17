@@ -52,7 +52,9 @@ impl PravahDispatcher for Dispatcher {
             value: input.value,
         });
         Ok(Some(match mode {
-            "conflict" => request.options(TaskOptions::new().ignore_conflicts())?,
+            "invalid-delay" => {
+                request.options(TaskOptions::new().delay(Duration::from_secs(u64::MAX)))?
+            }
             "delayed" => request.options(TaskOptions::new().delay(Duration::from_millis(80)))?,
             _ => request,
         }))
@@ -117,7 +119,7 @@ async fn rejected_routes_do_not_spawn() -> Result<(), TestError> {
     for mode in [
         "unknown",
         "flow",
-        "conflict",
+        "invalid-delay",
         "route-error",
         "route-panic",
         "graph-panic",
@@ -129,7 +131,10 @@ async fn rejected_routes_do_not_spawn() -> Result<(), TestError> {
                 value: 202,
             })
             .await?
-            .id();
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let task = terminal(&site, id).await?;
         assert_eq!(task.status(), TaskStatus::Failed, "{mode}");
         assert!(
@@ -171,7 +176,10 @@ async fn effect_outcome_matrix() -> Result<(), TestError> {
                 value: 202,
             })
             .await?
-            .id();
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let result = terminal(&site, id).await?.last_result::<u16>()?;
         match expected {
             Some(expected) => assert_eq!(result, Some(Ok(expected)), "{mode}"),
@@ -197,7 +205,16 @@ async fn concurrent_graphs_do_not_share_progress() -> Result<(), TestError> {
     runtime.start_runtime().await?;
     for (receipt, expected) in ids.into_iter().zip(200..232u16) {
         assert_eq!(
-            terminal(&site, receipt.id()).await?.last_result::<u16>()?,
+            terminal(
+                &site,
+                receipt
+                    .id()
+                    .ok_or_else(|| TaskRuntimeError::TaskExecutionError(
+                        "expected queued test task".into()
+                    ))?
+            )
+            .await?
+            .last_result::<u16>()?,
             Some(Ok(expected))
         );
     }
@@ -219,7 +236,8 @@ async fn delayed_effect_preserves_wait() -> Result<(), TestError> {
             value: 204,
         })
         .await?
-        .id();
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     assert_eq!(
         terminal(&site, id).await?.last_result::<u16>()?,
         Some(Ok(204))
@@ -262,7 +280,8 @@ async fn locked_effect_deadline() -> Result<(), TestError> {
             value: 206,
         })
         .await?
-        .id();
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     assert_eq!(
         terminal(&site, id).await?.last_result::<u16>()?,
         Some(Ok(206))

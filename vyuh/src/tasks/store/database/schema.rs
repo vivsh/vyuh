@@ -2,20 +2,21 @@
 
 use crate::db;
 
-use super::model::{
-    TaskIdempotencyRow, TaskLaneLockRow, TaskNodeRow, TaskRateRow, TaskRow, TaskScheduleRow,
-};
+#[cfg(feature = "mysql")]
+use super::model::TaskIdempotencyRow;
+use super::model::{TaskLaneLockRow, TaskNodeRow, TaskRateRow, TaskRow, TaskScheduleRow};
 
 /// Builds the desired task, idempotency, rate, and runtime coordination schema.
 pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
-    let mut schema = db::schema()
+    let builder = db::schema()
         .model::<TaskRow>()
         .model::<TaskNodeRow>()
-        .model::<TaskIdempotencyRow>()
         .model::<TaskRateRow>()
         .model::<TaskLaneLockRow>()
-        .model::<TaskScheduleRow>()
-        .build()?;
+        .model::<TaskScheduleRow>();
+    #[cfg(feature = "mysql")]
+    let builder = builder.model::<TaskIdempotencyRow>();
+    let mut schema = builder.build()?;
     if let Some(table) = schema.tables.get_mut("vyuh_tasks") {
         append_task_indexes(table);
         table.foreign_keys.push(db::schema::ForeignKey {
@@ -38,6 +39,21 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
 
 /// Adds per-lane readiness, node ownership, and diagnostic lookup indexes.
 fn append_task_indexes(table: &mut db::Table) {
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    table.indexes.extend([
+        index(
+            "idx_vyuh_tasks_held_key",
+            &["name", "idempotency_key"],
+            true,
+            Some(super::held::PREDICATE),
+        ),
+        index(
+            "idx_vyuh_tasks_held_expiry",
+            &["idempotency_expires_at", "id"],
+            false,
+            Some(super::held::EXPIRY_PREDICATE),
+        ),
+    ]);
     // PostgreSQL must retain readiness order across both eligible statuses.
     #[cfg(feature = "postgres")]
     let ready_columns: &[&str] = &["lane_name", "ready_at", "created_at", "id"];
@@ -133,3 +149,12 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/upgrade.rs"]
 mod upgrade;
+
+#[cfg(all(
+    test,
+    feature = "migrations",
+    feature = "test-support",
+    any(feature = "postgres", feature = "sqlite")
+))]
+#[path = "tests/key_hold_upgrade.rs"]
+mod key_hold_upgrade;

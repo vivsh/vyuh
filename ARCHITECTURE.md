@@ -88,10 +88,15 @@ Control notifications never bypass poll gates.
 Ordinary typed submission can select a configured lane once per batch. Flow
 spawn and all preparation can select a configured lane per child through
 the same registry validation before the store sees the outcome.
-Key identity remains handler-scoped; terminal retention
-uses the row's lane. This uses the existing admission and idempotency write
-paths without adding reads. Only explicit administrative reassignment moves
-unfinished tasks between lanes.
+Key identity remains handler-scoped; terminal retention uses the row's lane.
+PostgreSQL and SQLite arbitrate holds on the task row. Returned inserted IDs
+determine receipts and local placement; a held key cannot consume an ingress
+slot. Keyed workflow arbitration inserts provisional rows within the existing
+flush transaction; a rejected group removes only its transaction-owned
+provisionals and publishes nothing. Final admission and hints use the accepted
+rows without rereading them. MySQL/MariaDB retain batched owner-table
+arbitration with the same public receipt and release semantics. Only explicit
+administrative reassignment moves unfinished tasks between lanes.
 An explicit task wake advances only future `ready_at` on an eligible ownerless
 Pending row. The store commits a single conditional write and reuses the
 existing wake hints. This changes neither the claim predicate nor suspension
@@ -569,9 +574,9 @@ The `vyuh` crate is organized around these subsystems:
   not another owner of buffered outcomes; recovery prepares its own map from its
   retained immutable request. Fenced outcome reads retain deterministic identity
   order and atomic workflow mutations. There are no mixed store
-  turns or task renewal reads. A clone-shared counter spaces bounded physical
-  idempotency cleanup; logical expiry and lane lifecycle decisions remain
-  store-owned and are not deferred by that counter.
+  turns or task renewal reads. A clone-shared counter spaces bounded sweeps
+  of due positive-retention holds. Zero-retention release still commits with
+  the terminal outcome; lane lifecycle decisions do not wait for the sweep.
 - Vyuh-owned database integrations, such as PostgreSQL LISTEN/NOTIFY emitters,
   are layered over the Mool pool through extension traits and remain native to
   Vyuh.

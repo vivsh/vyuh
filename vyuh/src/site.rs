@@ -1651,10 +1651,10 @@ mod tests {
         )])
         .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL_TASK_LANE, 1)));
         let site = Site::build(crate::SiteConf::default().log_init(false), bundle).await?;
-        let receipt = site.tasks().submit(RuntimeTask).await?;
-        let task = site.tasks().get(receipt.id()).await?.ok_or_else(|| {
+        let id = site.tasks().submit(RuntimeTask).await?.queued_id()?;
+        let task = site.tasks().get(id).await?.ok_or_else(|| {
             SiteError::TaskRuntimeError(crate::tasks::TaskRuntimeError::TaskNotFound(
-                receipt.id().to_string(),
+                id.to_string(),
             ))
         })?;
 

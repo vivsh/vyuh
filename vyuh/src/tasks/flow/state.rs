@@ -93,7 +93,7 @@ impl<T> FlowState<T> {
         state: S,
         options: TaskOptions,
     ) -> Result<Self, TaskRuntimeError> {
-        crate::tasks::submission::validate_spawn_options(&options)?;
+        crate::tasks::submission::validate_options(&options)?;
         Ok(Self {
             inner: FlowValue::Spawn {
                 input: DataBox::new_data(input),

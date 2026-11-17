@@ -120,13 +120,15 @@ async fn run(site: &Site) -> Result<(), Error> {
         .submit(Question("What is the answer?".into()))
         .await
         .map_err(Error::other)?
-        .id();
+        .id()
+        .ok_or_else(|| Error::conflict("question key is held"))?;
     let external = site
         .tasks()
         .submit(Lookup("https://example.invalid".into()))
         .await
         .map_err(Error::other)?
-        .id();
+        .id()
+        .ok_or_else(|| Error::conflict("lookup key is held"))?;
     for id in [agent, external] {
         observe(site, id).await?;
     }

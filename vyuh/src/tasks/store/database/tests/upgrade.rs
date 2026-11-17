@@ -72,7 +72,7 @@ async fn seed_affinity(pool: &db::sqlx::SqlitePool, owner: uuid::Uuid) -> Result
 }
 /// Reconstructs only the predecessor schema; no legacy runtime adapter is retained.
 fn predecessor() -> Result<db::Schema, String> {
-    let mut schema = task_schema().map_err(|e| e.to_string())?;
+    let mut schema = owner_schema()?;
     let mut runtime = schema
         .tables
         .remove("vyuh_task_nodes")
@@ -99,6 +99,35 @@ fn predecessor() -> Result<db::Schema, String> {
         .ok_or("missing rates")?
         .columns
         .push(column("policy_fingerprint", "varchar(64)", false));
+    schema.prepare_loaded(dialect()).map_err(|e| e.to_string())
+}
+
+/// Reconstructs the 0017 owner-table schema for historical and key-hold rehearsals.
+pub(super) fn owner_schema() -> Result<db::Schema, String> {
+    let mut schema = task_schema().map_err(|e| e.to_string())?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        let tasks = schema.tables.get_mut("vyuh_tasks").ok_or("missing tasks")?;
+        tasks
+            .columns
+            .retain(|column| column.name != "idempotency_held");
+        tasks.indexes.retain(|index| {
+            !matches!(
+                index.name.as_str(),
+                "idx_vyuh_tasks_held_key" | "idx_vyuh_tasks_held_expiry"
+            )
+        });
+        let mut owner = db::schema()
+            .model::<super::TaskIdempotencyRow>()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut table = owner
+            .tables
+            .remove("vyuh_task_idempotency")
+            .ok_or("missing owners")?;
+        append_idempotency_indexes(&mut table);
+        schema.tables.insert(table.name.clone(), table);
+    }
     schema.prepare_loaded(dialect()).map_err(|e| e.to_string())
 }
 
@@ -222,7 +251,7 @@ fn pipeline_upgrade_matches_schema() -> Result<(), String> {
     let history = history()?;
     let planner = OfflinePlanner::new(dialect()).from_migrations(history.clone());
     let diff = planner
-        .make_migration(task_schema().map_err(|e| e.to_string())?, &[])
+        .make_migration(owner_schema()?, &[])
         .map_err(|e| format!("{e:?}"))?;
     if let Some(diff) = diff {
         return Err(diff.to_yaml_string().map_err(|e| e.to_string())?);

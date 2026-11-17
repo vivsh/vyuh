@@ -1,0 +1,59 @@
+# Stop all task workers and writers. Keep the old owner table inert after cutover.
+dependencies: [0017_local_sticky]
+atomic: true
+operations:
+  - type: statement
+    up: >-
+      CREATE TEMP TABLE vyuh_key_hold_preflight (
+        missing_active_owner integer NOT NULL CHECK (missing_active_owner = 0),
+        inconsistent_owner integer NOT NULL CHECK (inconsistent_owner = 0),
+        duplicate_ownership integer NOT NULL CHECK (duplicate_ownership = 0)
+      )
+  - type: statement
+    up: >-
+      INSERT INTO vyuh_key_hold_preflight
+      SELECT
+        CASE WHEN EXISTS (
+          SELECT 1 FROM vyuh_tasks t
+          WHERE t.status IN (0, 1, 2) AND t.idempotency_key IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM vyuh_task_idempotency o WHERE o.task_id = t.id)
+        ) THEN 1 ELSE 0 END,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM vyuh_task_idempotency o LEFT JOIN vyuh_tasks t ON t.id = o.task_id
+          WHERE t.id IS NULL OR t.name IS DISTINCT FROM o.task_name
+            OR t.idempotency_key IS DISTINCT FROM o.key_value
+            OR t.idempotency_expires_at IS DISTINCT FROM o.expires_at
+            OR t.status NOT IN (0, 1, 2, 3, 4)
+            OR (t.status IN (0, 1, 2) AND o.expires_at IS NOT NULL)
+            OR (t.status IN (3, 4) AND o.expires_at IS NULL)
+        ) THEN 1 ELSE 0 END,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM vyuh_task_idempotency GROUP BY task_name, key_value HAVING COUNT(*) > 1
+        ) OR EXISTS (
+          SELECT 1 FROM vyuh_task_idempotency GROUP BY task_id HAVING COUNT(*) > 1
+        ) THEN 1 ELSE 0 END
+  - type: statement
+    up: DROP TABLE vyuh_key_hold_preflight
+  - type: add_column
+    table_name: vyuh_tasks
+    column: {name: idempotency_held, type: boolean, nullable: false, default: 'true'}
+  - type: statement
+    up: >-
+      UPDATE vyuh_tasks SET idempotency_held = FALSE
+      WHERE idempotency_key IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM vyuh_task_idempotency o WHERE o.task_id = vyuh_tasks.id
+      )
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_held_key
+      columns: [name, idempotency_key]
+      unique: true
+      predicate: "idempotency_held = TRUE AND idempotency_key IS NOT NULL"
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_held_expiry
+      columns: [idempotency_expires_at, id]
+      unique: false
+      predicate: "idempotency_held = TRUE AND idempotency_key IS NOT NULL AND idempotency_expires_at IS NOT NULL"

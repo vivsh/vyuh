@@ -13,7 +13,6 @@ use crate::callables::DataBox;
 #[derive(Default)]
 pub struct TaskOptions {
     pub(crate) initial_delay: Option<Duration>,
-    pub(crate) ignore_conflicts: bool,
     pub(crate) lane: Option<TaskLane>,
 }
 
@@ -35,12 +34,6 @@ impl TaskOptions {
     /// Delays the first execution attempt.
     pub const fn delay(mut self, delay: Duration) -> Self {
         self.initial_delay = Some(delay);
-        self
-    }
-
-    /// Keeps non-conflicting batch entries when an idempotency key is reused.
-    pub const fn ignore_conflicts(mut self) -> Self {
-        self.ignore_conflicts = true;
         self
     }
 }
@@ -79,7 +72,6 @@ impl Clone for TaskOptions {
     fn clone(&self) -> Self {
         Self {
             initial_delay: self.initial_delay,
-            ignore_conflicts: self.ignore_conflicts,
             lane: self.lane,
         }
     }
@@ -90,7 +82,6 @@ impl fmt::Debug for TaskOptions {
         formatter
             .debug_struct("TaskOptions")
             .field("initial_delay", &self.initial_delay)
-            .field("ignore_conflicts", &self.ignore_conflicts)
             .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
@@ -101,29 +92,36 @@ impl fmt::Debug for TaskOptions {
 pub enum TaskReceipt {
     /// A new task was durably stored, or staged until commit in a caller-owned transaction.
     Queued(TaskId),
-    /// An identical idempotent task already exists.
-    Existing(TaskId),
-    /// A conflicting idempotent task was deliberately retained.
-    Ignored(TaskId),
+    /// This input was not inserted because its handler-scoped key was held.
+    KeyHeld,
 }
 
 impl TaskReceipt {
-    /// Returns the new or existing task identifier.
-    pub const fn id(self) -> TaskId {
+    /// Returns a new task ID only if this submission enqueued a task.
+    pub const fn id(self) -> Option<TaskId> {
         match self {
-            Self::Queued(id) | Self::Existing(id) | Self::Ignored(id) => id,
+            Self::Queued(id) => Some(id),
+            Self::KeyHeld => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_id(self) -> Result<TaskId, TaskRuntimeError> {
+        match self {
+            Self::Queued(id) => Ok(id),
+            _ => Err(TaskRuntimeError::TaskExecutionError(
+                "expected queued test task".into(),
+            )),
         }
     }
 }
 
-/// Store-facing task intent with resolved conflict behavior.
+/// Store-facing task intent with resolved routing and payload.
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct TaskWrite {
     /// Fully normalized task row waiting for store-relative timestamps.
     pub record: TaskRecord,
-    /// Whether an intent mismatch should retain the existing task.
-    pub ignore_conflicts: bool,
     /// Store-relative delay before the task first becomes eligible.
     pub initial_delay: Option<Duration>,
 }
@@ -147,11 +145,6 @@ pub(super) fn build_writes<T: Serialize + 'static>(
         }
         service.validate_object(&input)?;
         let key = service.idempotency_key(&input)?;
-        if key.is_none() && options.ignore_conflicts {
-            return Err(TaskRuntimeError::InvalidOptions(
-                "ignore_conflicts requires an idempotent task definition".into(),
-            ));
-        }
         let serialized = if key.is_some() {
             canonical_json(&input)?
         } else {
@@ -165,7 +158,6 @@ pub(super) fn build_writes<T: Serialize + 'static>(
             .transpose()?;
         writes.push(TaskWrite {
             record: build_record(name, serialized, key, fingerprint, lane, service.kind())?,
-            ignore_conflicts: options.ignore_conflicts,
             initial_delay: options.initial_delay,
         });
     }
@@ -207,19 +199,8 @@ pub(super) fn build_box_write(
             lane,
             service.kind(),
         )?,
-        ignore_conflicts: false,
         initial_delay: None,
     })
-}
-
-/// Rejects unsupported submission options before a child request can be returned.
-pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
-    if options.ignore_conflicts {
-        return Err(TaskRuntimeError::InvalidOptions(
-            "spawn cannot ignore idempotency conflicts".into(),
-        ));
-    }
-    validate_options(options)
 }
 
 /// Surfaces all accumulated builder failures at the submission terminal.

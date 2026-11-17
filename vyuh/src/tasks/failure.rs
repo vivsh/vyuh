@@ -87,9 +87,6 @@ pub enum TaskRuntimeError {
     #[error("Task lane '{0}' is not configured")]
     UnknownLane(String),
 
-    #[error("Idempotency key conflicts with task {0}")]
-    IdempotencyConflict(super::TaskId),
-
     #[error("Task lane '{0}' still has running work")]
     LaneBusy(String),
 

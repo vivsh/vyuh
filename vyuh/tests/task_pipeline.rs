@@ -8,14 +8,16 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::Notify;
 use vyuh::prelude::*;
-use vyuh::tasks::{TaskConf, TaskDefinition, TaskLaneConf, TaskLaneLock, TaskStatus};
+use vyuh::tasks::{
+    TaskConf, TaskDefinition, TaskLaneConf, TaskLaneLock, TaskRuntimeError, TaskStatus,
+};
 use vyuh::testing::TestSite;
 
 const SLOW: TaskLane = TaskLane::new("pipeline-slow");
 
 /// A retained lane owner can claim a later cohort instead of endlessly coordinating.
 #[tokio::test]
-async fn owned_lane_refills_after_flushing() {
+async fn owned_lane_refills_after_flushing() -> Result<(), TaskRuntimeError> {
     let site = Site::build(
         SiteConf::default().log_init(false).tasks(
             TaskConf::default()
@@ -40,15 +42,23 @@ async fn owned_lane_refills_after_flushing() {
     let runtime = TestSite::new(site.clone());
     runtime.start_runtime().await.unwrap();
     for value in 0..3 {
-        let id = site.tasks().submit(Fast(value)).await.unwrap().id();
+        let id = site
+            .tasks()
+            .submit(Fast(value))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         status(&site, id, TaskStatus::Succeeded).await;
     }
     runtime.shutdown_and_wait().await;
+    Ok(())
 }
 
 /// One batch invocation persists every constituent output at each database budget.
 #[tokio::test]
-async fn batches_persist_all_results() {
+async fn batches_persist_all_results() -> Result<(), TaskRuntimeError> {
     for limit in [1, 2, 4] {
         let site = Site::build(
             SiteConf::default().log_init(false).tasks(
@@ -74,7 +84,15 @@ async fn batches_persist_all_results() {
         let runtime = TestSite::new(site.clone());
         let mut ids = Vec::new();
         for value in 0..24 {
-            ids.push(site.tasks().submit(Fast(value)).await.unwrap().id());
+            ids.push(
+                site.tasks()
+                    .submit(Fast(value))
+                    .await?
+                    .id()
+                    .ok_or_else(|| {
+                        TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+                    })?,
+            );
         }
         runtime.start_runtime().await.unwrap();
         for (value, id) in ids.into_iter().enumerate() {
@@ -92,6 +110,7 @@ async fn batches_persist_all_results() {
         }
         runtime.shutdown_and_wait().await;
     }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -158,16 +177,26 @@ async fn gated(limit: usize) -> (TestSite, Arc<Notify>, Arc<AtomicUsize>) {
 
 /// A blocked invocation does not stop another lane from claiming and committing work.
 #[tokio::test]
-async fn unrelated_lanes_progress_at_each_database_limit() {
+async fn unrelated_lanes_progress_at_each_database_limit() -> Result<(), TaskRuntimeError> {
     for limit in [1, 2, 4] {
         let (runtime, release, _) = gated(limit).await;
         let site = runtime.site().clone();
-        let slow = site.tasks().submit(Slow).await.unwrap().id();
+        let slow = site.tasks().submit(Slow).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
         runtime.start_runtime().await.unwrap();
         status(&site, slow, TaskStatus::Running).await;
         let mut fast = Vec::new();
         for value in 0..16 {
-            fast.push(site.tasks().submit(Fast(value)).await.unwrap().id());
+            fast.push(
+                site.tasks()
+                    .submit(Fast(value))
+                    .await?
+                    .id()
+                    .ok_or_else(|| {
+                        TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+                    })?,
+            );
         }
         for id in fast {
             status(&site, id, TaskStatus::Succeeded).await;
@@ -180,14 +209,18 @@ async fn unrelated_lanes_progress_at_each_database_limit() {
         status(&site, slow, TaskStatus::Succeeded).await;
         runtime.shutdown_and_wait().await;
     }
+    Ok(())
 }
 
 /// Cancellation terminally commits while running execution continues; its later output is obsolete.
 #[tokio::test]
-async fn cancellation_overrides_a_later_successful_output() {
+async fn cancellation_overrides_a_later_successful_output() -> Result<(), TaskRuntimeError> {
     let (runtime, release, started) = gated(4).await;
     let site = runtime.site().clone();
-    let id = site.tasks().submit(Slow).await.unwrap().id();
+    let id =
+        site.tasks().submit(Slow).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     runtime.start_runtime().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while started.load(Ordering::SeqCst) == 0 {
@@ -214,14 +247,18 @@ async fn cancellation_overrides_a_later_successful_output() {
         .last_result::<u32>()
         .unwrap();
     assert!(matches!(result, Some(Err(failure)) if failure.message() == "Task cancelled"));
+    Ok(())
 }
 
 /// Graceful shutdown waits for admitted execution and persists its buffered completion.
 #[tokio::test]
-async fn shutdown_drains_admitted_work() {
+async fn shutdown_drains_admitted_work() -> Result<(), TaskRuntimeError> {
     let (runtime, release, started) = gated(2).await;
     let site = runtime.site().clone();
-    let id = site.tasks().submit(Slow).await.unwrap().id();
+    let id =
+        site.tasks().submit(Slow).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     runtime.start_runtime().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while started.load(Ordering::SeqCst) == 0 {
@@ -242,6 +279,7 @@ async fn shutdown_drains_admitted_work() {
         site.tasks().get(id).await.unwrap().unwrap().status(),
         TaskStatus::Succeeded
     );
+    Ok(())
 }
 
 /// Invalid database budgets are rejected while finalizing runtime configuration.

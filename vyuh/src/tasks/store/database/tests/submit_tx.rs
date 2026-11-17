@@ -31,6 +31,67 @@ fn job(key: u32) -> Job {
     Job { key, value: key }
 }
 
+/// Builds the task store for the same handler registrations as the transaction fixture.
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub(in crate::tasks::store::database) fn store(
+    pool: &db::DbPool,
+    conf: TaskConf,
+) -> Result<DbTaskStore, TaskRuntimeError> {
+    let mut registry = crate::tasks::TaskRegistry::new();
+    registry.register(crate::tasks::RegisteredTask::new(
+        TaskDefinition::new("tx_job").idempotency(TaskIdempotency::new("1", |input: &Job| {
+            input.key.to_string()
+        })),
+        |_: Data<Job>| async {},
+    ))?;
+    registry.register(crate::tasks::RegisteredTask::new(
+        TaskDefinition::new("tx_plain"),
+        |_: Data<Plain>| async {},
+    ))?;
+    let conf = registry.finalize(conf)?.store_conf()?;
+    Ok(DbTaskStore::new(
+        pool.as_sqlx().clone(),
+        1024,
+        Duration::from_secs(300),
+        conf,
+    ))
+}
+
+/// Builds store-level writes using the registered handlers' actual input format.
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub(in crate::tasks::store::database) fn writes(
+    keyed: bool,
+    lane: TaskLane,
+    start: u32,
+    count: usize,
+) -> Result<Vec<TaskWrite>, String> {
+    (start..start + count as u32)
+        .map(|n| {
+            let name = if keyed { "tx_job" } else { "tx_plain" };
+            let input = if keyed {
+                serde_json::to_string(&job(n))
+            } else {
+                serde_json::to_string(&Plain(n))
+            }
+            .map_err(error)?;
+            let fingerprint = keyed.then(|| blake3::hash(input.as_bytes()).to_hex().to_string());
+            let record = crate::tasks::submission::build_record(
+                name,
+                input,
+                keyed.then(|| n.to_string()),
+                fingerprint,
+                lane,
+                crate::tasks::TaskKind::Work,
+            )
+            .map_err(error)?;
+            Ok(TaskWrite {
+                record,
+                initial_delay: None,
+            })
+        })
+        .collect()
+}
+
 /// The live-backend tests provision a fresh database from the task schema.
 pub(in crate::tasks::store::database) async fn fixture()
 -> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
@@ -38,7 +99,7 @@ pub(in crate::tasks::store::database) async fn fixture()
 }
 
 /// Builds a producer-only site with the supplied lane policies against the real schema.
-async fn fixture_with(
+pub(in crate::tasks::store::database) async fn fixture_with(
     task_conf: TaskConf,
 ) -> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
     #[cfg(feature = "sqlite")]
@@ -59,11 +120,17 @@ async fn fixture_with(
         async move { input.value }
     };
     let runtime = TestSite::from_pool(
-        SiteConf::default().log_init(false).tasks(
-            task_conf
-                .poll_interval(Duration::from_millis(5))
-                .fallback_poll_interval(Duration::from_millis(20)),
-        ),
+        SiteConf::default()
+            .database(db::DbConf {
+                lazy: false,
+                ..Default::default()
+            })
+            .log_init(false)
+            .tasks(
+                task_conf
+                    .poll_interval(Duration::from_millis(5))
+                    .fallback_poll_interval(Duration::from_millis(20)),
+            ),
         bundles::bundle([
             bundles::work(
                 handler,
@@ -100,16 +167,30 @@ async fn submission_lane_retention() -> Result<(), String> {
     let conf = routing_conf();
     let (database, runtime, _) = fixture_with(conf.clone()).await?;
     let tasks = runtime.site().tasks();
-    let default = tasks.submit(job(1)).await.map_err(error)?.id();
-    let short = submit_to(&tasks, job(2), SHORT_RETENTION).await?.id();
-    let long = submit_to(&tasks, job(3), LONG_RETENTION).await?.id();
+    let default = tasks
+        .submit(job(1))
+        .await
+        .map_err(error)?
+        .queued_id()
+        .map_err(error)?;
+    let short = submit_to(&tasks, job(2), SHORT_RETENTION)
+        .await?
+        .queued_id()
+        .map_err(error)?;
+    let long = submit_to(&tasks, job(3), LONG_RETENTION)
+        .await?
+        .queued_id()
+        .map_err(error)?;
     let bulk = tasks
         .submit_many_with([job(4), job(2)], TaskOptions::new().lane(LONG_RETENTION))
         .await
         .map_err(error)?;
-    assert_eq!(bulk.get(1), Some(&TaskReceipt::Existing(short)));
-    let fourth = bulk.first().ok_or("missing fourth task")?.id();
-    assert_conflict(&tasks, short).await?;
+    assert_eq!(bulk.get(1), Some(&TaskReceipt::KeyHeld));
+    let fourth = bulk
+        .first()
+        .and_then(|receipt| receipt.id())
+        .ok_or("missing fourth task")?;
+    assert_conflict(&tasks).await?;
     finalize_lanes(database.pool(), conf, [default, short, long, fourth]).await?;
     for (id, lane, seconds) in [
         (default, DEFAULT_TASK_LANE, None),
@@ -132,7 +213,7 @@ async fn submission_lane_retention() -> Result<(), String> {
     );
     assert_eq!(
         tasks.submit(job(2)).await.map_err(error)?,
-        TaskReceipt::Existing(short)
+        TaskReceipt::KeyHeld
     );
     runtime.shutdown_and_wait().await;
     database.teardown().await.map_err(error)
@@ -146,21 +227,80 @@ async fn submit_to(tasks: &Tasks, job: Job, lane: TaskLane) -> Result<TaskReceip
 }
 
 /// A conflicting payload in another lane cannot adopt or move the key owner.
-async fn assert_conflict(tasks: &Tasks, owner: TaskId) -> Result<(), String> {
+async fn assert_conflict(tasks: &Tasks) -> Result<(), String> {
     let other = Job { key: 2, value: 42 };
-    assert!(matches!(
-        tasks.submit_with(other.clone(), TaskOptions::new().lane(LONG_RETENTION)).await,
-        Err(TaskRuntimeError::IdempotencyConflict(id)) if id == owner
-    ));
-    let ignored = tasks
-        .submit_with(
-            other,
-            TaskOptions::new().lane(LONG_RETENTION).ignore_conflicts(),
-        )
+    let receipt = tasks
+        .submit_with(other, TaskOptions::new().lane(LONG_RETENTION))
         .await
         .map_err(error)?;
-    assert_eq!(ignored, TaskReceipt::Ignored(owner));
+    assert_eq!(receipt, TaskReceipt::KeyHeld);
+    assert_eq!(receipt.id(), None);
     Ok(())
+}
+
+/// All SQL backends retain a due key until maintenance, then leave its task history intact.
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "requires an isolated dbharness admin URL"
+)]
+async fn positive_hold_is_sweep_only() -> Result<(), String> {
+    let conf = TaskConf::default().lane(
+        TaskLaneConf::new(SHORT_RETENTION, 2).idempotency_retention(Duration::from_millis(5)),
+    );
+    let (database, runtime, _) = fixture_with(conf).await?;
+    let tasks = runtime.site().tasks();
+    let id = submit_to(&tasks, job(8), SHORT_RETENTION)
+        .await?
+        .queued_id()
+        .map_err(error)?;
+    tasks.cancel(id).await.map_err(error)?;
+    let expiry = tasks
+        .get(id)
+        .await
+        .map_err(error)?
+        .and_then(|record| record.idempotency_expires_at())
+        .ok_or("no retained deadline")?;
+    wait_for_db_time(database.pool(), expiry).await?;
+    assert_eq!(
+        tasks.submit(job(8)).await.map_err(error)?,
+        TaskReceipt::KeyHeld
+    );
+    let mut tx = database.pool().begin().await.map_err(error)?;
+    delete_expired_owners(&mut tx, expiry, 250)
+        .await
+        .map_err(error)?;
+    tx.commit().await.map_err(error)?;
+    assert!(
+        matches!(tasks.submit(job(8)).await.map_err(error)?, TaskReceipt::Queued(new) if new != id)
+    );
+    assert_eq!(
+        tasks
+            .get(id)
+            .await
+            .map_err(error)?
+            .and_then(|record| record.idempotency_expires_at()),
+        Some(expiry)
+    );
+    runtime.shutdown_and_wait().await;
+    database.teardown().await.map_err(error)
+}
+
+/// Waits for the store's clock; SQLite and MySQL may report whole seconds.
+async fn wait_for_db_time(pool: &db::DbPool, expiry: DateTime<Utc>) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let mut tx = pool.begin().await.map_err(error)?;
+            let now = statement_now(&mut tx).await.map_err(error)?;
+            tx.commit().await.map_err(error)?;
+            if now >= expiry {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(error)?
 }
 
 /// Commits one shared terminal batch without requiring a scheduler timing assertion.
@@ -310,16 +450,21 @@ async fn max_keyed_batch() -> Result<(), String> {
         .await
         .map_err(error)?;
     assert_eq!(replay.len(), limit as usize);
-    for (original, duplicate) in staged.iter().rev().zip(replay) {
-        assert_eq!(duplicate, TaskReceipt::Existing(original.id()));
-    }
+    assert!(
+        replay
+            .iter()
+            .all(|receipt| *receipt == TaskReceipt::KeyHeld)
+    );
     tx.commit().await.map_err(error)?;
-    let counts: (i64, i64) = db::sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM vyuh_tasks), (SELECT COUNT(*) FROM vyuh_task_idempotency)",
-    )
-    .fetch_one(pool.as_sqlx())
-    .await
-    .map_err(error)?;
+    #[cfg(feature = "mysql")]
+    let sql =
+        "SELECT (SELECT count(*) FROM vyuh_tasks), (SELECT count(*) FROM vyuh_task_idempotency)";
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    let sql = "SELECT count(*), count(CASE WHEN idempotency_held AND idempotency_key IS NOT NULL THEN 1 END) FROM vyuh_tasks";
+    let counts: (i64, i64) = db::sqlx::query_as(sql)
+        .fetch_one(pool.as_sqlx())
+        .await
+        .map_err(error)?;
     let count = i64::from(limit) * 2;
     assert_eq!(counts, (count, count));
     runtime.shutdown_and_wait().await;
@@ -327,6 +472,7 @@ async fn max_keyed_batch() -> Result<(), String> {
 }
 
 /// Mixed groups match exact pairs even when keys overlap, and return owners by ID.
+#[cfg(feature = "mysql")]
 #[tokio::test]
 #[cfg_attr(
     not(feature = "sqlite"),
@@ -364,6 +510,7 @@ async fn mixed_key_owner_pairs() -> Result<(), String> {
     database.teardown().await.map_err(error)
 }
 
+#[cfg(feature = "mysql")]
 fn key_owner(task_name: &str, key: &str, now: DateTime<Utc>) -> TaskIdempotencyRow {
     TaskIdempotencyRow {
         id: uuid::Uuid::now_v7(),
@@ -425,8 +572,12 @@ async fn atomic_visibility() -> Result<(), String> {
     let tasks = site.tasks();
     let mut tx = pool.begin().await.map_err(error)?;
     domain_write(&mut tx).await?;
-    let rolled_back = tasks.submit_tx(&mut tx, job(1)).await.map_err(error)?;
-    assert!(matches!(rolled_back, TaskReceipt::Queued(_)));
+    let rolled_back = tasks
+        .submit_tx(&mut tx, job(1))
+        .await
+        .map_err(error)?
+        .queued_id()
+        .map_err(error)?;
     let staged: i64 = tx
         .fetch_scalar(db::Statement::raw(
             "SELECT COUNT(*) FROM vyuh_tasks WHERE status = 0 AND node_id IS NULL",
@@ -434,7 +585,7 @@ async fn atomic_visibility() -> Result<(), String> {
         .await
         .map_err(error)?;
     assert_eq!(staged, 1);
-    assert!(tasks.get(rolled_back.id()).await.map_err(error)?.is_none());
+    assert!(tasks.get(rolled_back).await.map_err(error)?.is_none());
     assert_eq!(domain_count(site).await?, 0);
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -442,12 +593,16 @@ async fn atomic_visibility() -> Result<(), String> {
 
     let mut tx = pool.begin().await.map_err(error)?;
     domain_write(&mut tx).await?;
-    let committed = tasks.submit_tx(&mut tx, job(1)).await.map_err(error)?;
-    assert!(matches!(committed, TaskReceipt::Queued(_)));
-    assert_ne!(rolled_back.id(), committed.id());
-    assert!(tasks.get(rolled_back.id()).await.map_err(error)?.is_none());
+    let committed = tasks
+        .submit_tx(&mut tx, job(1))
+        .await
+        .map_err(error)?
+        .queued_id()
+        .map_err(error)?;
+    assert_ne!(rolled_back, committed);
+    assert!(tasks.get(rolled_back).await.map_err(error)?.is_none());
     tx.commit().await.map_err(error)?;
-    wait_result(site, committed.id()).await?;
+    wait_result(site, committed).await?;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(domain_count(site).await?, 1);
     runtime.shutdown_and_wait().await;
@@ -471,14 +626,13 @@ async fn bulk_and_conflict() -> Result<(), String> {
         .await
         .map_err(error)?;
     let [
-        TaskReceipt::Queued(two),
+        TaskReceipt::Queued(_),
         TaskReceipt::Queued(one),
-        TaskReceipt::Existing(dup),
+        TaskReceipt::KeyHeld,
     ] = receipts.as_slice()
     else {
         return Err("unexpected bulk receipts".into());
     };
-    assert_eq!(two, dup);
     tx.commit().await.map_err(error)?;
     let info = tasks
         .get(*one)
@@ -490,9 +644,13 @@ async fn bulk_and_conflict() -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(error)?;
     domain_write(&mut tx).await?;
     let mut savepoint = tx.begin_nested().await.map_err(error)?;
+    let mixed = tasks
+        .submit_many_tx(&mut savepoint, [job(3), Job { key: 1, value: 99 }])
+        .await
+        .map_err(error)?;
     assert!(matches!(
-        tasks.submit_many_tx(&mut savepoint, [job(3), Job { key: 1, value: 99 }]).await,
-        Err(TaskRuntimeError::IdempotencyConflict(id)) if id == *one
+        mixed.as_slice(),
+        [TaskReceipt::Queued(_), TaskReceipt::KeyHeld]
     ));
     savepoint.rollback().await.map_err(error)?;
     assert!(matches!(
@@ -552,7 +710,7 @@ async fn concurrent_duplicate() -> Result<(), String> {
         .await
         .map_err(error)?
         .map_err(error)??;
-    assert_eq!(duplicate, TaskReceipt::Existing(receipt.id()));
+    assert_eq!(duplicate, TaskReceipt::KeyHeld);
     runtime.shutdown_and_wait().await;
     database.teardown().await.map_err(error)
 }
@@ -624,7 +782,7 @@ async fn rollback_partial_batch() -> Result<(), String> {
     }
     tx.rollback().await.map_err(error)?;
     let writes: (i64, i64) = db::sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM vyuh_tasks), (SELECT COUNT(*) FROM vyuh_task_idempotency)",
+        "SELECT count(*), count(CASE WHEN idempotency_held AND idempotency_key IS NOT NULL THEN 1 END) FROM vyuh_tasks",
     )
     .fetch_one(pool.as_sqlx())
     .await

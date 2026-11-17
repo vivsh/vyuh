@@ -147,10 +147,16 @@ impl DbTaskStore {
         now: DateTime<Utc>,
         delivery: Option<(uuid::Uuid, usize)>,
     ) -> Result<(Vec<TaskReceipt>, Vec<TaskRecord>), TaskRuntimeError> {
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        if writes
+            .iter()
+            .any(|write| write.record.idempotency_key.is_some())
+        {
+            return super::held::submit(self, transaction, writes, now, delivery).await;
+        }
         let (prepared, key_rows) = prepare_writes(writes, now)?;
         upsert_key_owners(transaction, &key_rows, super::queries::WRITE_CHUNK_SIZE).await?;
         let owners = load_key_owners(transaction, &key_rows).await?;
-        let owners = replace_expired_owners(transaction, owners, &key_rows, now).await?;
         let (mut rows, receipts) = resolve_writes(prepared, owners)?;
         let tasks = self.admit_rows(&mut rows, delivery, now)?;
         if !rows.is_empty() {
@@ -191,11 +197,7 @@ impl DbTaskStore {
                 break;
             }
             let mut record = TaskRecord::try_from(row.clone())?;
-            if record.node_id.is_some()
-                || (record.parent_id.is_some()
-                    && !crate::tasks::store::transitions::sticky(&record, &self.runtime_conf))
-                || !crate::tasks::store::transitions::direct(&record, &self.runtime_conf, now)
-            {
+            if !self.directly_eligible(&record, now) {
                 continue;
             }
             crate::tasks::store::transitions::admit(&mut record, node, now)?;
@@ -204,6 +206,38 @@ impl DbTaskStore {
             remaining -= 1;
         }
         Ok(tasks)
+    }
+
+    fn directly_eligible(&self, record: &TaskRecord, now: DateTime<Utc>) -> bool {
+        record.node_id.is_none()
+            && (record.parent_id.is_none()
+                || crate::tasks::store::transitions::sticky(record, &self.runtime_conf))
+            && crate::tasks::store::transitions::direct(record, &self.runtime_conf, now)
+    }
+
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    /// Only a tentative keyed admission can vacate a slot for a later eligible row.
+    pub(super) fn admission_backfill(
+        &self,
+        rows: &[TaskRow],
+        admitted: &[TaskRecord],
+        delivery: Option<(uuid::Uuid, usize)>,
+        now: DateTime<Utc>,
+    ) -> Result<bool, TaskRuntimeError> {
+        if !delivery.is_some_and(|(_, limit)| limit == admitted.len())
+            || !admitted.iter().any(|task| task.idempotency_key.is_some())
+        {
+            return Ok(false);
+        }
+        for row in rows
+            .iter()
+            .filter(|row| row.status == TaskStatus::Pending.as_i16())
+        {
+            if self.directly_eligible(&TaskRecord::try_from(row.clone())?, now) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -293,19 +327,25 @@ pub(super) async fn delete_expired_owners(
     now: DateTime<Utc>,
     limit: usize,
 ) -> Result<(), TaskRuntimeError> {
-    let table = DbTaskStore::idempotency_table();
-    let expired = db::from(&table)
-        .filter(table.expires_at.lte(db::val(Some(now))))
-        .sort(table.expires_at.asc())
-        .slice::<TaskIdempotencyRow>(0, limit)
-        .exec(&mut *transaction)
-        .await?;
-    let ids = expired.into_iter().map(|row| row.id).collect::<Vec<_>>();
-    delete_expired_owner_ids(transaction, ids, now).await
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    return super::held::sweep(transaction, now, limit).await;
+    #[cfg(feature = "mysql")]
+    {
+        let table = DbTaskStore::idempotency_table();
+        let expired = db::from(&table)
+            .filter(table.expires_at.lte(db::val(Some(now))))
+            .sort(table.expires_at.asc())
+            .slice::<TaskIdempotencyRow>(0, limit)
+            .exec(&mut *transaction)
+            .await?;
+        let ids = expired.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        delete_expired_owner_ids(transaction, ids, now).await
+    }
 }
 
 /// Rechecks expiry at deletion so a stale sweep cannot remove a renewed reservation.
-pub(super) async fn delete_expired_owner_ids(
+#[cfg(feature = "mysql")]
+async fn delete_expired_owner_ids(
     transaction: &mut db::DbTransaction<'_>,
     ids: Vec<uuid::Uuid>,
     now: DateTime<Utc>,
@@ -379,7 +419,7 @@ pub(super) fn resolve_writes(
         let task_id = prepared.write.record.id;
         let receipt = match prepared.owner_key {
             None => TaskReceipt::Queued(task_id),
-            Some(key) => resolve_owner(&prepared.write, owners.get(&key), task_id)?,
+            Some(key) => resolve_owner(owners.get(&key), task_id)?,
         };
         if matches!(receipt, TaskReceipt::Queued(_)) {
             rows.push(TaskRow::from(prepared.write.record));
@@ -390,7 +430,6 @@ pub(super) fn resolve_writes(
 }
 
 pub(super) fn resolve_owner(
-    write: &TaskWrite,
     owner: Option<&TaskIdempotencyRow>,
     task_id: TaskId,
 ) -> Result<TaskReceipt, TaskRuntimeError> {
@@ -400,15 +439,7 @@ pub(super) fn resolve_owner(
     if owner.task_id == task_id.into_uuid() {
         return Ok(TaskReceipt::Queued(task_id));
     }
-    if write.record.idempotency_fingerprint.as_deref() == Some(owner.fingerprint.as_str()) {
-        Ok(TaskReceipt::Existing(TaskId::new(owner.task_id)))
-    } else if write.ignore_conflicts {
-        Ok(TaskReceipt::Ignored(TaskId::new(owner.task_id)))
-    } else {
-        Err(TaskRuntimeError::IdempotencyConflict(TaskId::new(
-            owner.task_id,
-        )))
-    }
+    Ok(TaskReceipt::KeyHeld)
 }
 
 /// Builds the handler-scoped owner row for one keyed task intent.
@@ -545,58 +576,6 @@ fn owner_predicate(
         groups.push_back(left.or(right));
     }
     None
-}
-
-/// Replaces expired owners in one delete and insert pair while rows are locked.
-pub(super) async fn replace_expired_owners(
-    transaction: &mut db::DbTransaction<'_>,
-    mut owners: Vec<TaskIdempotencyRow>,
-    candidates: &[TaskIdempotencyRow],
-    now: DateTime<Utc>,
-) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
-    let expired = expired_replacements(&owners, candidates, now);
-    if expired.is_empty() {
-        return Ok(owners);
-    }
-    let expired_ids = expired.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    let replaced_ids = expired_ids.iter().copied().collect::<HashSet<_>>();
-    let replacements = expired
-        .into_iter()
-        .map(|(_, replacement)| replacement)
-        .collect::<Vec<_>>();
-    let table = DbTaskStore::idempotency_table();
-    db::from(&table)
-        .filter(table.id.in_values(expired_ids))
-        .delete()
-        .exec(&mut *transaction)
-        .await?;
-    db::from(&table)
-        .insert_many(&replacements)
-        .exec(transaction)
-        .await?;
-    owners.retain(|owner| !replaced_ids.contains(&owner.id));
-    owners.extend(replacements);
-    Ok(owners)
-}
-
-pub(super) fn expired_replacements(
-    owners: &[TaskIdempotencyRow],
-    candidates: &[TaskIdempotencyRow],
-    now: DateTime<Utc>,
-) -> Vec<(uuid::Uuid, TaskIdempotencyRow)> {
-    owners
-        .iter()
-        .filter(|owner| owner.expires_at.is_some_and(|expiry| expiry <= now))
-        .filter_map(|owner| {
-            candidates
-                .iter()
-                .find(|candidate| {
-                    candidate.task_name == owner.task_name && candidate.key_value == owner.key_value
-                })
-                .cloned()
-                .map(|replacement| (owner.id, replacement))
-        })
-        .collect()
 }
 
 /// Creates the initial schedule row without treating its first occurrence as complete.

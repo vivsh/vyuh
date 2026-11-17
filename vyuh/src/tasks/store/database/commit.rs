@@ -1,21 +1,19 @@
 //! Fenced outcome acceptance, cancellation finalization, and atomic lifecycle commits.
 
-use super::model::ResumePatch;
+#[cfg(feature = "mysql")]
+use super::model::IdempotencyExpiryPatch;
+use super::model::{ResumePatch, TaskRow};
+use super::queries::add_time;
 use super::queries::{StoreRow, statement_now};
 use super::store::DbTaskStore;
 use super::workflow::{self, queue_delivery};
-use super::{
-    model::{IdempotencyExpiryPatch, TaskRow},
-    queries::add_time,
-};
 use crate::db::{DbSession as _, Record as _};
+#[cfg(feature = "mysql")]
+use crate::tasks::IdempotencyRetention;
 use crate::tasks::store::StoreFailure;
 use crate::{
     db,
-    tasks::{
-        IdempotencyRetention, TaskCommit, TaskId, TaskOutcome, TaskRecord, TaskRetry,
-        TaskRuntimeError, TaskStatus,
-    },
+    tasks::{TaskCommit, TaskId, TaskOutcome, TaskRecord, TaskRetry, TaskRuntimeError, TaskStatus},
 };
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
@@ -133,7 +131,7 @@ impl DbTaskStore {
         tasks.extend(admitted.into_iter().map(std::sync::Arc::new));
         let wake_lanes = workflow::finalize_admitted(
             &mut transaction,
-            &children,
+            children,
             deliveries,
             &waits,
             conf,
@@ -515,35 +513,46 @@ pub(super) async fn update_idempotency_batch(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
 ) -> Result<(), TaskRuntimeError> {
-    let table = DbTaskStore::idempotency_table();
-    let (active, retained) = retention_groups(rows, conf)?;
-    if !active.is_empty() {
-        db::from(&table)
-            .filter(table.task_id.in_values(active))
-            .delete()
-            .exec(transaction)
-            .await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        let _ = transaction;
+        return super::held::finish(rows, conf, now);
     }
-    for (duration, ids) in retained {
-        let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
-        let patch = IdempotencyExpiryPatch {
-            expires_at: Some(expires),
-            updated_at: now,
-        };
-        db::from(&table)
-            .filter(table.task_id.in_values(ids))
-            .update(&patch)
-            .exec(transaction)
-            .await?;
-        apply_expiry(rows, conf, duration, expires)?;
+    #[cfg(feature = "mysql")]
+    {
+        let table = DbTaskStore::idempotency_table();
+        let (active, retained) = retention_groups(rows, conf)?;
+        if !active.is_empty() {
+            db::from(&table)
+                .filter(table.task_id.in_values(active))
+                .delete()
+                .exec(transaction)
+                .await?;
+        }
+        for (duration, ids) in retained {
+            let expires = add_time(now, chrono_duration(duration)?, "idempotency retention")?;
+            let patch = IdempotencyExpiryPatch {
+                expires_at: Some(expires),
+                updated_at: now,
+            };
+            db::from(&table)
+                .filter(table.task_id.in_values(ids))
+                .update(&patch)
+                .exec(transaction)
+                .await?;
+            apply_expiry(rows, conf, duration, expires)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
+#[cfg(feature = "mysql")]
 type RetentionGroup = (Duration, Vec<uuid::Uuid>);
+#[cfg(feature = "mysql")]
 type RetentionGroups = (Vec<uuid::Uuid>, Vec<RetentionGroup>);
 
 /// Groups terminal idempotent rows by the retention policy of their stored lane.
+#[cfg(feature = "mysql")]
 fn retention_groups(
     rows: &mut [TaskRow],
     conf: &crate::tasks::TaskStoreConf,
@@ -572,6 +581,7 @@ fn retention_groups(
 }
 
 /// Reflects one set-based retained-key write in the loaded task rows.
+#[cfg(feature = "mysql")]
 fn apply_expiry(
     rows: &mut [TaskRow],
     conf: &crate::tasks::TaskStoreConf,
@@ -589,6 +599,7 @@ fn apply_expiry(
 }
 
 /// Returns the retention inherited by one idempotent task row.
+#[cfg(feature = "mysql")]
 fn retention_for(
     row: &TaskRow,
     conf: &crate::tasks::TaskStoreConf,
@@ -596,6 +607,7 @@ fn retention_for(
     conf.idempotency_retention(&row.name, &row.lane_name)
 }
 
+#[cfg(feature = "mysql")]
 fn is_terminal_idempotent(row: &TaskRow) -> Result<bool, TaskRuntimeError> {
     Ok(row.idempotency_key.is_some()
         && matches!(
@@ -631,6 +643,12 @@ pub(super) async fn batch_update_rows(
     if rows.iter().any(|row| row.cancelled) {
         columns.extend((&table.cancelled).into_column_refs());
     }
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    let releases_hold = rows.iter().any(|row| !row.idempotency_held);
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    if releases_hold {
+        columns.extend((&table.idempotency_held).into_column_refs());
+    }
     #[cfg(feature = "postgres")]
     let changed = if rows.iter().any(|row| row.status == 0) {
         let mut names = vec![
@@ -647,6 +665,9 @@ pub(super) async fn batch_update_rows(
         ];
         if rows.iter().any(|row| row.cancelled) {
             names.push("cancelled");
+        }
+        if releases_hold {
+            names.push("idempotency_held");
         }
         super::notify::update(transaction, rows, &names, batch_size).await?
     } else {

@@ -153,7 +153,7 @@ async fn flow_metadata_and_scheduled_kind() -> Result<(), TestError> {
         )
         .await?;
     let task = store
-        .get_task(receipt.id())
+        .get_task(receipt.queued_id()?)
         .await?
         .ok_or_else(|| TaskRuntimeError::TaskNotFound("fixture".into()))?;
     assert_eq!(task.kind, TaskKind::Flow);

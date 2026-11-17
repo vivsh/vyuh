@@ -10,8 +10,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use super::lane_owner::{memory_activate, memory_owner_poll};
 use super::queries::{finalize_idempotency, is_due};
 use super::store::{
-    MemoryState, MemoryTaskStore, apply_outcome, claim_tasks_state, commit_outcomes_state,
-    memory_commit_allowed, stage_write, validate_write_lanes,
+    MemoryState, MemoryTaskStore, append_tasks, apply_outcome, claim_tasks_state,
+    commit_outcomes_state, memory_commit_allowed, release_keys, stage_write, validate_write_lanes,
 };
 
 impl MemoryTaskStore {
@@ -33,7 +33,7 @@ impl MemoryTaskStore {
         let mut staged = Vec::with_capacity(writes.len());
         let mut receipts = Vec::with_capacity(writes.len());
         for write in writes {
-            receipts.push(stage_write(&state.tasks, &mut staged, write, now)?);
+            receipts.push(stage_write(&state, &mut staged, write, now)?);
         }
         let mut tasks = Vec::new();
         if let Some(conf) = &state.conf {
@@ -46,7 +46,7 @@ impl MemoryTaskStore {
                 }
             }
         }
-        state.tasks.extend(staged);
+        append_tasks(&mut state, staged);
         Ok((receipts, tasks))
     }
 }
@@ -159,6 +159,7 @@ fn run_turn(
         }
     };
     workflow::materialize(state, &mut poll);
+    release_keys(state, undo);
     let mut wake_lanes = workflow::install(state, waits, now);
     wake_lanes.extend(finalize_workflow(state, children, deliveries, now));
     workflow::clear_terminal(state, undo);
@@ -300,18 +301,12 @@ fn prepare_spawn(
         return Ok(outcome);
     };
     validate_write_lanes(state, std::slice::from_ref(&child))?;
-    if child.ignore_conflicts {
-        return Err(TaskRuntimeError::InvalidOptions(
-            "spawn cannot ignore conflicts".into(),
-        ));
-    }
     child.record.parent_id = Some(parent.id);
     child.record.root_id = Some(parent.root_id.unwrap_or(parent.id));
     child.record.node_id = None;
-    match stage_write(&state.tasks, children, child, now) {
+    match stage_write(state, children, child, now) {
         Ok(TaskReceipt::Queued(_)) => Ok(TaskOutcome::Suspend { state: checkpoint }),
-        Ok(_)
-        | Err(TaskRuntimeError::IdempotencyConflict(_) | TaskRuntimeError::AlreadyExists(_)) => Ok(
+        Ok(TaskReceipt::KeyHeld) | Err(TaskRuntimeError::AlreadyExists(_)) => Ok(
             TaskOutcome::fail("Child task identity conflicts with an existing task"),
         ),
         Err(error) => Err(error),
@@ -345,7 +340,7 @@ pub(super) fn finalize_workflow(
     for child in &children {
         names.insert(child.lane.clone());
     }
-    state.tasks.extend(children);
+    append_tasks(state, children);
     for (id, (count, result)) in group_deliveries(deliveries) {
         if let Some(parent) = state
             .tasks
@@ -467,7 +462,7 @@ pub(super) fn prepare(
         child.record.root_id = Some(parent.root_id.unwrap_or(parent.id));
         child.record.node_id = None;
         if !matches!(
-            stage_write(&state.tasks, children, child, now),
+            stage_write(state, children, child, now),
             Ok(TaskReceipt::Queued(_))
         ) {
             children.truncate(start);

@@ -284,7 +284,7 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TestError> {
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
-    let task_id = dispatcher.submit(DirectJob { id: 42 }).await?.id();
+    let task_id = dispatcher.submit(DirectJob { id: 42 }).await?.queued_id()?;
     let claimed = store
         .claim_tasks(
             &uuid::Uuid::from_u128(1),
@@ -362,11 +362,7 @@ async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TestErro
         )
         .await?;
     assert!(matches!(receipts.first(), Some(TaskReceipt::Queued(_))));
-    assert!(matches!(receipts.get(1), Some(TaskReceipt::Existing(_))));
-    assert_eq!(
-        receipts.first().map(|receipt| receipt.id()),
-        receipts.get(1).map(|receipt| receipt.id())
-    );
+    assert_eq!(receipts.get(1), Some(&TaskReceipt::KeyHeld));
     Ok(())
 }
 
@@ -485,7 +481,9 @@ async fn spawn_resolves_lane() -> Result<(), TestError> {
         FlowState::<()>::spawn_with(
             DirectJob { id: 1 },
             (),
-            TaskOptions::new().lane(alternate).ignore_conflicts()
+            TaskOptions::new()
+                .lane(alternate)
+                .delay(crate::tasks::config::MAX_TASK_DELAY + Duration::from_secs(1))
         ),
         Err(TaskRuntimeError::InvalidOptions(_))
     ));
@@ -519,7 +517,7 @@ async fn override_preserves_ingress_gates() -> Result<(), TestError> {
     let runnable = client.submit(DirectJob { id: 0 }).await?;
     assert_eq!(
         ingress.try_recv().ok().map(|task| task.id),
-        Some(runnable.id())
+        Some(runnable.queued_id()?)
     );
     for options in [
         TaskOptions::new().lane(LOCKED),
@@ -531,7 +529,10 @@ async fn override_preserves_ingress_gates() -> Result<(), TestError> {
         let lane = options
             .lane
             .ok_or_else(|| TaskRuntimeError::InvalidOptions("expected lane".into()))?;
-        let id = client.submit_with(DirectJob { id: 1 }, options).await?.id();
+        let id = client
+            .submit_with(DirectJob { id: 1 }, options)
+            .await?
+            .queued_id()?;
         let row = store
             .get_task(id)
             .await?
@@ -711,7 +712,7 @@ async fn external_results_share_envelope() -> Result<(), TestError> {
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
-    let id = dispatcher.submit(DirectJob { id: 8 }).await?.id();
+    let id = dispatcher.submit(DirectJob { id: 8 }).await?.queued_id()?;
     let claim = LaneClaim {
         lane: DEFAULT_TASK_LANE,
         limit: 10,
@@ -765,7 +766,7 @@ async fn external_result_limit_is_independent() -> Result<(), TestError> {
     let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
     store.register_node(&uuid::Uuid::from_u128(1)).await?;
     let dispatcher = Arc::new(registry).client(store.clone(), Vec::new());
-    let id = dispatcher.submit(DirectJob { id: 1 }).await?.id();
+    let id = dispatcher.submit(DirectJob { id: 1 }).await?.queued_id()?;
     suspend_fixture(&store, id).await?;
     assert!(matches!(
         dispatcher.resume(id, "x".repeat(32_760)).await,

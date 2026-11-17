@@ -57,7 +57,7 @@ async fn returned_claim_rejects_stale() -> Result<(), TestError> {
         .registry
         .clone()
         .client(runner.store.clone(), Vec::new());
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     let claims = [LaneClaim {
         lane: crate::tasks::DEFAULT_TASK_LANE,
         limit: 1,
@@ -102,7 +102,7 @@ async fn startup_reclaim_scope() -> Result<(), TestError> {
             .registry
             .clone()
             .client(runner.store.clone(), Vec::new());
-        let id = client.submit(Job).await?.id();
+        let id = client.submit(Job).await?.queued_id()?;
         let old = uuid::Uuid::now_v7();
         runner.store.memory.register_node(&old).await?;
         runner
@@ -142,7 +142,7 @@ async fn late_claim_giveback() -> Result<(), TestError> {
         .registry
         .clone()
         .client(runner.store.clone(), Vec::new());
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     runner.initialize().await?;
     probe.failure.store(11, Ordering::SeqCst);
     runner.admit();
@@ -178,7 +178,7 @@ async fn failed_giveback_retains_queue() -> Result<(), TestError> {
         .registry
         .clone()
         .client(runner.store.clone(), Vec::new());
-    let id = client.submit(Job).await?.id();
+    let id = client.submit(Job).await?.queued_id()?;
     runner.initialize().await?;
     runner.admit();
     let site = site().await;
@@ -753,7 +753,7 @@ async fn draining_execution_heartbeats() -> Result<(), TestError> {
         .unwrap()
         .unwrap();
     assert_eq!(probe.registrations.load(Ordering::SeqCst), 1);
-    let task = client.store.get_task(receipt.id()).await?.unwrap();
+    let task = client.store.get_task(receipt.queued_id()?).await?.unwrap();
     assert_eq!(task.status, crate::tasks::TaskStatus::Succeeded);
     assert_eq!(probe.returns.load(Ordering::SeqCst), 1);
     site.shutdown_and_wait().await;

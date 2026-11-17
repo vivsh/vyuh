@@ -7,17 +7,19 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     db,
-    tasks::{
-        TaskCommit, TaskId, TaskOutcome, TaskReceipt, TaskRecord, TaskRuntimeError, TaskStatus,
-    },
+    tasks::{TaskCommit, TaskId, TaskOutcome, TaskRecord, TaskRuntimeError, TaskStatus},
 };
 
-use super::model::{TaskIdempotencyRow, TaskRow};
+#[cfg(feature = "mysql")]
+use super::model::TaskIdempotencyRow;
+use super::model::TaskRow;
+#[cfg(feature = "mysql")]
+use crate::tasks::TaskReceipt;
 
 use super::commit::lane_retry;
+#[cfg(feature = "mysql")]
 use super::submit::{
-    PreparedWrite, load_key_owners, prepare_writes, replace_expired_owners, resolve_owner,
-    upsert_key_owners,
+    PreparedWrite, load_key_owners, prepare_writes, resolve_owner, upsert_key_owners,
 };
 
 use crate::db::Model as _;
@@ -65,16 +67,13 @@ pub(super) async fn prepare_children(
     if writes.is_empty() {
         return Ok((Vec::new(), conflicts, waits));
     }
-    let (prepared, mut keys) = prepare_writes(writes, now)?;
-    let owners = if waits.is_empty() {
-        upsert_key_owners(tx, &keys, batch_size).await?;
-        let owners = load_key_owners(tx, &keys).await?;
-        replace_expired_owners(tx, owners, &keys, now).await?
-    } else {
-        reserve_group_keys(tx, &mut keys, now, batch_size).await?
-    };
-    let (mut children, found) = resolve_children(prepared, owners)?;
+    #[cfg(feature = "mysql")]
+    let (mut children, found) =
+        reserve_children(tx, writes, now, batch_size, waits.is_empty()).await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    let (mut children, found) = super::held::children(tx, writes, now, batch_size).await?;
     conflicts.extend(found);
+    #[cfg(feature = "mysql")]
     self::release_rejected(tx, &children, &conflicts, batch_size).await?;
     children.retain(|child| {
         !child
@@ -83,6 +82,25 @@ pub(super) async fn prepare_children(
     });
     waits.retain(|wait| !conflicts.contains(&TaskId::new(wait.id)));
     Ok((children, conflicts, waits))
+}
+
+#[cfg(feature = "mysql")]
+/// Reuses the existing owner reservation order on the owner-table backend.
+async fn reserve_children(
+    tx: &mut db::DbTransaction<'_>,
+    writes: Vec<crate::tasks::TaskWrite>,
+    now: DateTime<Utc>,
+    batch_size: usize,
+    single: bool,
+) -> Result<(Vec<TaskRow>, HashSet<TaskId>), TaskRuntimeError> {
+    let (prepared, mut keys) = prepare_writes(writes, now)?;
+    let owners = if single {
+        upsert_key_owners(tx, &keys, batch_size).await?;
+        load_key_owners(tx, &keys).await?
+    } else {
+        reserve_group_keys(tx, &mut keys, batch_size).await?
+    };
+    resolve_children(prepared, owners)
 }
 
 /// Derives group lineage and ordered membership without mutating durable key ownership.
@@ -134,18 +152,17 @@ fn prepare_groups(
 }
 
 /// Reserves fan-out keys in stable handler/key order with bounded parameter counts.
+#[cfg(feature = "mysql")]
 async fn reserve_group_keys(
     tx: &mut db::DbTransaction<'_>,
     keys: &mut [TaskIdempotencyRow],
-    now: DateTime<Utc>,
     batch: usize,
 ) -> Result<Vec<TaskIdempotencyRow>, TaskRuntimeError> {
     keys.sort_by(|a, b| (&a.task_name, &a.key_value).cmp(&(&b.task_name, &b.key_value)));
     let mut owners = Vec::with_capacity(keys.len());
     for chunk in keys.chunks(batch.clamp(1, QUERY_CHUNK_SIZE)) {
         upsert_key_owners(tx, chunk, batch).await?;
-        let loaded = load_key_owners(tx, chunk).await?;
-        owners.extend(replace_expired_owners(tx, loaded, chunk, now).await?);
+        owners.extend(load_key_owners(tx, chunk).await?);
     }
     Ok(owners)
 }
@@ -169,11 +186,6 @@ fn prepare_child(
     if crate::tasks::store::transitions::capability_error(kind, outcome, &conf.handlers).is_some() {
         return Ok(None);
     }
-    if child.ignore_conflicts {
-        return Err(TaskRuntimeError::InvalidOptions(
-            "spawn cannot ignore conflicts".into(),
-        ));
-    }
     lane_retry(&conf.lanes, &child.record.lane)?;
     Ok(Some(child_write(row, child)))
 }
@@ -183,11 +195,11 @@ fn child_write(row: &TaskRow, child: &crate::tasks::TaskWrite) -> crate::tasks::
     child.record.parent_id = Some(TaskId::new(row.id));
     child.record.root_id = Some(TaskId::new(row.root_id.unwrap_or(row.id)));
     child.record.node_id = None;
-    child.ignore_conflicts = true;
     child
 }
 
 /// Accepts only newly allocated child identities, never idempotent existing receipts.
+#[cfg(feature = "mysql")]
 fn resolve_children(
     prepared: Vec<PreparedWrite>,
     owners: Vec<TaskIdempotencyRow>,
@@ -202,7 +214,7 @@ fn resolve_children(
         let write = prepared.write;
         let receipt = match prepared.owner_key {
             None => TaskReceipt::Queued(write.record.id),
-            Some(key) => resolve_owner(&write, owners.get(&key), write.record.id)?,
+            Some(key) => resolve_owner(owners.get(&key), write.record.id)?,
         };
         if matches!(receipt, TaskReceipt::Queued(_)) {
             children.push(TaskRow::from(write.record));
@@ -232,7 +244,7 @@ pub(super) fn queue_delivery(
 /// Inserts children and resumes suspended parents in the originating transaction.
 pub(super) async fn finalize_workflow(
     tx: &mut db::DbTransaction<'_>,
-    children: &[TaskRow],
+    children: Vec<TaskRow>,
     deliveries: Vec<(TaskId, String)>,
     waits: &[self::WaitWrite],
     conf: &crate::tasks::TaskStoreConf,
@@ -258,7 +270,7 @@ pub(super) async fn finalize_workflow(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_admitted(
     tx: &mut db::DbTransaction<'_>,
-    children: &[TaskRow],
+    children: Vec<TaskRow>,
     deliveries: Vec<(TaskId, String)>,
     waits: &[self::WaitWrite],
     conf: &crate::tasks::TaskStoreConf,
@@ -273,12 +285,14 @@ pub(super) async fn finalize_admitted(
         .map(|child| child.lane_name.clone())
         .collect::<HashSet<_>>();
     self::install(tx, waits, batch_size, &mut lanes).await?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    let children = super::held::finish_children(tx, children, delivery, now).await?;
     if !children.is_empty() {
         #[cfg(feature = "postgres")]
-        super::notify::insert(tx, children, batch_size, delivery.map(|(node, _)| node)).await?;
+        super::notify::insert(tx, &children, batch_size, delivery.map(|(node, _)| node)).await?;
         #[cfg(not(feature = "postgres"))]
         db::from(DbTaskStore::table())
-            .insert_many(children)
+            .insert_many(&children)
             .batch_size(batch_size)
             .exec(&mut *tx)
             .await?;
@@ -618,6 +632,7 @@ struct ClearWait {
 }
 
 /// Releases only keys belonging to newly allocated children of rejected groups.
+#[cfg(feature = "mysql")]
 pub(super) async fn release_rejected(
     tx: &mut db::DbTransaction<'_>,
     children: &[TaskRow],

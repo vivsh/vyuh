@@ -9,7 +9,7 @@ use std::{
 
 use super::{TaskHealthSnapshot, TaskOutcome, TaskReceipt};
 
-const RECEIPTS: [&str; 4] = ["queued", "existing", "ignored", "error"];
+const RECEIPTS: [&str; 3] = ["queued", "key_held", "error"];
 const OUTCOMES: [&str; 5] = ["complete", "suspend", "sleep", "retry", "fail"];
 const HOOKS: [&str; 2] = ["idle", "busy"];
 const LANE_PHASES: [&str; 6] = [
@@ -24,14 +24,13 @@ const LANE_PHASES: [&str; 6] = [
 pub(crate) struct TaskMetrics {
     handlers: BTreeMap<String, usize>,
     lanes: BTreeMap<String, usize>,
-    submissions: Vec<[AtomicU64; 4]>,
+    submissions: Vec<[AtomicU64; 3]>,
     starts: Vec<AtomicU64>,
     batch_invocations: Vec<AtomicU64>,
     batch_items: Vec<AtomicU64>,
     outcomes: Vec<[AtomicU64; 5]>,
     claims: Vec<AtomicU64>,
     reclaimed: Vec<AtomicU64>,
-    idempotency_conflicts: Vec<AtomicU64>,
     ownership_acquires: Vec<AtomicU64>,
     ownership_takeovers: Vec<AtomicU64>,
     lane_owner_losses: Vec<AtomicU64>,
@@ -70,7 +69,6 @@ impl TaskMetrics {
             outcomes: atomic_outcomes(handlers.len()),
             claims: atomic_vector(lanes.len()),
             reclaimed: atomic_vector(lanes.len()),
-            idempotency_conflicts: atomic_vector(handlers.len()),
             ownership_acquires: atomic_vector(lanes.len()),
             ownership_takeovers: atomic_vector(lanes.len()),
             lane_owner_losses: atomic_vector(lanes.len()),
@@ -103,12 +101,8 @@ impl TaskMetrics {
             Ok(receipts) => receipts.iter().for_each(|receipt| {
                 self.submissions[index][receipt_index(*receipt)].fetch_add(1, Ordering::Relaxed);
             }),
-            Err(super::TaskRuntimeError::IdempotencyConflict(_)) => {
-                self.idempotency_conflicts[index].fetch_add(1, Ordering::Relaxed);
-                self.submissions[index][3].fetch_add(1, Ordering::Relaxed);
-            }
             Err(error) => {
-                self.submissions[index][3].fetch_add(1, Ordering::Relaxed);
+                self.submissions[index][2].fetch_add(1, Ordering::Relaxed);
                 if matches!(
                     error,
                     super::TaskRuntimeError::DatabaseError(_)
@@ -284,14 +278,6 @@ impl TaskMetrics {
             &self.outcomes,
             &OUTCOMES,
         );
-        output.push_str("# TYPE vyuh_task_idempotency_conflicts_total counter\n");
-        render_vector(
-            output,
-            "vyuh_task_idempotency_conflicts_total",
-            "handler",
-            &self.handlers,
-            &self.idempotency_conflicts,
-        );
     }
 
     fn render_lane_metrics(&self, output: &mut String) {
@@ -417,7 +403,7 @@ fn atomic_vector(size: usize) -> Vec<AtomicU64> {
     (0..size).map(|_| AtomicU64::new(0)).collect()
 }
 
-fn atomic_matrix(size: usize) -> Vec<[AtomicU64; 4]> {
+fn atomic_matrix(size: usize) -> Vec<[AtomicU64; 3]> {
     (0..size)
         .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
         .collect()
@@ -450,8 +436,7 @@ fn increment(indexes: &BTreeMap<String, usize>, counters: &[AtomicU64], name: &s
 fn receipt_index(receipt: TaskReceipt) -> usize {
     match receipt {
         TaskReceipt::Queued(_) => 0,
-        TaskReceipt::Existing(_) => 1,
-        TaskReceipt::Ignored(_) => 2,
+        TaskReceipt::KeyHeld => 1,
     }
 }
 

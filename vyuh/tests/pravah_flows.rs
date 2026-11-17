@@ -94,7 +94,14 @@ async fn work_result_delivery() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for input in [1, 0] {
-        let id = site.tasks().submit(Input(input)).await?.id();
+        let id = site
+            .tasks()
+            .submit(Input(input))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let result = terminal(&site, id).await?.last_result::<u32>()?;
         if input == 0 {
             assert!(matches!(result, Some(Err(_))));
@@ -113,7 +120,9 @@ async fn external_resume_without_dispatch() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for failed in [false, true] {
-        let id = site.tasks().submit(Input(1)).await?.id();
+        let id = site.tasks().submit(Input(1)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
         wait_status(&site, id, TaskStatus::Suspended).await?;
         if failed {
             site.tasks()
@@ -143,7 +152,10 @@ async fn budget_yields() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input(3)).await?.id();
+    let id =
+        site.tasks().submit(Input(3)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     assert_eq!(
         terminal(&site, id).await?.last_result::<u32>()?,
         Some(Ok(8))
@@ -242,7 +254,14 @@ async fn mapped_suspension() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for input in [4, 0] {
-        let id = site.tasks().submit(Input(input)).await?.id();
+        let id = site
+            .tasks()
+            .submit(Input(input))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let result = terminal(&site, id).await?.last_result::<u32>()?;
         if input == 0 {
             assert!(
@@ -280,7 +299,9 @@ async fn compiled_and_opaque_factories() -> Result<(), TestError> {
         let site = site(bundles::bundle([definition])).await?;
         let runtime = vyuh::testing::TestSite::new(site.clone());
         runtime.start_runtime().await?;
-        let id = site.tasks().submit(Input(2)).await?.id();
+        let id = site.tasks().submit(Input(2)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
         assert_eq!(
             terminal(&site, id).await?.last_result::<u32>()?,
             Some(Ok(6))
@@ -303,7 +324,10 @@ async fn sequential_work() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input(1)).await?.id();
+    let id =
+        site.tasks().submit(Input(1)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     assert_eq!(
         terminal(&site, id).await?.last_result::<u32>()?,
         Some(Ok(201))
@@ -338,7 +362,14 @@ async fn nested_work() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for (count, expected) in [(0, vec![]), (1, vec![201]), (3, vec![201, 201, 201])] {
-        let id = site.tasks().submit(Input(count)).await?.id();
+        let id = site
+            .tasks()
+            .submit(Input(count))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         assert_eq!(
             terminal(&site, id).await?.last_result::<Vec<u32>>()?,
             Some(Ok(expected))
@@ -375,7 +406,14 @@ async fn batched_effects() -> Result<(), TestError> {
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
     for (n, receipt) in ids.into_iter().enumerate() {
-        let result = terminal(&site, receipt.id()).await?.last_result::<u32>()?;
+        let result = terminal(
+            &site,
+            receipt.id().ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?,
+        )
+        .await?
+        .last_result::<u32>()?;
         if n % 2 == 0 {
             assert!(matches!(result, Some(Err(_))));
         } else {
@@ -403,7 +441,10 @@ async fn repeated_budget_yields() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input(0)).await?.id();
+    let id =
+        site.tasks().submit(Input(0)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     let task = terminal(&site, id).await?;
     assert_eq!(task.last_result::<u32>()?, Some(Ok(12)));
     assert!(task.attempts() > 10);
@@ -429,7 +470,10 @@ async fn oversized_checkpoint_fails() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input(1)).await?.id();
+    let id =
+        site.tasks().submit(Input(1)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     assert_eq!(terminal(&site, id).await?.status(), TaskStatus::Failed);
     runtime.shutdown_and_wait().await;
     Ok(())
@@ -448,7 +492,10 @@ async fn resume_envelope_limit() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input(1)).await?.id();
+    let id =
+        site.tasks().submit(Input(1)).await?.id().ok_or_else(|| {
+            TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+        })?;
     let before = wait_status(&site, id, TaskStatus::Suspended).await?;
     assert!(matches!(
         site.tasks().resume(id, "x".repeat(32760)).await,

@@ -1,5 +1,34 @@
 # Coordinated task upgrades
 
+## Key-hold upgrade: PostgreSQL and SQLite
+
+After `0017_local_sticky`, integrate `0018_task_key_holds` into the existing
+Gaman ledger with all task workers, submitters and scheduled emitters stopped.
+Take a verified backup. This is not the destructive node-pipeline reset below.
+
+The preflight rejects missing active-key owners, orphaned or mismatched owners,
+and duplicate ownership. If it fails, inspect the named check and reconcile
+the source rows offline; do not fake the ledger entry. On SQLite the two old
+expiry columns must agree in their stored representation, as written by the
+old store. Review manually normalized timestamps that differ.
+
+The atomic migration preserves task data and the old owner table. Only
+current owner rows stay held, including due-but-unswept keys; terminal history
+without an owner does not regain its key. Adding the hold and indexing it
+requires an exclusive task-table lock in PostgreSQL and SQLite's schema/writer
+lock in the migration transaction. Plan the maintenance window based on a
+rehearsal against a representative copy.
+
+After upgrade, start only compatible workers and writers. The retained old
+owner table is inert and will not track new writes. To roll back after
+cutover, restore the verified pre-upgrade backup or use a separately rehearsed
+offline reconstruction. Do not restart old binaries against stale ownership.
+Do not accept a generated schema change that drops the old table as part of
+this cutover. MySQL/MariaDB keep their existing owner table and do not run
+`0018`; they still require a coordinated writer replacement for the changed
+retention semantics. Fresh PostgreSQL/SQLite installations use desired schema
+without the legacy table, not this data migration.
+
 ## Current placement upgrade: local stickiness
 
 Apply `0017_local_sticky` after `0016_sticky_tasks`, with **all workers and

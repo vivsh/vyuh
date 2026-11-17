@@ -246,7 +246,8 @@ async fn main() -> Result<(), Error> {
 
     tasks
         .resume(
-            doc1.id(),
+            doc1.id()
+                .ok_or_else(|| Error::conflict("first document key is held"))?,
             ApprovalDecision::Approved {
                 approver: "carol".to_string(),
             },
@@ -256,7 +257,8 @@ async fn main() -> Result<(), Error> {
 
     tasks
         .resume(
-            doc2.id(),
+            doc2.id()
+                .ok_or_else(|| Error::conflict("second document key is held"))?,
             ApprovalDecision::Rejected {
                 approver: "carol".to_string(),
                 reason: "Budget not aligned with targets".to_string(),

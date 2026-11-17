@@ -7,7 +7,6 @@ fn task_schema_contains_lane_runtime_contract() -> Result<(), String> {
     for name in [
         "vyuh_tasks",
         "vyuh_task_nodes",
-        "vyuh_task_idempotency",
         "vyuh_task_lane_rates",
         "vyuh_task_lane_locks",
         "vyuh_schedules",
@@ -84,6 +83,7 @@ fn task_schema_contains_lane_runtime_contract() -> Result<(), String> {
             "idx_vyuh_tasks_node",
         ],
     )?;
+    #[cfg(feature = "mysql")]
     require_indexes(
         schema
             .tables
@@ -91,6 +91,15 @@ fn task_schema_contains_lane_runtime_contract() -> Result<(), String> {
             .ok_or("missing idempotency table")?,
         &["idx_vyuh_task_idempotency_owner"],
     )?;
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    {
+        assert!(!schema.tables.contains_key("vyuh_task_idempotency"));
+        require_columns(tasks, &["idempotency_held"])?;
+        require_indexes(
+            tasks,
+            &["idx_vyuh_tasks_held_key", "idx_vyuh_tasks_held_expiry"],
+        )?;
+    }
     let lane_locks = schema
         .tables
         .get("vyuh_task_lane_locks")

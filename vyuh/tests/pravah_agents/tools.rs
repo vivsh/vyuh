@@ -39,7 +39,12 @@ async fn controller_and_tools() -> Result<(), TestError> {
     let site = controlled_site(script.clone()).await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input("question".into())).await?.id();
+    let id = site
+        .tasks()
+        .submit(Input("question".into()))
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     let result = terminal(&site, id).await?;
     runtime.shutdown_and_wait().await;
     assert_eq!(result.last_result::<u32>()?, Some(Ok(42)));

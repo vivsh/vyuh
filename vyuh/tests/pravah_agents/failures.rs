@@ -10,7 +10,12 @@ async fn wrong_registry_fails() -> Result<(), TestError> {
     .await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input("question".into())).await?.id();
+    let id = site
+        .tasks()
+        .submit(Input("question".into()))
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     let result = terminal(&site, id).await?;
     runtime.shutdown_and_wait().await;
     assert_eq!(result.status(), TaskStatus::Failed);
@@ -51,7 +56,14 @@ async fn invalid_work_outputs() -> Result<(), TestError> {
         let site = site::<Dispatcher>(work).await?;
         let runtime = vyuh::testing::TestSite::new(site.clone());
         runtime.start_runtime().await?;
-        let id = site.tasks().submit(Input("question".into())).await?.id();
+        let id = site
+            .tasks()
+            .submit(Input("question".into()))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let result = terminal(&site, id).await?;
         runtime.shutdown_and_wait().await;
         assert_eq!(result.status(), TaskStatus::Failed, "{mode}");
@@ -93,7 +105,12 @@ async fn retry_preserves_request() -> Result<(), TestError> {
     let site = site::<Dispatcher>(worker).await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input("question".into())).await?.id();
+    let id = site
+        .tasks()
+        .submit(Input("question".into()))
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     let result = terminal(&site, id).await?;
     runtime.shutdown_and_wait().await;
     assert_eq!(result.last_result::<u32>()?, Some(Ok(42)));
@@ -117,7 +134,14 @@ async fn cancellation_rejects_late_response() -> Result<(), TestError> {
         let site = site::<Dispatcher>(work).await?;
         let runtime = vyuh::testing::TestSite::new(site.clone());
         runtime.start_runtime().await?;
-        let id = site.tasks().submit(Input("question".into())).await?.id();
+        let id = site
+            .tasks()
+            .submit(Input("question".into()))
+            .await?
+            .id()
+            .ok_or_else(|| {
+                TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+            })?;
         let child = running_child(&site).await?;
         tokio::time::timeout(Duration::from_secs(5), async {
             while !started.load(Ordering::SeqCst) {

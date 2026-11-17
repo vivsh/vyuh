@@ -65,13 +65,12 @@ fn mixed_group_validation() {
     let configuration = conf();
     let valid = vec![write(record()), write(flow_record())];
     assert!(validate_group(&valid, &configuration).is_ok());
-    let changes: [fn(&mut TaskWrite); 8] = [
+    let changes: [fn(&mut TaskWrite); 7] = [
         |child| child.record.name = "unregistered".into(),
         |child| child.record.kind = crate::tasks::TaskKind::Work,
         |child| child.record.lane = "unconfigured".into(),
         |child| child.record.status = TaskStatus::Running,
         |child| child.record.cancelled = true,
-        |child| child.ignore_conflicts = true,
         |child| child.record.idempotency_key = Some("missing fingerprint".into()),
         |child| {
             child.initial_delay =

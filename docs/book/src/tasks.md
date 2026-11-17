@@ -501,8 +501,8 @@ its child. The child inherits the parent's root ID and records the parent's ID.
 It uses its handler's default lane unless you pass
 `TaskOptions::new().lane(GPU)` to `spawn_with`. The selected lane's policies
 and any requested submission delay still apply.
-`ignore_conflicts` is invalid for spawning. A child key already owned by another
-task fails this spawn; it never adopts that task. Discarding an outcome creates no
+A child key already held by another task fails this spawn; it never adopts
+that task. Discarding an outcome creates no
 child. The site task facade has no public spawn operation.
 
 The child's successful output becomes `Ok(value)` in the parent continuation;
@@ -1064,14 +1064,16 @@ let receipt = site.tasks().submit(SendEmailJob {
 }).await?;
 ```
 
-The receipt is `Queued`, `Existing`, or `Ignored` and always exposes the new or
-existing task ID through `.id()`.
+The receipt is `Queued(id)` for a newly inserted task or `KeyHeld` when a
+handler-scoped key prevented insertion. `.id()` returns a task ID only for
+`Queued`. `KeyHeld` does not identify the previous task or promise that the key
+is still held when the receipt arrives.
 
 Use `submit_many` to enqueue up to 10,000 inputs in one store transaction,
 independently of claim, commit, and ingress sizes. Larger batches are rejected
 before any input is written. A full ingress channel falls back to durable Pending
 insertion rather than rejecting a submission. Use
-`submit_many_with` for a shared lane, initial delay, and conflict policy:
+`submit_many_with` for a shared lane and initial delay:
 
 ```rust
 use vyuh::prelude::*;
@@ -1083,16 +1085,16 @@ let receipts = site.tasks()
         jobs,
         TaskOptions::new()
             .lane(EMAIL)
-            .delay(Duration::from_secs(300))
-            .ignore_conflicts(),
+            .delay(Duration::from_secs(300)),
     )
     .await?;
 ```
 
 Submission is durable before it returns. Eligible tasks may enter local ingress
 after commit; others remain Pending for polling. A bounded bulk submission
-is atomic and its receipts preserve input order; a non-ignored
-conflict or store failure rolls back the whole batch. An empty batch succeeds
+is atomic and its receipts preserve input order. A held key skips just that
+input; a real validation or store failure rolls back the whole batch.
+Within a batch the first occurrence of a key is tried. An empty batch succeeds
 with no receipts.
 
 Both `submit_with` and `submit_many_with` accept `TaskOptions::lane` to route new
@@ -1119,14 +1121,12 @@ let definition = TaskDefinition::new("send_email")
     .idempotency(TaskIdempotency::new("email-v1", email_key));
 ```
 
-Vyuh fingerprints the canonical input with the definition's stable key-rule
-revision. Repeating the same intent returns `Existing`; reusing a key for a
-different intent rejects the batch. `.ignore_conflicts()` keeps non-conflicting
-entries and returns `Ignored` for conflicts. A different requested lane does not
-change key ownership or the intent: an identical submission returns the existing
-ID without moving the task. Retention comes from the task's stored lane when it
-becomes terminal. Without `.idempotency_retention(...)`, the task releases its key;
-a retained key remains reserved for the configured duration after completion.
+Reusing a held key returns `KeyHeld` whether the payload matches or differs.
+Routing a new submission to a different lane does not change key identity or move
+the task that holds it. Retention comes from the task's stored lane when it becomes
+terminal. With no positive retention, that same commit releases the key. Positive
+retention is a minimum: periodic maintenance releases the hold after the deadline.
+Submitting again does not release an overdue hold or delete task history.
 
 A single-item Work handler can opt in to `IdempotencyKey` before its `Data<T>`
 argument. The extractor works with `#[bundles::work]` and direct `bundles::work`
@@ -1552,8 +1552,8 @@ of one statement for global-rate, locked-lane, or join-materialization paths, an
 excludes transaction control. SQLite uses its transactional claim path.
 Flushes apply transitions in Rust with batched Mool writes in one transaction;
 they retain task ownership locks but do not read deployment policy.
-Expired idempotency reservations are physically cleaned up periodically; logical
-expiry still permits reuse immediately. Task renewal is replaced by node ownership;
+Periodic maintenance releases due retained keys. A key can remain held beyond its
+retention deadline until maintenance commits. Task renewal is replaced by node ownership;
 the ownership FK adds engine-level validation and locking, not a per-claim node query.
 
 Persistent task tables are migration-owned. Apply the application's Mool/Gaman
@@ -1562,6 +1562,13 @@ task tables. This makes schema changes reviewable and prevents a replica from
 changing production DDL during startup.
 
 ### Upgrading Existing Task Stores
+
+PostgreSQL and SQLite databases that already hold task keys in a separate owner
+table apply the offline, non-destructive `0018_task_key_holds` template after
+`0017_local_sticky` before starting workers with the new receipt API. See the
+[task-protocol upgrade notes](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol).
+Do not use the legacy reset below for that upgrade. The old table remains
+intact but stops tracking writes; old and new writers cannot share the store.
 
 Stop all workers and writers, back up, and integrate the backend-specific
 [task-protocol templates](https://github.com/vivsh/vyuh/tree/main/vyuh/migrations/task_protocol)
@@ -1645,8 +1652,8 @@ and a complete `all` handler pair above.
   to have stopped. Reclaimed attempts may repeat external effects.
 - Retried tasks become failed when their lane's per-step attempt budget is exhausted;
   lifetime invocation count is not that budget.
-- Conflicting idempotency intents reject the submission batch unless conflict
-  ignoring was explicitly selected.
+- A held key skips that submission input; other valid inputs retain their original
+  receipt order. A held child key instead rejects its entire workflow group.
 - An unavailable declared lane falls back to `default` with a warning unless
   `RequireConfigured` is selected. Persisted nonterminal work in a removed lane
   blocks startup until it is explicitly reassigned.

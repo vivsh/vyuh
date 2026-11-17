@@ -85,7 +85,14 @@ async fn all_registration_parity() -> Result<(), TestError> {
         let client = vyuh::testing::TestSite::new(site.clone());
         client.start_runtime().await?;
         for size in [0, 1, 32, 33] {
-            let id = site.tasks().submit(Group(size)).await?.id();
+            let id = site
+                .tasks()
+                .submit(Group(size))
+                .await?
+                .id()
+                .ok_or_else(|| {
+                    TaskRuntimeError::TaskExecutionError("expected queued test task".into())
+                })?;
             let result = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if let Some(task) = site.tasks().get(id).await?

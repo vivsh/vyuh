@@ -1,4 +1,62 @@
 use super::*;
+
+/// Positive retention is a minimum: submission cannot release a due hold.
+#[tokio::test]
+async fn due_key_requires_sweep() -> Result<(), String> {
+    let mut conf = conf();
+    conf.lanes =
+        vec![TaskLaneConf::new(DEFAULT_TASK_LANE, 2).idempotency_retention(Duration::from_secs(1))];
+    let store = MemoryTaskStore::new(32, conf);
+    let make = || {
+        let mut record = record();
+        record.idempotency_key = Some("retained".into());
+        record.idempotency_fingerprint = Some("fingerprint".into());
+        write(record)
+    };
+    let initial = store
+        .store_tasks(vec![make()])
+        .await
+        .map_err(|e| e.to_string())?;
+    let id = initial
+        .first()
+        .and_then(|r| r.id())
+        .ok_or("missing initial receipt")?;
+    store
+        .commit_tasks(&[TaskCommit::Cancel { task_id: id }])
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let mut state = store.state.lock().await;
+    let expiry = state
+        .tasks
+        .iter()
+        .find(|task| task.id == id)
+        .and_then(|task| task.idempotency_expires_at)
+        .ok_or("missing retained expiry")?;
+    let mut staged = Vec::new();
+    assert_eq!(
+        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        TaskReceipt::KeyHeld
+    );
+    sweep_keys(&mut state, expiry - chrono::Duration::milliseconds(1));
+    assert_eq!(
+        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        TaskReceipt::KeyHeld
+    );
+    sweep_keys(&mut state, expiry);
+    assert!(matches!(
+        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        TaskReceipt::Queued(_)
+    ));
+    assert_eq!(
+        state
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .and_then(|task| task.idempotency_expires_at),
+        Some(expiry)
+    );
+    Ok(())
+}
 use crate::tasks::{DEFAULT_TASK_LANE, TaskKind, TaskLaneConf};
 
 /// Store-side lane bounds remain authoritative when output batches are smaller than claims.
@@ -79,7 +137,6 @@ pub(crate) fn record() -> TaskRecord {
 pub(crate) fn write(record: TaskRecord) -> TaskWrite {
     TaskWrite {
         record,
-        ignore_conflicts: false,
         initial_delay: None,
     }
 }

@@ -64,7 +64,12 @@ async fn agent_work_round_trip() -> Result<(), TestError> {
     let site = site::<Dispatcher>(worker(executor)).await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    let id = site.tasks().submit(Input("question".into())).await?.id();
+    let id = site
+        .tasks()
+        .submit(Input("question".into()))
+        .await?
+        .id()
+        .ok_or_else(|| TaskRuntimeError::TaskExecutionError("expected queued test task".into()))?;
     let result = terminal(&site, id).await?;
     runtime.shutdown_and_wait().await;
     assert_eq!(result.last_result::<u32>()?, Some(Ok(42)));
