@@ -142,22 +142,15 @@ impl TaskRegistry {
     }
 
     /// Produces the finalized per-handler idempotency policy shared with stores.
-    pub(crate) fn idempotency_conf(
-        &self,
-    ) -> Result<Vec<super::store::TaskIdempotencyConf>, TaskRuntimeError> {
+    fn idempotency_conf(&self) -> Vec<super::store::TaskIdempotencyConf> {
         self.tasks
             .values()
             .filter_map(|task| {
-                task.idempotency_policy().map(|policy| {
-                    lane_retention(&self.lanes, task.effective_lane()).map(|retention| {
-                        super::store::TaskIdempotencyConf {
-                            handler: task.name.clone(),
-                            lane: task.effective_lane().to_string(),
-                            revision: policy.revision.into(),
-                            retention,
-                        }
+                task.idempotency_policy()
+                    .map(|policy| super::store::TaskIdempotencyConf {
+                        handler: task.name.clone(),
+                        revision: policy.revision.into(),
                     })
-                })
             })
             .collect()
     }
@@ -172,7 +165,7 @@ impl TaskRegistry {
                 .map(|task| (task.name.clone(), task.kind()))
                 .collect(),
             lanes: self.lanes().to_vec(),
-            idempotency: self.idempotency_conf()?,
+            idempotency: self.idempotency_conf(),
             poll_interval: self.config.poll_interval_value(),
         })
     }
@@ -232,18 +225,6 @@ fn validate_key_revision(policy: Option<IdempotencyPolicy>) -> Result<(), TaskRu
         ));
     }
     Ok(())
-}
-
-/// Reads the already validated retention policy for one effective registered lane.
-fn lane_retention(
-    lanes: &[super::TaskLaneConf],
-    lane: super::TaskLane,
-) -> Result<super::IdempotencyRetention, TaskRuntimeError> {
-    lanes
-        .iter()
-        .find(|entry| entry.lane() == lane)
-        .map(super::TaskLaneConf::idempotency_policy)
-        .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.to_string()))
 }
 
 /// Adds task-definition context when strict lane resolution rejects site construction.

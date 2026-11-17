@@ -28,9 +28,7 @@ pub(super) fn finalize_idempotency(
     if task.idempotency_key.is_none() {
         return Ok(());
     }
-    let policy = conf.idempotency_for(&task.name).ok_or_else(|| {
-        TaskRuntimeError::InvalidConfig(format!("task '{}' has no idempotency policy", task.name))
-    })?;
+    let policy = conf.idempotency_retention(&task.name, &task.lane)?;
     task.idempotency_expires_at = match policy {
         IdempotencyRetention::ActiveOnly => None,
         IdempotencyRetention::RetainFor(duration) => checked_deadline(now, duration)?,

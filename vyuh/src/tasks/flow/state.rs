@@ -86,7 +86,7 @@ impl<T> FlowState<T> {
     /// Requests one child with explicit scheduling options, without submitting it.
     /// Invalid options and checkpoint serialization fail immediately. Child registration,
     /// serialization, and configured size limits are checked after the handler returns.
-    /// `ignore_conflicts` is invalid: a spawn cannot adopt an independent task.
+    /// A spawn uses the child handler's lane and cannot ignore idempotency conflicts.
     pub fn spawn_with<I: DataValue, S: Serialize>(
         input: I,
         state: S,

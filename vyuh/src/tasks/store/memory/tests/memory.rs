@@ -103,9 +103,7 @@ pub(crate) fn conf() -> TaskStoreConf {
         lanes: vec![TaskLaneConf::new(DEFAULT_TASK_LANE, 8)],
         idempotency: vec![crate::tasks::store::TaskIdempotencyConf {
             handler: "workflow".into(),
-            lane: DEFAULT_TASK_LANE.to_string(),
             revision: "v1".into(),
-            retention: crate::tasks::IdempotencyRetention::ActiveOnly,
         }],
         poll_interval: Duration::from_millis(10),
     }

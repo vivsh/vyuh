@@ -14,12 +14,22 @@ use crate::callables::DataBox;
 pub struct TaskOptions {
     pub(crate) initial_delay: Option<Duration>,
     pub(crate) ignore_conflicts: bool,
+    pub(crate) lane: Option<TaskLane>,
 }
 
 impl TaskOptions {
     /// Creates the default submission policy.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Routes new tasks in a typed submission or batch to one configured lane.
+    ///
+    /// An unknown lane fails submission. This does not move existing idempotent
+    /// tasks and is not supported by child spawning.
+    pub const fn lane(mut self, lane: TaskLane) -> Self {
+        self.lane = Some(lane);
+        self
     }
 
     /// Delays the first execution attempt.
@@ -70,6 +80,7 @@ impl Clone for TaskOptions {
         Self {
             initial_delay: self.initial_delay,
             ignore_conflicts: self.ignore_conflicts,
+            lane: self.lane,
         }
     }
 }
@@ -80,6 +91,7 @@ impl fmt::Debug for TaskOptions {
             .debug_struct("TaskOptions")
             .field("initial_delay", &self.initial_delay)
             .field("ignore_conflicts", &self.ignore_conflicts)
+            .field("lane", &self.lane)
             .finish_non_exhaustive()
     }
 }
@@ -120,6 +132,7 @@ pub struct TaskWrite {
 pub(super) fn build_writes<T: Serialize + 'static>(
     service: &RegisteredTask,
     name: &str,
+    lane: TaskLane,
     inputs: impl IntoIterator<Item = T>,
     options: &TaskOptions,
     config: &super::TaskConf,
@@ -151,14 +164,7 @@ pub(super) fn build_writes<T: Serialize + 'static>(
             .map(|_| fingerprint(name, &serialized, service))
             .transpose()?;
         writes.push(TaskWrite {
-            record: build_record(
-                name,
-                serialized,
-                key,
-                fingerprint,
-                service.effective_lane(),
-                service.kind(),
-            )?,
+            record: build_record(name, serialized, key, fingerprint, lane, service.kind())?,
             ignore_conflicts: options.ignore_conflicts,
             initial_delay: options.initial_delay,
         });
@@ -205,11 +211,16 @@ pub(super) fn build_box_write(
     })
 }
 
-/// Rejects incompatible conflict behavior before a child request can be returned.
+/// Rejects unsupported submission options before a child request can be returned.
 pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskRuntimeError> {
     if options.ignore_conflicts {
         return Err(TaskRuntimeError::InvalidOptions(
             "spawn cannot ignore idempotency conflicts".into(),
+        ));
+    }
+    if options.lane.is_some() {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "spawn uses the child handler's configured lane".into(),
         ));
     }
     validate_options(options)

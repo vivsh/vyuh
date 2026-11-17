@@ -250,7 +250,7 @@ pub struct TaskStoreConf {
     pub handlers: Vec<(String, crate::tasks::TaskKind)>,
     /// Validated named lanes; stores coordinate only their global rate policies.
     pub lanes: Vec<TaskLaneConf>,
-    /// Immutable per-handler idempotency policies shared by all workers.
+    /// Immutable per-handler idempotency rules shared by all workers.
     pub idempotency: Vec<TaskIdempotencyConf>,
     /// Shared polling cadence used to throttle failed lifecycle hooks.
     pub poll_interval: Duration,
@@ -300,21 +300,31 @@ pub struct TaskScheduleSnapshot {
 pub struct TaskIdempotencyConf {
     /// Stable registered handler name.
     pub handler: String,
-    /// Finalized lane that owns this handler's retention policy.
-    pub lane: String,
     /// Explicit revision of the typed key derivation rule.
     pub revision: String,
-    /// Retention inherited from the handler's effective lane.
-    pub retention: IdempotencyRetention,
 }
 
 impl TaskStoreConf {
-    /// Finds the effective key-retention policy for one registered handler.
-    pub(crate) fn idempotency_for(&self, handler: &str) -> Option<IdempotencyRetention> {
-        self.idempotency
+    /// Resolves a registered key's retention using the task row's persisted lane.
+    pub(crate) fn idempotency_retention(
+        &self,
+        handler: &str,
+        lane: &str,
+    ) -> Result<IdempotencyRetention, TaskRuntimeError> {
+        if !self
+            .idempotency
             .iter()
-            .find(|policy| policy.handler == handler)
-            .map(|policy| policy.retention)
+            .any(|policy| policy.handler == handler)
+        {
+            return Err(TaskRuntimeError::InvalidConfig(format!(
+                "task '{handler}' has no idempotency policy"
+            )));
+        }
+        self.lanes
+            .iter()
+            .find(|entry| entry.lane().as_str() == lane)
+            .map(TaskLaneConf::idempotency_policy)
+            .ok_or_else(|| TaskRuntimeError::UnknownLane(lane.into()))
     }
 }
 

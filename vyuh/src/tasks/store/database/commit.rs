@@ -543,7 +543,7 @@ pub(super) async fn update_idempotency_batch(
 type RetentionGroup = (Duration, Vec<uuid::Uuid>);
 type RetentionGroups = (Vec<uuid::Uuid>, Vec<RetentionGroup>);
 
-/// Groups terminal idempotent rows by their finalized per-handler lane policy.
+/// Groups terminal idempotent rows by the retention policy of their stored lane.
 fn retention_groups(
     rows: &mut [TaskRow],
     conf: &crate::tasks::TaskStoreConf,
@@ -593,9 +593,7 @@ fn retention_for(
     row: &TaskRow,
     conf: &crate::tasks::TaskStoreConf,
 ) -> Result<IdempotencyRetention, TaskRuntimeError> {
-    conf.idempotency_for(&row.name).ok_or_else(|| {
-        TaskRuntimeError::InvalidConfig(format!("task '{}' has no idempotency policy", row.name))
-    })
+    conf.idempotency_retention(&row.name, &row.lane_name)
 }
 
 fn is_terminal_idempotent(row: &TaskRow) -> Result<bool, TaskRuntimeError> {

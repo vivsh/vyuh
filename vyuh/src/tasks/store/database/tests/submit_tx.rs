@@ -11,7 +11,10 @@ use crate::{
     Site, SiteConf, bundles,
     callables::Data,
     db::DbSession as _,
-    tasks::{TaskConf, TaskDefinition, TaskIdempotency, Tasks},
+    tasks::{
+        DEFAULT_TASK_LANE, TaskCommit, TaskConf, TaskDefinition, TaskIdempotency, TaskLane,
+        TaskLaneConf, TaskOptions, TaskStore as _, Tasks,
+    },
     testing::TestSite,
 };
 
@@ -31,6 +34,13 @@ fn job(key: u32) -> Job {
 /// The live-backend tests provision a fresh database from the task schema.
 pub(in crate::tasks::store::database) async fn fixture()
 -> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
+    fixture_with(TaskConf::default()).await
+}
+
+/// Builds a producer-only site with the supplied lane policies against the real schema.
+async fn fixture_with(
+    task_conf: TaskConf,
+) -> Result<(db::testing::TestDatabase, TestSite, Arc<AtomicUsize>), String> {
     #[cfg(feature = "sqlite")]
     let (conf, dialect) = (db::DbConf::default(), db::Dialect::Sqlite);
     #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -50,7 +60,7 @@ pub(in crate::tasks::store::database) async fn fixture()
     };
     let runtime = TestSite::from_pool(
         SiteConf::default().log_init(false).tasks(
-            TaskConf::default()
+            task_conf
                 .poll_interval(Duration::from_millis(5))
                 .fallback_poll_interval(Duration::from_millis(20)),
         ),
@@ -69,6 +79,172 @@ pub(in crate::tasks::store::database) async fn fixture()
     .await
     .map_err(error)?;
     Ok((database, runtime, calls))
+}
+
+const SHORT_RETENTION: TaskLane = TaskLane::new("short-retention");
+const LONG_RETENTION: TaskLane = TaskLane::new("long-retention");
+
+fn routing_conf() -> TaskConf {
+    TaskConf::default()
+        .lane(TaskLaneConf::new(SHORT_RETENTION, 2).idempotency_retention(Duration::from_secs(60)))
+        .lane(TaskLaneConf::new(LONG_RETENTION, 2).idempotency_retention(Duration::from_secs(120)))
+}
+
+/// One handler deduplicates across lanes; one terminal batch applies each lane's retention.
+#[tokio::test]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    ignore = "requires an isolated dbharness admin URL"
+)]
+async fn submission_lane_retention() -> Result<(), String> {
+    let conf = routing_conf();
+    let (database, runtime, _) = fixture_with(conf.clone()).await?;
+    let tasks = runtime.site().tasks();
+    let default = tasks.submit(job(1)).await.map_err(error)?.id();
+    let short = submit_to(&tasks, job(2), SHORT_RETENTION).await?.id();
+    let long = submit_to(&tasks, job(3), LONG_RETENTION).await?.id();
+    let bulk = tasks
+        .submit_many_with([job(4), job(2)], TaskOptions::new().lane(LONG_RETENTION))
+        .await
+        .map_err(error)?;
+    assert_eq!(bulk.get(1), Some(&TaskReceipt::Existing(short)));
+    let fourth = bulk.first().ok_or("missing fourth task")?.id();
+    assert_conflict(&tasks, short).await?;
+    finalize_lanes(database.pool(), conf, [default, short, long, fourth]).await?;
+    for (id, lane, seconds) in [
+        (default, DEFAULT_TASK_LANE, None),
+        (short, SHORT_RETENTION, Some(60)),
+        (long, LONG_RETENTION, Some(120)),
+        (fourth, LONG_RETENTION, Some(120)),
+    ] {
+        let task = tasks.get(id).await.map_err(error)?.ok_or("missing task")?;
+        assert!(task.cancelled());
+        assert_eq!(task.lane(), lane.as_str());
+        assert_eq!(
+            task.idempotency_expires_at()
+                .zip(task.completed_at())
+                .map(|(expires, completed)| (expires - completed).num_seconds()),
+            seconds
+        );
+    }
+    assert!(
+        matches!(submit_to(&tasks, job(1), LONG_RETENTION).await?, TaskReceipt::Queued(id) if id != default)
+    );
+    assert_eq!(
+        tasks.submit(job(2)).await.map_err(error)?,
+        TaskReceipt::Existing(short)
+    );
+    runtime.shutdown_and_wait().await;
+    database.teardown().await.map_err(error)
+}
+
+async fn submit_to(tasks: &Tasks, job: Job, lane: TaskLane) -> Result<TaskReceipt, String> {
+    tasks
+        .submit_with(job, TaskOptions::new().lane(lane))
+        .await
+        .map_err(error)
+}
+
+/// A conflicting payload in another lane cannot adopt or move the key owner.
+async fn assert_conflict(tasks: &Tasks, owner: TaskId) -> Result<(), String> {
+    let other = Job { key: 2, value: 42 };
+    assert!(matches!(
+        tasks.submit_with(other.clone(), TaskOptions::new().lane(LONG_RETENTION)).await,
+        Err(TaskRuntimeError::IdempotencyConflict(id)) if id == owner
+    ));
+    let ignored = tasks
+        .submit_with(
+            other,
+            TaskOptions::new().lane(LONG_RETENTION).ignore_conflicts(),
+        )
+        .await
+        .map_err(error)?;
+    assert_eq!(ignored, TaskReceipt::Ignored(owner));
+    Ok(())
+}
+
+/// Commits one shared terminal batch without requiring a scheduler timing assertion.
+async fn finalize_lanes(pool: &db::DbPool, conf: TaskConf, ids: [TaskId; 4]) -> Result<(), String> {
+    let mut registry = crate::tasks::TaskRegistry::new();
+    registry
+        .register(crate::tasks::RegisteredTask::new(
+            TaskDefinition::new("tx_job")
+                .idempotency(TaskIdempotency::new("1", |job: &Job| job.key.to_string())),
+            |_: Data<Job>| async {},
+        ))
+        .map_err(error)?;
+    let conf = registry
+        .finalize(conf)
+        .and_then(|registry| registry.store_conf())
+        .map_err(error)?;
+    let store = DbTaskStore::new(pool.as_sqlx().clone(), 32, Duration::from_secs(300), conf);
+    let commits = ids.map(|task_id| TaskCommit::Cancel { task_id });
+    store.commit_tasks(&commits).await.map_err(error)?;
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+struct TaskSqlCount(Arc<AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TaskSqlCount {
+    /// Counts task SQL, excluding pool setup and driver transaction controls.
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "sqlx::query" {
+            return;
+        }
+        let mut task_sql = false;
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                task_sql |= matches!(field.name(), "summary" | "db.statement")
+                    && format!("{value:?}").contains("vyuh_task");
+            },
+        );
+        if task_sql {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Selecting a lane adds no task SQL for keyed and unkeyed single/bulk submission.
+#[tokio::test]
+#[ignore = "run alone: SQL tracing uses a process-global subscriber"]
+async fn lane_override_query_budget() -> Result<(), String> {
+    use tracing_subscriber::prelude::*;
+
+    let (database, runtime, _) = fixture_with(routing_conf()).await?;
+    let tasks = runtime.site().tasks();
+    let count = TaskSqlCount::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(count.clone()))
+        .map_err(error)?;
+    let mut totals = Vec::new();
+    for options in [TaskOptions::new(), TaskOptions::new().lane(SHORT_RETENTION)] {
+        let before = count.0.load(Ordering::Relaxed);
+        tasks
+            .submit_with(Plain(1), options.clone())
+            .await
+            .map_err(error)?;
+        let after_plain = count.0.load(Ordering::Relaxed);
+        let offset = (totals.len() as u32) * 10;
+        tasks
+            .submit_many_with([job(offset), job(offset + 1)], options)
+            .await
+            .map_err(error)?;
+        let after_keyed = count.0.load(Ordering::Relaxed);
+        totals.push((after_plain - before, after_keyed - after_plain));
+    }
+    let default = totals.first().ok_or("missing SQL counts")?;
+    assert!(default.0 > 0 && default.1 > 0);
+    assert_eq!(totals.last(), Some(default));
+    let before = count.0.load(Ordering::Relaxed);
+    assert!(matches!(
+        tasks
+            .submit_with(Plain(2), TaskOptions::new().lane(TaskLane::new("unknown")))
+            .await,
+        Err(TaskRuntimeError::UnknownLane(_))
+    ));
+    assert_eq!(count.0.load(Ordering::Relaxed), before);
+    runtime.shutdown_and_wait().await;
+    database.teardown().await.map_err(error)
 }
 
 /// Installs the production task schema and one independent application table.

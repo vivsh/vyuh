@@ -370,9 +370,10 @@ async fn typed_bulk_idempotency_preserves_receipt_order() -> Result<(), TestErro
     Ok(())
 }
 
-/// Verifies a task's static key rule inherits retention from its finalized lane.
+/// A handler keeps one key rule and can resolve different retention by stored lane.
 #[test]
-fn static_idempotency_inherits_lane_retention() -> Result<(), TaskRuntimeError> {
+fn idempotency_uses_stored_lane() -> Result<(), TaskRuntimeError> {
+    let alternate = crate::tasks::TaskLane::new("alternate");
     let mut registry = TaskRegistry::new();
     registry.register(RegisteredTask::new(
         TaskDefinition::new("direct_job")
@@ -381,25 +382,22 @@ fn static_idempotency_inherits_lane_retention() -> Result<(), TaskRuntimeError> 
             })),
         direct_job,
     ))?;
-    let registry = registry.finalize(
-        TaskConf::default().lane(
-            super::super::TaskLaneConf::new(DEFAULT_TASK_LANE, 10)
-                .idempotency_retention(Duration::from_secs(60)),
-        ),
-    )?;
-    let policy = registry
-        .idempotency_conf()?
-        .into_iter()
-        .next()
-        .ok_or_else(|| TaskRuntimeError::TaskNotFound("direct_job".into()))?;
-
-    assert_eq!(policy.handler, "direct_job");
-    assert_eq!(policy.lane, DEFAULT_TASK_LANE.as_str());
-    assert!(matches!(
-        policy.retention,
-        super::super::IdempotencyRetention::RetainFor(duration)
-            if duration == Duration::from_secs(60)
-    ));
+    let retained = Duration::from_secs(60);
+    let conf =
+        registry
+            .finalize(TaskConf::default().lane(
+                crate::tasks::TaskLaneConf::new(alternate, 2).idempotency_retention(retained),
+            ))?
+            .store_conf()?;
+    assert_eq!(conf.idempotency.len(), 1);
+    assert_eq!(
+        conf.idempotency_retention("direct_job", DEFAULT_TASK_LANE.as_str())?,
+        crate::tasks::IdempotencyRetention::ActiveOnly
+    );
+    assert_eq!(
+        conf.idempotency_retention("direct_job", alternate.as_str())?,
+        crate::tasks::IdempotencyRetention::RetainFor(retained)
+    );
     Ok(())
 }
 
@@ -419,6 +417,91 @@ async fn empty_bulk_submission_returns_no_receipts() -> Result<(), TestError> {
 
     assert!(receipts.is_empty());
     assert_eq!(store.task_count().await, 0);
+    Ok(())
+}
+
+/// Explicit unknown lanes are rejected before any write, even with default fallback enabled.
+#[tokio::test]
+async fn submit_rejects_unknown_lane() -> Result<(), TestError> {
+    let mut registry = TaskRegistry::new();
+    registry.register(RegisteredTask::new(
+        TaskDefinition::new("direct_job"),
+        direct_job,
+    ))?;
+    let registry = registry.finalize(TaskConf::default())?;
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    let client = Arc::new(registry).client(store.clone(), Vec::new());
+    let unknown = crate::tasks::TaskLane::new("unknown");
+    let options = TaskOptions::new().lane(unknown);
+    assert!(matches!(
+        client.submit_many_with([DirectJob { id: 1 }, DirectJob { id: 2 }], options.clone()).await,
+        Err(TaskRuntimeError::UnknownLane(name)) if name == unknown.as_str()
+    ));
+    assert!(
+        client
+            .submit_many_with(Vec::<DirectJob>::new(), options.clone())
+            .await?
+            .is_empty()
+    );
+    assert!(matches!(
+        crate::tasks::FlowState::<()>::spawn_with(DirectJob { id: 1 }, (), options),
+        Err(TaskRuntimeError::InvalidOptions(_))
+    ));
+    assert_eq!(store.task_count().await, 0);
+    Ok(())
+}
+
+/// Locked, globally limited, and delayed destination work cannot bypass polling via ingress.
+#[tokio::test]
+async fn override_preserves_ingress_gates() -> Result<(), TestError> {
+    use crate::tasks::{TaskLane, TaskLaneConf, TaskLaneLock, TaskRate, TaskStatus};
+    const LOCKED: TaskLane = TaskLane::new("locked");
+    const LIMITED: TaskLane = TaskLane::new("limited");
+    let mut registry = TaskRegistry::new();
+    registry.register(RegisteredTask::new(
+        TaskDefinition::new("direct_job"),
+        direct_job,
+    ))?;
+    let registry = registry.finalize(
+        TaskConf::default()
+            .lane(TaskLaneConf::new(LOCKED, 2).lock(TaskLaneLock::new(1)))
+            .lane(TaskLaneConf::new(LIMITED, 2).global_rate_limit(TaskRate::per_second(1))),
+    )?;
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    let node = uuid::Uuid::now_v7();
+    store.initialize().await?;
+    store.register_node(&node).await?;
+    let mut client = Arc::new(registry).client(store.clone(), Vec::new());
+    let (sender, mut ingress) = tokio::sync::mpsc::channel(4);
+    client.ingress = Some((node, sender));
+    let runnable = client.submit(DirectJob { id: 0 }).await?;
+    assert_eq!(
+        ingress.try_recv().ok().map(|task| task.id),
+        Some(runnable.id())
+    );
+    for options in [
+        TaskOptions::new().lane(LOCKED),
+        TaskOptions::new().lane(LIMITED),
+        TaskOptions::new()
+            .lane(DEFAULT_TASK_LANE)
+            .delay(Duration::from_secs(60)),
+    ] {
+        let lane = options
+            .lane
+            .ok_or_else(|| TaskRuntimeError::InvalidOptions("expected lane".into()))?;
+        let id = client.submit_with(DirectJob { id: 1 }, options).await?.id();
+        let row = store
+            .get_task(id)
+            .await?
+            .ok_or_else(|| TaskRuntimeError::TaskNotFound(id.to_string()))?;
+        assert_eq!(row.lane, lane.as_str());
+        assert_eq!(row.status, TaskStatus::Pending);
+        assert!(row.node_id.is_none());
+    }
+    assert!(matches!(
+        ingress.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     Ok(())
 }
 

@@ -1066,7 +1066,7 @@ Use `submit_many` to enqueue up to 10,000 inputs in one store transaction,
 independently of claim, commit, and ingress sizes. Larger batches are rejected
 before any input is written. A full ingress channel falls back to durable Pending
 insertion rather than rejecting a submission. Use
-`submit_many_with` for a shared initial delay and conflict policy:
+`submit_many_with` for a shared lane, initial delay, and conflict policy:
 
 ```rust
 use vyuh::prelude::*;
@@ -1077,20 +1077,29 @@ let receipts = site.tasks()
     .submit_many_with(
         jobs,
         TaskOptions::new()
+            .lane(EMAIL)
             .delay(Duration::from_secs(300))
             .ignore_conflicts(),
     )
     .await?;
 ```
 
-Submission is immediate: the transaction commits before the terminal returns,
-then the local worker is notified. There is no ingress buffer. A bounded bulk
-submission is atomic and its receipts preserve input order; a non-ignored
+Submission is durable before it returns. Eligible tasks may enter local ingress
+after commit; others remain Pending for polling. A bounded bulk submission
+is atomic and its receipts preserve input order; a non-ignored
 conflict or store failure rolls back the whole batch. An empty batch succeeds
 with no receipts.
 
-Option builders are infallible. Invalid input serialization, generated keys,
-or durations are reported by the terminal submission call.
+Both `submit_with` and `submit_many_with` accept `TaskOptions::lane` to route new
+tasks to an existing configured lane instead of the handler's default.
+The input type still selects the handler, and every input in a bulk call uses
+the same lane. Unknown lanes fail submission rather than falling back.
+Retries, sleep, and resumption keep the stored lane. This option is not
+available for spawning children; transaction-owned submissions and schedules
+also continue using the registered lane.
+
+Option builders are infallible. The submission call reports invalid inputs,
+generated keys, lanes, or durations.
 
 Idempotency belongs to the static task definition, not a particular submission:
 
@@ -1107,9 +1116,11 @@ let definition = TaskDefinition::new("send_email")
 Vyuh fingerprints the canonical input with the definition's stable key-rule
 revision. Repeating the same intent returns `Existing`; reusing a key for a
 different intent rejects the batch. `.ignore_conflicts()` keeps non-conflicting
-entries and returns `Ignored` for conflicts. Retention is lane policy: without
-`.idempotency_retention(...)`, a terminal task releases its key; a retained key
-remains unavailable from terminal completion until the configured duration.
+entries and returns `Ignored` for conflicts. A different requested lane does not
+change key ownership or the intent: an identical submission returns the existing
+ID without moving the task. Retention comes from the task's stored lane when it
+becomes terminal. Without `.idempotency_retention(...)`, the task releases its key;
+a retained key remains reserved for the configured duration after completion.
 
 A single-item Work handler can opt in to `IdempotencyKey` before its `Data<T>`
 argument. The extractor works with `#[bundles::work]` and direct `bundles::work`
@@ -1436,7 +1447,8 @@ names are rejected.
 Removing a configured lane never silently moves its work. Non-terminal orphaned
 tasks prevent worker startup. After running work drains, explicitly call
 `site.tasks().reassign_lane(OLD, NEW)` before deploying the configuration that
-removes the old lane.
+removes the old lane. This is an administrative migration, not part of normal
+submission. It leaves completed tasks and their existing key expiry untouched.
 
 ## Adaptive Polling And Ownership
 

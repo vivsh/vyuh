@@ -176,6 +176,7 @@ impl Tasks {
         let writes = build_writes(
             service,
             name,
+            service.effective_lane(),
             inputs,
             &TaskOptions::new(),
             &client.registry.config,
@@ -201,7 +202,8 @@ impl Tasks {
         self.client.resume(id, input).await
     }
 
-    /// Explicitly moves non-running work between configured lanes.
+    /// Administrative migration of unfinished work to a configured replacement lane.
+    /// Drain running work in the source lane before moving it.
     pub async fn reassign_lane(
         &self,
         from: TaskLane,
@@ -358,7 +360,13 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             .tasks
             .get(name)
             .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.to_string()))?;
-        let writes = build_writes(service, name, inputs, &options, &self.registry.config)?;
+        let lane = if let Some(lane) = options.lane {
+            self.require_lane(lane)?;
+            lane
+        } else {
+            service.effective_lane()
+        };
+        let writes = build_writes(service, name, lane, inputs, &options, &self.registry.config)?;
         let result = self.store_inputs(writes).await;
         self.metrics.submission(name, &result);
         let receipts = result?;

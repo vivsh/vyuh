@@ -3,7 +3,10 @@
 
 use std::time::Duration;
 use vyuh::prelude::*;
-use vyuh::tasks::{TaskConf, TaskDefinition, TaskIdempotency, TaskOptions, TaskStatus};
+use vyuh::tasks::{
+    DEFAULT_TASK_LANE, TaskConf, TaskDefinition, TaskIdempotency, TaskLane, TaskLaneConf,
+    TaskOptions, TaskReceipt, TaskStatus, Tasks,
+};
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 struct Calculate(u32);
@@ -97,6 +100,85 @@ async fn wait_sleep(site: &Site, id: TaskId) -> Result<vyuh::tasks::TaskInfo, Te
 #[bundles::work]
 async fn calculate(input: Data<Calculate>) -> u32 {
     input.0.0 * 2
+}
+
+/// Single and bulk routing execute the original handler and retain keys by the stored lane.
+#[tokio::test]
+async fn typed_submission_routes_to_lane() -> Result<(), TestError> {
+    const BULK: TaskLane = TaskLane::new("bulk");
+    let retention = Duration::from_secs(60);
+    let site = Site::build(
+        SiteConf::default().log_init(false).tasks(
+            TaskConf::default()
+                .lane(TaskLaneConf::new(BULK, 2).idempotency_retention(retention))
+                .poll_interval(Duration::from_millis(10)),
+        ),
+        bundles::bundle([bundles::work(
+            calculate,
+            TaskDefinition::new("calculate")
+                .idempotency(TaskIdempotency::new("1", |input: &Calculate| {
+                    input.0.to_string()
+                })),
+        )]),
+    )
+    .await?;
+    let runtime = vyuh::testing::TestSite::new(site.clone());
+    let tasks = site.tasks();
+    let default = tasks.submit(Calculate(1)).await?.id();
+    let routed = tasks
+        .submit_with(Calculate(2), TaskOptions::new().lane(BULK))
+        .await?
+        .id();
+    let batch = tasks
+        .submit_many_with(
+            [Calculate(3), Calculate(2)],
+            TaskOptions::new().lane(BULK).clone(),
+        )
+        .await?;
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch.get(1), Some(&TaskReceipt::Existing(routed)));
+    let bulk = batch.first().ok_or(TestError::Missing)?.id();
+    runtime.start_runtime().await?;
+    for (id, lane, value) in [
+        (default, DEFAULT_TASK_LANE, 2),
+        (routed, BULK, 4),
+        (bulk, BULK, 6),
+    ] {
+        wait_status(&site, id, TaskStatus::Succeeded).await?;
+        assert_routed_result(&tasks, id, lane, value, retention).await?;
+    }
+    assert_eq!(
+        tasks.submit(Calculate(2)).await?,
+        TaskReceipt::Existing(routed)
+    );
+    let replacement = tasks
+        .submit_with(Calculate(1), TaskOptions::new().lane(BULK))
+        .await?;
+    assert!(matches!(replacement, TaskReceipt::Queued(id) if id != default));
+    runtime.shutdown_and_wait().await;
+    Ok(())
+}
+
+/// Checks the persisted routing, result, and lane-specific retention after completion.
+async fn assert_routed_result(
+    tasks: &Tasks,
+    id: TaskId,
+    lane: TaskLane,
+    value: u32,
+    retention: Duration,
+) -> Result<(), TestError> {
+    let task = tasks.get(id).await?.ok_or(TestError::Missing)?;
+    assert_eq!(task.lane(), lane.as_str());
+    assert_eq!(task.last_result::<u32>()?, Some(Ok(value)));
+    let expires_after = task
+        .idempotency_expires_at()
+        .zip(task.completed_at())
+        .and_then(|(expiry, completion)| (expiry - completion).to_std().ok());
+    assert_eq!(
+        expires_after,
+        (lane != DEFAULT_TASK_LANE).then_some(retention)
+    );
+    Ok(())
 }
 
 async fn await_response(
