@@ -263,7 +263,9 @@ impl WorkRequest {
         }
     }
 
-    /// Sets scheduling options, rejecting invalid combinations and `ignore_conflicts`.
+    /// Sets scheduling options, including an optional configured lane.
+    /// Invalid options and `ignore_conflicts` are rejected here; unknown lanes
+    /// fail child preparation against the executing site.
     pub fn options(mut self, options: TaskOptions) -> Result<Self, TaskRuntimeError> {
         crate::tasks::submission::validate_spawn_options(&options)?;
         self.options = options;

@@ -439,12 +439,54 @@ async fn submit_rejects_unknown_lane() -> Result<(), TestError> {
     ));
     assert!(
         client
-            .submit_many_with(Vec::<DirectJob>::new(), options.clone())
+            .submit_many_with(Vec::<DirectJob>::new(), options)
             .await?
             .is_empty()
     );
+    assert_eq!(store.task_count().await, 0);
+    Ok(())
+}
+
+/// Spawn preparation validates overrides without writing and preserves ordinary scheduling options.
+#[tokio::test]
+async fn spawn_resolves_lane() -> Result<(), TestError> {
+    use crate::tasks::{FlowState, TaskLane, TaskLaneConf};
+    let alternate = TaskLane::new("spawn-alternate");
+    let unknown = TaskLane::new("spawn-unknown");
+    let mut registry = TaskRegistry::new();
+    registry.register(RegisteredTask::new(
+        TaskDefinition::new("direct_job"),
+        direct_job,
+    ))?;
+    let registry = registry.finalize(TaskConf::default().lane(TaskLaneConf::new(alternate, 2)))?;
+    let store = Arc::new(MemoryTaskStore::new(10, registry.store_conf()?));
+    let client = Arc::new(registry).client(store.clone(), Vec::new());
+    let input = crate::callables::DataBox::new_data(DirectJob { id: 1 });
+    let delay = Duration::from_secs(1);
+    for (options, lane) in [
+        (TaskOptions::new(), DEFAULT_TASK_LANE),
+        (TaskOptions::new().lane(alternate), alternate),
+    ] {
+        assert!(matches!(
+            client.prepare_child(&input, "null", &options.delay(delay))?,
+            TaskOutcome::Spawn { child, .. }
+                if child.record.lane == lane.as_str() && child.initial_delay == Some(delay)
+        ));
+    }
     assert!(matches!(
-        crate::tasks::FlowState::<()>::spawn_with(DirectJob { id: 1 }, (), options),
+        client.prepare_child(&input, "null", &TaskOptions::new().lane(unknown)),
+        Err(TaskRuntimeError::UnknownLane(name)) if name == unknown.as_str()
+    ));
+    assert!(
+        FlowState::<()>::spawn_with(DirectJob { id: 1 }, (), TaskOptions::new().lane(alternate))
+            .is_ok()
+    );
+    assert!(matches!(
+        FlowState::<()>::spawn_with(
+            DirectJob { id: 1 },
+            (),
+            TaskOptions::new().lane(alternate).ignore_conflicts()
+        ),
         Err(TaskRuntimeError::InvalidOptions(_))
     ));
     assert_eq!(store.task_count().await, 0);

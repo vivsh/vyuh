@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::callables::{DataBox, DataValue};
 
-use crate::tasks::{TaskOptions, TaskOutcome, TaskRuntimeError};
+use crate::tasks::{TaskLane, TaskOptions, TaskOutcome, TaskRuntimeError};
 
 use super::FlowAllIn;
 
@@ -32,7 +32,7 @@ enum FlowValue<T> {
     Complete(T),
     Outcome(TaskOutcome),
     All {
-        inputs: Vec<DataBox>,
+        inputs: Vec<(DataBox, Option<TaskLane>)>,
         state: String,
     },
     Spawn {
@@ -59,9 +59,10 @@ impl<T> FlowState<T> {
 
     /// Requests an ordered, all-settled group without submitting any work.
     /// Accepts a homogeneous vector, a tuple of one through sixteen typed inputs,
-    /// or a dynamic [`FlowAllIn`]. Every child retains its registered lane/policies.
-    /// Checkpoint serialization can fail here; registration, size, and fan-out
-    /// limits are checked during framework preparation after the handler returns.
+    /// or a dynamic [`FlowAllIn`]. Children use their registered lanes unless
+    /// individually routed to a configured lane through [`FlowAllIn`].
+    /// Checkpoint serialization can fail here; registration, lane, size, and
+    /// fan-out are checked during framework preparation after the handler returns.
     /// Results retain input order and may decode as a typed vector/tuple or
     /// [`super::FlowAllOut`]. Input tuples do not infer child output types.
     pub fn all<C: Into<FlowAllIn>, S: Serialize>(
@@ -85,8 +86,8 @@ impl<T> FlowState<T> {
 
     /// Requests one child with explicit scheduling options, without submitting it.
     /// Invalid options and checkpoint serialization fail immediately. Child registration,
-    /// serialization, and configured size limits are checked after the handler returns.
-    /// A spawn uses the child handler's lane and cannot ignore idempotency conflicts.
+    /// lane overrides, and payload are checked after the handler returns.
+    /// A spawn defaults to the child handler's lane and cannot ignore idempotency conflicts.
     pub fn spawn_with<I: DataValue, S: Serialize>(
         input: I,
         state: S,

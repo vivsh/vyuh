@@ -9,6 +9,7 @@ use crate::callables::DataBox;
 use super::{
     RegisteredTask, ScheduledTaskWrite, TaskFilter, TaskId, TaskInfo, TaskLane, TaskOptions,
     TaskReceipt, TaskRecord, TaskRegistry, TaskRuntimeError, TaskScheduleConf, TaskStore,
+    TaskWrite,
     submission::{
         build_box_write, build_writes, validate_filter, validate_payload, validate_spawn_options,
     },
@@ -45,7 +46,7 @@ impl Tasks {
     /// Prepares an ordered child group without writing to the task store.
     pub(super) fn prepare_all(
         &self,
-        inputs: &[DataBox],
+        inputs: &[(DataBox, Option<TaskLane>)],
         state: &str,
     ) -> Result<super::TaskOutcome, TaskRuntimeError> {
         let client = &self.client;
@@ -57,10 +58,7 @@ impl Tasks {
         validate_payload(state, client.registry.config.payload_limit())?;
         let children = inputs
             .iter()
-            .map(|input| {
-                let service = client.task_for_payload(input)?;
-                build_box_write(service, input, &client.registry.config)
-            })
+            .map(|(input, lane)| client.prepare_box_write(input, *lane))
             .collect::<Result<Vec<_>, TaskRuntimeError>>()?;
         Ok(super::TaskOutcome::All {
             state: state.to_owned(),
@@ -290,8 +288,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
     ) -> Result<super::TaskOutcome, TaskRuntimeError> {
         validate_spawn_options(options)?;
         validate_payload(state, self.registry.config.payload_limit())?;
-        let service = self.task_for_payload(input)?;
-        let mut child = build_box_write(service, input, &self.registry.config)?;
+        let mut child = self.prepare_box_write(input, options.lane)?;
         child.initial_delay = options.initial_delay;
         Ok(super::TaskOutcome::Spawn {
             state: state.to_owned(),
@@ -360,12 +357,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             .tasks
             .get(name)
             .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.to_string()))?;
-        let lane = if let Some(lane) = options.lane {
-            self.require_lane(lane)?;
-            lane
-        } else {
-            service.effective_lane()
-        };
+        let lane = self.submission_lane(service, options.lane)?;
         let writes = build_writes(service, name, lane, inputs, &options, &self.registry.config)?;
         let result = self.store_inputs(writes).await;
         self.metrics.submission(name, &result);
@@ -495,6 +487,29 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             .ok_or_else(|| TaskRuntimeError::TaskNotFound(name.clone()))
     }
 
+    fn prepare_box_write(
+        &self,
+        input: &DataBox,
+        lane: Option<TaskLane>,
+    ) -> Result<TaskWrite, TaskRuntimeError> {
+        let service = self.task_for_payload(input)?;
+        let lane = self.submission_lane(service, lane)?;
+        build_box_write(service, input, lane, &self.registry.config)
+    }
+
+    fn submission_lane(
+        &self,
+        service: &RegisteredTask,
+        lane: Option<TaskLane>,
+    ) -> Result<TaskLane, TaskRuntimeError> {
+        if let Some(lane) = lane {
+            self.require_lane(lane)?;
+            Ok(lane)
+        } else {
+            Ok(service.effective_lane())
+        }
+    }
+
     fn require_lane(&self, lane: TaskLane) -> Result<(), TaskRuntimeError> {
         self.registry
             .lanes()
@@ -521,7 +536,12 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
     ) -> Result<Option<TaskReceipt>, TaskRuntimeError> {
         let service = self.task_for_payload(&payload)?;
         self.require_schedule_target(schedule, service.name())?;
-        let write = build_box_write(service, &payload, &self.registry.config)?;
+        let write = build_box_write(
+            service,
+            &payload,
+            service.effective_lane(),
+            &self.registry.config,
+        )?;
         let result = self
             .store
             .store_scheduled(ScheduledTaskWrite {

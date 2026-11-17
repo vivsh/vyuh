@@ -1,6 +1,8 @@
 use super::*;
 use crate::{Site, SiteConf, bundles, db, tasks::*, testing::TestSite};
 
+const AGENT_LANE: TaskLane = TaskLane::new("agent-override");
+
 #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 struct AgentJob {
     #[schemars(with = "serde_json::Value")]
@@ -15,7 +17,8 @@ impl PravahDispatcher for Dispatcher {
     fn agent(&self, request: &pravah::AgentRequest) -> Result<WorkRequest, FlowError> {
         Ok(WorkRequest::new(AgentJob {
             request: request.clone(),
-        }))
+        })
+        .options(TaskOptions::new().lane(AGENT_LANE))?)
     }
 }
 
@@ -38,9 +41,11 @@ async fn sqlite_agent_round_trip() -> Result<(), String> {
         TaskDefinition::new("agent_work"),
     );
     let site = Site::test(
-        SiteConf::default()
-            .log_init(false)
-            .tasks(TaskConf::default().poll_interval(Duration::from_millis(5))),
+        SiteConf::default().log_init(false).tasks(
+            TaskConf::default()
+                .poll_interval(Duration::from_millis(5))
+                .lane(TaskLaneConf::new(AGENT_LANE, 2)),
+        ),
         bundles::bundle([
             bundles::flow(agent_graph, FlowConf::new("graph").dispatch::<Dispatcher>()),
             work,
@@ -88,6 +93,7 @@ async fn run_graph(site: &Site) -> Result<(), String> {
                 assert_eq!(children.total, 2);
                 for child in children.items {
                     assert_eq!(child.parent_id(), Some(id));
+                    assert_eq!(child.lane(), AGENT_LANE.as_str());
                     assert_eq!(child.status(), TaskStatus::Succeeded);
                     assert!(matches!(
                         child

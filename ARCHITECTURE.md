@@ -85,8 +85,10 @@ globally Work-rate-limited or excess records retain ordinary Pending insertion.
 The existing site start guard publishes the endpoint after node registration;
 producer-only and pre-start dispatcher handles use ordinary insertion.
 Control notifications never bypass poll gates.
-Ordinary typed submission can select a configured lane once per batch before
-writing the task row. Key identity remains handler-scoped; terminal retention
+Ordinary typed submission can select a configured lane once per batch. Flow
+spawn and all preparation can select a configured lane per child through
+the same registry validation before the store sees the outcome.
+Key identity remains handler-scoped; terminal retention
 uses the row's lane. This uses the existing admission and idempotency write
 paths without adding reads. Only explicit administrative reassignment moves
 unfinished tasks between lanes.

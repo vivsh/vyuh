@@ -13,34 +13,45 @@ struct Document(u32);
 fn mixed_inputs_preserve_identity() -> Result<(), TaskRuntimeError> {
     type Alias = Image;
     let first: Alias = Image(1);
-    let mut children = FlowAllIn::new().with(first).with(Document(2));
-    children.push(Image(3));
+    let alternate = TaskLane::new("alternate");
+    let mut children = FlowAllIn::new()
+        .with(first)
+        .with_in_lane(Document(2), alternate);
+    children.push_in_lane(Image(3), alternate);
     assert_eq!(children.len(), 3);
     assert!(!children.is_empty());
     let first = children
         .inputs
         .first()
-        .and_then(DataBox::downcast_ref::<Image>);
+        .and_then(|(input, _)| input.downcast_ref::<Image>());
     assert_eq!(first, Some(&Image(1)));
     assert_eq!(
         children
             .inputs
             .get(1)
-            .and_then(DataBox::downcast_ref::<Document>),
+            .and_then(|(input, _)| input.downcast_ref::<Document>()),
         Some(&Document(2))
     );
     assert_eq!(
         children
             .inputs
             .get(2)
-            .and_then(DataBox::downcast_ref::<Image>),
+            .and_then(|(input, _)| input.downcast_ref::<Image>()),
         Some(&Image(3))
     );
     assert!(
         children
             .inputs
             .iter()
-            .all(|input| input.to_json().is_some())
+            .all(|(input, _)| input.to_json().is_some())
+    );
+    assert_eq!(
+        children
+            .inputs
+            .iter()
+            .map(|(_, lane)| *lane)
+            .collect::<Vec<_>>(),
+        [None, Some(alternate), Some(alternate)]
     );
     FlowState::<()>::all(children, ())?;
     Ok(())
@@ -53,7 +64,8 @@ fn tuple_arities_preserve_order() {
         ($($value:expr),+) => {{
             let children = FlowAllIn::from(($(Image($value),)+));
             let actual: Vec<_> = children.inputs.iter()
-                .filter_map(DataBox::downcast_ref::<Image>).map(|item| item.0).collect();
+                .filter_map(|(input, _)| input.downcast_ref::<Image>()).map(|item| item.0).collect();
+            assert!(children.inputs.iter().all(|(_, lane)| lane.is_none()));
             assert_eq!(actual, vec![$($value),+]);
         }};
     }
@@ -84,7 +96,7 @@ fn vector_and_nested_inputs() -> Result<(), TaskRuntimeError> {
         children
             .inputs
             .first()
-            .and_then(DataBox::downcast_ref::<(Image, Document)>),
+            .and_then(|(input, _)| input.downcast_ref::<(Image, Document)>()),
         Some(&(Image(1), Document(2)))
     );
     let nested = FlowAllIn::from(((Image(3), Document(4)), Image(5)));
@@ -93,7 +105,7 @@ fn vector_and_nested_inputs() -> Result<(), TaskRuntimeError> {
         nested
             .inputs
             .first()
-            .is_some_and(|input| input.downcast_ref::<(Image, Document)>().is_some())
+            .is_some_and(|(input, _)| input.downcast_ref::<(Image, Document)>().is_some())
     );
     assert!(FlowAllIn::default().is_empty());
     assert!(FlowAllIn::from(Vec::<Image>::new()).is_empty());

@@ -207,6 +207,12 @@ fn dynamic_inputs(input: &DynamicGroup) -> FlowAllIn {
             inputs
         }
         2 => FlowAllIn::new(),
+        4 => FlowAllIn::new()
+            .with_in_lane(Image(7), IO)
+            .with_in_lane(document, GPU),
+        5 => FlowAllIn::new()
+            .with(Image(7))
+            .with_in_lane(document, TaskLane::new("unknown")),
         _ => FlowAllIn::new().with(Image(7)).with(Unknown),
     }
 }
@@ -365,7 +371,7 @@ async fn empty_and_invalid_groups() -> Result<(), TestError> {
     let site = Site::build(mixed_conf(), mixed_bundle(false)).await?;
     let runtime = vyuh::testing::TestSite::new(site.clone());
     runtime.start_runtime().await?;
-    for mode in [2, 3] {
+    for mode in [2, 3, 5] {
         let id = site
             .tasks()
             .submit(DynamicGroup {
@@ -385,6 +391,47 @@ async fn empty_and_invalid_groups() -> Result<(), TestError> {
                 .all(|task| task.parent_id() != Some(id))
         );
     }
+    runtime.shutdown_and_wait().await;
+    Ok(())
+}
+
+/// A group can override each child's lane while preserving typed result order and lineage.
+#[tokio::test]
+async fn all_child_lane_overrides() -> Result<(), TestError> {
+    let site = Site::build(mixed_conf(), mixed_bundle(false)).await?;
+    let runtime = vyuh::testing::TestSite::new(site.clone());
+    runtime.start_runtime().await?;
+    let parent = site
+        .tasks()
+        .submit(DynamicGroup {
+            mode: 4,
+            failed: false,
+        })
+        .await?
+        .id();
+    assert_eq!(
+        wait_result(&site, parent).await?,
+        Ok(Summary {
+            image: 14,
+            document: Some("doc-7".into())
+        })
+    );
+    let tasks = site.tasks().list(TaskFilter::new()).await?.items;
+    let mut children = tasks
+        .iter()
+        .filter(|task| task.parent_id() == Some(parent))
+        .collect::<Vec<_>>();
+    children.sort_unstable_by_key(|task| task.name());
+    assert_eq!(
+        children
+            .iter()
+            .map(|task| (task.name(), task.lane(), task.root_id()))
+            .collect::<Vec<_>>(),
+        [
+            ("mixed_document", GPU.as_str(), Some(parent)),
+            ("mixed_image", IO.as_str(), Some(parent))
+        ]
+    );
     runtime.shutdown_and_wait().await;
     Ok(())
 }

@@ -4,16 +4,17 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 
 use crate::callables::{DataBox, DataValue};
-use crate::tasks::{TaskFailure, TaskRuntimeError};
+use crate::tasks::{TaskFailure, TaskLane, TaskRuntimeError};
 
 /// Ordered child inputs for [`super::FlowState::all`], preserving each registration.
 ///
 /// Insertion retains the concrete input type; the existing registry later resolves
-/// its handler, lane, and policies. Constructing this collection submits no work.
+/// its handler and policies, using a configured lane override when supplied.
+/// Constructing this collection submits no work.
 /// Vectors and tuples of one through sixteen inputs also convert into this type.
 #[derive(Default)]
 pub struct FlowAllIn {
-    pub(super) inputs: Vec<DataBox>,
+    pub(super) inputs: Vec<(DataBox, Option<TaskLane>)>,
 }
 
 impl FlowAllIn {
@@ -29,10 +30,23 @@ impl FlowAllIn {
         self
     }
 
-    /// Appends one child without submitting it or changing its registered lane.
+    /// Appends one child using its registered lane, without submitting it.
     /// Each call may supply a different input type; nested tuples are not flattened.
     pub fn push<I: DataValue>(&mut self, input: I) {
-        self.inputs.push(DataBox::new_data(input));
+        self.inputs.push((DataBox::new_data(input), None));
+    }
+
+    /// Appends a child routed to a configured lane and returns the group.
+    /// An unknown lane fails preparation for the entire group.
+    pub fn with_in_lane<I: DataValue>(mut self, input: I, lane: TaskLane) -> Self {
+        self.push_in_lane(input, lane);
+        self
+    }
+
+    /// Appends a child with a lane override, without submitting it.
+    /// The executing site validates the lane during group preparation.
+    pub fn push_in_lane<I: DataValue>(&mut self, input: I, lane: TaskLane) {
+        self.inputs.push((DataBox::new_data(input), Some(lane)));
     }
 
     /// Returns the number of children, including repeated input types.
@@ -49,7 +63,10 @@ impl FlowAllIn {
 impl<I: DataValue> From<Vec<I>> for FlowAllIn {
     fn from(inputs: Vec<I>) -> Self {
         Self {
-            inputs: inputs.into_iter().map(DataBox::new_data).collect(),
+            inputs: inputs
+                .into_iter()
+                .map(|input| (DataBox::new_data(input), None))
+                .collect(),
         }
     }
 }
@@ -58,7 +75,7 @@ macro_rules! tuple_inputs {
     ($($type:ident : $value:ident),+) => {
         impl<$($type: DataValue),+> From<($($type,)+)> for FlowAllIn {
             fn from(($($value,)+): ($($type,)+)) -> Self {
-                Self { inputs: vec![$(DataBox::new_data($value)),+] }
+                Self { inputs: vec![$((DataBox::new_data($value), None)),+] }
             }
         }
     };

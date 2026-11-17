@@ -492,13 +492,15 @@ FlowConf::new("build_report"))`. Spawning adds no macro syntax.
 `FlowState::spawn(input, state)` and `FlowState::spawn_with(input, state, options)`
 construct an outcome, not a submission. They serialize the checkpoint and reject
 invalid options immediately. After the handler returns, the runtime resolves the
-child through the executing site's registry, serializes its input, and validates
-configured payload limits. Preparation errors fail the parent without creating a
-child. Batch handlers cannot spawn children.
+child through the executing site's registry, validates any lane override, and
+serializes the input within configured payload limits. Preparation errors fail
+the parent without creating a child. Batch handlers cannot spawn children.
 
 The accepted outcome atomically checkpoints and suspends the parent and inserts
 its child. The child inherits the parent's root ID and records the parent's ID.
-Its own registered lane, retries, and submission delay still apply.
+It uses its handler's default lane unless you pass
+`TaskOptions::new().lane(GPU)` to `spawn_with`. The selected lane's policies
+and any requested submission delay still apply.
 `ignore_conflicts` is invalid for spawning. A child key already owned by another
 task fails this spawn; it never adopts that task. Discarding an outcome creates no
 child. The site task facade has no public spawn operation.
@@ -602,19 +604,19 @@ Work children obey Work rates and concurrency, while Flow advancement is exempt.
 Cancellation of a parent does not cancel its children.
 
 Do not externally resume a parent awaiting `all`. Duplicate/conflicting child
-idempotency keys reject the entire group without adopting existing tasks. Children
-use registered policies and default scheduling; per-child options are not
-supported. Work and batch handlers cannot return `all`.
+idempotency keys reject the entire group without adopting existing tasks, even
+across lanes. Children use default scheduling; only the lane can be overridden
+per child. Work and batch handlers cannot return `all`.
 
 ### Mixed Children and Lanes
 
 Pass a tuple for a fixed group, or use `FlowAllIn` when choosing children dynamically:
 
 ```rust,ignore
-// Each input resolves to its original registered handler and lane.
+// Tuple children use their registered handlers and default lanes.
 FlowState::all((RenderImage { /* ... */ }, FetchDocument { /* ... */ }), checkpoint)?;
 
-let mut children = FlowAllIn::new().with(RenderImage { /* ... */ });
+let mut children = FlowAllIn::new().with_in_lane(RenderImage { /* ... */ }, GPU);
 children.push(FetchDocument { /* ... */ });
 FlowState::all(children, checkpoint)?;
 ```
@@ -634,8 +636,10 @@ bundles::work(fetch, TaskDefinition::new("fetch").lane(NETWORK));
 ```
 
 There is no wrapper task or manual dispatcher. Concrete input identity selects
-the registration, including its kind, lane, idempotency, and retry policy.
-Work admission still obeys that lane's rates, concurrency, and lock controls.
+the registration, including its kind and idempotency rule. Set a configured
+destination with `with_in_lane` or `push_in_lane`; an unknown lane fails
+preparation for the whole group. Work admission still obeys each child's
+selected lane's rates, concurrency, and lock controls.
 Every tuple element or `push` is one child; nested tuples are not recursively
 flattened. An application enum used to choose which input to push is not itself
 submitted. Existing homogeneous vectors remain supported. With the generic
@@ -746,8 +750,9 @@ impl PravahDispatcher for AppDispatcher {
 
 The dispatcher is constructed once per selected type per site and shared across
 definitions. `suspend(&Suspension)` may return `Some(WorkRequest)` or `None` for
-external waiting; its default is `None`. `WorkRequest::options(...)` validates
-scheduling options and rejects conflict adoption. Targets must be registered
+external waiting; its default is `None`. `WorkRequest::options(...)` accepts a
+configured lane override through `TaskOptions::lane` and rejects conflict
+adoption. Targets must be registered
 Work, never Flow. Construction and routing cannot submit work: the snapshot and
 child are committed through the existing atomic spawn path.
 
@@ -1094,9 +1099,10 @@ Both `submit_with` and `submit_many_with` accept `TaskOptions::lane` to route ne
 tasks to an existing configured lane instead of the handler's default.
 The input type still selects the handler, and every input in a bulk call uses
 the same lane. Unknown lanes fail submission rather than falling back.
-Retries, sleep, and resumption keep the stored lane. This option is not
-available for spawning children; transaction-owned submissions and schedules
-also continue using the registered lane.
+Retries, sleep, and resumption keep the stored lane. `spawn_with` and
+Pravah dispatcher Work requests accept the same option. For `all`, use
+`FlowAllIn` to choose lanes per child. Transaction-owned submissions and
+schedules continue using the registered lane.
 
 Option builders are infallible. The submission call reports invalid inputs,
 generated keys, lanes, or durations.

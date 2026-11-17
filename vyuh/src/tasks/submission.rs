@@ -23,10 +23,10 @@ impl TaskOptions {
         Self::default()
     }
 
-    /// Routes new tasks in a typed submission or batch to one configured lane.
+    /// Routes new tasks in a typed submission, batch, or child request to one configured lane.
     ///
-    /// An unknown lane fails submission. This does not move existing idempotent
-    /// tasks and is not supported by child spawning.
+    /// An unknown lane fails submission or child preparation. This does not move
+    /// an existing task or change its idempotency identity.
     pub const fn lane(mut self, lane: TaskLane) -> Self {
         self.lane = Some(lane);
         self
@@ -176,6 +176,7 @@ pub(super) fn build_writes<T: Serialize + 'static>(
 pub(super) fn build_box_write(
     service: &RegisteredTask,
     input: &DataBox,
+    lane: TaskLane,
     config: &super::TaskConf,
 ) -> Result<TaskWrite, TaskRuntimeError> {
     service.validate_box(input)?;
@@ -203,7 +204,7 @@ pub(super) fn build_box_write(
             serialized,
             key,
             fingerprint,
-            service.effective_lane(),
+            lane,
             service.kind(),
         )?,
         ignore_conflicts: false,
@@ -216,11 +217,6 @@ pub(super) fn validate_spawn_options(options: &TaskOptions) -> Result<(), TaskRu
     if options.ignore_conflicts {
         return Err(TaskRuntimeError::InvalidOptions(
             "spawn cannot ignore idempotency conflicts".into(),
-        ));
-    }
-    if options.lane.is_some() {
-        return Err(TaskRuntimeError::InvalidOptions(
-            "spawn uses the child handler's configured lane".into(),
         ));
     }
     validate_options(options)
