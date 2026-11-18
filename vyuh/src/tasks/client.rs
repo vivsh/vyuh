@@ -190,7 +190,7 @@ impl Tasks {
         self.client.wake(id).await
     }
 
-    /// Delivers a payload to at most 64 currently suspended topic waiters.
+    /// Delivers a payload to at most 128 currently suspended topic waiters.
     /// Invalid topics and oversized resume envelopes are rejected before writing.
     /// No replay is retained; a subsequent publication can see different waiters.
     pub async fn publish<T: Serialize>(

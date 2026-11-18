@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub(super) const OTHER: TaskLane = TaskLane::new("unrelated");
 const INPUT: &str = r#"{"Ok":42}"#;
+const PUBLISH_CAP: usize = 128;
 
 pub(super) fn configuration() -> Result<TaskStoreConf, TaskRuntimeError> {
     let config = TaskConf::default().lane(TaskLaneConf::new(OTHER, 8));
@@ -144,7 +145,7 @@ pub(super) async fn contract(store: &impl TaskStore) -> Result<(), String> {
         0
     );
     assert!(store.publish(" \u{2003}", INPUT).await.is_err());
-    let ids = prepare(store, node, 65, wait_outcome("Topic")).await?;
+    let ids = prepare(store, node, PUBLISH_CAP + 1, wait_outcome("Topic")).await?;
     let lower = prepare(store, node, 1, wait_outcome("topic")).await?;
     check_caps(store, node).await?;
     let direct = prepare(store, node, 1, TaskOutcome::Suspend { state: "8".into() }).await?;
@@ -159,24 +160,7 @@ pub(super) async fn contract(store: &impl TaskStore) -> Result<(), String> {
         store.publish("Topic ", INPUT).await.map_err(error)?.resumed,
         0
     );
-    assert_eq!(
-        store.publish("Topic", INPUT).await.map_err(error)?,
-        PublishResult {
-            resumed: 64,
-            more: true
-        }
-    );
-    assert_eq!(
-        store.publish("Topic", INPUT).await.map_err(error)?,
-        PublishResult {
-            resumed: 1,
-            more: false
-        }
-    );
-    assert_eq!(
-        store.publish("Topic", INPUT).await.map_err(error)?.resumed,
-        0
-    );
+    check_over_cap(store, &ids).await?;
     check_delivery(
         store,
         &ids,
@@ -192,11 +176,43 @@ pub(super) async fn contract(store: &impl TaskStore) -> Result<(), String> {
     Ok(())
 }
 
+/// The extra waiter is only a hint and remains suspended until the caller publishes again.
+async fn check_over_cap(store: &impl TaskStore, ids: &[TaskId]) -> Result<(), String> {
+    assert_eq!(
+        store.publish("Topic", INPUT).await.map_err(error)?,
+        PublishResult {
+            resumed: PUBLISH_CAP as u64,
+            more: true
+        }
+    );
+    let last = *ids.iter().max().ok_or("no extra waiter id")?;
+    let task = store
+        .get_task(last)
+        .await
+        .map_err(error)?
+        .ok_or("missing extra waiter")?;
+    assert_eq!(task.status, TaskStatus::Suspended);
+    assert!(task.resume_input.is_none());
+    assert_eq!(
+        store.publish("Topic", INPUT).await.map_err(error)?,
+        PublishResult {
+            resumed: 1,
+            more: false
+        }
+    );
+    assert_eq!(
+        store.publish("Topic", INPUT).await.map_err(error)?.resumed,
+        0
+    );
+    Ok(())
+}
+
 /// Checks that an exactly full result does not advertise a missing sentinel.
 async fn check_caps(store: &impl TaskStore, node: Uuid) -> Result<(), String> {
-    for (topic, count) in [("cap:63", 63), ("cap:64", 64)] {
-        let ids = prepare(store, node, count, wait_outcome(topic)).await?;
-        let result = store.publish(topic, INPUT).await.map_err(error)?;
+    for count in [PUBLISH_CAP - 1, PUBLISH_CAP] {
+        let topic = format!("cap:{count}");
+        let ids = prepare(store, node, count, wait_outcome(&topic)).await?;
+        let result = store.publish(&topic, INPUT).await.map_err(error)?;
         assert_eq!(
             result,
             PublishResult {
@@ -204,7 +220,7 @@ async fn check_caps(store: &impl TaskStore, node: Uuid) -> Result<(), String> {
                 more: false
             }
         );
-        for batch in ids.chunks(64) {
+        for batch in ids.chunks(PUBLISH_CAP) {
             let cancel = batch
                 .iter()
                 .map(|&task_id| TaskCommit::Cancel { task_id })

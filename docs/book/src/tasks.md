@@ -749,12 +749,22 @@ impl PravahDispatcher for AppDispatcher {
 ```
 
 The dispatcher is constructed once per selected type per site and shared across
-definitions. `suspend(&Suspension)` may return `Some(WorkRequest)` or `None` for
-external waiting; its default is `None`. `WorkRequest::options(...)` accepts a
+definitions. `suspend(&Suspension)` may return `Some(WorkRequest)` or defer to
+external waiting with `None` (the default). `WorkRequest::options(...)` accepts a
 configured lane override through `TaskOptions::lane` and rejects conflict
 adoption. Targets must be registered
 Work, never Flow. Construction and routing cannot submit work: the snapshot and
 child are committed through the existing atomic spawn path.
+
+To route a Pravah suspension to a [task topic](#wait-for-a-shared-event),
+override `PravahDispatcher::wait_topic(&Suspension)`. The graph still uses
+`.suspend::<R>()`. Derive the topic from an explicit application payload in
+`Suspension::payload()`. A Work request from `suspend` takes precedence; only
+when it returns `None` does the adapter call `wait_topic`. Returning
+`Ok(Some(topic))` waits for `tasks.publish(topic, value)` with the graph's
+declared resume type. The default `Ok(None)` keeps direct resume by task ID.
+An invalid topic or a routing error fails the Flow. Existing checkpoints and
+Pravah's typed resume validation are unchanged.
 
 Missing dispatch for a statically declared Agent fails site construction, including
 nested graphs. A dynamically encountered Agent without dispatch returns
@@ -965,7 +975,7 @@ The task checkpoints and suspends without occupying an execution slot.
 
 ```rust
 let publication = site.tasks().publish("order:123:approval:7", approval).await?;
-// publication.resumed: the number made ready in this transaction (at most 64).
+// publication.resumed: the number made ready in this transaction (at most 128).
 // publication.more: an additional waiter was observed.
 ```
 

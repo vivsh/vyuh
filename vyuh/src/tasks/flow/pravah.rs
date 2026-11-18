@@ -124,19 +124,31 @@ impl<I: DataValue, O: DataValue, E: PravahDispatcher> PreparedPravah<I, O, E> {
                     let request = self.dispatcher.agent(&agent)?;
                     return Ok(FlowState::work(request, snapshot(&runtime)?)?);
                 }
-                pravah::Step::Suspend(_) => {
-                    let suspension = runtime
-                        .suspension()
-                        .ok_or_else(|| protocol("Missing graph suspension"))?;
-                    let request = self.dispatcher.suspend(suspension)?;
-                    return match request {
-                        Some(request) => Ok(FlowState::work(request, snapshot(&runtime)?)?),
-                        None => Ok(FlowState::suspend(snapshot(&runtime)?)?),
-                    };
-                }
+                pravah::Step::Suspend(_) => return self.suspend(&runtime),
             }
         }
         Ok(FlowState::sleep(snapshot(&runtime)?, Duration::ZERO)?)
+    }
+
+    /// Lets existing Work routing take precedence over optional external topic routing.
+    fn suspend(&self, runtime: &pravah::Runtime) -> Result<FlowState<O>, FlowError> {
+        let suspension = runtime
+            .suspension()
+            .ok_or_else(|| protocol("Missing graph suspension"))?;
+        if let Some(request) = self.dispatcher.suspend(suspension)? {
+            return Ok(FlowState::work(request, snapshot(runtime)?)?);
+        }
+        match self.dispatcher.wait_topic(suspension)? {
+            Some(topic) => {
+                FlowState::wait(&topic, snapshot(runtime)?).map_err(|error| match error {
+                    TaskRuntimeError::InvalidOptions(_) => {
+                        protocol("Invalid Pravah suspension wait topic")
+                    }
+                    other => other.into(),
+                })
+            }
+            None => Ok(FlowState::suspend(snapshot(runtime)?)?),
+        }
     }
 }
 
@@ -211,8 +223,9 @@ fn requires_agent(
 
 /// Shared, immutable dispatcher, built once per concrete type and site.
 ///
-/// Methods only select Work payloads/options. They must not perform external
-/// effects, submit tasks, retain execution progress, or transform returned results.
+/// Routing methods only select Work payloads/options or an external topic.
+/// They must not perform external effects, submit tasks, retain execution progress,
+/// or transform returned results.
 /// The store creates each Work child atomically with its Flow checkpoint.
 pub trait PravahDispatcher: Send + Sync + 'static {
     /// Obtains build-time handles without blocking I/O or runtime service extraction.
@@ -224,8 +237,18 @@ pub trait PravahDispatcher: Send + Sync + 'static {
     /// acknowledgements even when its agent outcome is a failure. Routing performs no effects.
     fn agent(&self, request: &pravah::AgentRequest) -> Result<WorkRequest, FlowError>;
 
-    /// Selects Work returning the declared resume value, or ordinary external waiting.
+    /// Selects Work returning the declared resume value, or defers to external waiting.
     fn suspend(&self, _: &pravah::Suspension) -> Result<Option<WorkRequest>, FlowError> {
+        Ok(None)
+    }
+
+    /// Routes an external suspension to a one-shot, exact-match task topic.
+    ///
+    /// Called only when [`Self::suspend`] declines to dispatch Work. Return
+    /// `None` (the default) to keep direct resume by task ID. An invalid topic
+    /// or routing error fails the Flow instead of falling back. The publication
+    /// must carry the declared resume value; early publications are not retained.
+    fn wait_topic(&self, _: &pravah::Suspension) -> Result<Option<String>, FlowError> {
         Ok(None)
     }
 

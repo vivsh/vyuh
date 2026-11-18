@@ -3,7 +3,7 @@
 use super::{TaskOutcome, TaskRuntimeError};
 use serde::Serialize;
 
-pub(super) const LIMIT: usize = 64;
+pub(super) const LIMIT: usize = 128;
 const MAX_TOPIC_BYTES: usize = 256;
 
 /// Acknowledgement of one bounded publication.

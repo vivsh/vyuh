@@ -436,8 +436,11 @@ The `vyuh` crate is organized around these subsystems:
   snapshots own their saved policy. History I/O runs in Work through an explicitly
   configured executor, never inside synchronous advancement. Suspension failures terminate the
   parent; successful domain values remain unchanged. Pure instruction-budget
-  exhaustion returns ordinary zero-delay sleep. No VM cache, implicit executor,
-  per-instruction persistence, new table or scheduling loop is introduced.
+  exhaustion returns ordinary zero-delay sleep. The adapter lets suspension
+  Work routing take precedence over opt-in dispatcher topic routing. Both topic
+  delivery and direct resume restore the same Pravah snapshot and use the same
+  typed resume path. No VM cache, implicit executor, per-instruction persistence,
+  new table, or scheduling loop is introduced.
   Registration validates configuration without computing deployment fingerprints.
   Protocol upgrades are ledger-owned and never reinterpret existing checkpoints.
   Spawn outcomes checkpoint a suspended parent and prepare one child; terminal
@@ -487,7 +490,7 @@ The `vyuh` crate is organized around these subsystems:
   one-shot membership. PostgreSQL and SQLite store it on the task row behind
   a partial index; MySQL/MariaDB use an active-only table. Ordinary writes and
   claims don't consult that table or project topics. One publish makes at most
-  64 tasks pending, consumes their memberships atomically, and reports an
+  128 tasks pending, consumes their memberships atomically, and reports an
   advisory extra-waiter hint. No replay, scheduler change, or automatic loop.
   Direct resume excludes topic waits; child delivery and lane gates stay intact.
 - `cache` provides an immutable per-site registry of asynchronous named cache
