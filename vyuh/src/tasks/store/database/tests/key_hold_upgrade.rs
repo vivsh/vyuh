@@ -559,7 +559,7 @@ fn assert_replay_shape(old: &Migration, migration: &Migration) -> Result<(), Str
     let planner =
         OfflinePlanner::new(dialect()).from_migrations(vec![old.clone(), migration.clone()]);
     let replay = planner.replay().map_err(err)?;
-    let mut expected = task_schema().map_err(err)?;
+    let mut expected = upgrade::before_topics()?;
     let replay_tasks = replay
         .tables
         .get("vyuh_tasks")

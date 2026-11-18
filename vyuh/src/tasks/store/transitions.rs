@@ -61,6 +61,11 @@ pub(super) fn capability_error(
             Some("Work tasks cannot spawn children")
         }
         (TaskKind::Flow, TaskOutcome::Retry { .. }) => Some("Flow handlers cannot request retry"),
+        (_, TaskOutcome::Wait { topic, .. })
+            if crate::tasks::publication::validate(topic).is_err() =>
+        {
+            Some("Invalid task wait topic")
+        }
         (_, TaskOutcome::Spawn { child, .. })
             if !handlers
                 .iter()

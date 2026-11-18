@@ -483,6 +483,13 @@ The `vyuh` crate is organized around these subsystems:
   finalization or parent delivery. Lane-owner loss still aborts invocations.
   Execution permits end at collection; uncommitted pressure ends at acknowledgement.
   Cancellation protects the durable terminal result, not cessation of effects.
+  Topic waits share the suspended checkpoint transition but have store-owned
+  one-shot membership. PostgreSQL and SQLite store it on the task row behind
+  a partial index; MySQL/MariaDB use an active-only table. Ordinary writes and
+  claims don't consult that table or project topics. One publish makes at most
+  64 tasks pending, consumes their memberships atomically, and reports an
+  advisory extra-waiter hint. No replay, scheduler change, or automatic loop.
+  Direct resume excludes topic waits; child delivery and lane gates stay intact.
 - `cache` provides an immutable per-site registry of asynchronous named cache
   providers. Its typed handles own JSON serialization, canonical provider and
   namespace key scoping, and bounded metrics; providers own byte storage, TTL,

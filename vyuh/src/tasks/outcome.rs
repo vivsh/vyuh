@@ -24,6 +24,8 @@ pub enum TaskOutcome {
     },
     /// Stores continuation state until an explicit resume.
     Suspend { state: String },
+    /// Suspends until a publication consumes this topic registration.
+    Wait { topic: String, state: String },
     /// Stores continuation state and schedules another execution.
     Sleep { state: String, delay: Duration },
     /// Schedules a retry and records its error.
@@ -91,7 +93,9 @@ pub(crate) fn normalize_outcome(
                 "Task output was invalid JSON or exceeded the 32768-byte result limit",
             )
         }
-        TaskOutcome::Suspend { state } if state.len() > payload_limit => {
+        TaskOutcome::Suspend { state } | TaskOutcome::Wait { state, .. }
+            if state.len() > payload_limit =>
+        {
             TaskOutcome::fail("Task continuation state exceeded the configured limit")
         }
         TaskOutcome::Sleep { state, .. } if state.len() > payload_limit => {

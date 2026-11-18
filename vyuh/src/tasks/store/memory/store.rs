@@ -34,6 +34,7 @@ pub(super) struct MemoryState {
     pub(super) schedules: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(super) lane_locks: HashMap<String, MemoryLaneLock>,
     pub(super) waits: HashMap<TaskId, workflow::TaskWait>,
+    pub(super) topic_waits: HashMap<TaskId, String>,
 }
 
 #[derive(Clone)]
@@ -412,6 +413,9 @@ impl TaskStore for MemoryTaskStore {
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         crate::tasks::result::validate_resume(&input)?;
         let mut state = self.state.lock().await;
+        if state.topic_waits.contains_key(&id) {
+            return Ok(false);
+        }
         let now = chrono::Utc::now();
         let Some(task) = state.tasks.iter_mut().find(|task| task.id == id) else {
             return Ok(false);
@@ -424,6 +428,17 @@ impl TaskStore for MemoryTaskStore {
         task.ready_at = Some(now);
         task.updated_at = now;
         Ok(true)
+    }
+
+    async fn publish(
+        &self,
+        topic: &str,
+        input: &str,
+    ) -> Result<crate::tasks::PublishResult, TaskRuntimeError> {
+        crate::tasks::publication::validate(topic)?;
+        crate::tasks::result::validate_resume(input)?;
+        let mut state = self.state.lock().await;
+        Ok(workflow::publish(&mut state, topic, input))
     }
 
     async fn list_tasks(
@@ -543,17 +558,19 @@ pub(super) fn commit_outcomes_state(
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
         Vec<(TaskId, workflow::TaskWait)>,
+        Vec<(TaskId, Option<String>)>,
     ),
     TaskRuntimeError,
 > {
-    let (updates, children, deliveries, waits) = workflow::stage_outcomes(state, commits, now)?;
+    let (updates, children, deliveries, waits, topics) =
+        workflow::stage_outcomes(state, commits, now)?;
     for (index, task) in updates {
         let current = state.tasks.get_mut(index).ok_or_else(|| {
             TaskRuntimeError::TaskExecutionError("staged task disappeared".into())
         })?;
         undo.push(std::mem::replace(current, task));
     }
-    Ok((children, deliveries, waits))
+    Ok((children, deliveries, waits, topics))
 }
 
 /// Fences outcomes from runners that no longer own an opt-in lane.
@@ -960,6 +977,7 @@ pub(super) fn apply_outcome(
             }
         }
         TaskOutcome::Suspend { state }
+        | TaskOutcome::Wait { state, .. }
         | TaskOutcome::Spawn { state, .. }
         | TaskOutcome::All { state, .. } => suspend(task, state),
         TaskOutcome::Sleep { state, delay } => sleep(task, state, delay, now)?,

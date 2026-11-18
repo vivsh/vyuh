@@ -104,7 +104,7 @@ fn predecessor() -> Result<db::Schema, String> {
 
 /// Reconstructs the 0017 owner-table schema for historical and key-hold rehearsals.
 pub(super) fn owner_schema() -> Result<db::Schema, String> {
-    let mut schema = task_schema().map_err(|e| e.to_string())?;
+    let mut schema = before_topics()?;
     #[cfg(any(feature = "postgres", feature = "sqlite"))]
     {
         let tasks = schema.tables.get_mut("vyuh_tasks").ok_or("missing tasks")?;
@@ -129,6 +129,84 @@ pub(super) fn owner_schema() -> Result<db::Schema, String> {
         schema.tables.insert(table.name.clone(), table);
     }
     schema.prepare_loaded(dialect()).map_err(|e| e.to_string())
+}
+
+/// Reconstructs the immediate predecessor without altering earlier ledger identities.
+pub(super) fn before_topics() -> Result<db::Schema, String> {
+    let mut schema = task_schema().map_err(|e| e.to_string())?;
+    schema.tables.remove("vyuh_task_waits");
+    let tasks = schema.tables.get_mut("vyuh_tasks").ok_or("missing tasks")?;
+    tasks.columns.retain(|column| column.name != "wait_topic");
+    tasks
+        .indexes
+        .retain(|index| index.name != "idx_vyuh_tasks_wait_topic");
+    schema.prepare_loaded(dialect()).map_err(|e| e.to_string())
+}
+
+/// Resolves the topic migration from the schema head of the selected backend.
+fn topic_migration() -> Result<(Migration, Migration), String> {
+    #[cfg(feature = "postgres")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/postgres/0019_task_topic_waits.yaml");
+    #[cfg(feature = "sqlite")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/sqlite/0019_task_topic_waits.yaml");
+    #[cfg(feature = "mysql")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/mysql/0019_task_topic_waits.yaml");
+    let mut next = Migration::from_yaml_str(yaml).map_err(|e| e.to_string())?;
+    next.id = "0019_task_topic_waits".into();
+    let mut previous = OfflinePlanner::new(dialect())
+        .make_migration(before_topics()?, &[])
+        .map_err(|e| e.to_string())?
+        .ok_or("missing predecessor")?;
+    previous.id = next
+        .dependencies
+        .first()
+        .ok_or("missing predecessor name")?
+        .clone();
+    Ok((previous, next))
+}
+
+/// Ensures the new ledger entry replays exactly to the desired schema.
+#[test]
+fn publication_upgrade() -> Result<(), String> {
+    let (previous, next) = topic_migration()?;
+    let planner = OfflinePlanner::new(dialect()).from_migrations(vec![previous, next]);
+    let desired = task_schema().map_err(|e| e.to_string())?;
+    if let Some(diff) = planner
+        .make_migration(desired, &[])
+        .map_err(|e| e.to_string())?
+    {
+        return Err(diff.to_yaml_string().map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+
+/// Applies the real additive upgrade and checks that preexisting suspensions get no topic.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn publication_upgrade_keeps_suspension() -> Result<(), String> {
+    let pool = db::sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .map_err(|e| e.to_string())?;
+    let (old, next) = topic_migration()?;
+    apply(&pool, &[], &old).await?;
+    db::sqlx::query(
+        "INSERT INTO vyuh_tasks (id, name, input, status, attempts, created_at, updated_at, state)
+        VALUES (randomblob(16),'legacy','null',2,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'42')",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    apply(&pool, &[old], &next).await?;
+    let actual: (i16, String, Option<Vec<u8>>) =
+        db::sqlx::query_as("SELECT status, state, wait_topic FROM vyuh_tasks")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    assert_eq!(actual, (2, "42".into(), None));
+    Ok(())
 }
 
 /// Restores the old ownership columns and readiness indexes in test-only schema scratch.

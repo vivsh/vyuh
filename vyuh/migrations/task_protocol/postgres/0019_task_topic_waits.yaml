@@ -1,0 +1,14 @@
+# Apply offline before new workers or writers begin using topic waits.
+dependencies: [0018_task_key_holds]
+atomic: true
+operations:
+  - type: add_column
+    table_name: vyuh_tasks
+    column: {name: wait_topic, type: bytea, nullable: true}
+  - type: add_index
+    table_name: vyuh_tasks
+    index:
+      name: idx_vyuh_tasks_wait_topic
+      columns: [wait_topic, id]
+      unique: false
+      predicate: "wait_topic IS NOT NULL"

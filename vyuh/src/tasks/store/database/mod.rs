@@ -11,6 +11,7 @@ mod model;
 mod nodes;
 #[cfg(feature = "postgres")]
 mod notify;
+mod publication;
 mod queries;
 mod recovery;
 #[cfg(feature = "migrations")]

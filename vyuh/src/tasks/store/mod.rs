@@ -28,6 +28,9 @@ pub(crate) type SqliteTaskStore = database::DbTaskStore;
 
 mod contract;
 mod lane;
+#[cfg(test)]
+#[path = "tests/publication.rs"]
+mod publication_tests;
 pub use contract::*;
 pub use lane::*;
 pub(crate) mod transitions;

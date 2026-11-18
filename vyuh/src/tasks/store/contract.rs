@@ -461,6 +461,20 @@ pub(crate) trait TaskStore {
     /// Advances only the readiness of a future, ownerless Pending task.
     fn wake(&self, id: TaskId) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + '_;
 
+    /// Consumes one bounded set of active topic waits atomically.
+    fn publish<'a>(
+        &'a self,
+        _topic: &'a str,
+        _input: &'a str,
+    ) -> impl Future<Output = Result<crate::tasks::PublishResult, TaskRuntimeError>> + Send + 'a
+    {
+        async {
+            Err(TaskRuntimeError::InvalidOptions(
+                "Task publication is not supported by this store".into(),
+            ))
+        }
+    }
+
     /// Resumes one suspended task with typed serialized input.
     fn resume<'a>(
         &'a self,
@@ -603,6 +617,14 @@ impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
 
     async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
         (**self).wake(id).await
+    }
+
+    async fn publish(
+        &self,
+        topic: &str,
+        input: &str,
+    ) -> Result<crate::tasks::PublishResult, TaskRuntimeError> {
+        (**self).publish(topic, input).await
     }
 
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {

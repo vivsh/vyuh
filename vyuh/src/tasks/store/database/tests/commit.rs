@@ -63,7 +63,15 @@ fn prepared_acceptance_preserves_outcomes() -> Result<(), TaskRuntimeError> {
         .with_config(crate::tasks::TaskConf::default())?
         .store_conf()?;
     assert!(
-        apply_owned_outcomes(&mut rows, &mut commands, &HashSet::new(), &conf, now)?.is_empty()
+        apply_owned_outcomes(
+            &mut rows,
+            &mut commands,
+            &HashSet::new(),
+            &conf,
+            now,
+            &mut Vec::new()
+        )?
+        .is_empty()
     );
     assert_eq!(
         commands.keys().copied().collect::<Vec<_>>(),

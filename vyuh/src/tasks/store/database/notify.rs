@@ -106,8 +106,18 @@ pub(super) async fn pending<'a>(
 }
 
 fn notification_sql(mutation: &str, returning: &str, result: &str) -> String {
+    notification_with("", mutation, returning, result)
+}
+
+/// Composes an optional selection CTE with the mutation and commit-time hints.
+pub(super) fn notification_with(
+    prefix: &str,
+    mutation: &str,
+    returning: &str,
+    result: &str,
+) -> String {
     format!(
-        "WITH changed AS ({mutation} RETURNING {returning}),
+        "WITH {prefix}changed AS ({mutation} RETURNING {returning}),
          targets AS (SELECT DISTINCT
            CASE WHEN node_id IS NULL THEN 'vyuh_tasks'
                 ELSE 'vyuh_tasks_' || replace(node_id::text, '-', '') END AS channel,

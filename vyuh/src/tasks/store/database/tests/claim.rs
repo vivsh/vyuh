@@ -491,6 +491,8 @@ pub(in crate::tasks::store::database) fn row(
     ready_at: Option<DateTime<Utc>>,
 ) -> TaskRow {
     TaskRow {
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        wait_topic: None,
         id: uuid::Uuid::from_u128(id),
         parent_id: None,
         root_id: None,

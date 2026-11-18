@@ -2,7 +2,7 @@
 
 #[cfg(feature = "mysql")]
 use super::model::IdempotencyExpiryPatch;
-use super::model::{ResumePatch, TaskRow};
+use super::model::TaskRow;
 use super::queries::add_time;
 use super::queries::{StoreRow, statement_now};
 use super::store::DbTaskStore;
@@ -49,7 +49,7 @@ impl DbTaskStore {
         Ok(changed)
     }
 
-    /// Executes an independent submission or control transaction.
+    /// Executes an independent direct resume, excluding topic waits.
     pub(super) async fn resume_impl(
         &self,
         id: TaskId,
@@ -58,40 +58,38 @@ impl DbTaskStore {
         crate::tasks::result::validate_resume(&input)?;
         let mut transaction = self.pool.begin().await?;
         let now = statement_now(&mut transaction).await?;
-        #[cfg(not(feature = "postgres"))]
-        let table = Self::table();
-        let patch = ResumePatch {
-            status: TaskStatus::Pending.as_i16(),
-            resume_input: Some(input),
-            ready_at: Some(now),
-            updated_at: now,
-        };
-        #[cfg(feature = "postgres")]
-        let changed = {
-            use db::DbSession as _;
-            let sql = super::notify::notifying(
-                "UPDATE vyuh_tasks SET status = 0, resume_input = $1, ready_at = $2, updated_at = $2 WHERE id = $3 AND status = 2 AND NOT cancelled",
-            );
-            let (changed, _): (i64, i64) = transaction
-                .fetch_one(
-                    db::Statement::raw(&sql)
-                        .bind(patch.resume_input)
-                        .bind(now)
-                        .bind(id.into_uuid()),
-                )
-                .await?;
-            changed as u64
-        };
-        #[cfg(not(feature = "postgres"))]
-        let changed = db::from(&table)
-            .filter(table.id.eq(db::val(id.into_uuid())))
-            .filter(table.status.eq(db::val(TaskStatus::Suspended.as_i16())))
-            .filter(table.cancelled.eq(db::val(false)))
-            .update(&patch)
-            .exec(&mut transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(changed > 0)
+        #[cfg(feature = "mysql")]
+        {
+            let changed = super::publication::resume(&mut transaction, id, input, now).await?;
+            transaction.commit().await?;
+            return Ok(changed);
+        }
+        #[cfg(not(feature = "mysql"))]
+        {
+            #[cfg(feature = "postgres")]
+            let changed = {
+                use db::DbSession as _;
+                let sql = super::notify::notifying(
+                    "UPDATE vyuh_tasks SET status = 0, resume_input = $1, ready_at = $2, updated_at = $2 WHERE id = $3 AND status = 2 AND NOT cancelled AND wait_topic IS NULL",
+                );
+                let (changed, _): (i64, i64) = transaction
+                    .fetch_one(
+                        db::Statement::raw(&sql)
+                            .bind(input)
+                            .bind(now)
+                            .bind(id.into_uuid()),
+                    )
+                    .await?;
+                changed as u64
+            };
+            #[cfg(feature = "sqlite")]
+        let changed = transaction.execute(db::Statement::raw(
+            "UPDATE vyuh_tasks SET status = 0, resume_input = ?1, ready_at = ?2, updated_at = ?2
+             WHERE id = ?3 AND status = 2 AND NOT cancelled AND wait_topic IS NULL"
+        ).bind(input).bind(now).bind(id.into_uuid())).await?;
+            transaction.commit().await?;
+            Ok(changed > 0)
+        }
     }
 
     /// Commits one bounded outcome batch in a shared transaction.
@@ -226,10 +224,13 @@ impl DbTaskStore {
             super::queries::WRITE_CHUNK_SIZE,
         )
         .await?;
-        let deliveries = apply_owned_outcomes(&mut rows, &mut commands, &conflicts, conf, now)?;
+        let mut topics = Vec::new();
+        let deliveries =
+            apply_owned_outcomes(&mut rows, &mut commands, &conflicts, conf, now, &mut topics)?;
         self.update_idempotency_batch(transaction, &mut rows, conf, now)
             .await?;
         batch_update_rows(transaction, &rows, super::queries::WRITE_CHUNK_SIZE).await?;
+        super::publication::store_changes(transaction, topics).await?;
         let rejected = commands.keys().copied().collect();
         let tasks = rows
             .into_iter()
@@ -421,6 +422,7 @@ pub(super) fn apply_outcome(
         TaskOutcome::Complete => finish(row, TaskStatus::Succeeded, None, now),
         TaskOutcome::CompleteWith { output } => complete_output(row, output, now),
         TaskOutcome::Suspend { state }
+        | TaskOutcome::Wait { state, .. }
         | TaskOutcome::Spawn { state, .. }
         | TaskOutcome::All { state, .. } => {
             row.last_result = None;
@@ -776,6 +778,7 @@ pub(super) fn apply_owned_outcomes(
     conflicts: &HashSet<TaskId>,
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
+    topics: &mut Vec<(uuid::Uuid, Option<Vec<u8>>)>,
 ) -> Result<Vec<(TaskId, String)>, TaskRuntimeError> {
     let mut deliveries = Vec::new();
     let cancellation = commands
@@ -803,6 +806,13 @@ pub(super) fn apply_owned_outcomes(
             .map(TaskOutcome::fail)
         };
         let outcome = invalid.as_ref().or(failure.as_ref()).unwrap_or(outcome);
+        if row.cancelled && row.status == TaskStatus::Suspended.as_i16() {
+            topics.push((row.id, None));
+        } else if !row.cancelled
+            && let TaskOutcome::Wait { topic, .. } = outcome
+        {
+            topics.push((row.id, Some(topic.as_bytes().to_vec())));
+        }
         let retry = lane_retry(&conf.lanes, &row.lane_name)?;
         apply_outcome(row, outcome, retry, now)?;
         queue_delivery(row, &mut deliveries)?;

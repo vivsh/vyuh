@@ -190,6 +190,17 @@ impl Tasks {
         self.client.wake(id).await
     }
 
+    /// Delivers a payload to at most 64 currently suspended topic waiters.
+    /// Invalid topics and oversized resume envelopes are rejected before writing.
+    /// No replay is retained; a subsequent publication can see different waiters.
+    pub async fn publish<T: Serialize>(
+        &self,
+        topic: &str,
+        payload: T,
+    ) -> Result<super::PublishResult, TaskRuntimeError> {
+        self.client.publish(topic, payload).await
+    }
+
     /// Resumes an ordinary suspension with success and wakes the local runner.
     /// Do not externally resume a parent waiting for a child. Returns false if not suspended.
     pub async fn resume<T: Serialize>(
@@ -411,6 +422,22 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             self.notify(RunnerEvent::Wake);
         }
         Ok(changed)
+    }
+
+    /// Uses the existing successful resume envelope and acknowledged wake path.
+    async fn publish<T: Serialize>(
+        &self,
+        topic: &str,
+        payload: T,
+    ) -> Result<super::PublishResult, TaskRuntimeError> {
+        super::publication::validate(topic)?;
+        let input = serde_json::to_string(&Ok::<_, super::TaskFailure>(payload))?;
+        super::result::validate_size(&input)?;
+        let result = self.store.publish(topic, &input).await?;
+        if result.resumed > 0 {
+            self.notify(RunnerEvent::Wake);
+        }
+        Ok(result)
     }
 
     /// Resumes an ordinary suspension with success and wakes local workers when it changed.

@@ -14,6 +14,7 @@ pub struct WorkState<T = ()> {
 enum WorkValue<T> {
     Complete(T),
     Suspend(String),
+    Wait { topic: String, state: String },
     Sleep { state: String, delay: Duration },
 }
 
@@ -31,6 +32,18 @@ impl<T> WorkState<T> {
     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
         Ok(Self {
             inner: WorkValue::Suspend(serde_json::to_string(&state)?),
+        })
+    }
+
+    /// Checkpoints and waits once for a topic publication. Invalid topics and
+    /// serialization errors are returned; early publications are not retained.
+    pub fn wait(topic: &str, state: impl Serialize) -> Result<Self, TaskRuntimeError> {
+        crate::tasks::publication::validate(topic)?;
+        Ok(Self {
+            inner: WorkValue::Wait {
+                topic: topic.to_owned(),
+                state: serde_json::to_string(&state)?,
+            },
         })
     }
 
@@ -52,6 +65,7 @@ impl<T: Serialize + 'static> WorkState<T> {
         match self.inner {
             WorkValue::Complete(output) => completion(output),
             WorkValue::Suspend(state) => TaskOutcome::Suspend { state },
+            WorkValue::Wait { topic, state } => TaskOutcome::Wait { topic, state },
             WorkValue::Sleep { state, delay } => TaskOutcome::Sleep { state, delay },
         }
     }

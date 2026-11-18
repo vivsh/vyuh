@@ -144,7 +144,8 @@ fn run_turn(
     now: chrono::DateTime<chrono::Utc>,
     undo: &mut Vec<TaskRecord>,
 ) -> Result<(TaskPoll, CommitResult), TaskRuntimeError> {
-    let (children, mut deliveries, waits) = commit_outcomes_state(state, commits, now, undo)?;
+    let (children, mut deliveries, waits, topics) =
+        commit_outcomes_state(state, commits, now, undo)?;
     let phases = state
         .lane_locks
         .iter()
@@ -161,6 +162,13 @@ fn run_turn(
     workflow::materialize(state, &mut poll);
     release_keys(state, undo);
     let mut wake_lanes = workflow::install(state, waits, now);
+    for (id, topic) in topics {
+        if let Some(topic) = topic {
+            state.topic_waits.insert(id, topic);
+        } else {
+            state.topic_waits.remove(&id);
+        }
+    }
     wake_lanes.extend(finalize_workflow(state, children, deliveries, now));
     workflow::clear_terminal(state, undo);
     reconcile_poll(state, &mut poll, &wake_lanes, &phases, now);
@@ -191,6 +199,7 @@ pub(super) fn stage_outcomes(
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
         Vec<(TaskId, workflow::TaskWait)>,
+        Vec<(TaskId, Option<String>)>,
     ),
     TaskRuntimeError,
 > {
@@ -198,6 +207,7 @@ pub(super) fn stage_outcomes(
     let mut children = Vec::new();
     let mut deliveries = Vec::new();
     let mut waits = Vec::new();
+    let mut topics = Vec::new();
     let mut seen = std::collections::HashSet::with_capacity(commits.len());
     for commit in commits {
         if !seen.insert(commit.task_id()) {
@@ -211,7 +221,15 @@ pub(super) fn stage_outcomes(
         let Some((index, task)) = owned_task(state, commit)? else {
             continue;
         };
+        let was_suspended = task.status == TaskStatus::Suspended;
         let task = staged_task(state, task, commit, now, &mut children, &mut deliveries)?;
+        if let Some(TaskOutcome::Wait { topic, .. }) = commit.outcome()
+            && task.status == TaskStatus::Suspended
+        {
+            topics.push((task.id, Some(topic.clone())));
+        } else if was_suspended && task.cancelled {
+            topics.push((task.id, None));
+        }
         if matches!(commit.outcome(), Some(TaskOutcome::All { .. }))
             && task.status == TaskStatus::Suspended
         {
@@ -219,7 +237,45 @@ pub(super) fn stage_outcomes(
         }
         updates.push((index, task));
     }
-    Ok((updates, children, deliveries, waits))
+    Ok((updates, children, deliveries, waits, topics))
+}
+
+/// Advances at most one bounded set while the memory store owns the mutex.
+pub(super) fn publish(
+    state: &mut MemoryState,
+    topic: &str,
+    input: &str,
+) -> crate::tasks::PublishResult {
+    use crate::tasks::publication::LIMIT;
+    let mut ordered = std::collections::BTreeSet::new();
+    for (&id, _) in state
+        .topic_waits
+        .iter()
+        .filter(|(_, key)| key.as_str() == topic)
+    {
+        ordered.insert(id);
+        if ordered.len() > LIMIT + 1 {
+            ordered.pop_last();
+        }
+    }
+    let more = ordered.len() > LIMIT;
+    let now = chrono::Utc::now();
+    let mut resumed = 0;
+    for task in &mut state.tasks {
+        if ordered.contains(&task.id)
+            && (!more || Some(&task.id) != ordered.last())
+            && task.status == TaskStatus::Suspended
+            && !task.cancelled
+        {
+            task.status = TaskStatus::Pending;
+            task.resume_input = Some(input.to_owned());
+            task.ready_at = Some(now);
+            task.updated_at = now;
+            state.topic_waits.remove(&task.id);
+            resumed += 1;
+        }
+    }
+    crate::tasks::PublishResult { resumed, more }
 }
 
 /// Borrows only the authoritative row still owned by the outcome's runner and lane.

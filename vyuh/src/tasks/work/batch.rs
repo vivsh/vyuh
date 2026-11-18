@@ -164,6 +164,7 @@ pub(in crate::tasks) fn resolve_batch(
 fn batch_safe(outcome: TaskOutcome) -> TaskOutcome {
     match outcome {
         TaskOutcome::Suspend { .. }
+        | TaskOutcome::Wait { .. }
         | TaskOutcome::Sleep { .. }
         | TaskOutcome::Spawn { .. }
         | TaskOutcome::All { .. } => {

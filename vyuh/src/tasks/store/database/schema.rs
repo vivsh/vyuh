@@ -15,7 +15,9 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
         .model::<TaskLaneLockRow>()
         .model::<TaskScheduleRow>();
     #[cfg(feature = "mysql")]
-    let builder = builder.model::<TaskIdempotencyRow>();
+    let builder = builder
+        .model::<TaskIdempotencyRow>()
+        .model::<super::publication::TopicWaitRow>();
     let mut schema = builder.build()?;
     if let Some(table) = schema.tables.get_mut("vyuh_tasks") {
         append_task_indexes(table);
@@ -31,6 +33,14 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
     if let Some(table) = schema.tables.get_mut("vyuh_task_idempotency") {
         append_idempotency_indexes(table);
     }
+    if let Some(table) = schema.tables.get_mut("vyuh_task_waits") {
+        table.indexes.push(index(
+            "idx_vyuh_task_waits_topic",
+            &["topic", "task_id"],
+            false,
+            None,
+        ));
+    }
     if let Some(table) = schema.tables.get_mut("vyuh_task_lane_rates") {
         append_rate_indexes(table);
     }
@@ -41,6 +51,12 @@ pub(crate) fn task_schema() -> Result<db::Schema, db::SchemaLoadError> {
 fn append_task_indexes(table: &mut db::Table) {
     #[cfg(any(feature = "postgres", feature = "sqlite"))]
     table.indexes.extend([
+        index(
+            "idx_vyuh_tasks_wait_topic",
+            &["wait_topic", "id"],
+            false,
+            Some("wait_topic IS NOT NULL"),
+        ),
         index(
             "idx_vyuh_tasks_held_key",
             &["name", "idempotency_key"],

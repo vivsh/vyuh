@@ -1,5 +1,15 @@
 # Coordinated task upgrades
 
+## Topic waits
+
+Stop task workers and writers, then append `0019_task_topic_waits` to the
+applicable ledger. PostgreSQL and SQLite add a nullable task-row topic and a
+partial index; MySQL and MariaDB create an active-waits table and do not alter
+the task table. Existing suspensions keep their direct-resume behavior. No data
+is rewritten. Rehearse the schema and index locks on a disposable copy before
+deployment. MySQL/MariaDB DDL is non-atomic; inspect partial application before
+retrying. Do not run old workers against a store with active topic waits.
+
 ## Key-hold upgrade: PostgreSQL and SQLite
 
 After `0017_local_sticky`, integrate `0018_task_key_holds` into the existing

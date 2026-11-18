@@ -119,6 +119,14 @@ impl<T> FlowState<T> {
         }))
     }
 
+    /// Checkpoints and waits once for a topic publication. Invalid topics and
+    /// serialization errors are returned; early publications are not retained.
+    pub fn wait(topic: &str, state: impl Serialize) -> Result<Self, TaskRuntimeError> {
+        Ok(Self::from_outcome(crate::tasks::publication::wait(
+            topic, state,
+        )?))
+    }
+
     /// Sleeps until the supplied delay with a checkpoint; returns serialization errors.
     pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
         Ok(Self::from_outcome(TaskOutcome::Sleep {

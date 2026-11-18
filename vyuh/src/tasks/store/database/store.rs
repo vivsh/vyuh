@@ -270,6 +270,17 @@ impl TaskStore for DbTaskStore {
         self.resume_impl(id, input).await
     }
 
+    async fn publish(
+        &self,
+        topic: &str,
+        input: &str,
+    ) -> Result<crate::tasks::PublishResult, TaskRuntimeError> {
+        crate::tasks::publication::validate(topic)?;
+        crate::tasks::result::validate_resume(input)?;
+        self.publish_bounded(topic.as_bytes(), input, crate::tasks::publication::LIMIT)
+            .await
+    }
+
     async fn list_tasks(
         &self,
         filter: TaskFilter,

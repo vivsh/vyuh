@@ -957,9 +957,30 @@ Use `resume_failed(id, TaskFailure::new(None, "safe explanation"))` to deliver a
 external failure instead. These remain independent operations; child completion
 does not call either method. Neither method may be used to interrupt a child wait.
 
-There are no retained topic events in the current task model. If an application
-needs to resume multiple tasks for one external event, it should keep its own
-mapping from event keys to task IDs and call `resume` for each task.
+### Wait for a shared event
+
+Single-item Work and Flow handlers can return `WorkState::wait(topic, state)?`
+or `FlowState::wait(topic, state)?` to wait once for the same named event.
+The task checkpoints and suspends without occupying an execution slot.
+
+```rust
+let publication = site.tasks().publish("order:123:approval:7", approval).await?;
+// publication.resumed: the number made ready in this transaction (at most 64).
+// publication.more: an additional waiter was observed.
+```
+
+Topics match exactly and must be nonblank, NUL-free, and at most 256 UTF-8
+bytes. The payload uses the same successful resume envelope and 32 KiB limit
+as direct resume. Direct `resume` and `resume_failed` cannot consume a topic
+wait. Child completion and sleep/wake are separate.
+
+Publications are not retained for future waiters. A wait must commit before
+it can receive one. Vyuh never repeats a publication automatically; a caller
+may publish again when `more` is true, but that call may reach new waiters.
+Use a different topic for each event occurrence when late duplicate
+publications must not release a later wait. A missing acknowledgement does
+not prove rollback. Keep must-not-miss events in application storage and
+use sleep/polling as a fallback.
 
 ## Cancellation
 

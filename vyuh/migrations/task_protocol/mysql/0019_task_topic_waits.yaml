@@ -1,0 +1,13 @@
+# Apply offline before new workers or writers begin using topic waits.
+dependencies: [0017_local_sticky]
+atomic: false
+operations:
+  - type: create_table
+    table:
+      name: vyuh_task_waits
+      columns:
+        - {name: task_id, type: binary(16), primary_key: true}
+        - {name: topic, type: varbinary(256)}
+  - type: add_index
+    table_name: vyuh_task_waits
+    index: {name: idx_vyuh_task_waits_topic, columns: [topic, task_id], unique: false}

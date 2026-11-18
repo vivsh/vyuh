@@ -36,6 +36,10 @@ pub(super) struct TaskRow {
     pub(super) input: String,
     pub(super) state: Option<String>,
     pub(super) resume_input: Option<String>,
+    #[cfg(any(feature = "postgres", feature = "sqlite"))]
+    #[column(selectable = false, insertable = false, updatable = false)]
+    #[allow(dead_code)] // Schema metadata; narrow writes live in publication.rs.
+    pub(super) wait_topic: Option<Vec<u8>>,
     #[cfg_attr(feature = "mysql", column(type = "mediumtext"))]
     #[column(selectable = false, insertable = false, updatable = false)]
     pub(super) waiting_children: Option<String>,
@@ -119,6 +123,8 @@ impl From<TaskRecord> for TaskRow {
             input: record.input,
             state: record.state,
             resume_input: record.resume_input,
+            #[cfg(any(feature = "postgres", feature = "sqlite"))]
+            wait_topic: None,
             waiting_children: None,
             remaining_completions: 0,
             status: record.status.as_i16(),
@@ -271,14 +277,5 @@ pub(super) struct RatePatch {
 #[table(name = "vyuh_task_idempotency")]
 pub(super) struct IdempotencyExpiryPatch {
     pub(super) expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, db::Record)]
-#[table(name = "vyuh_tasks")]
-pub(super) struct ResumePatch {
-    pub(super) status: i16,
-    pub(super) resume_input: Option<String>,
-    pub(super) ready_at: Option<chrono::DateTime<chrono::Utc>>,
     pub(super) updated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -12,6 +12,7 @@ mod lane_lock;
 mod metrics;
 mod models;
 mod outcome;
+mod publication;
 mod rate;
 mod registry;
 mod result;
@@ -44,6 +45,7 @@ pub(crate) use metrics::TaskMetrics;
 pub(crate) use models::TaskRecord;
 pub use models::{TaskDefinition, TaskFilter, TaskId, TaskIdempotency, TaskInfo, TaskKind};
 pub(crate) use outcome::TaskOutcome;
+pub use publication::PublishResult;
 pub(crate) use registry::TaskRegistry;
 pub(crate) use runner::TaskRunner;
 #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
