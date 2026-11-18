@@ -1,8 +1,8 @@
 error[E0053]: method `advance` has an incompatible type for trait
-  --> tests/ui/tasks/flow_invalid_sealed.rs:11:79
+  --> tests/ui/tasks/flow_invalid_sealed.rs:11:2
    |
 11 |  async fn advance(&self, _: TaskId, _: Data<Job>, _: Continuation<(), ()>) -> Result<FlowState, FlowError> {
-   |                                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<FlowState, FlowError>`, found future
+   |  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Result<FlowState, FlowError>`, found future
    |
    = note: expected signature `fn(&Bypass, vyuh::prelude::TaskId, vyuh::Data<Job>, vyuh::prelude::Continuation<()>) -> Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>`
               found signature `fn(&Bypass, vyuh::prelude::TaskId, vyuh::Data<Job>, vyuh::prelude::Continuation<()>) -> impl std::future::Future<Output = Result<vyuh::prelude::FlowState, vyuh::prelude::FlowError>>`

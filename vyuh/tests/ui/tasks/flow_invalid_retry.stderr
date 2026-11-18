@@ -6,11 +6,11 @@ warning: unused imports: `bundles` and `tasks::TaskDefinition`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-error[E0599]: no associated function or constant named `retry` found for struct `vyuh::prelude::FlowState<T>` in the current scope
+error[E0599]: no function or associated item named `retry` found for struct `vyuh::prelude::FlowState<T>` in the current scope
  --> tests/ui/tasks/flow_invalid_retry.rs:4:32
   |
 4 | fn main() { let _ = FlowState::retry("no"); }
-  |                                ^^^^^ associated function or constant not found in `vyuh::prelude::FlowState<_>`
+  |                                ^^^^^ function or associated item not found in `vyuh::prelude::FlowState<_>`
   |
 note: if you're trying to build a new `vyuh::prelude::FlowState<_>` consider using one of the following associated functions:
       vyuh::prelude::FlowState::<T>::all

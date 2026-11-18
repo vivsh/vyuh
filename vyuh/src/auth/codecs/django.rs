@@ -7,7 +7,8 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
-use ring::{constant_time, digest, hmac};
+use ring::{digest, hmac};
+use subtle::ConstantTimeEq as _;
 
 use crate::auth::{
     AuthError, AuthToken, CodecDefinition, CodecRuntime, CustomClaims, EncodedCredential,
@@ -119,7 +120,7 @@ impl DjangoCodec {
             .ok_or(AuthError::InvalidCredential)?;
         if !self.verification.iter().any(|key| {
             let expected = signature(key, &self.salt, signed);
-            constant_time::verify_slices_are_equal(expected.as_bytes(), supplied.as_bytes()).is_ok()
+            bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
         }) {
             return Err(AuthError::InvalidCredential);
         }
@@ -143,7 +144,7 @@ impl DjangoCodec {
             .ok_or(AuthError::InvalidCredential)?;
         if !self.verification.iter().any(|key| {
             let expected = signature(key, &self.salt, signed);
-            constant_time::verify_slices_are_equal(expected.as_bytes(), supplied.as_bytes()).is_ok()
+            bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
         }) {
             return Err(AuthError::InvalidCredential);
         }

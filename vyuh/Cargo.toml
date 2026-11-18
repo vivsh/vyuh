@@ -65,7 +65,8 @@ time = "0.3.41"
 
 # Password hashing utilities (Django-compatible PBKDF2)
 base64 = "0.21"
-ring = "0.16"
+ring = "0.17.12"
+subtle = "2.6"
 
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json", "time", "ansi", "tracing-log"] }
@@ -97,7 +98,7 @@ serde_yaml = "0.9"
 lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool"], optional = true }
 html2text = "0.17.1"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "stream"] }
-huskarl-resource-server = { version = "=0.10.1", optional = true }
+huskarl-resource-server = { version = "0.11.13", optional = true }
 jsonschema = { version = "0.49.8", optional = true, default-features = false }
 mime = { version = "0.3", optional = true }
 
@@ -106,8 +107,8 @@ pravah = { version = "0.4.25", default-features = false, features = ["testing"] 
 gaman-core = "0.3.38"
 tokio = { version = "1.46.1", features = ["full", "test-util"] }
 trybuild = "1.0"
-rand08 = { package = "rand", version = "0.8" }
-rsa = "0.9"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+rsa = "0.10"
 sqlx = { workspace = true, features = ["macros", "migrate", "chrono", "runtime-tokio", "uuid", "json", "postgres", "mysql", "sqlite"] }
 
 [[example]]

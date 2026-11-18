@@ -2,14 +2,11 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "oauth")]
-use std::error::Error as _;
-
 use axum::http::{Request, StatusCode};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use huskarl_resource_server::core::{
-    Error, ErrorKind,
+    Error, RetryAdvice,
     http::{HttpClient, HttpResponse, Idempotency},
     platform::MaybeSendBoxFuture,
 };
@@ -90,7 +87,7 @@ enum OAuthHttpError {
 }
 
 fn transport_setup_error(source: reqwest::Error) -> Error {
-    Error::new(ErrorKind::Config, OAuthHttpError::Setup(source))
+    Error::new(RetryAdvice::No, OAuthHttpError::Setup(source))
 }
 
 fn transport_error(source: reqwest::Error, idempotency: Idempotency) -> Error {
@@ -98,13 +95,13 @@ fn transport_error(source: reqwest::Error, idempotency: Idempotency) -> Error {
         || (matches!(idempotency, Idempotency::Idempotent)
             && (source.is_timeout() || source.is_body()));
     Error::new(
-        ErrorKind::Transport { retryable },
+        RetryAdvice::retry_if(retryable),
         OAuthHttpError::Request(source),
     )
 }
 
 pub(super) fn status_error(status: StatusCode) -> Error {
-    Error::new(ErrorKind::Protocol, OAuthHttpError::Status(status))
+    Error::new(RetryAdvice::No, OAuthHttpError::Status(status))
 }
 
 async fn read_bounded(
@@ -115,14 +112,14 @@ async fn read_bounded(
         .content_length()
         .is_some_and(|size| size > MAX_DOCUMENT_BYTES as u64)
     {
-        return Err(Error::new(ErrorKind::Protocol, OAuthHttpError::Oversized));
+        return Err(Error::new(RetryAdvice::No, OAuthHttpError::Oversized));
     }
     let mut result = BytesMut::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| transport_error(error, idempotency))?;
         if result.len().saturating_add(chunk.len()) > MAX_DOCUMENT_BYTES {
-            return Err(Error::new(ErrorKind::Protocol, OAuthHttpError::Oversized));
+            return Err(Error::new(RetryAdvice::No, OAuthHttpError::Oversized));
         }
         result.extend_from_slice(&chunk);
     }
@@ -131,19 +128,21 @@ async fn read_bounded(
 
 #[cfg(feature = "oauth")]
 pub(crate) fn unsupported_discovery(error: &Error) -> bool {
-    let mut source = error.source();
-    while let Some(current) = source {
-        if let Some(OAuthHttpError::Status(status)) = current.downcast_ref::<OAuthHttpError>() {
-            return matches!(*status, StatusCode::NOT_FOUND | StatusCode::GONE);
-        }
-        source = current.source();
-    }
-    false
+    error
+        .chain()
+        .find_map(|source| {
+            // Huskarl displays its cause directly and skips it in source().
+            let cause = source.downcast_ref::<Error>().map_or(source, Error::cause);
+            match cause.downcast_ref::<OAuthHttpError>()? {
+                OAuthHttpError::Status(status) => Some(*status),
+                _ => None,
+            }
+        })
+        .is_some_and(|status| matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE))
 }
 
 fn validate_transport_url(value: &str) -> Result<(), Error> {
-    validate_remote_url(value)
-        .map_err(|_| Error::new(ErrorKind::Protocol, OAuthHttpError::UnsafeUrl))
+    validate_remote_url(value).map_err(|_| Error::new(RetryAdvice::No, OAuthHttpError::UnsafeUrl))
 }
 
 /// Validates one clean HTTPS endpoint or an explicit loopback development endpoint.

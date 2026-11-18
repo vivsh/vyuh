@@ -13,12 +13,12 @@ use axum::http::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use huskarl_resource_server::core::{
-    Error as HuskarlError, ErrorKind,
+    Error as HuskarlError, RetryAdvice,
     http::{HttpClient, HttpResponse, Idempotency},
     platform::MaybeSendBoxFuture,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
+use rsa::{PrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -83,11 +83,11 @@ struct TestKey {
 
 impl TestKey {
     fn generate() -> Result<Self, TestError> {
-        let private = RsaPrivateKey::new(&mut rand08::rngs::OsRng, 2048)
-            .map_err(|_| TestError::KeyGeneration)?;
+        let private =
+            PrivateKey::new(&mut getrandom::SysRng, 2048).map_err(|_| TestError::KeyGeneration)?;
         let document = private.to_pkcs1_der().map_err(|_| TestError::KeyExport)?;
-        let modulus = URL_SAFE_NO_PAD.encode(private.n().to_bytes_be());
-        let exponent = URL_SAFE_NO_PAD.encode(private.e().to_bytes_be());
+        let modulus = URL_SAFE_NO_PAD.encode(private.n().to_be_bytes_trimmed_vartime());
+        let exponent = URL_SAFE_NO_PAD.encode(private.e().to_be_bytes_trimmed_vartime());
         Ok(Self {
             encoding: EncodingKey::from_rsa_der(document.as_bytes()),
             jwk: format!(
@@ -330,7 +330,7 @@ async fn rejects_wrong_audience_and_expiry() -> Result<(), TestError> {
 }
 
 fn unexpected_request() -> HuskarlError {
-    HuskarlError::new(ErrorKind::Config, TestError::Request)
+    HuskarlError::new(RetryAdvice::No, TestError::Request)
 }
 
 #[derive(Debug, Error)]

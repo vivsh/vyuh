@@ -6,24 +6,16 @@ error[E0277]: the trait bound `FlowAllIn: From<(Job, Job, Job, Job, Job, Job, Jo
 8 |         (Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job),
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<(Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job)>` is not implemented for `FlowAllIn`
   |
-  = help: `FlowAllIn` implements trait `From<T>`:
-            From<(A, B)>
-            From<(A, B, C)>
-            From<(A, B, C, D)>
-            From<(A, B, C, D, E)>
-            From<(A, B, C, D, E, F)>
-            From<(A, B, C, D, E, F, G)>
-            From<(A, B, C, D, E, F, G, H)>
-            From<(A, B, C, D, E, F, G, H, I)>
-            From<(A, B, C, D, E, F, G, H, I, J)>
-            From<(A, B, C, D, E, F, G, H, I, J, K)>
-            From<(A, B, C, D, E, F, G, H, I, J, K, L)>
-            From<(A, B, C, D, E, F, G, H, I, J, K, L, M)>
-            From<(A, B, C, D, E, F, G, H, I, J, K, L, M, N)>
-            From<(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O)>
-            From<(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P)>
-            From<(A,)>
-            From<Vec<I>>
+  = help: the following other types implement trait `From<T>`:
+            `FlowAllIn` implements `From<(A, B)>`
+            `FlowAllIn` implements `From<(A, B, C)>`
+            `FlowAllIn` implements `From<(A, B, C, D)>`
+            `FlowAllIn` implements `From<(A, B, C, D, E)>`
+            `FlowAllIn` implements `From<(A, B, C, D, E, F)>`
+            `FlowAllIn` implements `From<(A, B, C, D, E, F, G)>`
+            `FlowAllIn` implements `From<(A, B, C, D, E, F, G, H)>`
+            `FlowAllIn` implements `From<(A, B, C, D, E, F, G, H, I)>`
+          and $N others
   = note: required for `(Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job, Job)` to implement `Into<FlowAllIn>`
 note: required by a bound in `vyuh::prelude::FlowState::<T>::all`
  --> src/tasks/flow/state.rs

@@ -11,7 +11,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(vyuh::Site) -> _`
-   = note: required for `fn(vyuh::Site) -> Manual {site}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(vyuh::Site) -> Manual {site}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -26,6 +26,19 @@ help: consider wrapping the function in a closure
    |                        +++++++++++++++++++     ++++++++++++++++++
 
 error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:12:10
+   |
+ 5 | fn site(_: Site) -> Manual { Manual }
+   | -------------------------- found signature defined here
+...
+12 |  let _ = bundles::flow(site, FlowConf::new("site"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::Site) -> _`
+   = note: required for `fn(vyuh::Site) -> Manual {site}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
+
+error[E0631]: type mismatch in function arguments
   --> tests/ui/tasks/flow_invalid_extractors.rs:13:24
    |
  6 | fn service(_: ServiceRef<String>) -> Manual { Manual }
@@ -38,7 +51,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(vyuh::prelude::ServiceRef<std::string::String>) -> _`
-   = note: required for `fn(vyuh::prelude::ServiceRef<std::string::String>) -> Manual {service}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(vyuh::prelude::ServiceRef<std::string::String>) -> Manual {service}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -53,6 +66,19 @@ help: consider wrapping the function in a closure
    |                        +++++++++++++++++++        ++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:13:10
+   |
+ 6 | fn service(_: ServiceRef<String>) -> Manual { Manual }
+   | ------------------------------------------- found signature defined here
+...
+13 |  let _ = bundles::flow(service, FlowConf::new("service"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::ServiceRef<std::string::String>) -> _`
+   = note: required for `fn(vyuh::prelude::ServiceRef<std::string::String>) -> Manual {service}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
+
+error[E0631]: type mismatch in function arguments
   --> tests/ui/tasks/flow_invalid_extractors.rs:14:24
    |
  7 | fn identity(_: TaskId) -> Manual { Manual }
@@ -65,7 +91,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(vyuh::prelude::TaskId) -> _`
-   = note: required for `fn(vyuh::prelude::TaskId) -> Manual {identity}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(vyuh::prelude::TaskId) -> Manual {identity}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -80,6 +106,19 @@ help: consider wrapping the function in a closure
    |                        +++++++++++++++++++         +++++++++++++++++++++++++++++
 
 error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:14:10
+   |
+ 7 | fn identity(_: TaskId) -> Manual { Manual }
+   | -------------------------------- found signature defined here
+...
+14 |  let _ = bundles::flow(identity, FlowConf::new("id"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::TaskId) -> _`
+   = note: required for `fn(vyuh::prelude::TaskId) -> Manual {identity}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
+
+error[E0631]: type mismatch in function arguments
   --> tests/ui/tasks/flow_invalid_extractors.rs:15:24
    |
  8 | fn operation(_: vyuh::OperationId) -> Manual { Manual }
@@ -92,7 +131,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(OperationId) -> _`
-   = note: required for `fn(OperationId) -> Manual {operation}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(OperationId) -> Manual {operation}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -107,6 +146,19 @@ help: consider wrapping the function in a closure
    |                        +++++++++++++++++++          +++++++++++++++++++
 
 error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:15:10
+   |
+ 8 | fn operation(_: vyuh::OperationId) -> Manual { Manual }
+   | -------------------------------------------- found signature defined here
+...
+15 |  let _ = bundles::flow(operation, FlowConf::new("operation"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(OperationId) -> _`
+   = note: required for `fn(OperationId) -> Manual {operation}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
+
+error[E0631]: type mismatch in function arguments
   --> tests/ui/tasks/flow_invalid_extractors.rs:16:24
    |
  9 | fn input(_: Data<Job>) -> Manual { Manual }
@@ -119,7 +171,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(vyuh::Data<Job>) -> _`
-   = note: required for `fn(vyuh::Data<Job>) -> Manual {input}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(vyuh::Data<Job>) -> Manual {input}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -134,6 +186,19 @@ help: consider wrapping the function in a closure
    |                        +++++++++++++++++++      +++++++++++++++++++++++
 
 error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:16:10
+   |
+ 9 | fn input(_: Data<Job>) -> Manual { Manual }
+   | -------------------------------- found signature defined here
+...
+16 |  let _ = bundles::flow(input, FlowConf::new("input"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::Data<Job>) -> _`
+   = note: required for `fn(vyuh::Data<Job>) -> Manual {input}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
+
+error[E0631]: type mismatch in function arguments
   --> tests/ui/tasks/flow_invalid_extractors.rs:17:24
    |
 10 | fn continuation(_: Continuation<(), ()>) -> Manual { Manual }
@@ -146,7 +211,7 @@ error[E0631]: type mismatch in function arguments
    |
    = note: expected function signature `fn(PartialSite) -> _`
               found function signature `fn(vyuh::prelude::Continuation<()>) -> _`
-   = note: required for `fn(vyuh::prelude::Continuation<()>) -> Manual {continuation}` to implement `vyuh::tasks::FlowCallable<callables::specs::Tuple1<PartialSite>>`
+   = note: required for `fn(vyuh::prelude::Continuation<()>) -> Manual {continuation}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`
 note: required by a bound in `flow`
   --> src/bundles/part.rs
    |
@@ -159,3 +224,16 @@ help: consider wrapping the function in a closure
    |
 17 |  let _ = bundles::flow(|arg0: PartialSite| continuation(/* vyuh::prelude::Continuation<()> */), FlowConf::new("continuation"));
    |                        +++++++++++++++++++             +++++++++++++++++++++++++++++++++++++++
+
+error[E0631]: type mismatch in function arguments
+  --> tests/ui/tasks/flow_invalid_extractors.rs:17:10
+   |
+10 | fn continuation(_: Continuation<(), ()>) -> Manual { Manual }
+   | -------------------------------------------------- found signature defined here
+...
+17 |  let _ = bundles::flow(continuation, FlowConf::new("continuation"));
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+   |
+   = note: expected function signature `fn(PartialSite) -> _`
+              found function signature `fn(vyuh::prelude::Continuation<()>) -> _`
+   = note: required for `fn(vyuh::prelude::Continuation<()>) -> Manual {continuation}` to implement `FlowCallable<callables::specs::Tuple1<PartialSite>>`

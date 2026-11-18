@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use huskarl_resource_server::core::{
-    Error as HuskarlError, ErrorKind,
+    Error as HuskarlError, RetryAdvice,
     http::{HttpClient, HttpResponse, Idempotency},
     platform::MaybeSendBoxFuture,
 };
@@ -19,7 +19,7 @@ use ring::{
     rand::SystemRandom,
     signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as _},
 };
-use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
+use rsa::{PrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -148,7 +148,7 @@ enum TestError {
 }
 
 fn test_error(source: TestError) -> HuskarlError {
-    HuskarlError::new(ErrorKind::Config, source)
+    HuskarlError::new(RetryAdvice::No, source)
 }
 
 struct TestKey {
@@ -178,10 +178,10 @@ impl TestKey {
 
 fn rsa_key() -> Result<AlgorithmKey, TestError> {
     let private =
-        RsaPrivateKey::new(&mut rand08::rngs::OsRng, 2048).map_err(|_| TestError::KeyGeneration)?;
+        PrivateKey::new(&mut getrandom::SysRng, 2048).map_err(|_| TestError::KeyGeneration)?;
     let document = private.to_pkcs1_der().map_err(|_| TestError::KeyExport)?;
-    let n = URL_SAFE_NO_PAD.encode(private.n().to_bytes_be());
-    let e = URL_SAFE_NO_PAD.encode(private.e().to_bytes_be());
+    let n = URL_SAFE_NO_PAD.encode(private.n().to_be_bytes_trimmed_vartime());
+    let e = URL_SAFE_NO_PAD.encode(private.e().to_be_bytes_trimmed_vartime());
     Ok(AlgorithmKey {
         encoding: EncodingKey::from_rsa_der(document.as_bytes()),
         jwk: format!(
@@ -196,8 +196,9 @@ fn ec_key() -> Result<AlgorithmKey, TestError> {
     let random = SystemRandom::new();
     let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &random)
         .map_err(|_| TestError::KeyGeneration)?;
-    let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, document.as_ref())
-        .map_err(|_| TestError::KeyGeneration)?;
+    let pair =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, document.as_ref(), &random)
+            .map_err(|_| TestError::KeyGeneration)?;
     let point = pair.public_key().as_ref();
     if point.len() != 65 || point.first() != Some(&4) {
         return Err(TestError::KeyExport);

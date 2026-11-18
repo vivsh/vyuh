@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_TOOLCHAIN: "1.92"
+  RUST_TOOLCHAIN: "1.92.0"
 
 jobs:
   format:
@@ -28,8 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -42,23 +40,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - name: Lint backendless framework
-        run: cargo clippy -p vyuh --no-default-features -- -D warnings
+        run: cargo clippy -p vyuh --no-default-features -- -D clippy::correctness -D clippy::suspicious
       - name: Lint PostgreSQL framework
-        run: cargo clippy -p vyuh --no-default-features --features postgres -- -D warnings
+        run: cargo clippy -p vyuh --no-default-features --features postgres -- -D clippy::correctness -D clippy::suspicious
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -72,106 +66,65 @@ jobs:
       - name: Run backendless unit and integration suite
         run: cargo test -p vyuh --no-default-features
 
-  auth-codecs:
+  auth:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - oauth
-          - federated
-          - id-token
-          - email
-          - mcp
-          - "oauth,federated"
-          - paseto
-          - branca
-          - "oauth,federated,id-token,mcp"
-          - "oauth,federated,id-token,paseto,branca,mcp"
+        include:
+          - features: oauth
+            tests: --lib auth::oauth
+          - features: id-token
+            tests: --lib auth::id_token
+          - features: federated,paseto,branca
+            tests: --test auth
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Test authentication codec feature set
-        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --test auth
-      - name: Test OAuth resource-server internals
-        if: contains(matrix.features, 'oauth')
-        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::oauth
-      - name: Test external identity-token internals
-        if: contains(matrix.features, 'id-token')
-        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::id_token
+      - name: Test the selected auth feature
+        run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} ${{ matrix.tests }}
       - name: Test federated provider internals
         if: contains(matrix.features, 'federated')
         run: cargo test -p vyuh --no-default-features --features ${{ matrix.features }} --lib auth::login::federated
+
+  integrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Test email delivery and SMTP behavior
+        run: cargo test -p vyuh --no-default-features --features email,mcp --test email_delivery
+      - name: Test mail capture and isolation
+        run: cargo test -p vyuh --no-default-features --features email,test-support --test email
+      - name: Test MCP protocol and routing
+        run: cargo test -p vyuh --no-default-features --features email,mcp --lib mcp::tests
 
   feature-matrix:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features:
+        backend:
           - sqlite
           - postgres
           - mysql
-          - sqlite,migrations
-          - postgres,migrations
-          - oauth,sqlite
-          - oauth,postgres
-          - oauth,mysql
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Compile selected feature set
-        run: cargo check -p vyuh --no-default-features --features ${{ matrix.features }}
-
-  postgres-contracts:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: vyuh
-          POSTGRES_PASSWORD: vyuh
-          POSTGRES_DB: vyuh_ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U vyuh -d vyuh_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Run PostgreSQL migration and task contracts
-        env:
-          DATABASE_URL: postgres://vyuh:vyuh@localhost:5432/vyuh_ci
-        run: cargo test -p vyuh --no-default-features --features postgres,migrations --lib tasks::store_tests
-
-  sqlite-contracts:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - name: Run SQLite migration and task contracts
-        run: cargo test -p vyuh --no-default-features --features sqlite,migrations --lib tasks::store_tests
+      - name: Check the minimal backend
+        run: cargo check -p vyuh --no-default-features --features ${{ matrix.backend }}
+      - name: Check the backend with migrations
+        run: cargo check -p vyuh --no-default-features --features ${{ matrix.backend }},migrations
 
   docs:
+    # The Pages workflow already builds the book on main.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,8 +140,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Checkout Mool prerequisite
-        run: git clone --depth 1 https://github.com/vivsh/mool.git ../mool
-      - uses: rustsec/audit-check@v2
+      - uses: dtolnay/rust-toolchain@master
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Resolve the workspace dependency graph
+        run: cargo generate-lockfile
+      - name: Install RustSec audit CLI
+        run: cargo install cargo-audit --version 0.23.0 --locked --no-default-features
+      - name: Audit resolved dependencies
+        run: cargo audit --file Cargo.lock

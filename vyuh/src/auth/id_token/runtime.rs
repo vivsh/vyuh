@@ -162,12 +162,16 @@ async fn shared_verifier<C: HttpClient + Clone + 'static>(
     metadata: &AuthorizationServerMetadata,
 ) -> Result<Arc<dyn JwsVerifierFactory>, HuskarlError> {
     let jwks_uri = metadata.jwks_uri.as_ref().ok_or_else(|| {
-        HuskarlError::from(huskarl_resource_server::core::ErrorKind::Protocol)
-            .with_context("identity-provider metadata has no JWKS URI")
+        HuskarlError::new(
+            huskarl_resource_server::core::RetryAdvice::No,
+            "identity-provider metadata has no JWKS URI",
+        )
     })?;
     validate_remote_url(jwks_uri.as_uri().to_string().as_str()).map_err(|_| {
-        HuskarlError::from(huskarl_resource_server::core::ErrorKind::Protocol)
-            .with_context("identity-provider metadata has an invalid JWKS URI")
+        HuskarlError::new(
+            huskarl_resource_server::core::RetryAdvice::No,
+            "identity-provider metadata has an invalid JWKS URI",
+        )
     })?;
     let platform: Arc<dyn JwsVerifierPlatform> = DefaultJwsVerifierPlatform::default().into();
     let source = JwksSource::builder().http_client(client.clone()).build();
@@ -358,9 +362,9 @@ fn map_validation_error(error: ValidateHeadersError) -> AuthError {
     ) {
         return AuthError::ExpiredCredential;
     }
-    match error.token_error() {
+    match error.challenge().error {
         TokenValidationError::Client(_) => AuthError::InvalidCredential,
-        TokenValidationError::Server(_) => AuthError::ProviderUnavailable,
+        TokenValidationError::Server { .. } => AuthError::ProviderUnavailable,
     }
 }
 

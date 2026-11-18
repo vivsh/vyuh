@@ -2,9 +2,9 @@ use std::borrow::Cow;
 
 use axum::http::{HeaderName, HeaderValue, Method, header, request::Parts};
 use axum_extra::extract::cookie::{self, Cookie};
-use ring::constant_time;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use subtle::ConstantTimeEq as _;
 
 use super::AuthError;
 
@@ -147,8 +147,9 @@ impl CsrfConf {
         }
         let expected =
             extract_cookie(parts, &self.cookie.name)?.ok_or(AuthError::InvalidCsrfToken)?;
-        constant_time::verify_slices_are_equal(expected.as_bytes(), supplied.as_bytes())
-            .map_err(|_| AuthError::InvalidCsrfToken)
+        bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
+            .then_some(())
+            .ok_or(AuthError::InvalidCsrfToken)
     }
 
     pub(crate) fn attachment(
