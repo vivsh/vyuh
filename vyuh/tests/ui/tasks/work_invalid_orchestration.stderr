@@ -15,6 +15,7 @@ error[E0599]: no function or associated item named `spawn` found for struct `vyu
 note: if you're trying to build a new `vyuh::prelude::WorkState<_>` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
+      vyuh::prelude::WorkState::<T>::wait
       vyuh::prelude::WorkState::<T>::sleep
  --> src/tasks/work/state.rs
   |
@@ -23,6 +24,9 @@ note: if you're trying to build a new `vyuh::prelude::WorkState<_>` consider usi
 ...
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn wait(topic: &str, state: impl Serialize) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
   |     pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -36,6 +40,7 @@ error[E0599]: no function or associated item named `spawn_with` found for struct
 note: if you're trying to build a new `vyuh::prelude::WorkState<_>` consider using one of the following associated functions:
       vyuh::prelude::WorkState::<T>::complete
       vyuh::prelude::WorkState::<T>::suspend
+      vyuh::prelude::WorkState::<T>::wait
       vyuh::prelude::WorkState::<T>::sleep
  --> src/tasks/work/state.rs
   |
@@ -44,6 +49,9 @@ note: if you're trying to build a new `vyuh::prelude::WorkState<_>` consider usi
 ...
   |     pub fn suspend<S: Serialize>(state: S) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn wait(topic: &str, state: impl Serialize) -> Result<Self, TaskRuntimeError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
   |     pub fn sleep<S: Serialize>(state: S, delay: Duration) -> Result<Self, TaskRuntimeError> {
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
