@@ -397,7 +397,7 @@ async fn install_schema(pool: &db::DbPool, dialect: db::Dialect) -> Result<(), S
         .ok_or("missing schema")?;
     let mut conn = pool.as_sqlx().acquire().await.map_err(error)?;
     for sql in planner.sql_migrate(&[migration]).map_err(error)? {
-        db::sqlx::query(&sql)
+        db::sqlx::query(db::sqlx::AssertSqlSafe(sql))
             .execute(&mut *conn)
             .await
             .map_err(error)?;

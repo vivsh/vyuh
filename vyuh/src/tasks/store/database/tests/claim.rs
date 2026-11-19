@@ -454,7 +454,7 @@ pub(in crate::tasks::store::database) async fn fresh_store() -> Result<DbTaskSto
         .sql_migrate(&[migration])
         .map_err(|e| e.to_string())?
     {
-        db::sqlx::query(&sql)
+        db::sqlx::query(db::sqlx::AssertSqlSafe(sql))
             .execute(&pool)
             .await
             .map_err(|e| e.to_string())?;

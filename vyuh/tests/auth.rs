@@ -1229,12 +1229,34 @@ async fn oidc_begin_uses_authorization_code_pkce() -> Result<(), AuthError> {
 #[cfg(feature = "federated")]
 #[tokio::test]
 async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError> {
+    oidc_callback(jsonwebtoken::Algorithm::HS256, true).await
+}
+
+/// RSA-backed providers keep accepting independently signed RS256 and PS256 ID tokens.
+#[cfg(feature = "federated")]
+#[tokio::test]
+async fn oidc_callback_verifies_rsa_tokens() -> Result<(), AuthError> {
+    for algorithm in [
+        jsonwebtoken::Algorithm::RS256,
+        jsonwebtoken::Algorithm::PS256,
+    ] {
+        oidc_callback(algorithm, true).await?;
+        oidc_callback(algorithm, false).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "federated")]
+async fn oidc_callback(
+    algorithm: jsonwebtoken::Algorithm,
+    matching_nonce: bool,
+) -> Result<(), AuthError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(auth_error)?;
     let address = listener.local_addr().map_err(auth_error)?;
     let issuer = format!("http://{address}");
-    let oidc_state = MockOidcState::new(issuer.clone());
+    let oidc_state = MockOidcState::new(issuer.clone()).algorithm(algorithm);
     let router = oidc_discovery_router(oidc_state.clone());
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
@@ -1257,12 +1279,25 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
     let challenge = selected
         .begin(&site, FederatedStart::new(), &[REPORTS])
         .await?;
-    let redirect = url::Url::parse(
-        challenge
-            .redirect_url()
-            .ok_or(AuthError::InvalidLoginState)?,
-    )
-    .map_err(auth_error)?;
+    let callback = oidc_test_callback(&oidc_state, challenge.redirect_url(), matching_nonce)?;
+    let result = selected.complete(&site, callback).await;
+    server.abort();
+    if matching_nonce {
+        assert!(!result?.credentials().access().is_empty());
+    } else {
+        assert!(matches!(result, Err(AuthError::InvalidCredential)));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "federated")]
+fn oidc_test_callback(
+    oidc_state: &MockOidcState,
+    redirect_url: Option<&str>,
+    matching_nonce: bool,
+) -> Result<vyuh::auth::FederatedCallback, AuthError> {
+    let redirect =
+        url::Url::parse(redirect_url.ok_or(AuthError::InvalidLoginState)?).map_err(auth_error)?;
     let params = redirect
         .query_pairs()
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -1274,16 +1309,16 @@ async fn oidc_callback_verifies_and_issues_credentials() -> Result<(), AuthError
         .get("state")
         .ok_or(AuthError::InvalidLoginState)?
         .to_string();
-    oidc_state.set_nonce(nonce)?;
-    let callback = serde_json::from_value::<vyuh::auth::FederatedCallback>(serde_json::json!({
+    oidc_state.set_nonce(if matching_nonce {
+        nonce
+    } else {
+        "wrong-nonce".into()
+    })?;
+    serde_json::from_value(serde_json::json!({
         "code": "valid-code",
         "state": state,
     }))
-    .map_err(auth_error)?;
-    let completed = selected.complete(&site, callback).await?;
-    assert!(!completed.credentials().access().is_empty());
-    server.abort();
-    Ok(())
+    .map_err(auth_error)
 }
 
 /// Verifies non-loopback OIDC endpoints require HTTPS at startup.
@@ -1338,6 +1373,7 @@ async fn oidc_discovery_outage_is_provider_unavailable() -> Result<(), AuthError
 struct MockOidcState {
     issuer: String,
     nonce: Arc<Mutex<Option<String>>>,
+    algorithm: jsonwebtoken::Algorithm,
 }
 
 #[cfg(feature = "federated")]
@@ -1346,7 +1382,13 @@ impl MockOidcState {
         Self {
             issuer,
             nonce: Arc::new(Mutex::new(None)),
+            algorithm: jsonwebtoken::Algorithm::HS256,
         }
+    }
+
+    fn algorithm(mut self, algorithm: jsonwebtoken::Algorithm) -> Self {
+        self.algorithm = algorithm;
+        self
     }
 
     fn set_nonce(&self, nonce: String) -> Result<(), AuthError> {
@@ -1359,8 +1401,25 @@ impl MockOidcState {
 }
 
 #[cfg(feature = "federated")]
+fn oidc_test_keys(algorithm: jsonwebtoken::Algorithm) -> Result<serde_json::Value, AuthError> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rsa::{PublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
+
+    if algorithm == jsonwebtoken::Algorithm::HS256 {
+        return Ok(serde_json::json!([]));
+    }
+    let key = PublicKey::from_public_key_pem(include_str!("fixtures/jwt-old-public.pem"))
+        .map_err(auth_error)?;
+    Ok(serde_json::json!([{
+        "kty": "RSA", "kid": "oidc-test-key", "use": "sig", "alg": algorithm,
+        "n": URL_SAFE_NO_PAD.encode(key.n().to_be_bytes_trimmed_vartime()),
+        "e": URL_SAFE_NO_PAD.encode(key.e().to_be_bytes_trimmed_vartime()),
+    }]))
+}
+
+#[cfg(feature = "federated")]
 fn oidc_discovery_router(state: MockOidcState) -> axum::Router {
-    use axum::{Json as AxumJson, extract::State, routing::get};
+    use axum::{Json as AxumJson, extract::State, http::StatusCode, routing::get};
 
     async fn discovery(State(state): State<MockOidcState>) -> AxumJson<serde_json::Value> {
         let issuer = state.issuer;
@@ -1371,15 +1430,21 @@ fn oidc_discovery_router(state: MockOidcState) -> axum::Router {
             "jwks_uri": format!("{issuer}/jwks"),
             "response_types_supported": ["code"],
             "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["HS256"]
+            "id_token_signing_alg_values_supported": [state.algorithm]
         }))
     }
 
-    async fn jwks() -> AxumJson<serde_json::Value> {
-        AxumJson(serde_json::json!({ "keys": [] }))
+    async fn jwks(
+        State(state): State<MockOidcState>,
+    ) -> Result<AxumJson<serde_json::Value>, StatusCode> {
+        let keys =
+            oidc_test_keys(state.algorithm).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(AxumJson(serde_json::json!({ "keys": keys })))
     }
 
-    async fn token(State(state): State<MockOidcState>) -> AxumJson<serde_json::Value> {
+    async fn token(
+        State(state): State<MockOidcState>,
+    ) -> Result<AxumJson<serde_json::Value>, StatusCode> {
         let nonce = state
             .nonce
             .lock()
@@ -1397,18 +1462,22 @@ fn oidc_discovery_router(state: MockOidcState) -> axum::Router {
             "nonce": nonce,
             "amr": ["pwd"]
         });
-        let id_token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
-        )
-        .unwrap_or_default();
-        AxumJson(serde_json::json!({
+        let mut header = jsonwebtoken::Header::new(state.algorithm);
+        let key = if state.algorithm == jsonwebtoken::Algorithm::HS256 {
+            jsonwebtoken::EncodingKey::from_secret(b"test-secret")
+        } else {
+            header.kid = Some("oidc-test-key".into());
+            jsonwebtoken::EncodingKey::from_rsa_pem(include_bytes!("fixtures/jwt-old-private.pem"))
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        };
+        let id_token = jsonwebtoken::encode(&header, &claims, &key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(AxumJson(serde_json::json!({
             "access_token": "mock-access-token",
             "token_type": "Bearer",
             "expires_in": 300,
             "id_token": id_token
-        }))
+        })))
     }
 
     axum::Router::new()

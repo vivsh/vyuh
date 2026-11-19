@@ -438,7 +438,7 @@ async fn fresh_store() -> Result<DbTaskStore, String> {
         .await
         .map_err(|e| e.to_string())?;
     for sql in node_migration(dialect)? {
-        db::sqlx::query(&sql)
+        db::sqlx::query(db::sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&pool)
             .await
             .map_err(|e| format!("{e}: {sql}"))?;

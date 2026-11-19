@@ -6,7 +6,11 @@ error[E0277]: the trait bound `impl std::future::Future<Output = Manual>: FlowRe
 5 | async fn handler() -> support::Manual { support::Manual }
   |          ^^^^^^^ the trait `vyuh::prelude::Flow` is not implemented for `impl std::future::Future<Output = Manual>`
   |
-  = help: the trait `vyuh::prelude::Flow` is implemented for `Manual`
+help: the trait `vyuh::prelude::Flow` is implemented for `Manual`
+ --> tests/ui/tasks/support/manual.rs
+  |
+  | impl Flow for Manual {
+  | ^^^^^^^^^^^^^^^^^^^^
   = note: required for `impl std::future::Future<Output = Manual>` to implement `IntoFlow<_>`
   = note: required for `impl std::future::Future<Output = Manual>` to implement `FlowReturn<_, (), tasks::flow::factory::Definition>`
 note: required by a bound in `flow`
@@ -26,7 +30,11 @@ error[E0277]: the trait bound `impl std::future::Future<Output = Manual>: FlowRe
   |                     |
   |                     required by a bound introduced by this call
   |
-  = help: the trait `vyuh::prelude::Flow` is implemented for `Manual`
+help: the trait `vyuh::prelude::Flow` is implemented for `Manual`
+ --> tests/ui/tasks/support/manual.rs
+  |
+  | impl Flow for Manual {
+  | ^^^^^^^^^^^^^^^^^^^^
   = note: required for `impl std::future::Future<Output = Manual>` to implement `IntoFlow<_>`
   = note: required for `impl std::future::Future<Output = Manual>` to implement `FlowReturn<_, (), tasks::flow::factory::Definition>`
 note: required by a bound in `flow`

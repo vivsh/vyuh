@@ -656,9 +656,9 @@ async fn persisted_bytes(store: &DbTaskStore, id: uuid::Uuid) -> Result<String, 
         .map(|column| format!("quote(\"{}\")", column.name()))
         .collect::<Vec<_>>()
         .join(",");
-    db::sqlx::query_scalar(&format!(
+    db::sqlx::query_scalar(db::sqlx::AssertSqlSafe(format!(
         "SELECT json_array({values}) FROM vyuh_tasks WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_one(store.pool.as_sqlx())
     .await

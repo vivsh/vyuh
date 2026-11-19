@@ -22,7 +22,7 @@ async fn store() -> Result<(DbTaskStore, tempfile::TempDir), String> {
         .ok_or("missing schema")?;
     let mut setup = pool.acquire().await.map_err(error)?;
     for sql in planner.sql_migrate(&[migration]).map_err(error)? {
-        db::sqlx::query(&sql)
+        db::sqlx::query(db::sqlx::AssertSqlSafe(sql.as_str()))
             .execute(&mut *setup)
             .await
             .map_err(|cause| format!("{cause}: {sql}"))?;
@@ -59,7 +59,7 @@ async fn test_pool(_: &tempfile::TempDir) -> Result<db::sqlx::Pool<db::Database>
     let primary = db::sqlx::Pool::<db::Database>::connect(&url)
         .await
         .map_err(error)?;
-    db::sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    db::sqlx::query(db::sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&primary)
         .await
         .map_err(error)?;
@@ -137,7 +137,10 @@ async fn publication_rollback() -> Result<(), String> {
         last.simple()
     );
     let pool = store.pool.as_sqlx();
-    db::sqlx::query(&sql).execute(pool).await.map_err(error)?;
+    db::sqlx::query(db::sqlx::AssertSqlSafe(sql))
+        .execute(pool)
+        .await
+        .map_err(error)?;
     let input = r#"{"Ok":42}"#;
     assert!(store.publish("rollback", input).await.is_err());
     for id in ids {

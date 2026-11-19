@@ -2,10 +2,7 @@ error[E0432]: unresolved import `vyuh::auth::OidcLogin`
  --> tests/ui/auth/oidc_login.rs:1:5
   |
 1 | use vyuh::auth::OidcLogin;
-  |     ^^^^^^^^^^^^^^^^^^^^^ no `OidcLogin` in `auth`
-  |
-help: a similar name exists in the module
-  |
-1 - use vyuh::auth::OidcLogin;
-1 + use vyuh::auth::OtpLogin;
-  |
+  |     ^^^^^^^^^^^^---------
+  |     |           |
+  |     |           help: a similar name exists in the module: `OtpLogin`
+  |     no `OidcLogin` in `auth`

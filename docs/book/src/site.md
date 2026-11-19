@@ -332,13 +332,18 @@ let site = vyuh::testing::TestSite::new(site);
 site.start_runtime().await?;
 ```
 
-`test_site` owns Mool's isolated database and applies registered migrations:
+`test_site` owns Mool's isolated database and applies registered migrations on
+PostgreSQL and SQLite when the `migrations` feature is enabled:
 
 ```rust,ignore
 let site = vyuh::testing::test_site(conf, app_bundle()).await?;
 site.get("/api/posts").send().await.assert_ok();
 site.teardown().await?;
 ```
+
+On MySQL, automatic test migrations are not supported. If the bundle registers
+migrations, use `TestSite::builder(conf, bundle).without_migrations()` for an empty
+database or `TestSite::from_pool` with a prepared database.
 
 For a database shared by multiple test sites, retain Mool's `TestDatabase` in
 the fixture and use `TestSite::from_pool`; shut down every site before calling

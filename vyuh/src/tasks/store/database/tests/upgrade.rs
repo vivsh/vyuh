@@ -390,10 +390,12 @@ async fn sqlite_reset_rolls_back_on_failure() -> Result<(), String> {
             .is_err()
     );
     for (table, expected) in [("vyuh_tasks", 5), ("vyuh_task_idempotency", 1)] {
-        let count: i64 = db::sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let count: i64 = db::sqlx::query_scalar(db::sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {table}"
+        )))
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
         assert_eq!(count, expected);
     }
     Ok(())
@@ -412,7 +414,7 @@ async fn apply(
         .map_err(|e| e.to_string())?;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     for statement in sql {
-        db::sqlx::query(&statement)
+        db::sqlx::query(db::sqlx::AssertSqlSafe(statement.as_str()))
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("{e}: {statement}"))?;
@@ -446,10 +448,12 @@ async fn seed(pool: &db::sqlx::SqlitePool) -> Result<(), String> {
 #[cfg(feature = "sqlite")]
 async fn verify_reset(pool: &db::sqlx::SqlitePool) -> Result<(), String> {
     for table in ["vyuh_tasks", "vyuh_task_idempotency", "vyuh_task_nodes"] {
-        let count: i64 = db::sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let count: i64 = db::sqlx::query_scalar(db::sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM {table}"
+        )))
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
         assert_eq!(count, 0);
     }
     let tokens: i64 = db::sqlx::query_scalar("SELECT tokens_micros FROM vyuh_task_lane_rates")

@@ -6,7 +6,11 @@ error[E0277]: the trait bound `vyuh::prelude::WorkState: FlowReturn<_, (), tasks
 3 | fn handler() -> WorkState { WorkState::complete(()) }
   |    ^^^^^^^ the trait `vyuh::prelude::Flow` is not implemented for `vyuh::prelude::WorkState`
   |
-  = help: the trait `FlowReturn<I, E, tasks::flow::factory::Fallible>` is implemented for `Result<F, FlowError>`
+help: the trait `FlowReturn<I, E, tasks::flow::factory::Fallible>` is implemented for `Result<F, FlowError>`
+ --> src/tasks/flow/factory.rs
+  |
+  | impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Fallible> for Result<F, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: required for `vyuh::prelude::WorkState` to implement `IntoFlow<_>`
   = note: required for `vyuh::prelude::WorkState` to implement `FlowReturn<_, (), tasks::flow::factory::Definition>`
 note: required by a bound in `flow`
@@ -26,7 +30,11 @@ error[E0277]: the trait bound `u32: FlowReturn<_, (), tasks::flow::factory::Defi
   |                     |
   |                     required by a bound introduced by this call
   |
-  = help: the trait `FlowReturn<I, E, tasks::flow::factory::Fallible>` is implemented for `Result<F, FlowError>`
+help: the trait `FlowReturn<I, E, tasks::flow::factory::Fallible>` is implemented for `Result<F, FlowError>`
+ --> src/tasks/flow/factory.rs
+  |
+  | impl<I: DataValue, E, F: IntoFlow<I, E>> FlowReturn<I, E, Fallible> for Result<F, FlowError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = note: required for `u32` to implement `IntoFlow<_>`
   = note: required for `u32` to implement `FlowReturn<_, (), tasks::flow::factory::Definition>`
 note: required by a bound in `flow`

@@ -89,10 +89,13 @@ impl TestSite {
         Ok(Self::new(site))
     }
 
-    /// Provisions a Mool-owned isolated database, applies bundle migrations, and builds a test site.
+    /// Provisions a Mool-owned isolated database and builds a test site.
     ///
     /// The supplied configuration must contain credentials that can create and drop an isolated
     /// database. Call [`Self::teardown`] to shut down the site and report cleanup failures.
+    /// When migrations are enabled, registered migrations apply automatically on PostgreSQL and
+    /// SQLite. On MySQL, use [`TestSiteBuilder::without_migrations`] or supply a prepared pool
+    /// through [`Self::from_pool`].
     #[cfg(all(
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
@@ -118,7 +121,7 @@ impl TestSite {
         feature = "test-support",
         any(feature = "postgres", feature = "mysql", feature = "sqlite")
     ))]
-    /// Applies registered migrations to a Mool-owned isolated database.
+    /// Creates an isolated database and applies registered migrations when supported.
     async fn provision_database(
         conf: &SiteConf,
         bundle: &Bundle,
@@ -127,12 +130,20 @@ impl TestSite {
         let setup = crate::db::testing::setup(conf.database.clone());
         #[cfg(not(feature = "migrations"))]
         let _ = (bundle, apply_migrations);
-        #[cfg(feature = "migrations")]
+        #[cfg(all(feature = "migrations", any(feature = "postgres", feature = "sqlite")))]
         let setup = if apply_migrations && bundle.migrations.root().is_some() {
             setup.with_migrations(&bundle.migrations)
         } else {
             setup
         };
+        #[cfg(all(feature = "migrations", feature = "mysql"))]
+        if apply_migrations && bundle.migrations.root().is_some() {
+            return Err(SiteError::from(crate::conf::ConfError::Other(
+                "automatic test migrations are not supported on MySQL; use without_migrations() or from_pool()"
+                    .into(),
+            ))
+            .into());
+        }
         Ok(setup.create().await?)
     }
 
@@ -417,8 +428,9 @@ impl TestSiteBuilder {
     }
 }
 
-/// Provisions an isolated Mool database, applies registered migrations, and builds a test site.
+/// Provisions an isolated Mool database and builds a test site.
 ///
+/// See [`TestSite::from_conf`] for automatic migration support by backend.
 /// Use [`TestSite::builder`] when migrations must remain unapplied, and
 /// [`TestSite::from_pool`] when a fixture owns a database shared by several test sites.
 #[cfg(all(

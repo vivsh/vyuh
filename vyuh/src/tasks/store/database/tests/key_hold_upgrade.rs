@@ -479,7 +479,7 @@ async fn prove_runtime(database: &db::testing::TestDatabase) -> Result<(), Strin
 }
 
 async fn sql(pool: &db::Pool, query: &str) -> Result<u64, String> {
-    Ok(db::sqlx::query(query)
+    Ok(db::sqlx::query(db::sqlx::AssertSqlSafe(query))
         .execute(pool)
         .await
         .map_err(err)?
@@ -487,7 +487,7 @@ async fn sql(pool: &db::Pool, query: &str) -> Result<u64, String> {
 }
 
 async fn number(pool: &db::Pool, query: &str) -> Result<i64, String> {
-    db::sqlx::query_scalar(query)
+    db::sqlx::query_scalar(db::sqlx::AssertSqlSafe(query))
         .fetch_one(pool)
         .await
         .map_err(err)
@@ -604,19 +604,22 @@ async fn expiry_plan(pool: &db::Pool) -> Result<String, String> {
         ORDER BY idempotency_expires_at,id LIMIT 250";
     #[cfg(feature = "postgres")]
     return Ok(
-        db::sqlx::query_scalar::<_, String>(&format!("EXPLAIN (COSTS OFF) {select}"))
-            .fetch_all(pool)
-            .await
-            .map_err(err)?
-            .join(" | "),
+        db::sqlx::query_scalar::<_, String>(db::sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {select}"
+        )))
+        .fetch_all(pool)
+        .await
+        .map_err(err)?
+        .join(" | "),
     );
     #[cfg(feature = "sqlite")]
     {
-        let rows: Vec<(i32, i32, i32, String)> =
-            db::sqlx::query_as(&format!("EXPLAIN QUERY PLAN {select}"))
-                .fetch_all(pool)
-                .await
-                .map_err(err)?;
+        let rows: Vec<(i32, i32, i32, String)> = db::sqlx::query_as(db::sqlx::AssertSqlSafe(
+            format!("EXPLAIN QUERY PLAN {select}"),
+        ))
+        .fetch_all(pool)
+        .await
+        .map_err(err)?;
         Ok(rows
             .into_iter()
             .map(|(_, _, _, detail)| detail)
