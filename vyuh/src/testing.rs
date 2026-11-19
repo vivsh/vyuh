@@ -23,6 +23,10 @@ pub use crate::db::sqlx::test_block_on;
 #[doc(hidden)]
 pub use tokio;
 
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "tests/task_fixture.rs"]
+pub(crate) mod task_fixture;
+
 /// Returns the router of an already-built site for direct Axum-level tests.
 pub fn router(site: &Site) -> SiteService {
     site.router()

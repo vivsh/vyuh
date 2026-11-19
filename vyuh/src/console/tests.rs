@@ -4,6 +4,8 @@ use axum::http::{StatusCode, header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "sqlite")]
+use crate::testing::task_fixture::sqlite_task_conf;
 use crate::{
     Data, Error, Site, SiteConf, bundles,
     commands::CommandConf,
@@ -737,29 +739,32 @@ mod web;
 
 /// Verifies task lists omit results while detail inspection exposes the result field.
 #[tokio::test]
-async fn console_task_pages_show_submitted_tasks() {
+async fn console_task_pages_show_submitted_tasks() -> Result<(), String> {
     let conf = test_conf()
         .log_init(false)
         .console(ConsoleConf::default().enabled(true));
-    let site = Site::build(conf, task_app_bundle()).await.unwrap();
+    #[cfg(feature = "sqlite")]
+    let (conf, _database) = sqlite_task_conf(conf).await.map_err(|e| e.to_string())?;
+    let site = Site::build(conf, task_app_bundle())
+        .await
+        .map_err(|e| e.to_string())?;
     site.tasks()
         .submit(ConsoleTaskJob {
             message: "hello".to_string(),
         })
         .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        .map_err(|e| e.to_string())?;
 
-    let cookie = console_cookie(&site).await.unwrap();
+    let cookie = console_cookie(&site).await.map_err(|e| e.to_string())?;
     let task_id = site
         .tasks()
         .list(crate::tasks::TaskFilter::new())
         .await
-        .unwrap()
+        .map_err(|e| e.to_string())?
         .items
         .into_iter()
         .next()
-        .unwrap()
+        .ok_or("missing submitted task")?
         .id;
     let client = TestSite::new(site);
 
@@ -773,25 +778,7 @@ async fn console_task_pages_show_submitted_tasks() {
     assert!(api_tasks.contains("console_test_task"));
     assert!(!api_tasks.contains("last_result"));
 
-    let detail = client
-        .get(&format!("/console/api/tasks/{task_id}"))
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(detail.status(), StatusCode::OK);
-    let detail: serde_json::Value = serde_json::from_str(&detail.text().await).unwrap();
-    assert!(detail.get("input").is_some());
-    assert!(detail.get("output").is_none());
-    assert!(detail.get("result").is_none());
-    assert!(detail.get("last_result").is_some());
-    let html = client
-        .get(&format!("/console/tasks/{task_id}"))
-        .header(header::COOKIE.as_str(), &cookie)
-        .send()
-        .await;
-    assert_eq!(html.status(), StatusCode::OK);
-    assert!(html.text().await.contains("Last result"));
-
+    assert_task_details(&client, &cookie, task_id).await?;
     let tasks = client
         .get("/console/tasks")
         .header(header::COOKIE.as_str(), &cookie)
@@ -801,20 +788,49 @@ async fn console_task_pages_show_submitted_tasks() {
     let tasks = tasks.text().await;
     assert!(tasks.contains("console_test_task"));
     assert!(!tasks.contains("No task records yet."));
+    Ok(())
+}
+
+/// Checks both task detail representations expose the latest result without legacy fields.
+async fn assert_task_details(
+    client: &TestSite,
+    cookie: &str,
+    task_id: crate::tasks::TaskId,
+) -> Result<(), String> {
+    let detail = client
+        .get(&format!("/console/api/tasks/{task_id}"))
+        .header(header::COOKIE.as_str(), cookie)
+        .send()
+        .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: serde_json::Value =
+        serde_json::from_str(&detail.text().await).map_err(|e| e.to_string())?;
+    assert!(detail.get("input").is_some());
+    assert!(detail.get("output").is_none());
+    assert!(detail.get("result").is_none());
+    assert!(detail.get("last_result").is_some());
+    let html = client
+        .get(&format!("/console/tasks/{task_id}"))
+        .header(header::COOKIE.as_str(), cookie)
+        .send()
+        .await;
+    assert_eq!(html.status(), StatusCode::OK);
+    assert!(html.text().await.contains("Last result"));
+    Ok(())
 }
 
 /// Verifies the console shows immutable task schedules and their durable cursor fields.
 #[tokio::test]
-async fn console_schedule_pages_show_task_schedules() {
-    let site = Site::build(
-        test_conf()
-            .log_init(false)
-            .console(ConsoleConf::default().enabled(true)),
-        scheduled_task_bundle(),
-    )
-    .await
-    .unwrap();
-    let cookie = console_cookie(&site).await.unwrap();
+async fn console_schedule_pages_show_task_schedules() -> Result<(), String> {
+    let conf = test_conf()
+        .log_init(false)
+        .console(ConsoleConf::default().enabled(true));
+    #[cfg(feature = "sqlite")]
+    let (conf, _database) = sqlite_task_conf(conf).await.map_err(|e| e.to_string())?;
+    let site = Site::build(conf, scheduled_task_bundle())
+        .await
+        .map_err(|e| e.to_string())?;
+    let cookie = console_cookie(&site).await.map_err(|e| e.to_string())?;
     let client = TestSite::new(site);
 
     let page = client
@@ -835,11 +851,13 @@ async fn console_schedule_pages_show_task_schedules() {
         .send()
         .await;
     assert_eq!(api.status(), StatusCode::OK);
-    let api: serde_json::Value = serde_json::from_str(&api.text().await).unwrap();
+    let api: serde_json::Value =
+        serde_json::from_str(&api.text().await).map_err(|e| e.to_string())?;
     assert_eq!(api["configured"], 1);
     assert_eq!(api["items"][0]["name"], "nightly-console-task");
     assert_eq!(api["items"][0]["lane"], "default");
     assert!(api["items"][0]["next_expected_at"].is_string());
+    Ok(())
 }
 
 #[tokio::test]

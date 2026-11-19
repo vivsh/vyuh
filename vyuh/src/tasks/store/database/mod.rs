@@ -14,7 +14,7 @@ mod notify;
 mod publication;
 mod queries;
 mod recovery;
-#[cfg(feature = "migrations")]
+#[cfg(any(feature = "migrations", all(test, feature = "sqlite")))]
 pub(crate) mod schema;
 mod store;
 mod submit;

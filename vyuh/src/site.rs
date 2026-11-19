@@ -1476,6 +1476,8 @@ impl axum::extract::FromRequestParts<Site> for SiteConfig {
 #[cfg(test)]
 mod tests {
     use super::{Site, log_server_error};
+    #[cfg(feature = "sqlite")]
+    use crate::testing::task_fixture::sqlite_task_conf;
     use crate::{
         Error, ErrorReport, ErrorSourceKind, SiteError, bundles,
         callables::Data,
@@ -1695,7 +1697,10 @@ mod tests {
             TaskDefinition::new("email-runtime-task").lane(EMAIL_TASK_LANE),
         )])
         .with_conf(bundles::conf().task_lane(TaskLaneConf::new(EMAIL_TASK_LANE, 1)));
-        let site = Site::build(crate::SiteConf::default().log_init(false), bundle).await?;
+        let conf = crate::SiteConf::default().log_init(false);
+        #[cfg(feature = "sqlite")]
+        let (conf, _database) = sqlite_task_conf(conf).await?;
+        let site = Site::build(conf, bundle).await?;
         let id = site.tasks().submit(RuntimeTask).await?.queued_id()?;
         let task = site.tasks().get(id).await?.ok_or_else(|| {
             SiteError::TaskRuntimeError(crate::tasks::TaskRuntimeError::TaskNotFound(
@@ -2161,7 +2166,7 @@ mod tests {
 
     /// Verifies one-shot commands do not activate emitters, signals, or task workers.
     #[tokio::test]
-    async fn command_does_not_start_runtime() {
+    async fn command_does_not_start_runtime() -> Result<(), SiteError> {
         RUNTIME_SIGNALS.store(0, Ordering::SeqCst);
         RUNTIME_TASKS.store(0, Ordering::SeqCst);
         let bundle = bundles::bundle([
@@ -2179,16 +2184,14 @@ mod tests {
                 CommandConf::new("wait-runtime-probe"),
             ),
         ]);
-        let result = Site::run_with_args(
-            crate::SiteConf::default().log_init(false),
-            bundle,
-            strings(&["wait-runtime-probe"]),
-        )
-        .await;
+        let conf = crate::SiteConf::default().log_init(false);
+        #[cfg(feature = "sqlite")]
+        let (conf, _database) = sqlite_task_conf(conf).await?;
+        Site::run_with_args(conf, bundle, strings(&["wait-runtime-probe"])).await?;
 
-        assert!(result.is_ok());
         assert_eq!(RUNTIME_SIGNALS.load(Ordering::SeqCst), 0);
         assert_eq!(RUNTIME_TASKS.load(Ordering::SeqCst), 0);
+        Ok(())
     }
 
     /// Verifies task readiness changes from in-memory runtime state without a second store probe.
@@ -2198,13 +2201,12 @@ mod tests {
             count_runtime_task,
             TaskDefinition::new("readiness-task"),
         )]);
-        let site = Site::build(
-            crate::SiteConf::default()
-                .log_init(false)
-                .observability(ObservabilityConf::production()),
-            bundle,
-        )
-        .await?;
+        let conf = crate::SiteConf::default()
+            .log_init(false)
+            .observability(ObservabilityConf::production());
+        #[cfg(feature = "sqlite")]
+        let (conf, _database) = sqlite_task_conf(conf).await?;
+        let site = Site::build(conf, bundle).await?;
         let client = TestSite::new(site);
 
         assert_eq!(

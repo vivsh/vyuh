@@ -158,11 +158,11 @@ fn dialect() -> db::Dialect {
     db::Dialect::Sqlite
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "migrations"))]
 #[path = "tests/schema.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "migrations"))]
 #[path = "tests/upgrade.rs"]
 mod upgrade;
 
