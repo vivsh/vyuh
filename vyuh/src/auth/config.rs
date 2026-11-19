@@ -9,7 +9,7 @@ use serde::Serialize;
 
 #[cfg(feature = "id-token")]
 use super::IdToken;
-#[cfg(feature = "oauth")]
+#[cfg(feature = "oauth-resource")]
 use super::OAuthResourceServer;
 use super::{
     Audience, AudienceId, AuthError, AuthProvider, AuthToken, AuthUser, CodecDefinition,
@@ -503,9 +503,9 @@ impl ProviderDefinition for AuthKey {
     }
 }
 
-#[cfg(feature = "oauth")]
+#[cfg(feature = "oauth-resource")]
 impl sealed::ProviderDefinition for OAuthResourceServer {}
-#[cfg(feature = "oauth")]
+#[cfg(feature = "oauth-resource")]
 impl ProviderDefinition for OAuthResourceServer {
     fn define(self) -> ProviderDefinitionInner {
         ProviderDefinitionInner::new(ProviderKind::OAuth(Box::new(self)))
@@ -526,7 +526,7 @@ impl ProviderDefinition for IdToken {
 pub(crate) enum ProviderKind {
     Token(Box<TokenProvider>),
     Key(Box<AuthKey>),
-    #[cfg(feature = "oauth")]
+    #[cfg(feature = "oauth-resource")]
     OAuth(Box<OAuthResourceServer>),
     #[cfg(feature = "id-token")]
     IdToken(Box<IdToken>),
@@ -537,7 +537,7 @@ impl ProviderKind {
         match self {
             Self::Token(value) => &value.access.location,
             Self::Key(value) => &value.location,
-            #[cfg(feature = "oauth")]
+            #[cfg(feature = "oauth-resource")]
             Self::OAuth(value) => value.location(),
             #[cfg(feature = "id-token")]
             Self::IdToken(value) => &value.location,
@@ -548,7 +548,7 @@ impl ProviderKind {
         match self {
             Self::Token(value) => value.refresh.as_ref().map(|item| &item.location),
             Self::Key(_) => None,
-            #[cfg(feature = "oauth")]
+            #[cfg(feature = "oauth-resource")]
             Self::OAuth(_) => None,
             #[cfg(feature = "id-token")]
             Self::IdToken(_) => None,
@@ -560,7 +560,7 @@ impl ProviderKind {
         match self {
             Self::Token(value) => value.audiences.clone(),
             Self::Key(value) => value.audiences.clone(),
-            #[cfg(feature = "oauth")]
+            #[cfg(feature = "oauth-resource")]
             Self::OAuth(value) => Some(value.route_audiences().collect()),
             #[cfg(feature = "id-token")]
             Self::IdToken(value) => Some(
@@ -758,8 +758,10 @@ impl AuthConf {
                         CredentialType::Token(Some(value.codec.format().to_owned()))
                     }
                     ProviderKind::Key(_) => CredentialType::Key,
-                    #[cfg(feature = "oauth")]
-                    ProviderKind::OAuth(_) => CredentialType::Token(Some("OAuth JWT".into())),
+                    #[cfg(feature = "oauth-resource")]
+                    ProviderKind::OAuth(value) => {
+                        CredentialType::Token(Some(value.format().into()))
+                    }
                     #[cfg(feature = "id-token")]
                     ProviderKind::IdToken(_) => CredentialType::Token(Some("JWT".into())),
                 },
@@ -773,7 +775,7 @@ impl AuthConf {
                     ProviderKind::Key(value) => {
                         value.csrf.as_ref().map(|csrf| csrf.header_name.clone())
                     }
-                    #[cfg(feature = "oauth")]
+                    #[cfg(feature = "oauth-resource")]
                     ProviderKind::OAuth(_) => None,
                     #[cfg(feature = "id-token")]
                     ProviderKind::IdToken(value) => {
@@ -796,7 +798,7 @@ impl AuthConf {
                         ));
                     }
                 }
-                #[cfg(feature = "oauth")]
+                #[cfg(feature = "oauth-resource")]
                 ProviderKind::OAuth(value) => value.validate()?,
                 #[cfg(feature = "id-token")]
                 ProviderKind::IdToken(value) => value.validate_production()?,
@@ -853,7 +855,7 @@ fn provider_doc_audiences(kind: &ProviderKind) -> Option<Vec<String>> {
             .audiences
             .as_ref()
             .map(|values| audience_names(values)),
-        #[cfg(feature = "oauth")]
+        #[cfg(feature = "oauth-resource")]
         ProviderKind::OAuth(value) => Some(
             value
                 .route_audiences()

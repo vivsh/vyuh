@@ -3,9 +3,10 @@
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use futures::future::BoxFuture;
+use huskarl_resource_server::core::secrets::SecretString;
 
 use super::{
-    super::{Audience, AudienceId, AuthError, AuthUser, CredentialLocation},
+    super::{Audience, AudienceId, AuthError, AuthUser, CredentialLocation, KeySource, SecretRing},
     http::validate_remote_url,
 };
 
@@ -43,7 +44,7 @@ impl OAuthJwtAlgorithm {
     }
 }
 
-/// Validated OAuth JWT claims available to an application identity mapper.
+/// Validated external OAuth claims from local JWT verification or token introspection.
 #[derive(Clone)]
 pub struct OAuthClaims {
     /// Stable upstream subject identifier.
@@ -54,7 +55,8 @@ pub struct OAuthClaims {
     pub audiences: Vec<String>,
     /// Upstream OAuth scopes, distinct from Vyuh application scopes.
     pub scopes: BTreeSet<String>,
-    /// Authenticated JWT claims for application-specific mapping.
+    /// Validated standard claims and bounded upstream extensions for mapping.
+    /// This is not the raw credential or the introspection response body.
     pub raw: serde_json::Value,
 }
 
@@ -146,12 +148,19 @@ impl OAuthResource {
     }
 }
 
-/// A discovery-backed OAuth resource-server provider for JWT access tokens.
+#[derive(Clone)]
+pub(super) struct IntrospectionConf {
+    pub(super) client_id: String,
+    client_secret: KeySource,
+}
+
+/// A discovery-backed, verify-only OAuth resource server for external access tokens.
 #[derive(Clone)]
 pub struct OAuthResourceServer {
     pub(super) issuer: String,
     pub(super) resources: Vec<(Audience, OAuthResource)>,
-    pub(super) algorithms: Vec<OAuthJwtAlgorithm>,
+    pub(super) algorithms: Option<Vec<OAuthJwtAlgorithm>>,
+    pub(super) introspection: Option<IntrospectionConf>,
     pub(super) mapper: Arc<dyn ErasedOAuthIdentityMapper>,
     location: CredentialLocation,
 }
@@ -160,9 +169,8 @@ impl std::fmt::Debug for OAuthResourceServer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OAuthResourceServer")
-            .field("issuer", &self.issuer)
             .field("resources", &self.resources.len())
-            .field("algorithms", &self.algorithms)
+            .field("validation", &self.format())
             .finish_non_exhaustive()
     }
 }
@@ -173,7 +181,8 @@ impl OAuthResourceServer {
         Self {
             issuer: issuer.into(),
             resources: Vec::new(),
-            algorithms: vec![OAuthJwtAlgorithm::Rs256],
+            algorithms: None,
+            introspection: None,
             mapper: Arc::new(SubjectMapper),
             location: CredentialLocation::bearer(),
         }
@@ -187,7 +196,17 @@ impl OAuthResourceServer {
 
     /// Replaces the accepted asymmetric JWT algorithm allowlist.
     pub fn algorithms(mut self, values: impl IntoIterator<Item = OAuthJwtAlgorithm>) -> Self {
-        self.algorithms = values.into_iter().collect();
+        self.algorithms = Some(values.into_iter().collect());
+        self
+    }
+
+    /// Validates access tokens at the discovered HTTPS introspection endpoint using
+    /// dedicated client credentials. Cannot be combined with a JWT algorithm list.
+    pub fn introspection(mut self, client_id: impl Into<String>, secret: KeySource) -> Self {
+        self.introspection = Some(IntrospectionConf {
+            client_id: client_id.into(),
+            client_secret: secret,
+        });
         self
     }
 
@@ -208,9 +227,59 @@ impl OAuthResourceServer {
 
     pub(crate) fn validate(&self) -> Result<(), AuthError> {
         validate_remote_url(&self.issuer)?;
-        validate_algorithms(&self.algorithms)?;
+        if let Some(conf) = &self.introspection {
+            if self.algorithms.is_some() {
+                return Err(invalid_introspection(
+                    "introspection cannot use JWT algorithms",
+                ));
+            }
+            if !self.issuer.starts_with("https://")
+                || conf.client_secret.is_site_secret()
+                || !valid_client_value(&conf.client_id, 256)
+            {
+                return Err(invalid_introspection(
+                    "introspection requires HTTPS and dedicated client credentials",
+                ));
+            }
+        } else if let Some(algorithms) = &self.algorithms {
+            validate_algorithms(algorithms)?;
+        }
         validate_resources(&self.resources)
     }
+
+    pub(crate) fn format(&self) -> &'static str {
+        if self.introspection.is_some() {
+            "OAuth Bearer"
+        } else {
+            "OAuth JWT"
+        }
+    }
+
+    /// Resolves dedicated credentials on the blocking startup worker; never logs key-source details.
+    pub(crate) fn prepare_secret(
+        &self,
+        secrets: &SecretRing,
+    ) -> Result<Option<SecretString>, AuthError> {
+        self.validate()?;
+        let Some(conf) = &self.introspection else {
+            return Ok(None);
+        };
+        let invalid = || invalid_introspection("invalid introspection client secret");
+        let bytes = secrets.active(&conf.client_secret).map_err(|_| invalid())?;
+        let secret = std::str::from_utf8(&bytes)
+            .ok()
+            .filter(|secret| valid_client_value(secret, 1024))
+            .ok_or_else(invalid)?;
+        Ok(Some(SecretString::new(secret)))
+    }
+}
+
+fn valid_client_value(value: &str, max: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+pub(super) fn invalid_introspection(reason: &str) -> AuthError {
+    AuthError::InvalidProviderConfig(format!("OAuth {reason}"))
 }
 
 fn validate_token_audience(value: &str) -> Result<(), AuthError> {

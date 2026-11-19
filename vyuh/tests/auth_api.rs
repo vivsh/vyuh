@@ -9,7 +9,7 @@ fn role_based_authentication_apis_are_removed() {
 }
 
 /// Verifies superseded OAuth and OIDC names have no compatibility aliases.
-#[cfg(all(feature = "oauth", feature = "federated"))]
+#[cfg(all(feature = "oauth-resource", feature = "federated"))]
 #[test]
 fn superseded_external_authentication_names_are_removed() {
     let tests = trybuild::TestCases::new();

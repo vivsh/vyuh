@@ -664,11 +664,12 @@ format)` integrates externally issued self-contained tokens; login and refresh
 then fail with `UnsupportedProviderCapability`. Framework validation always
 runs after decoding and cannot be bypassed by a `TokenVerifier`.
 
-### OAuth JWT access tokens
+### External OAuth access tokens
 
-The optional `oauth` feature makes Vyuh an OAuth resource server for external
-JWT access tokens. It is not an OAuth authorization server and does not add
-login, consent, client registration, issuance, refresh, or token introspection.
+The optional `oauth-resource` feature makes Vyuh a resource server for
+externally issued OAuth Bearer access tokens. Replace the former Cargo feature
+`oauth` with `oauth-resource`; existing JWT builders are unchanged.
+This feature does not add login, consent, client registration, issuance, or refresh.
 Use `OAuthResourceServer::discovery(...)` with one or more resource policies:
 
 ```rust,ignore
@@ -682,9 +683,10 @@ OAuthResourceServer::discovery("https://auth.example.com")
 ```
 
 The outer `Audience` selects a Vyuh route surface. `OAuthResource::new(...)`
-names the external JWT `aud`; neither value is inferred from the other. Each
-policy may also advertise and require upstream OAuth scopes. Vyuh builds the provider during `Site::build`: RFC 8414 discovery and
-the initial JWKS load must succeed before the site starts. A missing RFC 8414
+names the external token audience; neither value is inferred from the other. Each
+policy may also advertise and require upstream OAuth scopes. Vyuh builds the
+provider during `Site::build`. In JWT mode, RFC 8414 discovery and the initial
+JWKS load must succeed before the site starts. A missing RFC 8414
 endpoint (`404` or `410`) falls back to OIDC discovery; transport failures,
 server failures, malformed metadata, and issuer mismatches do not.
 
@@ -693,7 +695,7 @@ selection, bounded JWKS retention, rotation, single-flight refresh, and
 unknown-key refresh throttling are handled by a private Huskarl runtime. Its
 state belongs to the built site and is not coupled to `site.cache()`.
 
-The default identity mapping is `sub` to `AuthUser::subject()` with no application
+The default identity mapping in both modes is `sub` to `AuthUser::subject()` with no application
 scopes. Upstream OAuth scopes are credential policy; an explicit identity
 mapper decides which Vyuh application scopes to grant:
 
@@ -707,10 +709,35 @@ impl OAuthIdentityMapper for AppIdentityMapper {
 }
 ```
 
-OAuth providers remain verify-only and accept Bearer JWT access tokens. They do
-not add opaque-token introspection, DPoP, mTLS, multi-issuer routing, login,
-refresh, issuance, or authorization-server behavior. The old OAuth cache and
-cache-TTL builders have been removed; no compatibility aliases are retained.
+#### Opaque tokens and introspection
+
+Opt into remote validation explicitly on the same provider:
+
+```rust,ignore
+OAuthResourceServer::discovery("https://auth.partner.example")
+    .introspection("vyuh-api", KeySource::env("PARTNER_INTROSPECTION_SECRET"))
+    .resource(
+        API,
+        OAuthResource::new("https://api.example.com")
+            .require_scopes(["api.read"]),
+    )
+    .mapper(AppIdentityMapper)
+```
+
+Register dedicated client credentials for `client_secret_basic` with the
+authorization server. Vyuh resolves the secret during `Site::build`, requires
+the issuer's discovered HTTPS introspection endpoint, and does not fetch JWKS
+or send a probe token. Remote credential rejection is therefore detected on use,
+not at startup. `.algorithms(...)` cannot be combined with introspection.
+
+An introspection request must return an active access token with a subject and
+the exact configured external audience. An upstream server that omits the audience
+or cannot distinguish usable access tokens from refresh tokens is not supported.
+There is no `/userinfo` fallback and no format sniffing. JWT validation stays
+local; introspection makes one uncached upstream call per validated request.
+Invalid credentials return 401, missing required scopes return 403, and
+upstream failures return 503. The provider still does not support DPoP, mTLS,
+or multi-issuer dispatch.
 
 ### External identity tokens
 

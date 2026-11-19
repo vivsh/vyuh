@@ -266,10 +266,14 @@ pub(crate) fn reject_duplicate_claims(value: &str) -> Result<(), AuthError> {
     let claims = URL_SAFE_NO_PAD
         .decode(claims)
         .map_err(|_| AuthError::InvalidCredential)?;
-    let mut deserializer = serde_json::Deserializer::from_slice(&claims);
-    deserializer
-        .deserialize_map(UniqueClaims)
-        .map_err(|_| AuthError::InvalidCredential)
+    unique_json_fields(&claims).map_err(|_| AuthError::InvalidCredential)
+}
+
+/// Rejects top-level duplicate members without storing any claim values.
+pub(crate) fn unique_json_fields(value: &[u8]) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(value);
+    deserializer.deserialize_map(UniqueClaims)?;
+    deserializer.end()
 }
 
 struct UniqueClaims;
@@ -278,7 +282,7 @@ impl<'de> Visitor<'de> for UniqueClaims {
     type Value = ();
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a JWT object with unique claim names")
+        formatter.write_str("a JSON object with unique field names")
     }
 
     fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
@@ -288,7 +292,7 @@ impl<'de> Visitor<'de> for UniqueClaims {
         let mut names = std::collections::BTreeSet::new();
         while let Some(name) = map.next_key::<String>()? {
             if !names.insert(name) {
-                return Err(serde::de::Error::custom("duplicate JWT claim"));
+                return Err(serde::de::Error::custom("duplicate JSON field"));
             }
             map.next_value::<IgnoredAny>()?;
         }

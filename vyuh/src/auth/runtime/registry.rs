@@ -12,8 +12,12 @@ use crate::auth::{
 
 pub(super) enum PreparedProvider {
     Ready(ProviderRuntime),
-    #[cfg(feature = "oauth")]
-    OAuth(ProviderId, Box<crate::auth::OAuthResourceServer>),
+    #[cfg(feature = "oauth-resource")]
+    OAuth(
+        ProviderId,
+        Box<crate::auth::OAuthResourceServer>,
+        Option<huskarl_resource_server::core::secrets::SecretString>,
+    ),
     #[cfg(feature = "id-token")]
     IdToken(ProviderId, Box<crate::auth::IdToken>),
 }
@@ -23,10 +27,12 @@ impl PreparedProvider {
     pub(super) async fn finish(self) -> Result<ProviderRuntime, AuthError> {
         match self {
             Self::Ready(runtime) => Ok(runtime),
-            #[cfg(feature = "oauth")]
-            Self::OAuth(id, value) => crate::auth::oauth::OAuthRuntime::build(id, *value)
-                .await
-                .map(ProviderRuntime::new),
+            #[cfg(feature = "oauth-resource")]
+            Self::OAuth(id, value, secret) => {
+                crate::auth::oauth::OAuthRuntime::build(id, *value, secret)
+                    .await
+                    .map(ProviderRuntime::new)
+            }
             #[cfg(feature = "id-token")]
             Self::IdToken(id, value) => crate::auth::id_token::IdTokenRuntime::build(id, *value)
                 .await
@@ -55,8 +61,11 @@ pub(super) fn prepare_provider(
                 audiences,
             })))
         }
-        #[cfg(feature = "oauth")]
-        ProviderKind::OAuth(value) => Ok(PreparedProvider::OAuth(id, value)),
+        #[cfg(feature = "oauth-resource")]
+        ProviderKind::OAuth(value) => {
+            let secret = value.prepare_secret(secrets)?;
+            Ok(PreparedProvider::OAuth(id, value, secret))
+        }
         #[cfg(feature = "id-token")]
         ProviderKind::IdToken(value) => Ok(PreparedProvider::IdToken(id, value)),
     }
@@ -219,7 +228,7 @@ fn definition_audiences(kind: &ProviderKind) -> Result<ProviderAudienceSet, Auth
     match kind {
         ProviderKind::Token(value) => provider_audiences(value.audiences.as_deref()),
         ProviderKind::Key(value) => provider_audiences(value.audiences.as_deref()),
-        #[cfg(feature = "oauth")]
+        #[cfg(feature = "oauth-resource")]
         ProviderKind::OAuth(value) => resource_audiences(value.route_audiences()),
         #[cfg(feature = "id-token")]
         ProviderKind::IdToken(value) => {
@@ -246,7 +255,7 @@ fn resource_audiences(
     ProviderAudienceSet::only(values)
 }
 
-#[cfg(all(test, feature = "oauth"))]
+#[cfg(all(test, feature = "oauth-resource"))]
 mod tests {
     use super::*;
     use crate::auth::{AuthConf, AuthProvider, OAuthResource, OAuthResourceServer};

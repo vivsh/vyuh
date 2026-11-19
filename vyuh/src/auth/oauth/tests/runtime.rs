@@ -367,7 +367,7 @@ fn parts(token: &str) -> Result<axum::http::request::Parts, TestError> {
 }
 
 async fn runtime(conf: OAuthResourceServer, client: FakeClient) -> Result<OAuthRuntime, AuthError> {
-    OAuthRuntime::build_with_client(ProviderId::new("oauth")?, conf, client).await
+    OAuthRuntime::build_with_client(ProviderId::new("oauth")?, conf, client, None).await
 }
 
 async fn authenticate_token(

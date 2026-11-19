@@ -29,8 +29,8 @@ or `Permit<ScopeRule>`.
 
 ## External OAuth
 
-Enable the separate `oauth` auth feature when an external authorization server
-issues JWT access tokens. Vyuh is a resource server, not an OAuth server:
+Enable `oauth-resource` when an external authorization server issues access
+tokens. In this mode Vyuh is the resource server:
 Hydra, Auth0, Keycloak, or another provider owns login, consent, PKCE, client
 registration, token issuance, and refresh.
 
@@ -48,24 +48,24 @@ let auth = AuthConf::default().provider(
 );
 ```
 
-OAuth discovery and JWKS validation are part of generic Vyuh auth. The provider
-validates issuer, signature, algorithm, audience, time claims, and all required
-upstream scopes before producing `AuthUser`. By default it maps `sub` to
+By default, generic Vyuh auth verifies access JWTs locally with discovered keys.
+For opaque tokens, configure [explicit introspection](auth.md#opaque-tokens-and-introspection)
+on the same provider. Both modes enforce the external audience and required
+upstream scopes before producing `AuthUser`. By default the provider maps `sub` to
 `AuthUser::subject()` with no application scopes. An explicit identity mapper resolves
 trusted application scopes. Upstream OAuth scopes are not copied into Vyuh
 application scopes automatically; `Permit<R>` evaluates only the mapped grants.
 
 MCP publishes RFC 9728 Protected Resource Metadata only when exactly one
 central provider eligible for its audience exposes compatible metadata. Native
-token and key services do not advertise an OAuth flow. OAuth v1 accepts JWT access tokens only; opaque-token
-introspection is intentionally unsupported.
+token and key services do not advertise an OAuth flow. The discovery metadata
+and Bearer challenges do not change when switching validation modes.
 
-OAuth providers initialize during `Site::build`. Their private per-site Huskarl
-verifier owns bounded in-memory JWKS reuse, key rotation, single-flight refresh,
-and unknown-key refresh throttling. OAuth metadata and JWKS do not consume a
-named Vyuh cache provider. Startup therefore requires working discovery and an
-initial JWKS load; runtime refresh outages are classified as provider failures
-without exposing upstream responses or verifier details to MCP clients.
+OAuth providers initialize during `Site::build`. Both modes require working
+discovery; JWT mode additionally loads JWKS, maintains keys per site, and
+refreshes them on rotation. Introspection makes an uncached request per
+presented credential. An upstream validation outage is reported as a provider
+failure without exposing credentials or verifier details to MCP clients.
 
 ## Tools
 

@@ -1,7 +1,9 @@
-//! Bounded HTTPS transport adapter for Huskarl discovery and JWKS loading.
+//! Bounded HTTPS transport for Huskarl discovery, JWKS, and introspection.
 
 use std::time::Duration;
 
+#[cfg(feature = "oauth-resource")]
+use axum::http::{Method, header};
 use axum::http::{Request, StatusCode};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -14,6 +16,8 @@ use reqwest::redirect::Policy;
 use thiserror::Error;
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "oauth-resource")]
+const MAX_INTROSPECTION_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct AuthHttpClient {
@@ -22,7 +26,20 @@ pub(crate) struct AuthHttpClient {
 
 impl AuthHttpClient {
     pub(crate) fn build() -> Result<Self, Error> {
-        let client = reqwest::Client::builder()
+        Self::build_client(reqwest::Client::builder())
+    }
+
+    #[cfg(feature = "oauth-resource")]
+    pub(super) fn introspection() -> Result<Self, Error> {
+        Self::build_client(
+            reqwest::Client::builder()
+                .https_only(true)
+                .retry(reqwest::retry::never()),
+        )
+    }
+
+    fn build_client(builder: reqwest::ClientBuilder) -> Result<Self, Error> {
+        let client = builder
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
@@ -50,6 +67,17 @@ impl AuthHttpClient {
     ) -> Result<HttpResponse, Error> {
         let (parts, body) = request.into_parts();
         validate_transport_url(&parts.uri.to_string())?;
+        // In this adapter GET loads metadata or JWKS; only introspection sends POST.
+        #[cfg(feature = "oauth-resource")]
+        let introspection = parts.method == Method::POST;
+        #[cfg(feature = "oauth-resource")]
+        let limit = if introspection {
+            MAX_INTROSPECTION_BYTES
+        } else {
+            MAX_DOCUMENT_BYTES
+        };
+        #[cfg(not(feature = "oauth-resource"))]
+        let limit = MAX_DOCUMENT_BYTES;
         let response = self
             .client
             .request(parts.method, parts.uri.to_string())
@@ -63,7 +91,11 @@ impl AuthHttpClient {
         }
         let status = response.status();
         let headers = response.headers().clone();
-        let body = read_bounded(response, idempotency).await?;
+        let body = read_bounded(response, idempotency, limit).await?;
+        #[cfg(feature = "oauth-resource")]
+        if introspection {
+            validate_introspection_body(&headers, &body)?;
+        }
         Ok(HttpResponse {
             status,
             headers,
@@ -84,6 +116,9 @@ enum OAuthHttpError {
     Oversized,
     #[error("OAuth endpoint URL is unsafe")]
     UnsafeUrl,
+    #[cfg(feature = "oauth-resource")]
+    #[error("OAuth introspection returned an invalid JSON response")]
+    InvalidIntrospection,
 }
 
 fn transport_setup_error(source: reqwest::Error) -> Error {
@@ -107,10 +142,11 @@ pub(super) fn status_error(status: StatusCode) -> Error {
 async fn read_bounded(
     response: reqwest::Response,
     idempotency: Idempotency,
+    limit: usize,
 ) -> Result<Bytes, Error> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_DOCUMENT_BYTES as u64)
+        .is_some_and(|size| size > limit as u64)
     {
         return Err(Error::new(RetryAdvice::No, OAuthHttpError::Oversized));
     }
@@ -118,7 +154,7 @@ async fn read_bounded(
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| transport_error(error, idempotency))?;
-        if result.len().saturating_add(chunk.len()) > MAX_DOCUMENT_BYTES {
+        if result.len().saturating_add(chunk.len()) > limit {
             return Err(Error::new(RetryAdvice::No, OAuthHttpError::Oversized));
         }
         result.extend_from_slice(&chunk);
@@ -126,7 +162,30 @@ async fn read_bounded(
     Ok(result.freeze())
 }
 
-#[cfg(feature = "oauth")]
+/// Accepts only bounded JSON objects with unique top-level members.
+#[cfg(feature = "oauth-resource")]
+pub(super) fn validate_introspection_body(
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> Result<(), Error> {
+    if body.len() > MAX_INTROSPECTION_BYTES {
+        return Err(Error::new(RetryAdvice::No, OAuthHttpError::Oversized));
+    }
+    let json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    if !json || crate::auth::codecs::unique_json_fields(body).is_err() {
+        return Err(Error::new(
+            RetryAdvice::No,
+            OAuthHttpError::InvalidIntrospection,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "oauth-resource")]
 pub(crate) fn unsupported_discovery(error: &Error) -> bool {
     error
         .chain()

@@ -12,7 +12,7 @@ mod lifecycle;
 mod location;
 mod login;
 mod metrics;
-#[cfg(any(feature = "oauth", feature = "id-token"))]
+#[cfg(any(feature = "oauth-resource", feature = "id-token"))]
 mod oauth;
 mod password;
 mod request;
@@ -57,7 +57,7 @@ pub use login::{
     FederatedCallback, FederatedIdentity, FederatedLogin, FederatedProvider, FederatedStart,
     FederatedUserMapper,
 };
-#[cfg(feature = "oauth")]
+#[cfg(feature = "oauth-resource")]
 pub use oauth::{
     OAuthClaims, OAuthIdentityMapper, OAuthJwtAlgorithm, OAuthResource, OAuthResourceServer,
 };
@@ -73,7 +73,7 @@ pub use token::{AuthToken, AuthTokenBuilder, EncodedCredential, PresentedCredent
 pub(crate) use codec::{
     CodecRuntime, CustomClaims, CustomCodec, ErasedDecoder, ErasedEncoder, SecretRing,
 };
-#[cfg(any(feature = "oauth", feature = "id-token"))]
+#[cfg(any(feature = "oauth-resource", feature = "id-token"))]
 pub(crate) use codecs::reject_duplicate_claims;
 pub(crate) use config::{CredentialType, ProviderDoc};
 pub(crate) use config::{

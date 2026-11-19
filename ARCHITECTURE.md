@@ -517,10 +517,11 @@ The `vyuh` crate is organized around these subsystems:
   only by the MCP protocol. The engine owns protocol framing, scope-filtered
   discovery, resource listing and reads, and optional
   protected-resource metadata; it authenticates through the central audience
-  selector just like a normal route. Generic optional `auth::oauth`
-  delegates external JWT/JWKS validation and bounded key rotation to a private
-  Huskarl runtime built eagerly for the site; MCP only publishes protected-resource
-  metadata when that provider exposes it. It never
+  selector just like a normal route. The optional `oauth-resource` feature
+  initializes a private Huskarl validator at site construction: either local
+  JWT verification with bounded JWKS rotation or explicit, uncached RFC 7662
+  introspection. Both modes share audience, scope, and mapping policy. MCP publishes protected-resource
+  metadata from an eligible external provider. It never
   forwards credentials or owns OAuth login and consent. Modern MCP requests are
   stateless and validate mirrored routing headers against body metadata, while
   prior initialization-based revisions are accepted without framework session
@@ -696,7 +697,9 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
 4. The authenticator resolves key sources off request threads and builds
    immutable credential-provider, selector, metric, and typed login-method
    registries plus the site-secret key ring. OAuth resource, external ID-token,
-   and federated discovery/JWKS state is initialized before the site starts.
+   and federated discovery state is initialized before the site starts; JWT
+   validation also initializes JWKS state. Introspection credentials are resolved
+   during blocking preparation, and the built provider owns its HTTPS validator.
    Account-resolution callbacks borrow the invoking `Site` for application
    lookups through `site.db()`. Method login, flow initiation/completion, and
    refresh pass `&site` as their first terminal argument; callback runtimes do
@@ -781,9 +784,8 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
     call time; resources remain protected by that same endpoint boundary.
     Direct targets receive `McpToolContext`; the MCP engine does not adapt or
     dispatch HTTP routes. Tools and resources never receive the external bearer
-    credential. Only public
-    OAuth metadata and JWKS remain inside an eligible provider's per-site
-    Huskarl verifier and never cross the application cache boundary.
+    credential. An eligible provider owns discovery, JWKS validation or an
+    uncached introspection client; none use the application cache.
 11. OpenAPI and schema metadata are produced from registered operations and
     type metadata.
 

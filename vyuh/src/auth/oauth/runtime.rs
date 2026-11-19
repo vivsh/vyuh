@@ -1,6 +1,9 @@
 //! Huskarl-backed OAuth provider runtime.
 
 #[cfg(test)]
+#[path = "tests/introspection.rs"]
+mod introspection_tests;
+#[cfg(test)]
 #[path = "tests/runtime.rs"]
 mod tests;
 
@@ -21,6 +24,7 @@ use huskarl_resource_server::{
         jwk::JwksSource,
         jwt::validator::JwtValidationError,
         platform::MaybeSendBoxFuture,
+        secrets::SecretString,
         server_metadata::AuthorizationServerMetadata,
     },
     error::{ToRfc6750Error, TokenValidationError},
@@ -29,8 +33,9 @@ use huskarl_resource_server::{
 use serde::Deserialize;
 
 use super::{
-    config::{OAuthClaims, OAuthResource, OAuthResourceServer, parse_scopes},
+    config::{OAuthClaims, OAuthJwtAlgorithm, OAuthResource, OAuthResourceServer, parse_scopes},
     http::{AuthHttpClient, unsupported_discovery, validate_remote_url},
+    introspection::{self, Introspection},
 };
 #[cfg(feature = "mcp")]
 use crate::auth::AuthProtectedResource;
@@ -44,21 +49,25 @@ use crate::auth::{
 const MAX_OAUTH_CREDENTIAL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Deserialize)]
-struct ExtraClaims {
+pub(super) struct ExtraClaims {
     #[serde(default)]
     scope: String,
     #[serde(flatten)]
-    _other: serde_json::Map<String, serde_json::Value>,
+    pub(super) other: serde_json::Map<String, serde_json::Value>,
 }
 
 struct ResourceRuntime {
     policy: OAuthResource,
-    validator: CustomValidator<ExtraClaims>,
+    validator: Validator,
+}
+
+enum Validator {
+    Jwt(Box<CustomValidator<ExtraClaims>>),
+    Introspection(Box<Introspection>),
 }
 
 pub(crate) struct OAuthRuntime {
     id: ProviderId,
-    #[cfg(feature = "mcp")]
     issuer: String,
     mapper: Arc<dyn super::config::ErasedOAuthIdentityMapper>,
     resources: BTreeMap<AudienceId, ResourceRuntime>,
@@ -70,16 +79,22 @@ impl OAuthRuntime {
     pub(crate) async fn build(
         id: ProviderId,
         conf: OAuthResourceServer,
+        secret: Option<SecretString>,
     ) -> Result<Self, AuthError> {
-        let client = AuthHttpClient::build()
-            .map_err(|error| startup_failure(&id, "HTTP client construction", error))?;
-        Self::build_with_client(id, conf, client).await
+        let client = if conf.introspection.is_some() {
+            AuthHttpClient::introspection()
+        } else {
+            AuthHttpClient::build()
+        }
+        .map_err(|_| startup_failure(&id, "HTTP client construction"))?;
+        Self::build_with_client(id, conf, client, secret).await
     }
 
     async fn build_with_client<C>(
         id: ProviderId,
         conf: OAuthResourceServer,
         client: C,
+        secret: Option<SecretString>,
     ) -> Result<Self, AuthError>
     where
         C: HttpClient + Clone + 'static,
@@ -87,16 +102,20 @@ impl OAuthRuntime {
         conf.validate()?;
         let metadata = discover(&client, &conf.issuer)
             .await
-            .map_err(|error| startup_failure(&id, "metadata discovery", error))?;
-        let factory = shared_verifier(&client, &metadata)
-            .await
-            .map_err(|error| startup_failure(&id, "initial JWKS load", error))?;
-        let resources = build_resources(&id, &conf, &metadata, factory).await?;
+            .map_err(|_| startup_failure(&id, "metadata discovery"))?;
+        let resources = if let Some(conf_mode) = &conf.introspection {
+            let secret = secret.ok_or_else(|| startup_failure(&id, "introspection credentials"))?;
+            build_introspection(&id, &conf, &metadata, client, &conf_mode.client_id, secret).await?
+        } else {
+            let factory = shared_verifier(&client, &metadata)
+                .await
+                .map_err(|_| startup_failure(&id, "initial JWKS load"))?;
+            build_resources(&id, &conf, &metadata, factory).await?
+        };
         let audiences = ProviderAudienceSet::only(resources.keys().cloned().collect())?;
         Ok(Self {
             id,
-            #[cfg(feature = "mcp")]
-            issuer: conf.issuer.clone(),
+            issuer: conf.issuer,
             mapper: conf.mapper,
             resources,
             location: CredentialLocation::bearer(),
@@ -120,10 +139,25 @@ impl OAuthRuntime {
         if raw.is_empty() || raw.len() > MAX_OAUTH_CREDENTIAL_BYTES {
             return Err(AuthError::InvalidCredential);
         }
-        crate::auth::reject_duplicate_claims(raw).map_err(|_| AuthError::InvalidCredential)?;
         let resource = self.resource(audience)?;
-        let validated = validate(resource, parts).await?;
-        let auth_time = validated.iat.map(unix_timestamp).transpose()?;
+        let (validated, auth_time) = match &resource.validator {
+            Validator::Jwt(validator) => {
+                crate::auth::reject_duplicate_claims(raw)
+                    .map_err(|_| AuthError::InvalidCredential)?;
+                let token = validate(validator, parts).await?;
+                let time = token.iat.map(unix_timestamp).transpose()?;
+                (token, time)
+            }
+            Validator::Introspection(validator) => {
+                if !introspection::valid_bearer(raw) {
+                    return Err(AuthError::InvalidCredential);
+                }
+                (
+                    introspection::validate(validator, parts, &self.issuer).await?,
+                    None,
+                )
+            }
+        };
         let claims = normalize_claims(validated)?;
         require_scopes(&claims.scopes, &resource.policy.required)?;
         let user = self.mapper.map(site, &claims).await?;
@@ -202,6 +236,8 @@ async fn build_resources(
 ) -> Result<BTreeMap<AudienceId, ResourceRuntime>, AuthError> {
     let algorithms = conf
         .algorithms
+        .as_deref()
+        .unwrap_or(&[OAuthJwtAlgorithm::Rs256])
         .iter()
         .map(|algorithm| algorithm.name().to_owned())
         .collect::<Vec<_>>();
@@ -216,16 +252,50 @@ async fn build_resources(
             &algorithms,
         )
         .await
-        .map_err(|error| startup_failure(provider, "resource validator construction", error))?;
+        .map_err(|_| startup_failure(provider, "resource validator construction"))?;
         result.insert(
             id,
             ResourceRuntime {
                 policy: policy.clone(),
-                validator,
+                validator: Validator::Jwt(Box::new(validator)),
             },
         );
     }
     Ok(result)
+}
+
+/// Builds configured introspection validators without fetching keys or probing the endpoint.
+async fn build_introspection(
+    provider: &ProviderId,
+    conf: &OAuthResourceServer,
+    metadata: &AuthorizationServerMetadata,
+    client: impl HttpClient + Clone + 'static,
+    client_id: &str,
+    secret: SecretString,
+) -> Result<BTreeMap<AudienceId, ResourceRuntime>, AuthError> {
+    let endpoint = introspection::endpoint(metadata)?;
+    let auth = introspection::client_auth(secret);
+    let mut resources = BTreeMap::new();
+    for (audience, policy) in &conf.resources {
+        let validator = introspection::build(
+            &conf.issuer,
+            endpoint,
+            client.clone(),
+            client_id,
+            auth.clone(),
+            policy,
+        )
+        .await
+        .map_err(|_| startup_failure(provider, "introspection validator construction"))?;
+        resources.insert(
+            AudienceId::declared(*audience)?,
+            ResourceRuntime {
+                policy: policy.clone(),
+                validator: Validator::Introspection(Box::new(validator)),
+            },
+        );
+    }
+    Ok(resources)
 }
 
 async fn build_validator(
@@ -249,11 +319,10 @@ async fn build_validator(
 }
 
 async fn validate(
-    resource: &ResourceRuntime,
+    validator: &CustomValidator<ExtraClaims>,
     parts: &Parts,
 ) -> Result<ValidatedRequest<ExtraClaims>, AuthError> {
-    let outcome = resource
-        .validator
+    let outcome = validator
         .validate_request(&parts.headers, &parts.method, &parts.uri, None)
         .await
         .outcome
@@ -266,7 +335,7 @@ fn normalize_claims(validated: ValidatedRequest<ExtraClaims>) -> Result<OAuthCla
     let subject = validated.sub.ok_or(AuthError::InvalidCredential)?;
     let issuer = validated.iss.ok_or(AuthError::InvalidCredential)?;
     let scopes = parse_scopes(&validated.claims.scope)?;
-    let mut raw = validated.claims._other;
+    let mut raw = validated.claims.other;
     raw.insert("sub".into(), subject.clone().into());
     raw.insert("iss".into(), issuer.clone().into());
     raw.insert("aud".into(), serde_json::json!(&validated.aud));
@@ -295,8 +364,8 @@ fn unix_timestamp(value: std::time::SystemTime) -> Result<i64, AuthError> {
     i64::try_from(duration.as_secs()).map_err(|_| AuthError::InvalidCredential)
 }
 
-fn startup_failure(provider: &ProviderId, operation: &str, error: HuskarlError) -> AuthError {
-    tracing::error!(provider = %provider, operation, error = ?error, "OAuth provider initialization failed");
+fn startup_failure(provider: &ProviderId, operation: &str) -> AuthError {
+    tracing::error!(provider = %provider, operation, "OAuth provider initialization failed");
     AuthError::InvalidProviderConfig(format!(
         "OAuth provider '{provider}' failed during {operation}"
     ))
@@ -315,7 +384,7 @@ fn map_validation_error(error: ValidateHeadersError) -> AuthError {
     match error.challenge().error {
         TokenValidationError::Client(_) => AuthError::InvalidCredential,
         TokenValidationError::Server { .. } => {
-            tracing::warn!(error = ?error, "OAuth token verifier is unavailable");
+            tracing::warn!("OAuth JWT verifier is unavailable");
             AuthError::ProviderUnavailable
         }
     }
@@ -356,7 +425,18 @@ impl ProviderRuntimeContract for OAuthRuntime {
                     .map(|value| value.as_str().to_owned())
                     .collect()
             }),
-            credential_type: crate::auth::CredentialType::Token(Some("OAuth JWT".into())),
+            credential_type: crate::auth::CredentialType::Token(Some(
+                if self
+                    .resources
+                    .values()
+                    .any(|value| matches!(value.validator, Validator::Introspection(_)))
+                {
+                    "OAuth Bearer"
+                } else {
+                    "OAuth JWT"
+                }
+                .into(),
+            )),
             location: self.location.doc(),
             csrf_header: None,
         }

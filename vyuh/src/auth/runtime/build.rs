@@ -213,8 +213,8 @@ fn provider_names(values: &[PreparedProvider]) -> Vec<String> {
         .iter()
         .map(|value| match value {
             PreparedProvider::Ready(runtime) => runtime.id().to_string(),
-            #[cfg(feature = "oauth")]
-            PreparedProvider::OAuth(id, _) => id.to_string(),
+            #[cfg(feature = "oauth-resource")]
+            PreparedProvider::OAuth(id, ..) => id.to_string(),
             #[cfg(feature = "id-token")]
             PreparedProvider::IdToken(id, _) => id.to_string(),
         })

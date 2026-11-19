@@ -32,7 +32,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Check Vyuh at the declared MSRV
-        run: cargo check -p vyuh --no-default-features --features oauth,id-token,federated,mcp,paseto,branca
+        run: cargo check -p vyuh --no-default-features --features oauth-resource,id-token,federated,mcp,paseto,branca
       - name: Check Vyuh macros at the declared MSRV
         run: cargo check -p vyuh-macros
 
@@ -72,7 +72,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - features: oauth
+          - features: oauth-resource
             tests: --lib auth::oauth
           - features: id-token
             tests: --lib auth::id_token
