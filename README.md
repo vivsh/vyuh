@@ -18,7 +18,7 @@ ship them as reusable Rust crates.
 [API reference](https://docs.rs/vyuh) ·
 [Examples](vyuh/examples)
 
-**Rust 1.92+ · Pre-1.0: breaking changes are still expected.**
+**Rust 1.94+ · Pre-1.0: breaking changes are still expected.**
 
 ## Why Vyuh?
 
@@ -110,7 +110,7 @@ they do not inherit task durability.
 ## Try it
 
 The blog includes login, a browser UI, post/comment APIs, uploads, migrations,
-and OpenAPI. With Rust 1.92+, local PostgreSQL, and permission to create a
+and OpenAPI. With Rust 1.94+, local PostgreSQL, and permission to create a
 database:
 
 ```sh

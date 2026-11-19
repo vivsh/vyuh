@@ -8,7 +8,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-rust-version = "1.92"
+rust-version = "1.94"
 
 [workspace.dependencies]
 axum = { version = "0.8.4", features = ["macros", "ws", "multipart", "http2"] }
@@ -21,7 +21,7 @@ serde_json = { version = "1.0.140", features = ["indexmap", "raw_value", "preser
 serde_urlencoded = { version = "0.7" }
 tokio = { version = "1.46.1", features = ["full"] }
 uuid = { version = "1.17.0", features=["v4", "v7", "serde"]}
-sqlx = { version = "^0.8.6", default-features = false, features = ["chrono", "derive", "postgres", "sqlite", "runtime-tokio", "uuid", "json"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["chrono", "derive", "postgres", "sqlite", "runtime-tokio", "uuid", "json"] }
 minijinja = "2.11.0"
 blake3 = "1.8.2"
 dotenvy = "0.15.7"
