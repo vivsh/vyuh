@@ -39,6 +39,11 @@ pub struct Authenticator {
     metrics: Arc<AuthMetrics>,
     default_audience: Option<AudienceId>,
     challenges: Arc<BTreeMap<AudienceId, Arc<[axum::http::HeaderValue]>>>,
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub(crate) oauth_issuer: Option<Arc<super::oauth_issue::IssuerRuntime>>,
 }
 
 impl std::fmt::Debug for Authenticator {
@@ -85,6 +90,40 @@ impl Authenticator {
         parts: &Parts,
         audience: &AudienceId,
     ) -> Result<AuthUser, AuthError> {
+        let (provider, raw) = self.select_access(parts, audience)?;
+        let result = provider.authenticate(site, &raw, parts, audience).await;
+        self.record(provider.id(), &result);
+        result
+    }
+
+    /// Authenticates the exact browser cookie that will bind a consent decision.
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub(crate) async fn authenticate_oauth_browser(
+        &self,
+        site: &crate::Site,
+        parts: &Parts,
+        audience: &AudienceId,
+    ) -> Result<(AuthUser, String), AuthError> {
+        let (provider, raw) = self.select_access(parts, audience)?;
+        if !provider.access_location().is_cookie() {
+            return Err(AuthError::InvalidCredential);
+        }
+        let result = provider.authenticate(site, &raw, parts, audience).await;
+        self.record(provider.id(), &result);
+        let user = result?;
+        let digest = blake3::derive_key("vyuh OAuth consent browser cookie v1", raw.as_bytes());
+        Ok((user, blake3::Hash::from_bytes(digest).to_hex().to_string()))
+    }
+
+    /// Selects one bounded access credential without authenticating it.
+    fn select_access<'a>(
+        &self,
+        parts: &'a Parts,
+        audience: &AudienceId,
+    ) -> Result<(&ProviderRuntime, std::borrow::Cow<'a, str>), AuthError> {
         let mut selected = None;
         let mut scan = RequestCredentialScan::new(parts);
         for position in self.indexes.access_for(audience) {
@@ -104,11 +143,7 @@ impl Authenticator {
         if provider.access_location().is_cookie() && scan.has_authorization() {
             return Err(AuthError::MalformedLocation);
         }
-        let result = provider
-            .authenticate(site, raw.as_ref(), parts, audience)
-            .await;
-        self.record(provider.id(), &result);
-        result
+        Ok((provider, raw))
     }
 
     pub(crate) fn rejection(

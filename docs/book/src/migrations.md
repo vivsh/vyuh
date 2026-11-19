@@ -219,6 +219,18 @@ is the only way to recover deleted tasks. No schema changes are applied at start
 
 See [Tasks](tasks.md) for current handler APIs and runtime guarantees.
 
+## OAuth issuance
+
+When `AuthConf::oauth_issuer(...)` is configured, Vyuh contributes
+`vyuh_oauth_grants` and `vyuh_oauth_credentials` to the desired schema. Generate,
+review, and commit the normal application migration with `make_migration` and
+apply it before accepting OAuth requests. Site startup does not create tables.
+The migration includes an indexed credential lookup, an expiry index for bounded
+maintenance, and a foreign key that removes dependent credential history when
+an expired grant is pruned. Use the application's usual backup and retention
+policy for these records; restoring an earlier snapshot can restore credentials
+and grant state from that snapshot.
+
 ## SQLite
 
 SQLite migrations use the same bundle registration and command surface:

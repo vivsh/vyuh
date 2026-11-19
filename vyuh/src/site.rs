@@ -551,6 +551,21 @@ impl SiteBuilder {
             .doc_engine
             .setup(&mut router, &bundle.ops, &auth_conf, &bundle.topology)?;
 
+        let route_registry = crate::routes::RouteRegistry::build(bundle.ops.values())
+            .map_err(crate::bundles::BundleError::RouteRegistry)?;
+        #[cfg(all(
+            feature = "oauth-issue",
+            any(feature = "postgres", feature = "mysql", feature = "sqlite")
+        ))]
+        if let Some(issuer) = &authenticator.oauth_issuer {
+            bundle
+                .mcp_engine
+                .validate_issuer(issuer, &bundle.ops, authenticator.default_audience())
+                .map_err(crate::auth::AuthBuildError::Configuration)?;
+            crate::auth::oauth_issue::setup(&mut router, issuer, &route_registry)
+                .map_err(crate::auth::AuthBuildError::Configuration)?;
+        }
+
         #[cfg(feature = "mcp")]
         bundle.mcp_engine.setup(
             &mut router,
@@ -564,8 +579,6 @@ impl SiteBuilder {
             .fallback(route_not_found)
             .method_not_allowed_fallback(method_not_allowed);
 
-        let route_registry = crate::routes::RouteRegistry::build(bundle.ops.values())
-            .map_err(crate::bundles::BundleError::RouteRegistry)?;
         let console_runtime = console_runtime(
             &self.conf.console,
             &route_registry,
@@ -598,6 +611,21 @@ impl SiteBuilder {
                 crate::tasks::store::database::schema::task_schema,
             ))
             .map_err(|error| crate::bundles::BundleError::Migration(Arc::new(error)))?;
+
+        #[cfg(feature = "migrations")]
+        #[cfg(all(
+            feature = "oauth-issue",
+            any(feature = "postgres", feature = "mysql", feature = "sqlite")
+        ))]
+        if authenticator.oauth_issuer.is_some() {
+            bundle
+                .migrations
+                .register_schema(crate::db::crate_schema(
+                    "vyuh",
+                    crate::auth::oauth_issue::schema,
+                ))
+                .map_err(|error| crate::bundles::BundleError::Migration(Arc::new(error)))?;
+        }
 
         #[cfg(feature = "migrations")]
         let migration_runner = crate::commands::core::migration_runner(
@@ -1286,7 +1314,24 @@ impl Site {
         }
 
         if http.trace.enabled {
-            router = router.layer(TraceLayer::new_for_http());
+            #[cfg(all(
+                feature = "oauth-issue",
+                any(feature = "postgres", feature = "mysql", feature = "sqlite")
+            ))]
+            if self.auth().oauth_issuer.is_some() {
+                router = router.layer(TraceLayer::new_for_http().make_span_with(|request: &Request| {
+                    tracing::debug_span!("request", method = %request.method(), path = %request.uri().path())
+                }));
+            } else {
+                router = router.layer(TraceLayer::new_for_http());
+            }
+            #[cfg(not(all(
+                feature = "oauth-issue",
+                any(feature = "postgres", feature = "mysql", feature = "sqlite")
+            )))]
+            {
+                router = router.layer(TraceLayer::new_for_http());
+            }
         }
 
         if self.inner.observability.enabled() {

@@ -604,6 +604,11 @@ pub struct AuthConf {
     login_methods: Vec<LoginDefinitionInner>,
     login_state_store: Option<LoginStateStoreRuntime>,
     passwordless_store: Option<PasswordlessStoreRuntime>,
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub(crate) oauth_issuer: Option<super::OAuthIssuer>,
 }
 
 impl Default for AuthConf {
@@ -615,11 +620,26 @@ impl Default for AuthConf {
             login_methods: Vec::new(),
             login_state_store: None,
             passwordless_store: None,
+            #[cfg(all(
+                feature = "oauth-issue",
+                any(feature = "postgres", feature = "mysql", feature = "sqlite")
+            ))]
+            oauth_issuer: None,
         }
     }
 }
 
 impl AuthConf {
+    /// Enables the application-owned browser flow and durable OAuth endpoints.
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub fn oauth_issuer(mut self, issuer: super::OAuthIssuer) -> Self {
+        self.oauth_issuer = Some(issuer);
+        self
+    }
+
     /// Creates development configuration with the built-in JWT provider.
     pub fn development() -> Self {
         Self {

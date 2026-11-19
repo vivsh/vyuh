@@ -309,6 +309,15 @@ The `vyuh` crate is organized around these subsystems:
   shared providers and auth lifecycle remain `SiteConf` concerns. Provider selector ownership is
   indexed by local audience, allowing the same Bearer source for disjoint OAuth
   resources without token sniffing or verifier fallthrough.
+- `auth::oauth_issue` is an opt-in authorization server for local MCP resources.
+  The application owns browser login, routes and consent UI. The issuer borrows
+  the invoking site, uses the normal CSRF-protected cookie provider for browser
+  proof, and registers as the exclusive provider for its delegated audiences.
+  Its Mool store owns exactly two tables: grant decisions and credential
+  digests. Consent inserts the grant first; exchange and rotation compare-and-set
+  the grant before inserting new digests, while revocation changes only the
+  grant. No application callback runs under those transactions. Resource access
+  performs an indexed read without a database write or an in-memory auth cache.
 - `routes::ClientIp` resolves a single forwarded client address when supplied,
   with TCP peer-address fallback for applications and framework routes.
 - `validation` and `validators` provide typed validation primitives and
@@ -521,7 +530,7 @@ The `vyuh` crate is organized around these subsystems:
   initializes a private Huskarl validator at site construction: either local
   JWT verification with bounded JWKS rotation or explicit, uncached RFC 7662
   introspection. Both modes share audience, scope, and mapping policy. MCP publishes protected-resource
-  metadata from an eligible external provider. It never
+  metadata from an eligible external provider or the local issuer. It never
   forwards credentials or owns OAuth login and consent. Modern MCP requests are
   stateless and validate mirrored routing headers against body metadata, while
   prior initialization-based revisions are accepted without framework session

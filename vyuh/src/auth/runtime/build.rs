@@ -30,6 +30,11 @@ struct PreparedAuth {
     metric_providers: Vec<String>,
     metric_methods: Vec<String>,
     audiences: Vec<AudienceId>,
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    oauth_issuer: Option<Arc<crate::auth::oauth_issue::IssuerRuntime>>,
 }
 
 const STARTUP_CONCURRENCY: usize = 8;
@@ -76,7 +81,31 @@ fn prepare(
     }
     let default_audience = conf.default_audience_id()?;
     let challenge_codec = ChallengeCodec::new(&secrets)?;
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    let oauth_issuer = conf
+        .oauth_issuer
+        .as_ref()
+        .map(|issuer| {
+            crate::auth::oauth_issue::IssuerRuntime::build(issuer, &secrets, &definitions)
+        })
+        .transpose()?
+        .map(Arc::new);
     let providers = prepare_providers(definitions, &secrets, default_audience.clone())?;
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    let providers = providers
+        .into_iter()
+        .chain(
+            oauth_issuer
+                .iter()
+                .map(|issuer| PreparedProvider::Ready(ProviderRuntime(issuer.clone()))),
+        )
+        .collect::<Vec<_>>();
     let audiences = challenge_audiences(audiences, default_audience.as_ref());
     Ok(PreparedAuth {
         metric_providers: provider_names(&providers),
@@ -89,6 +118,11 @@ fn prepare(
         challenge_codec,
         default_audience,
         audiences,
+        #[cfg(all(
+            feature = "oauth-issue",
+            any(feature = "postgres", feature = "mysql", feature = "sqlite")
+        ))]
+        oauth_issuer,
     })
 }
 
@@ -132,6 +166,11 @@ async fn finish(prepared: PreparedAuth) -> Result<Authenticator, AuthError> {
         )),
         default_audience: prepared.default_audience,
         challenges: Arc::new(challenges),
+        #[cfg(all(
+            feature = "oauth-issue",
+            any(feature = "postgres", feature = "mysql", feature = "sqlite")
+        ))]
+        oauth_issuer: prepared.oauth_issuer,
     })
 }
 

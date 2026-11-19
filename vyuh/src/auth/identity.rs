@@ -202,6 +202,27 @@ impl AuthUser {
         &self.scopes
     }
 
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub(crate) fn restrict_scopes(mut self, allowed: &[Scope]) -> Self {
+        if !self
+            .scopes
+            .iter()
+            .all(|scope| allowed.binary_search(scope).is_ok())
+        {
+            self.scopes = self
+                .scopes
+                .iter()
+                .filter(|scope| allowed.binary_search(scope).is_ok())
+                .cloned()
+                .collect::<Vec<_>>()
+                .into();
+        }
+        self
+    }
+
     /// Returns whether the identity has one exact scope.
     pub fn has_scope(&self, scope: &Scope) -> bool {
         self.scopes.binary_search(scope).is_ok()

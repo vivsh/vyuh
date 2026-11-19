@@ -67,6 +67,89 @@ refreshes them on rotation. Introspection makes an uncached request per
 presented credential. An upstream validation outage is reported as a provider
 failure without exposing credentials or verifier details to MCP clients.
 
+## Issue OAuth credentials with your existing login
+
+Enable `oauth-issue` and one database feature when the same application should
+authorize access to its own MCP tools. Use a pre-registered client with the
+exact callback shown by that client. For a confidential client, add a dedicated
+secret with `OAuthClient::secret(KeySource::env("MCP_CLIENT_SECRET"))`; never
+share the site's signing secret. Clients must support authorization code with
+PKCE S256, protected-resource and authorization-server discovery, and the
+`resource` parameter on authorization and token requests. Dynamic client
+registration and hosted sign-in or consent pages are not provided.
+
+```rust,ignore
+const BROWSER: Audience = Audience::new("browser");
+const NOTES_MCP: Audience = Audience::new("https://app.example.com/mcp/notes");
+const NOTES_READ: Scope = Scope::of("notes:read");
+
+let auth = AuthConf::default()
+    .provider(
+        WEB_AUTH,
+        TokenProvider::new(Jwt::hs256_site_secret())
+            .audiences([BROWSER])
+            .access(TokenConf::cookie("browser_session")),
+    )
+    .oauth_issuer(
+        OAuthIssuer::new("https://app.example.com")
+            .authorize_route("oauth_authorize")
+            .browser_audience(BROWSER)
+            .client(OAuthClient::new(client_id, "Notes client").redirect_uri(callback_uri))
+            .resource(NOTES_MCP, [NOTES_READ])
+            .verifier(ActiveAccount),
+    );
+```
+
+Use the configured resource URL as the protected MCP bundle's audience. Its
+origin must equal the HTTPS issuer and its path must match the endpoint. The
+audience is exclusive to the issuer; explicitly restrict all other providers
+to their own audiences. Put your named, static `oauth_authorize` GET route where
+your existing access cookie is sent. The site must have exactly one
+CSRF-protected cookie token provider eligible for `BROWSER`.
+
+Your named GET handler calls `site.oauth()?.request(&parts).await?`.
+On `OAuthConsent::Redirect(response)`, return the protocol redirect unchanged.
+On `OAuthConsent::SignIn { return_to }`, use your existing login endpoint and
+pass that local return URL through your usual sign-in flow. On
+`OAuthConsent::Ready`, render your own consent screen using the client name,
+resource and requested scopes. Keep the opaque continuation out of URLs and
+logs. Set `Cache-Control: no-store` and `Referrer-Policy: no-referrer` on your
+browser pages.
+
+Your POST handler calls `site.oauth()?.approve(&parts, &continuation, &selected_scopes).await`
+or `site.oauth()?.deny(&parts, &continuation).await` and returns the resulting
+redirect. Supply the usual CSRF header. If you use a native HTML form, you can
+read the CSRF value from a hidden field and pass it in the configured request
+header before calling the helper; **never** populate the header from the
+incoming cookie on the server. The helpers use the exact accepted access
+cookie; if it rotated during consent, start again. A denied or approved
+continuation cannot be used a second time.
+
+`OAuthGrantVerifier` borrows the invoking `&Site` and resolves the original
+subject to its current account and scopes. It can reject disabled or missing
+accounts. The browser user's current scopes limit consent; MCP receives only
+the intersection of the approved scopes, the configured resource scopes, and
+the current account scopes. The usual MCP predicate and tool permits still
+apply. The verifier runs for resource access, so an account lookup it performs
+adds to the issuer's own single indexed credential/grant read.
+
+Vyuh serves `/.well-known/oauth-authorization-server`, `/oauth/token`,
+`/oauth/revoke`, and the existing MCP protected-resource metadata. Codes live
+for two minutes, access tokens for up to ten minutes, and grants for up to 30
+days. Refresh rotates both credentials; a validated replay revokes the grant,
+including any replacement from a competing refresh. If a refresh response is
+lost after commit, the client may need to authorize again. Do not retry refresh
+concurrently.
+
+Generate and apply the [application migration](migrations.md#oauth-issuance)
+before serving OAuth traffic. Set the same issuer configuration and secret ring
+on every replica, synchronize clocks, and use a shared database. Rate-limit
+public protocol endpoints at the edge and redact request bodies and query
+strings in proxies and application logs. Call `site.oauth()?.prune(limit).await`
+from trusted scheduled maintenance to delete expired grants and their credential
+history; there is no automatic cleanup task. Verify an actual connection with
+each target client before rollout.
+
 ## Tools
 
 Each `mcp_tool` callable exposes its one object payload as the tool input

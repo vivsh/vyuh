@@ -14,6 +14,16 @@ mod login;
 mod metrics;
 #[cfg(any(feature = "oauth-resource", feature = "id-token"))]
 mod oauth;
+#[cfg(all(
+    feature = "oauth-issue",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub(crate) mod oauth_issue;
+#[cfg(all(
+    feature = "oauth-issue",
+    not(any(feature = "postgres", feature = "mysql", feature = "sqlite"))
+))]
+compile_error!("oauth-issue requires a database backend: postgres, mysql, or sqlite");
 mod password;
 mod request;
 mod response;
@@ -60,6 +70,13 @@ pub use login::{
 #[cfg(feature = "oauth-resource")]
 pub use oauth::{
     OAuthClaims, OAuthIdentityMapper, OAuthJwtAlgorithm, OAuthResource, OAuthResourceServer,
+};
+#[cfg(all(
+    feature = "oauth-issue",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub use oauth_issue::{
+    OAuthClient, OAuthConsent, OAuthGrantVerifier, OAuthIssue, OAuthIssueError, OAuthIssuer,
 };
 pub use password::{
     PasswordError, PasswordVerification, check_password, check_password_with_upgrade,

@@ -38,6 +38,41 @@ pub(crate) struct McpEngine {
 }
 
 impl McpEngine {
+    /// Binds issuer audiences to exactly one protected MCP endpoint and no HTTP handler.
+    #[cfg(all(
+        feature = "oauth-issue",
+        any(feature = "postgres", feature = "mysql", feature = "sqlite")
+    ))]
+    pub(crate) fn validate_issuer(
+        &self,
+        issuer: &crate::auth::oauth_issue::IssuerRuntime,
+        operations: &BTreeMap<OperationId, Operation>,
+        default: Option<&AudienceId>,
+    ) -> Result<(), AuthError> {
+        for audience in issuer.resource_audiences() {
+            let error = || {
+                AuthError::InvalidProviderConfig(
+                "an OAuth issuer resource must name exactly one protected MCP endpoint and no other routes".into()
+            )
+            };
+            let mut nodes = self.nodes.iter().filter_map(|node| {
+                let marker = operations.get(&node.marker_id)?;
+                (marker.audience_id() == Some(audience)).then_some((node, marker))
+            });
+            let (node, marker) = nodes.next().ok_or_else(error)?;
+            let valid_path =
+                url::Url::parse(audience.as_str()).is_ok_and(|url| url.path() == marker.path);
+            let overlaps = operations.values().any(|operation| {
+                operation.kind == crate::callables::OperationKind::Route
+                    && operation.audience_id().or(default) == Some(audience)
+            });
+            if node.conf.auth.is_none() || !valid_path || overlaps || nodes.next().is_some() {
+                return Err(error());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new() -> Self {
         Self { nodes: Vec::new() }
     }

@@ -670,6 +670,8 @@ The optional `oauth-resource` feature makes Vyuh a resource server for
 externally issued OAuth Bearer access tokens. Replace the former Cargo feature
 `oauth` with `oauth-resource`; existing JWT builders are unchanged.
 This feature does not add login, consent, client registration, issuance, or refresh.
+For issuing OAuth credentials to clients of your own MCP tools, see
+[`oauth-issue`](mcp.md#issue-oauth-credentials-with-your-existing-login).
 Use `OAuthResourceServer::discovery(...)` with one or more resource policies:
 
 ```rust,ignore

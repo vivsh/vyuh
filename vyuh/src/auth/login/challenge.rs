@@ -328,9 +328,12 @@ pub(crate) struct ChallengeCodec {
 
 impl ChallengeCodec {
     pub(crate) fn new(secrets: &SecretRing) -> Result<Self, AuthError> {
-        let active = secrets.derived_active(&KeySource::site_secret(), KEY_CONTEXT, 32)?;
-        let verification =
-            secrets.derived_verification(&KeySource::site_secret(), KEY_CONTEXT, 32)?;
+        Self::with_context(secrets, KEY_CONTEXT)
+    }
+
+    pub(crate) fn with_context(secrets: &SecretRing, context: &[u8]) -> Result<Self, AuthError> {
+        let active = secrets.derived_active(&KeySource::site_secret(), context, 32)?;
+        let verification = secrets.derived_verification(&KeySource::site_secret(), context, 32)?;
         Ok(Self {
             active: active.into(),
             verification: verification.into(),

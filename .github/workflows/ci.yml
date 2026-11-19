@@ -74,6 +74,8 @@ jobs:
         include:
           - features: oauth-resource
             tests: --lib auth::oauth
+          - features: sqlite,oauth-issue
+            tests: --lib auth::oauth_issue
           - features: id-token
             tests: --lib auth::id_token
           - features: federated,paseto,branca
@@ -121,6 +123,8 @@ jobs:
         run: cargo check -p vyuh --no-default-features --features ${{ matrix.backend }}
       - name: Check the backend with migrations
         run: cargo check -p vyuh --no-default-features --features ${{ matrix.backend }},migrations
+      - name: Check the backend with OAuth issuance
+        run: cargo check -p vyuh --no-default-features --features ${{ matrix.backend }},oauth-issue
 
   docs:
     # The Pages workflow already builds the book on main.
