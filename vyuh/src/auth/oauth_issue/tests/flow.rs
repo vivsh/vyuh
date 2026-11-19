@@ -21,6 +21,14 @@ use crate::{
 
 use super::{OAuthClient, OAuthConsent, OAuthGrantVerifier, OAuthIssueError, OAuthIssuer};
 
+#[path = "cimd_flow.rs"]
+pub(super) mod cimd_flow;
+#[path = "registration.rs"]
+mod registration;
+#[cfg(feature = "sqlite")]
+#[path = "smoke.rs"]
+mod smoke;
+
 const BROWSER: Audience = Audience::new("browser");
 const MCP: Audience = Audience::new("https://app.example.com/mcp");
 const OTHER_MCP: Audience = Audience::new("https://app.example.com/other");
@@ -74,17 +82,25 @@ async fn other_echo(Data(value): Data<Echo>) -> Data<Echo> {
 }
 
 fn issuer() -> OAuthIssuer {
+    issuer_base()
+        .client(OAuthClient::new("client", "Client").redirect_uri(REDIRECT))
+        .client(OAuthClient::new("other-client", "Other client").redirect_uri(REDIRECT))
+}
+
+pub(super) fn issuer_base() -> OAuthIssuer {
     OAuthIssuer::new("https://app.example.com")
         .authorize_route("authorize")
         .browser_audience(BROWSER)
-        .client(OAuthClient::new("client", "Client").redirect_uri(REDIRECT))
-        .client(OAuthClient::new("other-client", "Other client").redirect_uri(REDIRECT))
         .resource(MCP, [READ, WRITE])
         .resource(OTHER_MCP, [READ])
         .verifier(Account)
 }
 
 fn conf(database: db::DbConf) -> SiteConf {
+    conf_with(database, issuer())
+}
+
+pub(super) fn conf_with(database: db::DbConf, issuer: OAuthIssuer) -> SiteConf {
     SiteConf::default().database(database).log_init(false).auth(
         AuthConf::default()
             .provider(
@@ -94,11 +110,11 @@ fn conf(database: db::DbConf) -> SiteConf {
                     .without_refresh()
                     .audiences([BROWSER]),
             )
-            .oauth_issuer(issuer()),
+            .oauth_issuer(issuer),
     )
 }
 
-fn bundle() -> bundles::Bundle {
+pub(super) fn bundle() -> bundles::Bundle {
     let browser = bundles::bundle([bundles::route(
         || async {},
         RouteConf {
@@ -109,11 +125,12 @@ fn bundle() -> bundles::Bundle {
         },
     )])
     .with_conf(bundles::conf().audience(BROWSER));
-    browser
-        .merge(
-            bundles::bundle! { echo, write_note }
-                .with_conf(bundles::conf().audience(MCP).mcp(McpConf::new("/mcp"))),
-        )
+    browser.merge(tool_bundles())
+}
+
+fn tool_bundles() -> bundles::Bundle {
+    bundles::bundle! { echo, write_note }
+        .with_conf(bundles::conf().audience(MCP).mcp(McpConf::new("/mcp")))
         .merge(
             bundles::bundle! { other_echo }.with_conf(
                 bundles::conf()
@@ -176,7 +193,11 @@ async fn session(site: &Site) -> Result<(String, String), String> {
         .map_err(err)?;
     let mut response = Response::new(Body::empty());
     login.write(&mut response);
-    let cookies = response.headers().get_all(header::SET_COOKIE);
+    browser_cookies(response.headers())
+}
+
+fn browser_cookies(headers: &HeaderMap) -> Result<(String, String), String> {
+    let cookies = headers.get_all(header::SET_COOKIE);
     let cookies = cookies
         .iter()
         .map(|value| value.to_str().map_err(err))
@@ -199,18 +220,22 @@ fn parts(method: &str, path: &str, headers: &[(&str, &str)]) -> Result<Parts, St
 }
 
 fn query() -> String {
+    client_query("client", REDIRECT, "notes:write notes:read")
+}
+
+fn client_query(id: &str, redirect: &str, scope: &str) -> String {
     let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(
         &ring::digest::SHA256,
         VERIFIER.as_bytes(),
     ));
     encode(&[
-        ("client_id", "client"),
-        ("redirect_uri", REDIRECT),
+        ("client_id", id),
+        ("redirect_uri", redirect),
         ("resource", MCP.as_str()),
         ("response_type", "code"),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
-        ("scope", "notes:write notes:read"),
+        ("scope", scope),
         ("state", "state / round-trip"),
     ])
 }

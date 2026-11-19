@@ -1,4 +1,4 @@
-//! Two-table Mool persistence. Every mutation starts with the grant.
+//! OAuth persistence. Grant transactions remain independent of client state and replay claims.
 
 use uuid::Uuid;
 
@@ -16,6 +16,7 @@ pub(super) struct GrantRow {
     #[column(type = "varchar(512)")]
     pub(super) issuer: String,
     pub(super) client_id: Option<String>,
+    pub(super) client_binding: Option<i16>,
     pub(super) subject: Option<String>,
     pub(super) resource: Option<String>,
     pub(super) scopes: Option<String>,
@@ -39,11 +40,41 @@ pub(super) struct CredentialRow {
     pub(super) expires_at: i64,
 }
 
-/// Returns the migration-managed grant and credential schema.
+#[derive(db::Model)]
+#[table(name = "vyuh_oauth_registrations")]
+pub(super) struct RegistrationRow {
+    #[column(primary_key)]
+    pub(super) id: Uuid,
+    #[column(type = "varchar(512)")]
+    pub(super) issuer: String,
+    pub(super) slot: i32,
+    pub(super) redirects: String,
+    #[column(type = "varchar(32)")]
+    pub(super) auth_method: String,
+    #[column(type = "varchar(64)")]
+    pub(super) secret_digest: Option<String>,
+    pub(super) allow_refresh: bool,
+    pub(super) scopes: String,
+    pub(super) issued_at: i64,
+}
+
+#[derive(db::Model)]
+#[table(name = "vyuh_oauth_assertions")]
+pub(super) struct AssertionRow {
+    #[column(primary_key, type = "varchar(64)")]
+    pub(super) digest: String,
+    #[column(type = "varchar(512)")]
+    pub(super) issuer: String,
+    pub(super) expires_at: i64,
+}
+
+/// Returns the stable migration-managed schema for an issuer, regardless of its enabled modes.
 pub(crate) fn schema() -> Result<db::Schema, db::SchemaLoadError> {
     let mut schema = db::schema()
         .model::<GrantRow>()
         .model::<CredentialRow>()
+        .model::<RegistrationRow>()
+        .model::<AssertionRow>()
         .build()?;
     if let Some(grants) = schema.tables.get_mut("vyuh_oauth_grants") {
         grants.indexes.push(index(
@@ -63,6 +94,17 @@ pub(crate) fn schema() -> Result<db::Schema, db::SchemaLoadError> {
             on_delete: Some("cascade".into()),
             on_update: None,
         });
+    }
+    if let Some(registrations) = schema.tables.get_mut("vyuh_oauth_registrations") {
+        let mut slots = index("idx_vyuh_oauth_registration_slot", &["issuer", "slot"]);
+        slots.unique = true;
+        registrations.indexes.push(slots);
+    }
+    if let Some(assertions) = schema.tables.get_mut("vyuh_oauth_assertions") {
+        assertions.indexes.push(index(
+            "idx_vyuh_oauth_assertion_expiry",
+            &["issuer", "expires_at", "digest"],
+        ));
     }
     #[cfg(feature = "postgres")]
     let dialect = db::Dialect::Postgres;
@@ -92,6 +134,7 @@ pub(super) struct Proof {
     pub(super) grant_expiry: i64,
     pub(super) revoked: Option<i64>,
     pub(super) client: String,
+    pub(super) client_binding: Option<i16>,
     pub(super) subject: String,
     pub(super) resource: String,
     pub(super) scopes: String,
@@ -109,6 +152,7 @@ type ProofRow = (
     i64,
     Option<i64>,
     String,
+    Option<i16>,
     String,
     String,
     String,
@@ -117,14 +161,16 @@ type ProofRow = (
     i64,
 );
 
+pub(super) type AccessRow = (String, String, Option<i16>, String, String, String);
+
 /// Fetches only resource-authorization data on the hot path, in one indexed join.
 pub(super) async fn access(
     mut pool: DbPool,
     issuer: &str,
     digest: String,
     now: i64,
-) -> Result<Option<(String, String, String, String)>, DbError> {
-    let sql = "SELECT g.subject,g.client_id,g.resource,g.scopes \
+) -> Result<Option<AccessRow>, DbError> {
+    let sql = "SELECT g.subject,g.client_id,g.client_binding,g.resource,g.scopes,g.redirect_uri \
         FROM vyuh_oauth_credentials c JOIN vyuh_oauth_grants g ON c.grant_id=g.id \
         WHERE c.digest=? AND g.issuer=? AND c.kind=? AND g.approved=TRUE \
         AND g.revoked_at IS NULL AND g.generation=c.generation \
@@ -147,7 +193,7 @@ pub(super) async fn lookup(
     digest: String,
 ) -> Result<Option<Proof>, DbError> {
     let sql = "SELECT g.id,c.kind,c.generation,c.expires_at,g.generation,g.expires_at,\
-        g.revoked_at,g.client_id,g.subject,g.resource,g.scopes,g.redirect_uri,g.pkce_challenge,\
+        g.revoked_at,g.client_id,g.client_binding,g.subject,g.resource,g.scopes,g.redirect_uri,g.pkce_challenge,\
         g.code_expires_at FROM vyuh_oauth_credentials c JOIN vyuh_oauth_grants g \
         ON c.grant_id=g.id WHERE c.digest=? AND g.issuer=? AND g.approved=TRUE";
     let row: Option<ProofRow> = pool
@@ -163,6 +209,7 @@ pub(super) async fn lookup(
             grant_expiry,
             revoked,
             client,
+            client_binding,
             subject,
             resource,
             scopes,
@@ -179,6 +226,7 @@ pub(super) async fn lookup(
             grant_expiry,
             revoked,
             client,
+            client_binding,
             subject,
             resource,
             scopes,
@@ -304,8 +352,101 @@ pub(super) async fn prune(
     .await
 }
 
+pub(super) const REGISTRATION_CAP: i32 = 1024;
+
+/// Finds a candidate slot. Only a subsequent unique insert claims it.
+pub(super) async fn free_slot(mut pool: DbPool, issuer: &str) -> Result<Option<i32>, DbError> {
+    let sql = "SELECT slot FROM vyuh_oauth_registrations WHERE issuer=? AND slot>=0 \
+        AND slot<? ORDER BY slot LIMIT ?";
+    let occupied: Vec<(i32,)> = pool
+        .fetch_all(
+            statement(sql)
+                .bind(issuer.to_owned())
+                .bind(REGISTRATION_CAP)
+                .bind(REGISTRATION_CAP),
+        )
+        .await?;
+    let mut slots = occupied.into_iter().map(|(slot,)| slot).peekable();
+    Ok((0..REGISTRATION_CAP).find(|slot| {
+        if slots.peek() == Some(slot) {
+            slots.next();
+            false
+        } else {
+            true
+        }
+    }))
+}
+
+/// Inserts immutable registration terms. A unique-key race leaves no partial registration.
+pub(super) async fn register(mut pool: DbPool, row: &RegistrationRow) -> Result<bool, DbError> {
+    let table = <RegistrationRow as db::Model>::table();
+    inserted(db::from(&table).insert(row).exec(&mut pool).await)
+}
+
+pub(super) type Registration = (String, String, Option<String>, bool, String);
+
+/// Loads only the registration terms used to authorize subsequent requests.
+pub(super) async fn registration(
+    mut pool: DbPool,
+    issuer: &str,
+    id: Uuid,
+) -> Result<Option<Registration>, DbError> {
+    let sql = "SELECT redirects,auth_method,secret_digest,allow_refresh,scopes \
+        FROM vyuh_oauth_registrations WHERE id=? AND issuer=?";
+    pool.fetch_optional(statement(sql).bind(id).bind(issuer.to_owned()))
+        .await
+}
+
+/// Disables one client in a standalone delete. Its grant history ages out separately.
+pub(super) async fn disable(mut pool: DbPool, issuer: &str, id: Uuid) -> Result<bool, DbError> {
+    let sql = "DELETE FROM vyuh_oauth_registrations WHERE id=? AND issuer=?";
+    Ok(pool
+        .execute(statement(sql).bind(id).bind(issuer.to_owned()))
+        .await?
+        == 1)
+}
+
+/// Claims a signed assertion exactly once across every replica sharing this store.
+pub(super) async fn claim_assertion(mut pool: DbPool, row: &AssertionRow) -> Result<bool, DbError> {
+    let table = <AssertionRow as db::Model>::table();
+    inserted(db::from(&table).insert(row).exec(&mut pool).await)
+}
+
+/// Distinguishes a uniqueness loss from all other errors, including ambiguous acknowledgements.
+fn inserted(result: Result<u64, DbError>) -> Result<bool, DbError> {
+    match result {
+        Ok(count) => Ok(count == 1),
+        Err(DbError::Integrity {
+            kind: db::IntegrityKind::Unique,
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Deletes an issuer-scoped, bounded batch of assertions past the replay window.
+pub(super) async fn prune_assertions(
+    mut pool: DbPool,
+    issuer: &str,
+    now: i64,
+    limit: u32,
+) -> Result<u64, DbError> {
+    let sql = "DELETE FROM vyuh_oauth_assertions WHERE digest IN \
+        (SELECT digest FROM (SELECT digest FROM vyuh_oauth_assertions WHERE issuer=? \
+        AND expires_at<=? ORDER BY expires_at,digest LIMIT ?) AS expired_assertions) \
+        AND expires_at<=?";
+    pool.execute(
+        statement(sql)
+            .bind(issuer.to_owned())
+            .bind(now)
+            .bind(i64::from(limit))
+            .bind(now),
+    )
+    .await
+}
+
 /// Converts static bind markers for PostgreSQL; caller values never enter SQL.
-fn statement(sql: &str) -> Statement {
+pub(super) fn statement(sql: &str) -> Statement {
     #[cfg(feature = "postgres")]
     {
         let mut parts = sql.split('?');

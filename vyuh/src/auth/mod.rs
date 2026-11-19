@@ -76,7 +76,8 @@ pub use oauth::{
     any(feature = "postgres", feature = "mysql", feature = "sqlite")
 ))]
 pub use oauth_issue::{
-    OAuthClient, OAuthConsent, OAuthGrantVerifier, OAuthIssue, OAuthIssueError, OAuthIssuer,
+    OAuthCimdAuth, OAuthCimdClient, OAuthClient, OAuthConsent, OAuthDcr, OAuthDcrAdmission,
+    OAuthDcrMethod, OAuthGrantVerifier, OAuthIssue, OAuthIssueError, OAuthIssuer, mcp_preflight,
 };
 pub use password::{
     PasswordError, PasswordVerification, check_password, check_password_with_upgrade,

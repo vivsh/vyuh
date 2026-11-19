@@ -36,6 +36,10 @@ commands:
 
 Applications register additional commands through bundles.
 
+Applications using `oauth-issue` can opt in to the deployment diagnostic
+`mcp:preflight` by adding `vyuh::auth::mcp_preflight()` to their bundle.
+See [the MCP issuer recipe](mcp.md#check-a-deployed-issuer-and-run-the-smoke-tests).
+
 Commands execute against a fully constructed but runtime-inert `Site`. They
 share configuration, database pools, service facades, templates, assets,
 logging, task queues, and dependency injection with HTTP routes, but do not

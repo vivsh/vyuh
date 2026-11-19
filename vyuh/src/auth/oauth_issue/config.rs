@@ -78,19 +78,133 @@ impl OAuthClient {
             return Err(invalid("invalid OAuth client"));
         }
         for uri in &self.redirects {
-            let url = clean_url(uri, true)
-                .filter(|_| uri.len() <= 1024)
-                .ok_or_else(|| invalid("invalid OAuth client redirect URI"))?;
-            if url.query_pairs().any(|(key, _)| {
-                matches!(
-                    key.as_ref(),
-                    "code" | "error" | "error_description" | "state" | "iss"
-                )
-            }) {
-                return Err(invalid("reserved OAuth redirect query parameter"));
-            }
+            validate_redirect(uri)?;
         }
         Ok(())
+    }
+}
+
+/// The exact authentication method the operator permits for a metadata client.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OAuthCimdAuth {
+    /// Require PKCE and accept requests without client authentication.
+    Public,
+    /// Require a signed assertion on token and revocation requests, in addition to PKCE at login.
+    PrivateKeyJwt,
+}
+
+/// Application trust for one exact HTTPS client metadata document.
+#[derive(Clone)]
+pub struct OAuthCimdClient {
+    pub(super) client_id: String,
+    pub(super) name: String,
+    pub(super) redirects: Vec<String>,
+    pub(super) auth: OAuthCimdAuth,
+}
+
+impl OAuthCimdClient {
+    /// Starts an allowlist rule with a trusted consent label and one authentication method.
+    pub fn new(client_id: impl Into<String>, name: impl Into<String>, auth: OAuthCimdAuth) -> Self {
+        Self {
+            client_id: client_id.into(),
+            name: name.into(),
+            redirects: Vec::new(),
+            auth,
+        }
+    }
+
+    /// Allows an exact callback if it also appears in the document. Validated at site build.
+    pub fn redirect_uri(mut self, value: impl Into<String>) -> Self {
+        self.redirects.push(value.into());
+        self
+    }
+}
+
+/// Admission required before an RFC 7591 registration can allocate an issuer-owned client.
+#[derive(Clone)]
+pub enum OAuthDcrAdmission {
+    /// Require a dedicated, operator-provisioned Bearer secret. Site keys are rejected.
+    InitialAccessToken(KeySource),
+    /// Accept requests without caller authentication. Requires operator-managed ingress limits.
+    Unauthenticated,
+}
+
+/// One authentication method that a dynamically registered client can use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OAuthDcrMethod {
+    /// Public client with S256 PKCE.
+    None,
+    /// Confidential client presenting its generated secret via HTTP Basic.
+    ClientSecretBasic,
+    /// Confidential client presenting its generated secret in the form body.
+    ClientSecretPost,
+}
+
+impl OAuthDcrMethod {
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ClientSecretBasic => "client_secret_basic",
+            Self::ClientSecretPost => "client_secret_post",
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "client_secret_basic" => Some(Self::ClientSecretBasic),
+            "client_secret_post" => Some(Self::ClientSecretPost),
+            _ => None,
+        }
+    }
+}
+
+/// Operator policy for durable dynamic client registration.
+#[derive(Clone)]
+pub struct OAuthDcr {
+    pub(super) admission: OAuthDcrAdmission,
+    pub(super) name: String,
+    pub(super) redirects: Vec<String>,
+    pub(super) methods: Vec<OAuthDcrMethod>,
+    pub(super) scopes: Vec<Scope>,
+    pub(super) allow_refresh: bool,
+}
+
+impl OAuthDcr {
+    /// Starts with an operator-controlled consent label and explicit admission mode.
+    pub fn new(name: impl Into<String>, admission: OAuthDcrAdmission) -> Self {
+        Self {
+            admission,
+            name: name.into(),
+            redirects: Vec::new(),
+            methods: Vec::new(),
+            scopes: Vec::new(),
+            allow_refresh: false,
+        }
+    }
+
+    /// Allows a particular exact registration callback, validated at site build.
+    pub fn redirect_uri(mut self, value: impl Into<String>) -> Self {
+        self.redirects.push(value.into());
+        self
+    }
+
+    /// Permits one authentication method. At least one method must be configured.
+    pub fn method(mut self, value: OAuthDcrMethod) -> Self {
+        self.methods.push(value);
+        self
+    }
+
+    /// Sets the maximum scopes registrants can request and the default when scope is omitted.
+    pub fn scopes(mut self, values: impl IntoIterator<Item = Scope>) -> Self {
+        self.scopes = values.into_iter().collect();
+        self
+    }
+
+    /// Permits registrants to request the refresh-token grant alongside authorization code.
+    pub fn allow_refresh(mut self) -> Self {
+        self.allow_refresh = true;
+        self
     }
 }
 
@@ -101,6 +215,8 @@ pub struct OAuthIssuer {
     pub(super) authorize_route: Option<String>,
     pub(super) browser_audience: Option<Audience>,
     pub(super) clients: Vec<OAuthClient>,
+    pub(super) cimd: Vec<OAuthCimdClient>,
+    pub(super) dcr: Option<OAuthDcr>,
     pub(super) resources: Vec<(Audience, Vec<Scope>)>,
     pub(super) verifier: Option<Arc<dyn AccountVerifier>>,
 }
@@ -122,6 +238,8 @@ impl OAuthIssuer {
             authorize_route: None,
             browser_audience: None,
             clients: Vec::new(),
+            cimd: Vec::new(),
+            dcr: None,
             resources: Vec::new(),
             verifier: None,
         }
@@ -145,6 +263,18 @@ impl OAuthIssuer {
         self
     }
 
+    /// Enables CIMD for this exact application-approved client. Rules are validated at site build.
+    pub fn cimd_client(mut self, client: OAuthCimdClient) -> Self {
+        self.cimd.push(client);
+        self
+    }
+
+    /// Enables RFC 7591 registration with explicit admission and metadata policy.
+    pub fn dynamic_registration(mut self, policy: OAuthDcr) -> Self {
+        self.dcr = Some(policy);
+        self
+    }
+
     /// Allows delegation to the canonical MCP URL with explicitly listed scopes.
     pub fn resource(mut self, audience: Audience, scopes: impl IntoIterator<Item = Scope>) -> Self {
         self.resources
@@ -161,6 +291,25 @@ impl OAuthIssuer {
 
 pub(super) fn bounded(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+pub(super) fn validate_redirect(uri: &str) -> Result<(), AuthError> {
+    let url = clean_url(uri, true)
+        .filter(|_| uri.len() <= 1024)
+        .ok_or_else(|| invalid("invalid OAuth client redirect URI"))?;
+    if url.query_pairs().any(|(key, _)| {
+        matches!(
+            key.as_ref(),
+            "code" | "error" | "error_description" | "state" | "iss"
+        )
+    }) {
+        return Err(invalid("reserved OAuth redirect query parameter"));
+    }
+    Ok(())
+}
+
+pub(super) fn exact(values: &[String], value: &str) -> bool {
+    values.iter().any(|allowed| allowed == value)
 }
 
 /// Validates front-channel URLs and allows HTTP only for explicit loopback redirects.

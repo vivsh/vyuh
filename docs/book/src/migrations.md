@@ -222,14 +222,27 @@ See [Tasks](tasks.md) for current handler APIs and runtime guarantees.
 ## OAuth issuance
 
 When `AuthConf::oauth_issuer(...)` is configured, Vyuh contributes
-`vyuh_oauth_grants` and `vyuh_oauth_credentials` to the desired schema. Generate,
-review, and commit the normal application migration with `make_migration` and
-apply it before accepting OAuth requests. Site startup does not create tables.
-The migration includes an indexed credential lookup, an expiry index for bounded
-maintenance, and a foreign key that removes dependent credential history when
-an expired grant is pruned. Use the application's usual backup and retention
-policy for these records; restoring an earlier snapshot can restore credentials
-and grant state from that snapshot.
+`vyuh_oauth_grants`, `vyuh_oauth_credentials`, `vyuh_oauth_registrations`, and
+`vyuh_oauth_assertions` to the desired schema. Generate, review, and commit the
+normal application migration with `make_migration` and apply it before starting
+the new issuer. Site startup does not create tables.
+
+For an upgrade from the static-only issuer, expect two new tables with their
+indexes and a nullable `client_binding` column on `vyuh_oauth_grants`. Existing
+rows keep their static binding. Review the DDL and migration lock window on the
+target engine. Apply the migration even if both new modes are disabled, then
+upgrade all replicas before enabling either mode.
+
+For an application rollback, disable both new modes and retain the additive
+schema. When running a binary that predates client bindings, make sure its
+static client IDs are disjoint from IDs used by the new modes. The original
+credential lookup, grant expiry index, and credential cascade support ordinary
+grant maintenance throughout.
+
+A stale database restore can restore earlier grant and registration state.
+Reapply operator disablements before resuming traffic. Keep signed operations
+closed for seven minutes after quiescing the old replicas so any assertions
+missing from the restored replay records expire, including replica clock skew.
 
 ## SQLite
 

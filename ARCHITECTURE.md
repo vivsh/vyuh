@@ -313,11 +313,17 @@ The `vyuh` crate is organized around these subsystems:
   The application owns browser login, routes and consent UI. The issuer borrows
   the invoking site, uses the normal CSRF-protected cookie provider for browser
   proof, and registers as the exclusive provider for its delegated audiences.
-  Its Mool store owns exactly two tables: grant decisions and credential
-  digests. Consent inserts the grant first; exchange and rotation compare-and-set
-  the grant before inserting new digests, while revocation changes only the
-  grant. No application callback runs under those transactions. Resource access
-  performs an indexed read without a database write or an in-memory auth cache.
+  Exact static clients, allowlisted client metadata documents, and durable
+  dynamic registrations use the same consent and token pipeline. The issuer
+  owns immutable client policy and a dedicated outbound HTTPS transport for
+  metadata. The Mool store owns grants, credential digests, registrations, and
+  signed-assertion replay claims. Consent inserts the grant first. Exchange and
+  rotation compare-and-set the grant before inserting replacement digests.
+  Revocation changes only the grant. Registration writes and replay claims are
+  separate autocommit statements. Network I/O and application callbacks finish
+  before the grant transaction. Resource access performs an indexed read and,
+  for registered clients, a second indexed lookup. It performs no outbound
+  metadata fetch or database write.
 - `routes::ClientIp` resolves a single forwarded client address when supplied,
   with TCP peer-address fallback for applications and framework routes.
 - `validation` and `validators` provide typed validation primitives and

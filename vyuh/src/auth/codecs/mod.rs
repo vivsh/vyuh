@@ -9,9 +9,13 @@ mod branca;
 mod paseto;
 
 pub use django::DjangoSigning;
-#[cfg(any(feature = "oauth-resource", feature = "id-token"))]
+#[cfg(any(
+    feature = "oauth-resource",
+    feature = "id-token",
+    feature = "oauth-issue"
+))]
 pub(crate) use jwt::reject_duplicate_claims;
-#[cfg(feature = "oauth-resource")]
+#[cfg(any(feature = "oauth-resource", feature = "oauth-issue"))]
 pub(crate) use jwt::unique_json_fields;
 pub use jwt::{Jwt, JwtAlgorithm, JwtConf, JwtVerificationKey};
 

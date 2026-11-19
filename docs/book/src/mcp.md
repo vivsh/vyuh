@@ -70,13 +70,14 @@ failure without exposing credentials or verifier details to MCP clients.
 ## Issue OAuth credentials with your existing login
 
 Enable `oauth-issue` and one database feature when the same application should
-authorize access to its own MCP tools. Use a pre-registered client with the
-exact callback shown by that client. For a confidential client, add a dedicated
-secret with `OAuthClient::secret(KeySource::env("MCP_CLIENT_SECRET"))`; never
-share the site's signing secret. Clients must support authorization code with
-PKCE S256, protected-resource and authorization-server discovery, and the
-`resource` parameter on authorization and token requests. Dynamic client
-registration and hosted sign-in or consent pages are not provided.
+authorize access to its own MCP tools. Clients must support authorization code
+with PKCE S256, protected-resource and authorization-server discovery, and the
+`resource` parameter on authorization and token requests. The application
+provides the sign-in and consent pages for every client mode.
+
+Use a pre-registered client with the exact callback shown by that client.
+For a confidential static client, configure a dedicated secret with
+`OAuthClient::secret(KeySource::env("MCP_CLIENT_SECRET"))`.
 
 ```rust,ignore
 const BROWSER: Audience = Audience::new("browser");
@@ -130,8 +131,9 @@ subject to its current account and scopes. It can reject disabled or missing
 accounts. The browser user's current scopes limit consent; MCP receives only
 the intersection of the approved scopes, the configured resource scopes, and
 the current account scopes. The usual MCP predicate and tool permits still
-apply. The verifier runs for resource access, so an account lookup it performs
-adds to the issuer's own single indexed credential/grant read.
+apply. The verifier runs for resource access alongside the issuer's indexed
+credential and grant read. Dynamically registered clients also require an
+indexed registration lookup. CIMD bearer access uses the local trust rule.
 
 Vyuh serves `/.well-known/oauth-authorization-server`, `/oauth/token`,
 `/oauth/revoke`, and the existing MCP protected-resource metadata. Codes live
@@ -149,6 +151,147 @@ strings in proxies and application logs. Call `site.oauth()?.prune(limit).await`
 from trusted scheduled maintenance to delete expired grants and their credential
 history; there is no automatic cleanup task. Verify an actual connection with
 each target client before rollout.
+
+### Allow a client metadata document
+
+Add one `OAuthCimdClient` rule for each exact HTTPS client ID that the
+application trusts. Give the rule an operator-controlled label and exact
+callbacks. Vyuh displays the document hostname alongside that label. Before
+accepting a callback, Vyuh requires an exact match in both the document and
+your rule.
+
+```rust,ignore
+let issuer = issuer.cimd_client(
+    OAuthCimdClient::new(
+        "https://client.example.com/oauth/client.json",
+        "Notes integration",
+        OAuthCimdAuth::PrivateKeyJwt,
+    )
+    .redirect_uri("https://client.example.com/oauth/callback"),
+);
+```
+
+Use `OAuthCimdAuth::Public` for a PKCE-only client you trust to use that
+method. `PrivateKeyJwt` requires a signed assertion on code exchange, refresh,
+and revocation, even if the document also offers `none`. Document and key
+resolution uses bounded HTTPS requests to public addresses. Supply a public
+JWKS inline or at a same-origin HTTPS URL. Every signed attempt needs a fresh
+`jti` and an assertion whose sole audience is the issuer URL. The supported
+signing algorithms are RS256 and ES256. Publish overlapping keys during
+rotation so pending assertions signed with the previous key can still verify.
+Vyuh reads the current key set on the next signed request.
+
+Keep replica clocks synchronized to within 30 seconds and use the same shared
+issuer database. Schedule `site.oauth()?.prune_assertions(limit).await` from
+trusted maintenance to remove expired replay entries. Metadata or JWKS
+unavailability prevents dependent authorization and signed protocol operations.
+An already-issued bearer token can continue until expiry while the local trust
+rule and the grant remain valid.
+
+### Enable dynamic client registration
+
+Add `OAuthDcr` policy to enable `POST /oauth/register` and advertise it in
+discovery. DCR and CIMD can be enabled independently or together. Configure
+exact callback URLs, the permitted methods, and the maximum scopes that a
+registration can request. Authorization still checks the requested scopes
+against the exact resource and the current user account.
+
+```rust,ignore
+let issuer = issuer.dynamic_registration(
+    OAuthDcr::new(
+        "Notes integration",
+        OAuthDcrAdmission::InitialAccessToken(KeySource::env("MCP_DCR_INITIAL_TOKEN")),
+    )
+    .redirect_uri("https://client.example.com/oauth/callback")
+    .method(OAuthDcrMethod::None)
+    .method(OAuthDcrMethod::ClientSecretBasic)
+    .scopes([NOTES_READ])
+    .allow_refresh(),
+);
+```
+
+The registration client sends the initial token as an HTTP Bearer credential.
+`OAuthDcrAdmission::Unauthenticated` explicitly enables admission without
+caller authentication. Apply shared ingress limits to the registration route
+and treat its requester as unidentified. Each issuer has a shared limit of
+1,024 registrations. Omitted authentication defaults to `client_secret_basic`
+and is accepted only if policy permits it. Omitted scope uses the configured
+scope ceiling. A client can register for refresh by requesting `refresh_token`
+alongside `authorization_code` when the policy permits it.
+
+Registration binds the selected authentication method to the new client ID.
+For either supported secret method, the registration response is the only time
+the generated secret is returned. Keep the ID and secret for the life of the
+connection. Trusted operator code can call
+`site.oauth()?.disable_registration(client_id).await` to delete an abandoned or
+compromised registration and free its slot. Later requests using that client's
+grants fail, and the grant history expires through ordinary maintenance.
+
+### Check a deployed issuer and run the smoke tests
+
+Add the optional command to the application bundle passed to `Site::run`.
+Run it with the same issuer configuration as the HTTPS deployment being checked.
+
+```rust,ignore
+let bundle = bundle.merge(vyuh::bundles::bundle([vyuh::auth::mcp_preflight()]));
+```
+
+```sh
+./app mcp:preflight --resource https://app.example.com/mcp/notes \
+  --mode signed-cimd --client-id https://client.example.com/oauth/client.json \
+  --redirect-uri https://client.example.com/oauth/callback --scopes notes:read \
+  --require-refresh
+
+./app mcp:preflight --resource https://app.example.com/mcp/notes \
+  --mode dcr --redirect-uri https://client.example.com/oauth/callback \
+  --token-auth-method none --scopes notes:read --require-refresh --json
+```
+
+The preflight checks local policy, the deployed bearer challenge, and the
+discovery documents. Signed CIMD also checks the trusted metadata and published
+key shape. DCR checks the registration advertisement and never creates a client.
+The command exits with an error if a required check fails. `--json` emits the
+resource, mode, and ordered checks with `pass`, `fail`, or `skipped` status.
+The command sends an unauthenticated probe, so a gateway that requires credentials
+before discovery responds will appear as a reachability or challenge failure.
+
+Run the two smoke tests separately from the Vyuh workspace. Each uses a
+temporary SQLite database and in-process HTTP handlers. The tests exercise
+login, CSRF-protected consent, authorization code, scoped tool access,
+refresh, and revocation. Signed CIMD uses a test document and signing keys
+with DCR disabled. The DCR test registers public and confidential clients
+with CIMD disabled.
+
+```sh
+cargo test -p vyuh --no-default-features --features sqlite,oauth-issue \
+  --lib auth::oauth_issue::tests::smoke::signed_cimd -- --exact
+
+cargo test -p vyuh --no-default-features --features sqlite,oauth-issue \
+  --lib auth::oauth_issue::tests::smoke::dcr -- --exact
+```
+
+A minimal ChatGPT plugin `mcp.json` can select CIMD and let discovery supply
+the OAuth endpoints. Set the exact client document and callback in the
+application's trusted policy.
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "type": "streamable-http",
+      "url": "https://app.example.com/mcp/notes",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": { "mode": "cimd" }
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ## Tools
 

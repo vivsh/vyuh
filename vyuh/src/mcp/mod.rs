@@ -23,6 +23,16 @@ pub use future::McpFuture;
 pub use resources::{McpResource, McpUiResourceMeta};
 
 pub(crate) use engine::McpEngine;
+#[cfg(all(
+    feature = "oauth-issue",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub(crate) use engine::protected_resource_url;
+#[cfg(all(
+    feature = "oauth-issue",
+    any(feature = "postgres", feature = "mysql", feature = "sqlite")
+))]
+pub(crate) use protocol::CURRENT_VERSION;
 pub(crate) use registry::{
     McpDirectRegistration, McpResourceRegistry, McpToolRegistry, McpToolTarget,
 };

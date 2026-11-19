@@ -681,7 +681,7 @@ fn protected_resource_path(endpoint: &str) -> String {
     )
 }
 
-fn protected_resource_url(resource: &str) -> Result<String, McpError> {
+pub(crate) fn protected_resource_url(resource: &str) -> Result<String, McpError> {
     let mut url = url::Url::parse(resource).map_err(|error| McpError::Config(error.to_string()))?;
     if url.scheme() != "https"
         || url.host_str().is_none()

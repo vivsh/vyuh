@@ -1,6 +1,6 @@
 //! Headless OAuth metadata, token exchange, and revocation endpoints.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use axum::{
     Json, Router,
@@ -16,6 +16,7 @@ use base64::{
 };
 use serde::Serialize;
 use serde_json::json;
+use smallvec::SmallVec;
 use subtle::ConstantTimeEq;
 
 use crate::{
@@ -25,15 +26,17 @@ use crate::{
 };
 
 use super::{
-    IssuerRuntime,
+    IssuerRuntime, OAuthCimdAuth, OAuthDcrMethod, assertion,
+    clients::{self, Resolved},
     config::{bounded, invalid},
+    registration,
     runtime::{ACCESS_TTL, credential_digest, now, random_credential},
     store::{self, CredentialRow, Proof},
 };
 
-const METADATA_PATH: &str = "/.well-known/oauth-authorization-server";
-const TOKEN_PATH: &str = "/oauth/token";
-const REVOCATION_PATH: &str = "/oauth/revoke";
+pub(super) const METADATA_PATH: &str = "/.well-known/oauth-authorization-server";
+pub(super) const TOKEN_PATH: &str = "/oauth/token";
+pub(super) const REVOCATION_PATH: &str = "/oauth/revoke";
 const MAX_FORM: usize = 16 * 1024;
 
 /// Safe, protocol-shaped authorization or token failure.
@@ -124,8 +127,9 @@ impl OAuthIssueError {
 }
 
 /// Keeps an MCP resource from replacing an OAuth protocol route.
-pub(super) fn reserved_path(path: &str) -> bool {
+pub(super) fn reserved_path(path: &str, dcr: bool) -> bool {
     matches!(path, METADATA_PATH | TOKEN_PATH | REVOCATION_PATH)
+        || (dcr && path == registration::PATH)
 }
 
 /// Prevents OAuth credentials and front-channel continuations from being cached.
@@ -154,7 +158,10 @@ pub(crate) fn setup(
                 && routes.resolve_url(axum::http::Method::GET, path).is_some()
         })
         .ok_or_else(|| invalid("OAuth authorization route must be a named static GET route"))?;
-    for path in [METADATA_PATH, TOKEN_PATH, REVOCATION_PATH] {
+    let paths = [METADATA_PATH, TOKEN_PATH, REVOCATION_PATH]
+        .into_iter()
+        .chain(issuer.dcr.as_ref().map(|_| registration::PATH));
+    for path in paths {
         if routes.resolve_url(axum::http::Method::GET, path).is_some()
             || routes.resolve_url(axum::http::Method::POST, path).is_some()
         {
@@ -164,14 +171,19 @@ pub(crate) fn setup(
         }
     }
     let metadata = metadata(issuer, &authorize);
-    *router = std::mem::take(router)
+    let wired = std::mem::take(router)
         .route(METADATA_PATH, get(move || async move { Json(metadata) }))
         .route(TOKEN_PATH, post(token))
         .route(REVOCATION_PATH, post(revocation));
+    *router = if issuer.dcr.is_some() {
+        wired.route(registration::PATH, post(registration::register))
+    } else {
+        wired
+    };
     Ok(())
 }
 
-/// Publishes only configured, pre-registered-client capabilities.
+/// Publishes the issuer's protocol capabilities, with independent opt-in markers.
 fn metadata(issuer: &IssuerRuntime, authorize: &str) -> serde_json::Value {
     let mut scopes = issuer
         .resources
@@ -181,7 +193,8 @@ fn metadata(issuer: &IssuerRuntime, authorize: &str) -> serde_json::Value {
         .collect::<Vec<_>>();
     scopes.sort_unstable();
     scopes.dedup();
-    json!({
+    let methods = auth_methods(issuer);
+    let mut fields = json!({
         "issuer": issuer.issuer,
         "authorization_endpoint": format!("{}{authorize}", issuer.issuer),
         "token_endpoint": format!("{}{TOKEN_PATH}", issuer.issuer),
@@ -189,34 +202,72 @@ fn metadata(issuer: &IssuerRuntime, authorize: &str) -> serde_json::Value {
         "response_types_supported": ["code"], "response_modes_supported": ["query"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"], "scopes_supported": scopes,
-        "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
-        "revocation_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post"],
+        "token_endpoint_auth_methods_supported": methods,
+        "revocation_endpoint_auth_methods_supported": methods,
         "authorization_response_iss_parameter_supported": true
-    })
+    });
+    if !issuer.cimd.is_empty() {
+        fields["client_id_metadata_document_supported"] = json!(true);
+    }
+    if issuer.dcr.is_some() {
+        fields["registration_endpoint"] = json!(format!("{}{}", issuer.issuer, registration::PATH));
+    }
+    if methods.contains(&"private_key_jwt") {
+        for name in [
+            "token_endpoint_auth_signing_alg_values_supported",
+            "revocation_endpoint_auth_signing_alg_values_supported",
+        ] {
+            fields[name] = json!(assertion::ALGORITHMS);
+        }
+    }
+    fields
+}
+
+/// Keeps legacy static discovery and derives the additions from the enabled client policy.
+fn auth_methods(issuer: &IssuerRuntime) -> Vec<&'static str> {
+    let mut methods = if issuer.clients.is_empty() {
+        Vec::new()
+    } else {
+        vec!["none", "client_secret_basic", "client_secret_post"]
+    };
+    if let Some(policy) = &issuer.dcr {
+        for method in &policy.methods {
+            if !methods.contains(&method.wire()) {
+                methods.push(method.wire());
+            }
+        }
+    }
+    for method in [OAuthCimdAuth::Public, OAuthCimdAuth::PrivateKeyJwt] {
+        if issuer.cimd.values().any(|rule| rule.auth == method) {
+            let name = if method == OAuthCimdAuth::Public {
+                "none"
+            } else {
+                "private_key_jwt"
+            };
+            if !methods.contains(&name) {
+                methods.push(name);
+            }
+        }
+    }
+    methods
 }
 
 async fn token(State(site): State<Site>, request: Request) -> Result<Response, OAuthIssueError> {
     let issuer = site.oauth()?.issuer;
     let (headers, form) = read_form(request).await?;
-    let client = authenticate_client(issuer, &headers, &form)?;
-    let proof = match form.get("grant_type") {
-        Some("authorization_code") => {
-            find_proof(&site, issuer, client, &form, "code", store::CODE).await?
-        }
-        Some("refresh_token") => {
-            find_proof(
-                &site,
-                issuer,
-                client,
-                &form,
-                "refresh_token",
-                store::REFRESH,
-            )
-            .await?
-        }
+    let (id, client) = authenticate_client(&site, issuer, &headers, &form).await?;
+    let refresh = client.permits_refresh();
+    let (field, kind) = match form.get("grant_type") {
+        Some("authorization_code") => ("code", store::CODE),
+        Some("refresh_token") if refresh => ("refresh_token", store::REFRESH),
+        Some("refresh_token") => return Err(OAuthIssueError::InvalidGrant),
         Some(_) => return Err(OAuthIssueError::UnsupportedGrantType),
         None => return Err(OAuthIssueError::InvalidRequest),
     };
+    let proof = find_proof(&site, issuer, &id, &form, field, kind).await?;
+    if !client.permits_proof(&proof) {
+        return Err(OAuthIssueError::InvalidGrant);
+    }
     let resource = form.get("resource").ok_or(OAuthIssueError::InvalidTarget)?;
     if resource != proof.resource || issuer.resource_scopes(resource).is_none() {
         return Err(OAuthIssueError::InvalidTarget);
@@ -234,7 +285,9 @@ async fn token(State(site): State<Site>, request: Request) -> Result<Response, O
             return Err(OAuthIssueError::InvalidScope);
         }
     }
-    Ok(no_store(Json(exchange(&site, issuer, proof).await?)))
+    Ok(no_store(Json(
+        exchange(&site, issuer, proof, refresh).await?,
+    )))
 }
 
 /// Verifies the submitted PKCE proof and exact redirect before any replay action.
@@ -277,7 +330,8 @@ async fn find_proof(
 #[derive(Serialize)]
 struct TokenReply {
     access_token: String,
-    refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
     token_type: &'static str,
     expires_in: i64,
     scope: String,
@@ -288,6 +342,7 @@ async fn exchange(
     site: &Site,
     issuer: &IssuerRuntime,
     proof: Proof,
+    refresh: bool,
 ) -> Result<TokenReply, OAuthIssueError> {
     if proof.revoked.is_some() || proof.grant_expiry <= now() {
         return Err(OAuthIssueError::InvalidGrant);
@@ -314,7 +369,7 @@ async fn exchange(
             _ => OAuthIssueError::Unavailable,
         })?;
     let at = now();
-    let (reply, rows) = credentials(&proof, at)?;
+    let (reply, rows) = credentials(&proof, at, refresh)?;
     if !store::advance(site.db(), &proof, &rows, at)
         .await
         .map_err(store_failure("token_advance"))?
@@ -353,13 +408,14 @@ async fn reject_after_race(
 fn credentials(
     proof: &Proof,
     at: i64,
-) -> Result<(TokenReply, [CredentialRow; 2]), OAuthIssueError> {
+    allow_refresh: bool,
+) -> Result<(TokenReply, SmallVec<[CredentialRow; 2]>), OAuthIssueError> {
     let expiry = (at + ACCESS_TTL).min(proof.grant_expiry);
     if expiry <= at {
         return Err(OAuthIssueError::InvalidGrant);
     }
     let access = random_credential()?;
-    let refresh = random_credential()?;
+    let refresh = allow_refresh.then(random_credential).transpose()?;
     let row = |raw: &str, kind, expires_at| -> Result<_, OAuthIssueError> {
         Ok(CredentialRow {
             digest: credential_digest(raw).ok_or(OAuthIssueError::Unavailable)?,
@@ -372,10 +428,11 @@ fn credentials(
             expires_at,
         })
     };
-    let rows = [
-        row(&access, store::ACCESS, expiry)?,
-        row(&refresh, store::REFRESH, proof.grant_expiry)?,
-    ];
+    let mut rows = SmallVec::new();
+    rows.push(row(&access, store::ACCESS, expiry)?);
+    if let Some(refresh) = &refresh {
+        rows.push(row(refresh, store::REFRESH, proof.grant_expiry)?);
+    }
     Ok((
         TokenReply {
             access_token: access,
@@ -394,7 +451,7 @@ async fn revocation(
 ) -> Result<Response, OAuthIssueError> {
     let issuer = site.oauth()?.issuer;
     let (headers, form) = read_form(request).await?;
-    let client = authenticate_client(issuer, &headers, &form)?;
+    let (id, client) = authenticate_client(&site, issuer, &headers, &form).await?;
     let raw = form
         .get("token")
         .filter(|raw| !raw.is_empty())
@@ -403,9 +460,11 @@ async fn revocation(
         let proof = store::lookup(site.db(), &issuer.issuer, digest)
             .await
             .map_err(store_failure("revoke_lookup"))?;
-        if let Some(proof) =
-            proof.filter(|proof| proof.client == client && proof.kind != store::CODE)
-        {
+        if let Some(proof) = proof.filter(|proof| {
+            proof.client == id
+                && proof.kind != store::CODE
+                && client.matches_binding(proof.client_binding)
+        }) {
             store::revoke(site.db(), proof.grant, now())
                 .await
                 .map_err(store_failure("revoke"))?;
@@ -477,47 +536,135 @@ fn valid_form_encoding(input: &[u8]) -> bool {
         .is_ok()
 }
 
-/// Selects one client authentication method; a body and Basic header cannot be mixed.
-fn authenticate_client<'a>(
-    issuer: &'a IssuerRuntime,
+enum ClientProof<'a> {
+    Public,
+    Basic(String),
+    Post(&'a str),
+    Signed(assertion::Assertion<'a>),
+}
+
+impl ClientProof<'_> {
+    fn permits_cimd(&self, method: OAuthCimdAuth) -> bool {
+        matches!(
+            (self, method),
+            (Self::Public, OAuthCimdAuth::Public) | (Self::Signed(_), OAuthCimdAuth::PrivateKeyJwt)
+        )
+    }
+}
+
+/// Selects exactly one credential transport before resolving a client's permitted method.
+fn client_proof<'a>(
+    issuer: &str,
     headers: &HeaderMap,
-    params: &Parameters,
-) -> Result<&'a str, OAuthIssueError> {
+    params: &'a Parameters,
+) -> Result<(Cow<'a, str>, ClientProof<'a>), OAuthIssueError> {
+    let bad = OAuthIssueError::InvalidClient;
     let mut authorization = headers.get_all(header::AUTHORIZATION).iter();
     let basic = authorization.next().map(decode_basic).transpose()?;
-    if authorization.next().is_some()
-        || (basic.is_some()
-            && (params.get("client_id").is_some() || params.get("client_secret").is_some()))
+    let id = params.get("client_id");
+    let secret = params.get("client_secret");
+    let assertion = params.get("client_assertion");
+    let assertion_type = params.get("client_assertion_type");
+    if authorization.next().is_some() {
+        return Err(bad);
+    }
+    if let Some((id_value, password)) = basic {
+        if id.is_some() || secret.is_some() || assertion.is_some() || assertion_type.is_some() {
+            return Err(bad);
+        }
+        return Ok((Cow::Owned(id_value), ClientProof::Basic(password)));
+    }
+    if assertion.is_some() || assertion_type.is_some() {
+        if secret.is_some() || assertion_type != Some(assertion::TYPE) {
+            return Err(bad);
+        }
+        let signed = assertion::Assertion::parse(assertion.ok_or(bad)?, issuer)?;
+        if id.is_some_and(|id| id != signed.client_id) {
+            return Err(bad);
+        }
+        let id = id.map_or_else(|| Cow::Owned(signed.client_id.clone()), Cow::Borrowed);
+        return Ok((id, ClientProof::Signed(signed)));
+    }
+    Ok((
+        Cow::Borrowed(id.ok_or(bad)?),
+        secret.map_or(ClientProof::Public, ClientProof::Post),
+    ))
+}
+
+/// Authenticates the resolved client using only the method selected for its identity.
+async fn authenticate_client<'a>(
+    site: &Site,
+    issuer: &'a IssuerRuntime,
+    headers: &HeaderMap,
+    params: &'a Parameters,
+) -> Result<(Cow<'a, str>, Resolved<'a>), OAuthIssueError> {
+    let (id, proof) = client_proof(&issuer.issuer, headers, params)?;
+    if issuer
+        .cimd
+        .get(id.as_ref())
+        .is_some_and(|rule| !proof.permits_cimd(rule.auth))
     {
         return Err(OAuthIssueError::InvalidClient);
     }
-    let (id, presented) = if let Some((id, secret)) = &basic {
-        (id.as_str(), Some(secret.as_str()))
-    } else {
-        (
-            params
-                .get("client_id")
-                .ok_or(OAuthIssueError::InvalidClient)?,
-            params.get("client_secret"),
-        )
-    };
-    let (name, client) = issuer
-        .clients
-        .get_key_value(id)
-        .ok_or(OAuthIssueError::InvalidClient)?;
-    match (client.secret.as_ref(), presented) {
-        (None, None) => Ok(name),
-        (Some(expected), Some(secret))
-            if bool::from(
-                expected
-                    .as_bytes()
-                    .ct_eq(blake3::hash(secret.as_bytes()).as_bytes()),
-            ) =>
-        {
-            Ok(name)
+    let client = clients::resolve(site, issuer, &id).await?;
+    let authenticated = match (&client, proof) {
+        (Resolved::Static(client), ClientProof::Public) => client.secret.is_none(),
+        (Resolved::Static(client), ClientProof::Basic(secret)) => {
+            matches_secret(client.secret, &secret)
         }
-        _ => Err(OAuthIssueError::InvalidClient),
-    }
+        (Resolved::Static(client), ClientProof::Post(secret)) => {
+            matches_secret(client.secret, secret)
+        }
+        (Resolved::Registered(_, client), ClientProof::Public) => {
+            client.method == OAuthDcrMethod::None
+        }
+        (Resolved::Registered(_, client), ClientProof::Basic(secret)) => {
+            client.method == OAuthDcrMethod::ClientSecretBasic
+                && matches_secret(client.secret, &secret)
+        }
+        (Resolved::Registered(_, client), ClientProof::Post(secret)) => {
+            client.method == OAuthDcrMethod::ClientSecretPost
+                && matches_secret(client.secret, secret)
+        }
+        (Resolved::Cimd(rule, _), ClientProof::Public) => rule.auth == OAuthCimdAuth::Public,
+        (Resolved::Cimd(rule, metadata), ClientProof::Signed(assertion))
+            if rule.auth == OAuthCimdAuth::PrivateKeyJwt =>
+        {
+            verify_assertion(site, issuer, metadata, assertion).await?;
+            true
+        }
+        _ => false,
+    };
+    authenticated
+        .then_some((id, client))
+        .ok_or(OAuthIssueError::InvalidClient)
+}
+
+/// Resolves the published signing keys before verifying and consuming the assertion.
+async fn verify_assertion(
+    site: &Site,
+    issuer: &IssuerRuntime,
+    metadata: &super::cimd::CimdMetadata,
+    assertion: assertion::Assertion<'_>,
+) -> Result<(), OAuthIssueError> {
+    let transport = issuer
+        .cimd_http
+        .as_ref()
+        .ok_or(OAuthIssueError::Unavailable)?;
+    let keys = metadata.keys(transport).await?;
+    assertion
+        .authenticate(site, issuer, &keys, metadata.algorithm.as_deref())
+        .await
+}
+
+fn matches_secret(expected: Option<blake3::Hash>, presented: &str) -> bool {
+    expected.is_some_and(|digest| {
+        bool::from(
+            digest
+                .as_bytes()
+                .ct_eq(blake3::hash(presented.as_bytes()).as_bytes()),
+        )
+    })
 }
 
 /// Decodes RFC 6749's form-encoded Basic username and password, without logging them.
