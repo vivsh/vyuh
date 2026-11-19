@@ -7,13 +7,16 @@ use super::{
     registration::{authenticate, dcr, discover, issue},
     *,
 };
-use crate::auth::oauth_issue::{assertion, cimd::tests::documents, runtime::now};
+use crate::auth::oauth_issue::{
+    assertion, cimd::tests::documents, protocol::LEGACY_CHATGPT_CIMD, runtime::now,
+};
 use crate::auth::{KeySource, OAuthCimdAuth, OAuthCimdClient, OAuthDcrAdmission};
 
 const ISSUER: &str = "https://app.example.com";
 pub(in crate::auth::oauth_issue) const SIGNED: &str = "https://client.example.com/signed.json";
 const PUBLIC: &str = "https://client.example.com/public.json";
 const KEYS: &str = "https://client.example.com/jwks.json";
+const CHATGPT_KEYS: &str = "https://chatgpt.com/oauth/jwks.json";
 const CONFIDENTIAL: &str = "static-secret-with-at-least-32-bytes";
 
 pub(in crate::auth::oauth_issue) struct SigningKey {
@@ -44,11 +47,11 @@ fn metadata(id: &str) -> Value {
         "grant_types": ["authorization_code", "refresh_token", "urn:custom:grant"],
         "response_types": ["code"],
     });
-    if id == SIGNED {
+    if matches!(id, SIGNED | LEGACY_CHATGPT_CIMD) {
         doc["token_endpoint_auth_method"] = json!("private_key_jwt");
         doc["token_endpoint_auth_methods_supported"] = json!(["none", "private_key_jwt"]);
         doc["token_endpoint_auth_signing_alg"] = json!("RS256");
-        doc["jwks_uri"] = json!(KEYS);
+        doc["jwks_uri"] = json!(if id == SIGNED { KEYS } else { CHATGPT_KEYS });
     }
     doc
 }
@@ -62,7 +65,9 @@ pub(in crate::auth::oauth_issue) async fn fixture<T>(
     documents(
         [
             (SIGNED, Ok(metadata(SIGNED))),
+            (LEGACY_CHATGPT_CIMD, Ok(metadata(LEGACY_CHATGPT_CIMD))),
             (PUBLIC, Ok(metadata(PUBLIC))),
+            (CHATGPT_KEYS, Ok(json!({"keys": [jwk.clone()]}))),
             (KEYS, Ok(json!({"keys": [jwk]}))),
         ],
         work,

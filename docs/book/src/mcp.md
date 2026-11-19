@@ -181,6 +181,15 @@ signing algorithms are RS256 and ES256. Publish overlapping keys during
 rotation so pending assertions signed with the previous key can still verify.
 Vyuh reads the current key set on the next signed request.
 
+There is one temporary compatibility exception to
+[RFC 10070](https://www.rfc-editor.org/rfc/rfc10070.html#section-4): if the
+application explicitly trusts `https://chatgpt.com/oauth/client.json` with
+`PrivateKeyJwt`, Vyuh also accepts the issuer's exact token endpoint URL as
+the sole audience on code exchange and refresh. Revocation still requires
+the issuer URL. Signature, key, time, and replay checks are unchanged. If your
+deployment requires strict issuer-only validation, do not enable this signed
+ChatGPT CIMD client while the exception is present.
+
 Keep replica clocks synchronized to within 30 seconds and use the same shared
 issuer database. Schedule `site.oauth()?.prune_assertions(limit).await` from
 trusted maintenance to remove expired replay entries. Metadata or JWKS
@@ -254,6 +263,13 @@ The command exits with an error if a required check fails. `--json` emits the
 resource, mode, and ordered checks with `pass`, `fail`, or `skipped` status.
 The command sends an unauthenticated probe, so a gateway that requires credentials
 before discovery responds will appear as a reachability or challenge failure.
+
+If discovery works but the client cannot complete token exchange, enable the
+`vyuh::oauth_diagnostics=debug` tracing target on a diagnostic sink for one
+retry. It records token-handler arrival and protocol outcomes without request
+headers, form values, or credentials. `legacy_token_audience_authenticated`
+means the ChatGPT assertion was authenticated, not that a token was issued;
+look for the separate `issued` outcome.
 
 Run the two smoke tests separately from the Vyuh workspace. Each uses a
 temporary SQLite database and in-process HTTP handlers. The tests exercise

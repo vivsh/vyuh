@@ -36,6 +36,7 @@ use super::{
 
 pub(super) const METADATA_PATH: &str = "/.well-known/oauth-authorization-server";
 pub(super) const TOKEN_PATH: &str = "/oauth/token";
+pub(super) const LEGACY_CHATGPT_CIMD: &str = "https://chatgpt.com/oauth/client.json";
 pub(super) const REVOCATION_PATH: &str = "/oauth/revoke";
 const MAX_FORM: usize = 16 * 1024;
 
@@ -252,10 +253,35 @@ fn auth_methods(issuer: &IssuerRuntime) -> Vec<&'static str> {
     methods
 }
 
+/// Traces handler entry and its terminal outcome, without recording any request fields.
+#[tracing::instrument(
+    target = "vyuh::oauth_diagnostics",
+    level = "debug",
+    skip_all,
+    name = "oauth_token"
+)]
 async fn token(State(site): State<Site>, request: Request) -> Result<Response, OAuthIssueError> {
+    tracing::debug!(target: "vyuh::oauth_diagnostics", stage = "received", "OAuth token exchange");
+    let result = issue_token(&site, request).await;
+    let outcome = result.as_ref().map_or_else(|err| err.code(), |_| "issued");
+    tracing::debug!(target: "vyuh::oauth_diagnostics", stage = "finished", outcome, "OAuth token exchange");
+    result
+}
+
+/// Reads the request and authenticates its client before checking the grant.
+async fn issue_token(site: &Site, request: Request) -> Result<Response, OAuthIssueError> {
     let issuer = site.oauth()?.issuer;
-    let (headers, form) = read_form(request).await?;
-    let (id, client) = authenticate_client(&site, issuer, &headers, &form).await?;
+    let (headers, form) = read_form(request)
+        .await
+        .inspect_err(|_| diagnostic("form_invalid"))?;
+    // Temporary interoperability exception to RFC 10070, only for this trusted signed CIMD client.
+    let legacy_client = issuer
+        .cimd
+        .get(LEGACY_CHATGPT_CIMD)
+        .filter(|rule| rule.auth == OAuthCimdAuth::PrivateKeyJwt)
+        .map(|_| LEGACY_CHATGPT_CIMD);
+    let (id, client) = authenticate_client(site, issuer, &headers, &form, legacy_client).await?;
+    tracing::debug!(target: "vyuh::oauth_diagnostics", stage = "client_authenticated", "OAuth token exchange");
     let refresh = client.permits_refresh();
     let (field, kind) = match form.get("grant_type") {
         Some("authorization_code") => ("code", store::CODE),
@@ -264,7 +290,7 @@ async fn token(State(site): State<Site>, request: Request) -> Result<Response, O
         Some(_) => return Err(OAuthIssueError::UnsupportedGrantType),
         None => return Err(OAuthIssueError::InvalidRequest),
     };
-    let proof = find_proof(&site, issuer, &id, &form, field, kind).await?;
+    let proof = find_proof(site, issuer, &id, &form, field, kind).await?;
     if !client.permits_proof(&proof) {
         return Err(OAuthIssueError::InvalidGrant);
     }
@@ -286,7 +312,7 @@ async fn token(State(site): State<Site>, request: Request) -> Result<Response, O
         }
     }
     Ok(no_store(Json(
-        exchange(&site, issuer, proof, refresh).await?,
+        exchange(site, issuer, proof, refresh).await?,
     )))
 }
 
@@ -451,7 +477,7 @@ async fn revocation(
 ) -> Result<Response, OAuthIssueError> {
     let issuer = site.oauth()?.issuer;
     let (headers, form) = read_form(request).await?;
-    let (id, client) = authenticate_client(&site, issuer, &headers, &form).await?;
+    let (id, client) = authenticate_client(&site, issuer, &headers, &form, None).await?;
     let raw = form
         .get("token")
         .filter(|raw| !raw.is_empty())
@@ -557,6 +583,7 @@ fn client_proof<'a>(
     issuer: &str,
     headers: &HeaderMap,
     params: &'a Parameters,
+    legacy_client: Option<&str>,
 ) -> Result<(Cow<'a, str>, ClientProof<'a>), OAuthIssueError> {
     let bad = OAuthIssueError::InvalidClient;
     let mut authorization = headers.get_all(header::AUTHORIZATION).iter();
@@ -578,7 +605,7 @@ fn client_proof<'a>(
         if secret.is_some() || assertion_type != Some(assertion::TYPE) {
             return Err(bad);
         }
-        let signed = assertion::Assertion::parse(assertion.ok_or(bad)?, issuer)?;
+        let signed = assertion::Assertion::parse(assertion.ok_or(bad)?, issuer, legacy_client)?;
         if id.is_some_and(|id| id != signed.client_id) {
             return Err(bad);
         }
@@ -597,16 +624,19 @@ async fn authenticate_client<'a>(
     issuer: &'a IssuerRuntime,
     headers: &HeaderMap,
     params: &'a Parameters,
+    legacy_client: Option<&str>,
 ) -> Result<(Cow<'a, str>, Resolved<'a>), OAuthIssueError> {
-    let (id, proof) = client_proof(&issuer.issuer, headers, params)?;
-    if issuer
-        .cimd
-        .get(id.as_ref())
-        .is_some_and(|rule| !proof.permits_cimd(rule.auth))
+    let (id, proof) = client_proof(&issuer.issuer, headers, params, legacy_client)
+        .inspect_err(|_| diagnostic("client_proof_rejected"))?;
+    if let Some(rule) = issuer.cimd.get(id.as_ref())
+        && !proof.permits_cimd(rule.auth)
     {
+        diagnostic("cimd_method_mismatch");
         return Err(OAuthIssueError::InvalidClient);
     }
-    let client = clients::resolve(site, issuer, &id).await?;
+    let client = clients::resolve(site, issuer, &id)
+        .await
+        .inspect_err(|_| diagnostic("client_resolution_failed"))?;
     let authenticated = match (&client, proof) {
         (Resolved::Static(client), ClientProof::Public) => client.secret.is_none(),
         (Resolved::Static(client), ClientProof::Basic(secret)) => {
@@ -651,7 +681,10 @@ async fn verify_assertion(
         .cimd_http
         .as_ref()
         .ok_or(OAuthIssueError::Unavailable)?;
-    let keys = metadata.keys(transport).await?;
+    let keys = metadata
+        .keys(transport)
+        .await
+        .inspect_err(|_| diagnostic("jwks_unavailable"))?;
     assertion
         .authenticate(site, issuer, &keys, metadata.algorithm.as_deref())
         .await
@@ -665,6 +698,11 @@ fn matches_secret(expected: Option<blake3::Hash>, presented: &str) -> bool {
                 .ct_eq(blake3::hash(presented.as_bytes()).as_bytes()),
         )
     })
+}
+
+/// Emits only developer-defined labels, never protocol input or dependency error details.
+pub(super) fn diagnostic(reason: &'static str) {
+    tracing::debug!(target: "vyuh::oauth_diagnostics", reason, "OAuth authentication diagnostic");
 }
 
 /// Decodes RFC 6749's form-encoded Basic username and password, without logging them.

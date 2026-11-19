@@ -7,6 +7,55 @@ use serde_json::json;
 
 use super::*;
 
+/// Wrong audiences stay rejected; trace output identifies the local token URL without echoing claims.
+#[test]
+fn audience_diagnostics() -> std::io::Result<()> {
+    let issuer = "https://issuer.example";
+    let token_url = format!("{issuer}/oauth/token");
+    let private = "untrusted-value-not-for-logs";
+    let log = tempfile::NamedTempFile::new()?;
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("off,vyuh::oauth_diagnostics=debug")
+        .with_writer(log.reopen()?)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || -> Result<(), serde_json::Error> {
+        for (aud, expected) in [
+            (json!(issuer), None),
+            (json!([issuer]), None),
+            (
+                json!(token_url),
+                Some("assertion_audience_is_token_endpoint"),
+            ),
+            (
+                json!([token_url]),
+                Some("assertion_audience_is_token_endpoint"),
+            ),
+            (
+                json!([issuer, token_url]),
+                Some("assertion_audience_mismatch"),
+            ),
+            (json!(private), Some("assertion_audience_mismatch")),
+        ] {
+            let payload = json!({"iss": private, "sub": private, "jti": private, "exp": now()+60, "aud": aud});
+            let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"test"}"#);
+            let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
+            // This test stops at pre-verification parsing, without performing a signed exchange.
+            let parsed = Assertion::parse(&format!("{header}.{body}.AA"), issuer, None)
+                .map(|_| ())
+                .map_err(OAuthIssueError::code);
+            assert_eq!(parsed, expected.map_or(Ok(()), |_| Err("invalid_client")));
+            let claims: Claims = serde_json::from_value(payload)?;
+            assert_eq!(claims.check(issuer, None, now()).err(), expected);
+        }
+        Ok(())
+    })?;
+    let output = std::fs::read_to_string(log.path())?;
+    assert!(output.contains("assertion_audience_is_token_endpoint"));
+    assert!(output.contains("assertion_audience_mismatch"));
+    assert!(!output.contains(private) && !output.contains(issuer));
+    Ok(())
+}
+
 /// Verifies an ES256 assertion using the same public JWK handling as signed clients.
 #[test]
 fn verifies_es256() -> Result<(), String> {
@@ -26,9 +75,9 @@ fn verifies_es256() -> Result<(), String> {
     header.kid = Some("signing-key".into());
     let raw = encode(&header, &input, &EncodingKey::from_ec_der(pkcs8.as_ref()))
         .map_err(|error| error.to_string())?;
-    let assertion = Assertion::parse(&raw, issuer).map_err(|error| error.to_string())?;
+    let assertion = Assertion::parse(&raw, issuer, None).map_err(|error| error.to_string())?;
     let key = decoding_key(&jwk, "ES256").map_err(|error| error.to_string())?;
-    let verified = decode::<Claims>(&raw, &key, &assertion.validation(issuer))
+    let verified = decode::<Claims>(&raw, &key, &assertion.validation())
         .map_err(|error| error.to_string())?
         .claims;
     assert!(verified.aud.is_only(issuer));

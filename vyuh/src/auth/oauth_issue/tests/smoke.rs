@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::auth::{
     OAuthCimdAuth, OAuthDcrAdmission,
-    oauth_issue::protocol::{Parameters, no_store},
+    oauth_issue::protocol::{LEGACY_CHATGPT_CIMD, Parameters, no_store},
 };
 
 use super::{
@@ -252,6 +252,37 @@ async fn read_only(site: &Site, access: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The HTTP trace records arrival and rejection, never the submitted header or form body.
+#[tokio::test]
+async fn token_diagnostics() -> Result<(), String> {
+    use tracing::instrument::WithSubscriber;
+
+    let (_dir, site, _peer) = smoke_sites(issuer()).await?;
+    let log = tempfile::NamedTempFile::new().map_err(err)?;
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("off,vyuh::oauth_diagnostics=debug")
+        .with_writer(log.reopen().map_err(err)?)
+        .finish();
+    let request = Request::post("/oauth/token")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-header-canary")
+        .body(Body::from("test-body-canary"))
+        .map_err(err)?;
+    let response = raw(&site, request).with_subscriber(subscriber).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), 1024).await.map_err(err)?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).map_err(err)?,
+        json!({"error":"invalid_request"})
+    );
+    let log = std::fs::read_to_string(log.path()).map_err(err)?;
+    for field in ["received", "form_invalid", "finished", "invalid_request"] {
+        assert!(log.contains(field));
+    }
+    assert!(!log.contains("canary"));
+    Ok(())
+}
+
 /// Signs in and consents over HTTP, then proves replay defense, key rotation and revocation.
 #[tokio::test]
 async fn signed_cimd() -> Result<(), String> {
@@ -270,6 +301,92 @@ async fn signed_cimd() -> Result<(), String> {
     assert_eq!(no_registration.status(), StatusCode::NOT_FOUND);
     let refresh = fixture(&OLD, signed_exchange(&site, &peer)).await?;
     fixture(&NEW, rotate_and_revoke(&site, &peer, &refresh)).await
+}
+
+/// Verifies that only signed ChatGPT requests use the token URL, with replay and revocation boundaries intact.
+#[tokio::test]
+async fn chatgpt_token_audience() -> Result<(), String> {
+    let issuer = issuer_base()
+        .cimd_client(rule(LEGACY_CHATGPT_CIMD, OAuthCimdAuth::PrivateKeyJwt))
+        .cimd_client(rule(SIGNED, OAuthCimdAuth::PrivateKeyJwt));
+    let (_dir, site, peer) = smoke_sites(issuer).await?;
+    fixture(&OLD, chatgpt_exchange(&site, &peer)).await
+}
+
+/// Completes code exchange and refresh with ChatGPT's legacy assertion audience.
+async fn chatgpt_exchange(site: &Site, peer: &Site) -> Result<(), String> {
+    let code = browser_code(site, LEGACY_CHATGPT_CIMD).await?;
+    let fields = exchange_fields(&code);
+    let token_url = format!("{ISSUER}/oauth/token");
+    let other_code = browser_code(site, SIGNED).await?;
+    let mut other = claims("other-cimd");
+    other["aud"] = json!(token_url);
+    let raw = signed(&OLD, &other)?;
+    assert_eq!(
+        send_signed(site, "/oauth/token", &exchange_fields(&other_code), &raw)
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut chatgpt = claims("chatgpt-code");
+    chatgpt["iss"] = json!(LEGACY_CHATGPT_CIMD);
+    chatgpt["sub"] = json!(LEGACY_CHATGPT_CIMD);
+    for audience in [
+        json!([ISSUER, token_url]),
+        json!("https://other.example/oauth/token"),
+    ] {
+        chatgpt["aud"] = audience;
+        let raw = signed(&OLD, &chatgpt)?;
+        assert_eq!(
+            send_signed(site, "/oauth/token", &fields, &raw).await?.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    chatgpt["aud"] = json!(token_url);
+    let raw = signed(&OLD, &chatgpt)?;
+    let (status, _, reply) = send_signed(site, "/oauth/token", &fields, &raw).await?;
+    assert_eq!(status, StatusCode::OK);
+    let access = token(&reply, "access_token")?;
+    read_only(peer, &access).await?;
+    assert_eq!(
+        send_signed(peer, "/oauth/token", &fields, &raw).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    chatgpt_refresh(site, peer, &reply, chatgpt).await
+}
+
+/// Requires the canonical audience at revocation and tests both accepted refresh audiences.
+async fn chatgpt_refresh(
+    site: &Site,
+    peer: &Site,
+    reply: &Value,
+    mut chatgpt: Value,
+) -> Result<(), String> {
+    let access = token(reply, "access_token")?;
+    chatgpt["jti"] = json!("chatgpt-next");
+    let raw = signed(&OLD, &chatgpt)?;
+    assert_eq!(
+        send_signed(peer, "/oauth/revoke", &[("token", &access)], &raw)
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let refresh = token(reply, "refresh_token")?;
+    let (status, _, renewed) =
+        send_signed(peer, "/oauth/token", &refresh_fields(&refresh), &raw).await?;
+    assert_eq!(status, StatusCode::OK);
+    read_only(site, &token(&renewed, "access_token")?).await?;
+    chatgpt["aud"] = json!(ISSUER);
+    chatgpt["jti"] = json!("chatgpt-canonical");
+    let raw = signed(&OLD, &chatgpt)?;
+    let refresh = token(&renewed, "refresh_token")?;
+    assert_eq!(
+        send_signed(peer, "/oauth/token", &refresh_fields(&refresh), &raw)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    Ok(())
 }
 
 /// Exchanges a browser code only with a signed client assertion and rejects reuse on a peer.

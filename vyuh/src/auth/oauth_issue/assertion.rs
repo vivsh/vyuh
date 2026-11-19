@@ -13,7 +13,7 @@ use crate::{
 use super::{
     IssuerRuntime, OAuthIssueError,
     config::bounded,
-    protocol::store_failure,
+    protocol::{diagnostic, store_failure},
     runtime::now,
     store::{self, AssertionRow},
 };
@@ -28,6 +28,7 @@ const BAD: OAuthIssueError = OAuthIssueError::InvalidClient;
 pub(super) struct Assertion<'a> {
     raw: &'a str,
     pub(super) client_id: String,
+    audience: String,
     algorithm: Algorithm,
     kid: String,
 }
@@ -51,15 +52,58 @@ enum Audience {
 }
 
 impl Audience {
-    fn is_only(&self, expected: &str) -> bool {
+    fn singleton(&self) -> Option<&str> {
         match self {
-            Self::Single(value) => value == expected,
-            Self::List(values) => values == &[expected],
+            Self::Single(value) => Some(value),
+            Self::List(values) => match values.as_slice() {
+                [value] => Some(value),
+                _ => None,
+            },
         }
+    }
+
+    fn is_only(&self, expected: &str) -> bool {
+        self.singleton() == Some(expected)
     }
 }
 
 impl Claims {
+    /// Selects an exact singleton audience before any key lookup.
+    fn audience(&self, issuer: &str, legacy_client: Option<&str>) -> Result<&str, &'static str> {
+        let audience = self.aud.singleton().ok_or("assertion_audience_mismatch")?;
+        if audience == issuer {
+            return Ok(audience);
+        }
+        if audience.strip_prefix(issuer) == Some(super::protocol::TOKEN_PATH) {
+            return if legacy_client == Some(self.sub.as_str()) {
+                Ok(audience)
+            } else {
+                Err("assertion_audience_is_token_endpoint")
+            };
+        }
+        Err("assertion_audience_mismatch")
+    }
+
+    /// Validates identity, audience, time and replay identifier before key lookup.
+    fn check(
+        &self,
+        issuer: &str,
+        legacy_client: Option<&str>,
+        at: i64,
+    ) -> Result<&str, &'static str> {
+        if self.iss != self.sub {
+            return Err("assertion_identity_mismatch");
+        }
+        let audience = self.audience(issuer, legacy_client)?;
+        if !self.valid_time(at) {
+            return Err("assertion_time_invalid");
+        }
+        if !bounded(&self.jti, 128) {
+            return Err("assertion_jti_invalid");
+        }
+        Ok(audience)
+    }
+
     fn valid_time(&self, at: i64) -> bool {
         self.exp > at - SKEW
             && self.exp <= at + WINDOW + SKEW
@@ -77,7 +121,11 @@ impl Claims {
 
 impl<'a> Assertion<'a> {
     /// Parses only bounded, unambiguous JWT input before any outbound request.
-    pub(super) fn parse(raw: &'a str, issuer: &str) -> Result<Self, OAuthIssueError> {
+    pub(super) fn parse(
+        raw: &'a str,
+        issuer: &str,
+        legacy_client: Option<&str>,
+    ) -> Result<Self, OAuthIssueError> {
         if raw.len() > MAX_ASSERTION {
             return Err(BAD);
         }
@@ -93,16 +141,17 @@ impl<'a> Assertion<'a> {
         let kid = header.kid.filter(|value| bounded(value, 128)).ok_or(BAD)?;
         let bytes = URL_SAFE_NO_PAD.decode(claims).map_err(|_| BAD)?;
         let claims: Claims = serde_json::from_slice(&bytes).map_err(|_| BAD)?;
-        if claims.iss != claims.sub
-            || !claims.aud.is_only(issuer)
-            || !claims.valid_time(now())
-            || !bounded(&claims.jti, 128)
-        {
-            return Err(BAD);
-        }
+        let audience = claims
+            .check(issuer, legacy_client, now())
+            .map_err(|reason| {
+                diagnostic(reason);
+                BAD
+            })?
+            .to_owned();
         Ok(Self {
             raw,
             client_id: claims.sub,
+            audience,
             algorithm,
             kid,
         })
@@ -122,19 +171,40 @@ impl<'a> Assertion<'a> {
             _ => return Err(BAD),
         };
         if registered_algorithm.is_some_and(|value| value != algorithm) {
+            diagnostic("assertion_algorithm_mismatch");
             return Err(BAD);
         }
         let jwk = keys
             .iter()
             .find(|key| key.get("kid").and_then(Value::as_str) == Some(&self.kid))
-            .ok_or(BAD)?;
-        let key = decoding_key(jwk, algorithm)?;
-        let claims = decode::<Claims>(self.raw, &key, &self.validation(&issuer.issuer))
-            .map_err(|_| BAD)?
+            .ok_or(BAD)
+            .inspect_err(|_| diagnostic("assertion_key_not_found"))?;
+        let key =
+            decoding_key(jwk, algorithm).inspect_err(|_| diagnostic("assertion_key_invalid"))?;
+        let claims = decode::<Claims>(self.raw, &key, &self.validation())
+            .map_err(|_| {
+                diagnostic("assertion_verification_failed");
+                BAD
+            })?
             .claims;
-        if !claims.aud.is_only(&issuer.issuer) || !claims.valid_time(now()) {
+        if !claims.aud.is_only(&self.audience) || !claims.valid_time(now()) {
+            diagnostic("verified_claims_invalid");
             return Err(BAD);
         }
+        self.consume(site, issuer, &claims).await?;
+        if self.audience != issuer.issuer {
+            diagnostic("legacy_token_audience_authenticated");
+        }
+        Ok(())
+    }
+
+    /// Claims the same issuer-wide replay identity for canonical and legacy audiences.
+    async fn consume(
+        &self,
+        site: &Site,
+        issuer: &IssuerRuntime,
+        claims: &Claims,
+    ) -> Result<(), OAuthIssueError> {
         let row = AssertionRow {
             digest: replay_digest(&issuer.issuer, &self.client_id, &claims.jti),
             issuer: issuer.issuer.clone(),
@@ -145,14 +215,15 @@ impl<'a> Assertion<'a> {
             .map_err(store_failure("claim_assertion"))?
             || !claims.valid_time(now())
         {
+            diagnostic("assertion_replayed_or_expired");
             return Err(BAD);
         }
         Ok(())
     }
 
-    fn validation(&self, issuer: &str) -> Validation {
+    fn validation(&self) -> Validation {
         let mut validation = Validation::new(self.algorithm);
-        validation.set_audience(&[issuer]);
+        validation.set_audience(&[&self.audience]);
         validation.set_issuer(&[&self.client_id]);
         validation.sub = Some(self.client_id.clone());
         validation.set_required_spec_claims(&["exp", "iss", "sub", "aud"]);
