@@ -219,6 +219,9 @@ impl ProviderRuntimeContract for IssuerRuntime {
             required_scopes: Vec::new(),
         })
     }
+    fn mcp_same_name_scopes(&self) -> bool {
+        true
+    }
     fn authenticate<'a>(
         &'a self,
         site: &'a Site,

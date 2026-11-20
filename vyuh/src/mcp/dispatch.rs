@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{ErrorKind, Site, auth::AuthUser};
 
-use super::{McpError, McpToolContext, protocol, tools::ToolDefinition};
+use super::{McpError, McpProfile, McpToolContext, protocol, tools::ToolDefinition};
 
 /// Invokes one already-authorized tool with semantic object arguments.
 pub(crate) async fn invoke(
@@ -24,16 +24,18 @@ pub(crate) async fn invoke(
             "tool arguments do not match the declared schema".to_string(),
         ));
     }
-    invoke_direct(site, &tool.target.callable, arguments, user, modern).await
+    invoke_direct(site, tool, arguments, user, modern).await
 }
 
+/// Deserializes the authorized invocation and executes the typed target.
 async fn invoke_direct(
     site: Site,
-    callable: &crate::callables::Callable<McpToolContext, crate::Error>,
+    tool: &ToolDefinition,
     arguments: Value,
     user: Option<AuthUser>,
     modern: bool,
 ) -> Result<Value, McpError> {
+    let callable = &tool.target.callable;
     let encoded = serde_json::to_string(&arguments)
         .map_err(|error| McpError::Arguments(error.to_string()))?;
     let payload = callable
@@ -41,12 +43,24 @@ async fn invoke_direct(
         .map_err(|error| McpError::Arguments(error.to_string()))?;
     let context = McpToolContext::new(site, payload, user);
     match callable.call(context).await {
-        Ok(output) => direct_output(output, modern),
+        Ok(output) => direct_output(output, tool.target.conf.openai_profile, modern),
         Err(error) => Ok(application_error(error.kind, modern)),
     }
 }
 
-fn direct_output(output: crate::callables::DataBox, modern: bool) -> Result<Value, McpError> {
+/// Checks designated profile output before encoding it as an ordinary tool result.
+fn direct_output(
+    output: crate::callables::DataBox,
+    profile: bool,
+    modern: bool,
+) -> Result<Value, McpError> {
+    if profile
+        && !output
+            .downcast_ref::<McpProfile>()
+            .is_some_and(|profile| !profile.id.trim().is_empty())
+    {
+        return Err(McpError::Dispatch("invalid MCP profile output".into()));
+    }
     let value = match output.to_json() {
         Some(value) => value.map_err(McpError::Dispatch)?,
         None if output.payload_type_id() == std::any::TypeId::of::<()>() => Value::Null,

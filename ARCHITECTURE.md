@@ -527,7 +527,8 @@ The `vyuh` crate is organized around these subsystems:
   semantic callables and static resources. Bundle-owned `McpToolRegistry` and
   `McpResourceRegistry` entries retain stable schemas, direct callable targets,
   MCP annotations, and immutable registered text content; `McpEngine`
-  separately owns finalized bundle-subtree service endpoints. Tools execute
+  separately owns finalized bundle-subtree service endpoints and their
+  discovery identity. Tools execute
   through `McpToolContext`, without a route adapter, while resources are served
   only by the MCP protocol. The engine owns protocol framing, scope-filtered
   discovery, resource listing and reads, and optional
@@ -619,6 +620,8 @@ compact while feeding metadata into the runtime:
 
 - Route, signal, work, work-batch, flow, cron, periodic, and asset macros
   generate bundle parts.
+- The MCP tool attribute generates the same named bundle part and typed
+  `McpToolConf` as direct registration. The runtime validates both forms.
 - `embed_asset!` delegates directory discovery and force-mode expansion to Rust
   Silos' shared macro implementation while emitting Vyuh's asset facade types.
 - `Record`, `ManagedRecord`, `Model`, `Filterable`, `SortKey`, `SqlEnum`, and
@@ -795,8 +798,12 @@ build. Redis, if added, uses Pub/Sub rather than Streams for this mechanism.
     cross-service UI attachments, and endpoint/resource collisions, then builds
     deterministic tool and resource catalogs per service. Protected endpoints
     validate their configured audience and map the subject to `AuthUser`.
-    Discovery filters tools using the same normalized scope rules used again at
-    call time; resources remain protected by that same endpoint boundary.
+    Mixed OAuth endpoints admit only explicitly opted-in anonymous tools.
+    A separate tool opt-in publishes OAuth metadata and a signed-out linking
+    challenge. Discovery and calls use the same access decision, based on
+    endpoint mode, tool opt-ins and normalized permits. Resources stay behind
+    the endpoint authentication boundary. The optional OpenAI profile marker
+    describes a typed, authenticated read-only callable with an app-owned ID.
     Direct targets receive `McpToolContext`; the MCP engine does not adapt or
     dispatch HTTP routes. Tools and resources never receive the external bearer
     credential. An eligible provider owns discovery, JWKS validation or an

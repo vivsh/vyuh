@@ -182,6 +182,24 @@ impl Authenticator {
         protected
     }
 
+    /// Resolves per-tool OAuth only when one effective provider accepts Bearer
+    /// and can describe the resource. The boolean describes scope alignment.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn mcp_tool_resource(
+        &self,
+        audience: &AudienceId,
+    ) -> Option<(super::AuthProtectedResource, bool)> {
+        let mut providers = self.indexes.access_for(audience);
+        let provider = self.providers.get(*providers.next()?)?;
+        if providers.next().is_some() || !provider.access_location().is_bearer() {
+            return None;
+        }
+        Some((
+            provider.0.protected_resource(audience)?,
+            provider.0.mcp_same_name_scopes(),
+        ))
+    }
+
     pub(crate) fn challenge_codec(&self) -> &super::ChallengeCodec {
         &self.challenge_codec
     }

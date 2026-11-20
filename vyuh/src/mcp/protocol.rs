@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{resources::ResourceDefinition, tools::ToolDefinition};
+use super::{McpConf, resources::ResourceDefinition};
 
 pub(crate) const CURRENT_VERSION: &str = "2026-07-28";
 pub(crate) const PREVIOUS_VERSION: &str = "2025-11-25";
@@ -249,24 +249,36 @@ fn unsupported(request: &RpcRequest, requested: &str) -> Box<RpcResponse> {
     ))
 }
 
-pub(crate) fn discovery(method: &str, revision: Revision) -> Option<Value> {
-    match (method, revision) {
-        ("initialize", Revision::Legacy(version)) => Some(json!({
+/// Builds the revision's discovery result from the configured endpoint identity.
+pub(crate) fn discovery(method: &str, revision: Revision, conf: &McpConf) -> Option<Value> {
+    let server_info = || {
+        json!({
+            "name": conf.server_name.as_deref().unwrap_or("vyuh"),
+            "version": conf.server_version.as_deref().unwrap_or(env!("CARGO_PKG_VERSION"))
+        })
+    };
+    let mut result = match (method, revision) {
+        ("initialize", Revision::Legacy(version)) => json!({
             "protocolVersion": version,
             "capabilities": {"tools": {"listChanged": false}, "resources": {}},
-            "serverInfo": {"name": "vyuh", "version": env!("CARGO_PKG_VERSION")}
-        })),
-        ("server/discover", Revision::Modern) => Some(json!({
+            "serverInfo": server_info()
+        }),
+        ("server/discover", Revision::Modern) => json!({
             "resultType": "complete",
             "supportedVersions": SUPPORTED_VERSIONS,
             "capabilities": {"tools": {"listChanged": false}, "resources": {}},
-            "_meta": {"io.modelcontextprotocol/serverInfo": {
-                "name": "vyuh", "version": env!("CARGO_PKG_VERSION")
-            }},
+            "_meta": {"io.modelcontextprotocol/serverInfo": server_info()},
+            "ttlMs": 0,
             "cacheScope": "public"
-        })),
-        _ => None,
+        }),
+        _ => return None,
+    };
+    if let Some(instructions) = conf.instructions.as_deref()
+        && let Some(fields) = result.as_object_mut()
+    {
+        fields.insert("instructions".into(), Value::from(instructions));
     }
+    Some(result)
 }
 
 /// Builds the deterministic static resource catalog response.
@@ -278,6 +290,7 @@ pub(crate) fn resource_list<'a>(
         json!({"resources": resources.map(ResourceDefinition::list_value).collect::<Vec<_>>()});
     if revision.modern() {
         result["resultType"] = Value::String("complete".to_string());
+        result["ttlMs"] = Value::from(0);
         result["cacheScope"] = Value::String("private".to_string());
     }
     result
@@ -288,6 +301,8 @@ pub(crate) fn resource_read(resource: &ResourceDefinition, revision: Revision) -
     let mut result = json!({"contents": [resource.content_value()]});
     if revision.modern() {
         result["resultType"] = Value::String("complete".to_string());
+        result["ttlMs"] = Value::from(0);
+        result["cacheScope"] = Value::String("private".to_string());
     }
     result
 }
@@ -297,16 +312,15 @@ pub(crate) fn resource_not_found(id: Option<Value>, uri: String) -> RpcResponse 
     RpcResponse::error_with_data(id, -32002, "resource not found", Some(json!({"uri": uri})))
 }
 
-pub(crate) fn tool_list<'a>(
-    tools: impl Iterator<Item = &'a ToolDefinition>,
-    revision: Revision,
-) -> Value {
-    let mut result = json!({"tools": tools.collect::<Vec<_>>()});
+pub(crate) fn tool_list(tools: impl Iterator<Item = Value>, revision: Revision) -> Value {
+    let mut result = serde_json::Map::new();
+    result.insert("tools".into(), Value::Array(tools.collect()));
     if revision.modern() {
-        result["resultType"] = Value::String("complete".to_string());
-        result["cacheScope"] = Value::String("private".to_string());
+        result.insert("resultType".into(), Value::String("complete".into()));
+        result.insert("ttlMs".into(), Value::from(0));
+        result.insert("cacheScope".into(), Value::String("private".into()));
     }
-    result
+    Value::Object(result)
 }
 
 pub(crate) fn tool_result(value: Value, modern: bool) -> Value {
@@ -332,6 +346,22 @@ pub(crate) fn tool_error(status: u16, message: &str, modern: bool) -> Value {
     });
     if modern {
         result["resultType"] = Value::String("complete".to_string());
+    }
+    result
+}
+
+/// Emits the tool result used by OpenAI clients to link an OAuth account.
+pub(crate) fn tool_oauth(metadata: &str, scopes: &[&str], modern: bool) -> Value {
+    let message = "Sign in to use this tool";
+    let mut challenge = format!(
+        "Bearer resource_metadata=\"{metadata}\", error=\"insufficient_scope\", error_description=\"{message}\""
+    );
+    if !scopes.is_empty() {
+        challenge.push_str(&format!(", scope=\"{}\"", scopes.join(" ")));
+    }
+    let mut result = tool_error(401, message, modern);
+    if let Some(fields) = result.as_object_mut() {
+        fields.insert("_meta".into(), json!({"mcp/www_authenticate": [challenge]}));
     }
     result
 }
@@ -390,7 +420,7 @@ mod tests {
     /// Verifies modern discovery advertises the standard static resources capability.
     #[test]
     fn discovery_advertises_resources() {
-        let response = discovery("server/discover", Revision::Modern);
+        let response = discovery("server/discover", Revision::Modern, &McpConf::new("/mcp"));
         assert_eq!(
             response.and_then(|value| value.pointer("/capabilities/resources").cloned()),
             Some(json!({}))

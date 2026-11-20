@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    McpError, McpToolConf, McpToolRegistry, McpToolTarget,
+    McpError, McpProfile, McpProfileArgs, McpToolConf, McpToolRegistry, McpToolTarget,
     resources::{ResourceDefinition, validate_ui_uri},
 };
 
@@ -62,6 +62,20 @@ impl ToolAuthorization {
             }
         })
     }
+
+    /// Tests whether a single scope list expresses all required permits.
+    pub(crate) fn conjunctive(&self) -> bool {
+        self.permits
+            .iter()
+            .all(|permit| permit.all || permit.scopes.len() == 1)
+    }
+
+    /// Returns the declared permit scopes for validated conjunctive tools.
+    pub(crate) fn scopes(&self) -> impl Iterator<Item = &str> {
+        self.permits
+            .iter()
+            .flat_map(|permit| permit.scopes.iter().map(Scope::as_str))
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -93,6 +107,51 @@ struct ToolMetadata {
 #[serde(rename_all = "camelCase")]
 struct ToolUiMetadata {
     resource_uri: String,
+}
+
+impl ToolDefinition {
+    /// Renders optional OAuth metadata and the profile marker alongside existing UI metadata.
+    pub(crate) fn descriptor(&self, required: &[String]) -> Value {
+        let mut value = json!(self);
+        let Some(fields) = value.as_object_mut() else {
+            return value;
+        };
+        let conf = &self.target.conf;
+        let schemes = if conf.oauth_security {
+            Some(json!([{"type": "oauth2", "scopes": self.oauth_scopes(required)}]))
+        } else if conf.allow_anonymous {
+            Some(json!([{"type": "noauth"}]))
+        } else {
+            None
+        };
+        if let Some(schemes) = &schemes {
+            fields.insert("securitySchemes".into(), schemes.clone());
+        }
+        if schemes.is_some() || conf.openai_profile {
+            let meta = fields.entry("_meta").or_insert_with(|| json!({}));
+            if let Some(meta) = meta.as_object_mut() {
+                if let Some(schemes) = schemes {
+                    meta.insert("securitySchemes".into(), schemes);
+                }
+                if conf.openai_profile {
+                    meta.insert("openai/profile".into(), Value::Bool(true));
+                }
+            }
+        }
+        value
+    }
+
+    /// Combines provider and tool scopes after startup validates the OAuth projection.
+    pub(crate) fn oauth_scopes<'a>(&'a self, required: &'a [String]) -> Vec<&'a str> {
+        let mut scopes: Vec<_> = required
+            .iter()
+            .map(String::as_str)
+            .chain(self.authorization.scopes())
+            .collect();
+        scopes.sort_unstable();
+        scopes.dedup();
+        scopes
+    }
 }
 
 impl std::fmt::Debug for ToolDefinition {
@@ -134,6 +193,7 @@ pub(crate) fn definitions(
     Ok(output)
 }
 
+/// Validates a registered tool and builds its immutable callable and wire contracts.
 fn definition(
     operation: &Operation,
     target: McpToolTarget,
@@ -141,8 +201,9 @@ fn definition(
 ) -> Result<ToolDefinition, McpError> {
     validate_name(&operation.name)?;
     validate_target(operation)?;
-    let (input_schema, authorization) = input_contract(operation)?;
-    let output_schema = output_schema(operation)?;
+    let profile = target.conf.openai_profile;
+    let (input_schema, authorization) = input_contract(operation, profile)?;
+    let output_schema = output_schema(operation, profile)?;
     let validator = jsonschema::validator_for(&input_schema)
         .map_err(|error| McpError::Config(format!("invalid generated tool schema: {error}")))?;
     Ok(ToolDefinition {
@@ -194,7 +255,11 @@ fn validate_target(operation: &Operation) -> Result<(), McpError> {
     unsupported(operation, "only direct mcp_tool callables are supported")
 }
 
-fn input_contract(operation: &Operation) -> Result<(Value, ToolAuthorization), McpError> {
+/// Derives the tool's JSON argument schema and its required identity and permits.
+fn input_contract(
+    operation: &Operation,
+    profile: bool,
+) -> Result<(Value, ToolAuthorization), McpError> {
     let mut state = InputState::default();
     for argument in &operation.args {
         inspect_part(&argument.part, true, operation, &mut state)?;
@@ -207,6 +272,9 @@ fn input_contract(operation: &Operation) -> Result<(Value, ToolAuthorization), M
     let schema = state.body.ok_or_else(|| {
         unsupported_error(operation, "exactly one required JSON body is required")
     })?;
+    if profile && schema.type_id() != std::any::TypeId::of::<McpProfileArgs>() {
+        return unsupported(operation, "profile tools must accept Data<McpProfileArgs>");
+    }
     let mut value = schema_value(&schema)?;
     if !is_object_schema(&value) {
         return unsupported(operation, "tool input schema must have an object root");
@@ -338,7 +406,8 @@ fn contains_authentication(part: &ArgPart) -> bool {
     }
 }
 
-fn output_schema(operation: &Operation) -> Result<Option<Value>, McpError> {
+/// Derives the success schema and enforces the designated profile result type.
+fn output_schema(operation: &Operation, profile: bool) -> Result<Option<Value>, McpError> {
     let response = operation.returns.iter().find(|value| {
         value
             .status_code
@@ -348,6 +417,13 @@ fn output_schema(operation: &Operation) -> Result<Option<Value>, McpError> {
     let Some(response) = response else {
         return unsupported(operation, "a successful response schema is required");
     };
+    if profile
+        && !matches!(&response.part, ReturnPart::Body(schema, content_type)
+            if schema.type_id() == std::any::TypeId::of::<McpProfile>()
+            && content_type.as_ref() == "application/json")
+    {
+        return unsupported(operation, "profile tools must return Data<McpProfile>");
+    }
     match &response.part {
         ReturnPart::Body(schema, content_type)
         | ReturnPart::Created(schema, content_type)

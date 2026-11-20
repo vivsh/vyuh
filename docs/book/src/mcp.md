@@ -27,6 +27,127 @@ can any other route with that audience.
 Anonymous exposure is deliberate and cannot claim a tool requiring `AuthUser`
 or `Permit<ScopeRule>`.
 
+## Server identity and instructions
+
+Configure discovery metadata on the endpoint. Instructions can give clients a
+short overview or glossary shared by its tools.
+
+```rust,ignore
+let mcp = McpConf::new("/mcp/notes")
+    .server_name("Team Notes")
+    .server_version(env!("CARGO_PKG_VERSION"))
+    .instructions("Notes are internal team entries. An archived note is no longer active.");
+```
+
+Name and version default independently to `vyuh` and the Vyuh crate
+version. They appear in `initialize` under `result.serverInfo` and in
+`server/discover` under `result._meta["io.modelcontextprotocol/serverInfo"]`.
+Startup rejects blank names or versions and values containing control characters.
+Vyuh sends the text as `result.instructions` in both `initialize` and
+`server/discover`. The field is omitted when unset. Instructions are
+client-visible. Keep secrets and private records out of the text. Instructions
+grant no permissions and enforce no policy.
+
+## Mixed OAuth tools
+
+Use `McpConf::mixed_oauth()` when some tools can run before a user signs in.
+Opt in public tools with `allow_anonymous` and protected tools that can start
+OAuth linking with `oauth_security`.
+
+```rust,ignore
+#[bundles::mcp_tool(allow_anonymous = true)]
+async fn public_help(input: Data<HelpInput>) -> Data<HelpOutput> {
+    // ...
+}
+
+#[bundles::mcp_tool(oauth_security = true)]
+async fn read_note(_permit: Permit<ReadNotes>, input: Data<ReadNoteInput>) -> Data<Note> {
+    // ...
+}
+
+let notes_conf = bundles::conf().audience(NOTES_MCP).mcp(
+    McpConf::new("/mcp/notes").mixed_oauth().auth(is_allowed_account),
+);
+let notes = bundles::bundle! { public_help, read_note }.with_conf(notes_conf);
+```
+
+To register the same handlers directly, use the corresponding builders.
+
+```rust,ignore
+use vyuh::mcp::McpToolConf;
+
+let notes = bundles::bundle([
+    bundles::mcp_tool("public_help", public_help, McpToolConf::default().allow_anonymous()),
+    bundles::mcp_tool("read_note", read_note, McpToolConf::default().oauth_security()),
+]).with_conf(notes_conf);
+```
+
+Both registration forms use the same startup validation and authorization.
+For access opt-ins, a bare attribute such as `oauth_security` is equivalent to
+`oauth_security = true`. Omitting an opt-in or setting it to `false` leaves it
+disabled. Ordinary tools require sign-in on mixed endpoints. An OAuth tool
+must require `AuthUser` or a `Permit<ScopeRule>` before accepting its usual
+`Data<T>` argument. Mark a tool anonymous only when its handler and layers
+are safe to run without an identity. Anonymous tools cannot require identity
+or attach MCP Apps UI. Resources still require sign-in.
+
+`oauth_security()` makes the tool's name, description, and schemas visible
+before sign-in on a mixed endpoint. Vyuh publishes `securitySchemes` and its
+`_meta` mirror. A signed-out protected call returns a
+`mcp/www_authenticate` tool result for clients that support account linking.
+After sign-in, the same account predicate and tool permits govern listing and
+calling. Calls with invalid bearer credentials fail even on anonymous tools.
+An authenticated application denial does not trigger a request for more scopes.
+Mixed tool and resource responses use HTTP `Cache-Control: no-store`.
+Modern catalogs and resource reads use private MCP cache scope and a zero TTL.
+
+Mixed mode and per-tool OAuth publication require a canonical HTTPS audience
+matching the endpoint path and one OAuth Bearer provider. For scoped tool
+publication, the local issuer enforces exact same-name scope grants. A published
+tool can require a conjunction of scopes advertised by the resource. Tools
+published with an external provider may require identity and publish the
+provider's required scopes. Keep application-mapped `Permit` tools unmarked
+with that provider. A fully OAuth-protected endpoint can also use
+`oauth_security()` for its authenticated tool catalog.
+
+## OpenAI profile tool
+
+Optionally designate one tool per endpoint to identify the current connected
+profile. It takes `Data<McpProfileArgs>` and returns `Data<McpProfile>`.
+
+```rust,ignore
+use vyuh::mcp::{McpProfile, McpProfileArgs};
+
+#[bundles::mcp_tool(read_only = true, oauth_security = true, openai_profile = true)]
+async fn current_profile(user: AuthUser, _: Data<McpProfileArgs>) -> Data<McpProfile> {
+    Data::new(McpProfile {
+        id: opaque_profile_id(&user),
+        name: None,
+        email: None,
+        nickname: None,
+    })
+}
+
+let profile = bundles::bundle! { current_profile };
+```
+
+The equivalent direct registration uses the same profile handler.
+
+```rust,ignore
+use vyuh::mcp::McpToolConf;
+
+let profile = bundles::bundle([bundles::mcp_tool(
+    "current_profile",
+    current_profile,
+    McpToolConf::default().read_only(true).oauth_security().openai_profile(),
+)]);
+```
+
+The app supplies `opaque_profile_id`. It must identify the current profile
+uniquely within the app, survive reconnects, and never be reassigned. Vyuh
+rejects blank IDs and omits absent optional fields. The designation uses
+`_meta["openai/profile"]` and follows the normal tool authorization policy.
+
 ## External OAuth
 
 Enable `oauth-resource` when an external authorization server issues access
@@ -344,6 +465,9 @@ async fn render_member(input: Data<MemberCard>) -> Data<MemberCard> {
     input
 }
 ```
+
+The equivalent direct tool registration is
+`bundles::mcp_tool("render_member", render_member, McpToolConf::default().ui_resource_uri("ui://widget/member-card.html"))`.
 
 `ui_resource_uri` is optional. When present, Vyuh emits the standard MCP Apps
 tool metadata in `tools/list`:

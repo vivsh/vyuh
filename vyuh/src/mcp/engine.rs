@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    body::to_bytes,
+    body::{Body, to_bytes},
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -12,14 +12,19 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     OperationId, Site,
-    auth::{AudienceId, AuthError, AuthProtectedResource, Authenticator},
+    auth::{AudienceId, AuthError, AuthProtectedResource, AuthUser, Authenticator},
     callables::Operation,
     routes::AxumRouter,
 };
 
 use super::{
-    McpConf, McpError, McpResourceRegistry, McpToolRegistry, protocol,
-    resources::ResourceDefinition, tools, tools::ToolDefinition,
+    McpConf, McpError, McpResourceRegistry, McpToolRegistry,
+    access::{ToolAccess, endpoint_resource},
+    config::McpAccess,
+    protocol,
+    resources::ResourceDefinition,
+    tools,
+    tools::ToolDefinition,
 };
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -66,7 +71,11 @@ impl McpEngine {
                 operation.kind == crate::callables::OperationKind::Route
                     && operation.audience_id().or(default) == Some(audience)
             });
-            if node.conf.auth.is_none() || !valid_path || overlaps || nodes.next().is_some() {
+            if matches!(node.conf.access, McpAccess::Public)
+                || !valid_path
+                || overlaps
+                || nodes.next().is_some()
+            {
                 return Err(error());
             }
         }
@@ -181,6 +190,7 @@ impl McpEngine {
         Ok(())
     }
 
+    /// Builds one endpoint and mounts its canonical OAuth metadata route when present.
     fn setup_node(
         &self,
         router: &mut AxumRouter<Site>,
@@ -202,21 +212,16 @@ impl McpEngine {
             registry,
             &resource_definitions,
         )?;
-        if node.conf.auth.is_none()
-            && definitions
-                .values()
-                .any(|tool| tool.authorization.requires_identity())
-        {
-            return Err(McpError::Config(format!(
-                "anonymous MCP service '{endpoint}' contains authenticated tools"
-            )));
-        }
         let audience = operations
             .get(&node.marker_id)
             .and_then(|operation| operation.audience_id().cloned());
-        let protected = audience
-            .as_ref()
-            .and_then(|value| auth.mcp_protected_resource(value));
+        let protected = endpoint_resource(
+            node.conf.access,
+            auth,
+            audience.as_ref(),
+            &endpoint,
+            &definitions,
+        )?;
         if protected.is_some() {
             let metadata = protected_resource_path(&endpoint);
             validate_well_known(operations, &metadata)?;
@@ -348,33 +353,63 @@ impl McpRuntime {
         self.metadata.clone()
     }
 
+    /// Reads and validates the bounded MCP request before applying its method-level policy.
     async fn process(
         &self,
         site: Site,
-        request: RpcEnvelope,
-        user: Option<crate::auth::AuthUser>,
-    ) -> RpcReply {
-        if let Err(response) = request.rpc.validate() {
-            return RpcReply::status(StatusCode::BAD_REQUEST, response);
-        }
-        let revision = match protocol::revision(&request.headers, &request.rpc) {
+        headers: HeaderMap,
+        body: Body,
+        user: Option<AuthUser>,
+    ) -> Response {
+        let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
             Ok(value) => value,
-            Err(response) => return RpcReply::status(StatusCode::BAD_REQUEST, response),
+            Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         };
-        self.method(site, request.rpc, user, revision).await
+        let request: protocol::RpcRequest = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Json(protocol::RpcResponse::error(None, -32700, "parse error"))
+                    .into_response();
+            }
+        };
+        if let Err(response) = request.validate() {
+            return (StatusCode::BAD_REQUEST, Json(response)).into_response();
+        }
+        let revision = match protocol::revision(&headers, &request) {
+            Ok(value) => value,
+            Err(response) => return (StatusCode::BAD_REQUEST, Json(response)).into_response(),
+        };
+        let mixed = matches!(self.conf.access, McpAccess::MixedOAuth { .. });
+        let resource_method =
+            matches!(request.method.as_str(), "resources/list" | "resources/read");
+        if mixed && resource_method && user.is_none() {
+            return no_store(auth_error(self, AuthError::NoCredential));
+        }
+        let private = mixed
+            && (resource_method || matches!(request.method.as_str(), "tools/list" | "tools/call"));
+        let response = self
+            .method(site, request, user, revision)
+            .await
+            .into_response();
+        if private {
+            no_store(response)
+        } else {
+            response
+        }
     }
 
+    /// Routes a protocol method after transport authentication and revision checks.
     async fn method(
         &self,
         site: Site,
         request: protocol::RpcRequest,
-        user: Option<crate::auth::AuthUser>,
+        user: Option<AuthUser>,
         revision: protocol::Revision,
     ) -> RpcReply {
         if request.method == "notifications/initialized" && !revision.modern() {
             return RpcReply::empty();
         }
-        if let Some(value) = protocol::discovery(&request.method, revision) {
+        if let Some(value) = protocol::discovery(&request.method, revision, &self.conf) {
             return RpcReply::result(request.id, value);
         }
         match request.method.as_str() {
@@ -382,7 +417,11 @@ impl McpRuntime {
                 let tools = self
                     .tools
                     .values()
-                    .filter(|tool| tool.authorization.allows(user.as_ref()));
+                    .filter(|tool| {
+                        ToolAccess::evaluate(self.conf.access, tool, user.as_ref())
+                            != ToolAccess::Hidden
+                    })
+                    .map(|tool| tool.descriptor(&self.required_scopes));
                 RpcReply::result(request.id, protocol::tool_list(tools, revision))
             }
             "resources/list" => RpcReply::result(
@@ -419,24 +458,38 @@ impl McpRuntime {
         RpcReply::result(request.id, protocol::resource_read(resource, revision))
     }
 
+    /// Applies the shared catalog policy before running a callable or requesting OAuth.
     async fn call(
         &self,
         site: Site,
         request: protocol::RpcRequest,
-        user: Option<crate::auth::AuthUser>,
+        user: Option<AuthUser>,
         modern: bool,
     ) -> RpcReply {
         let call: protocol::ToolCall = match serde_json::from_value(request.params) {
             Ok(value) => value,
             Err(_) => return RpcReply::invalid_params(request.id),
         };
-        let Some(tool) = self
-            .tools
-            .get(&call.name)
-            .filter(|tool| tool.authorization.allows(user.as_ref()))
-        else {
+        let Some(tool) = self.tools.get(&call.name) else {
             return unknown_tool(request.id);
         };
+        match ToolAccess::evaluate(self.conf.access, tool, user.as_ref()) {
+            ToolAccess::Allowed => {}
+            ToolAccess::Hidden => return unknown_tool(request.id),
+            ToolAccess::NeedsOAuth => {
+                let Some(metadata) = self.resource_metadata_url.as_deref() else {
+                    return RpcReply::result(
+                        request.id,
+                        protocol::tool_error(500, "tool execution failed", modern),
+                    );
+                };
+                let scopes = tool.oauth_scopes(&self.required_scopes);
+                return RpcReply::result(
+                    request.id,
+                    protocol::tool_oauth(metadata, &scopes, modern),
+                );
+            }
+        }
         match super::dispatch::invoke(site, tool, call.arguments, user, modern).await {
             Ok(value) => RpcReply::result(request.id, value),
             Err(McpError::Arguments(_)) => RpcReply::invalid_params(request.id),
@@ -446,11 +499,6 @@ impl McpRuntime {
             ),
         }
     }
-}
-
-struct RpcEnvelope {
-    headers: HeaderMap,
-    rpc: protocol::RpcRequest,
 }
 
 enum RpcReply {
@@ -493,42 +541,49 @@ impl RpcReply {
     }
 }
 
+/// Checks transport and account access before reading the bounded MCP request body.
 async fn handle_mcp(runtime: Arc<McpRuntime>, site: Site, request: Request) -> Response {
     let (parts, body) = request.into_parts();
-    let headers = parts.headers.clone();
     let resource = runtime
         .audience
         .as_ref()
         .map(AudienceId::as_str)
         .unwrap_or("http://localhost");
-    if let Err(status) = validate_transport(&headers, resource) {
+    if let Err(status) = validate_transport(&parts.headers, resource) {
         return status.into_response();
     }
-    let user = match (runtime.conf.auth, runtime.audience.as_ref()) {
-        (Some(predicate), Some(audience)) => {
-            match site.auth().authenticate(&site, &parts, audience).await {
-                Ok(user) if predicate(&user) => Some(user),
-                Ok(_) => return StatusCode::FORBIDDEN.into_response(),
-                Err(error) => return auth_error(&runtime, error),
+    let predicate = match runtime.conf.access {
+        McpAccess::Public => None,
+        McpAccess::MixedOAuth { .. } if !parts.headers.contains_key(header::AUTHORIZATION) => None,
+        McpAccess::Required { predicate } | McpAccess::MixedOAuth { predicate } => Some(predicate),
+    };
+    let user = if let Some(predicate) = predicate {
+        let Some(audience) = runtime.audience.as_ref() else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let failure = |response| {
+            if matches!(runtime.conf.access, McpAccess::MixedOAuth { .. }) {
+                no_store(response)
+            } else {
+                response
             }
+        };
+        match site.auth().authenticate(&site, &parts, audience).await {
+            Ok(user) if predicate(&user) => Some(user),
+            Ok(_) => return failure(StatusCode::FORBIDDEN.into_response()),
+            Err(error) => return failure(auth_error(&runtime, error)),
         }
-        (Some(_), None) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        (None, _) => None,
+    } else {
+        None
     };
-    let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
-        Ok(value) => value,
-        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-    };
-    let rpc = match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(_) => {
-            return Json(protocol::RpcResponse::error(None, -32700, "parse error")).into_response();
-        }
-    };
-    runtime
-        .process(site, RpcEnvelope { headers, rpc }, user)
-        .await
-        .into_response()
+    runtime.process(site, parts.headers, body, user).await
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn auth_error(runtime: &McpRuntime, error: AuthError) -> Response {

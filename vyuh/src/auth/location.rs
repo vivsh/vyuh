@@ -403,6 +403,14 @@ impl CredentialLocation {
         matches!(self.0, LocationKind::Cookie(_))
     }
 
+    /// Checks whether the provider selects credentials only from Authorization Bearer.
+    #[cfg(feature = "mcp")]
+    pub(crate) fn is_bearer(&self) -> bool {
+        matches!(&self.0, LocationKind::Header {
+            parsed: Some(name), scheme: Some(scheme), ..
+        } if name == header::AUTHORIZATION && scheme.eq_ignore_ascii_case("Bearer"))
+    }
+
     pub(crate) fn default_csrf(&self) -> Option<CsrfConf> {
         let LocationKind::Cookie(cookie) = &self.0 else {
             return None;

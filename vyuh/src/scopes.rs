@@ -298,7 +298,8 @@ pub(crate) fn validate_expr(expr: ScopeExpr) -> Result<(), ScopeRuleError> {
     normalize_rule(&mut scopes)
 }
 
-fn valid_name(value: &str) -> bool {
+/// Checks the bounded scope-token syntax shared with OAuth.
+pub(crate) fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_SCOPE_BYTES
         && value.bytes().all(|byte| {

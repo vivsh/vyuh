@@ -128,6 +128,10 @@ pub fn beacon(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// one `Data<T>` or `Valid<Data<T>>` object payload. Supported annotations are
 /// `read_only`, `destructive`, `idempotent`, `open_world`, and
 /// `ui_resource_uri = "ui://..."`.
+/// Set `allow_anonymous = true`, `oauth_security = true`, or
+/// `openai_profile = true` for the corresponding `McpToolConf` opt-in.
+/// A bare opt-in name also enables it. Omission or `false` leaves it disabled.
+/// Site construction applies the same validation as direct registration.
 ///
 /// ```ignore
 /// #[mcp_tool(read_only = true, idempotent = true)]

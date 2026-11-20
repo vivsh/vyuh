@@ -23,6 +23,9 @@ use super::{OAuthClient, OAuthConsent, OAuthGrantVerifier, OAuthIssueError, OAut
 
 #[path = "cimd_flow.rs"]
 pub(super) mod cimd_flow;
+#[cfg(feature = "sqlite")]
+#[path = "mixed.rs"]
+mod mixed;
 #[path = "registration.rs"]
 mod registration;
 #[cfg(feature = "sqlite")]
@@ -115,7 +118,11 @@ pub(super) fn conf_with(database: db::DbConf, issuer: OAuthIssuer) -> SiteConf {
 }
 
 pub(super) fn bundle() -> bundles::Bundle {
-    let browser = bundles::bundle([bundles::route(
+    browser_bundle().merge(tool_bundles())
+}
+
+fn browser_bundle() -> bundles::Bundle {
+    bundles::bundle([bundles::route(
         || async {},
         RouteConf {
             name: "authorize".into(),
@@ -124,8 +131,7 @@ pub(super) fn bundle() -> bundles::Bundle {
             trim: false,
         },
     )])
-    .with_conf(bundles::conf().audience(BROWSER));
-    browser.merge(tool_bundles())
+    .with_conf(bundles::conf().audience(BROWSER))
 }
 
 fn tool_bundles() -> bundles::Bundle {
@@ -182,11 +188,15 @@ fn err(error: impl std::fmt::Display) -> String {
 }
 
 async fn session(site: &Site) -> Result<(String, String), String> {
+    session_for(site, "person").await
+}
+
+async fn session_for(site: &Site, subject: &str) -> Result<(String, String), String> {
     let login = site
         .auth()
         .using(COOKIES)
         .issue(
-            AuthUser::new("person").with_scopes([READ, WRITE]),
+            AuthUser::new(subject).with_scopes([READ, WRITE]),
             &[BROWSER],
         )
         .await
@@ -224,6 +234,11 @@ fn query() -> String {
 }
 
 fn client_query(id: &str, redirect: &str, scope: &str) -> String {
+    query_for(id, redirect, scope, MCP)
+}
+
+/// Builds an authorization request bound to the requested test resource.
+fn query_for(id: &str, redirect: &str, scope: &str, resource: Audience) -> String {
     let challenge = URL_SAFE_NO_PAD.encode(ring::digest::digest(
         &ring::digest::SHA256,
         VERIFIER.as_bytes(),
@@ -231,7 +246,7 @@ fn client_query(id: &str, redirect: &str, scope: &str) -> String {
     encode(&[
         ("client_id", id),
         ("redirect_uri", redirect),
-        ("resource", MCP.as_str()),
+        ("resource", resource.as_str()),
         ("response_type", "code"),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
@@ -320,13 +335,21 @@ async fn send(
 }
 
 fn code_params<'a>(code: &'a str, verifier: &'a str) -> [(&'static str, &'a str); 6] {
+    code_for(code, verifier, MCP)
+}
+
+fn code_for<'a>(
+    code: &'a str,
+    verifier: &'a str,
+    resource: Audience,
+) -> [(&'static str, &'a str); 6] {
     [
         ("grant_type", "authorization_code"),
         ("client_id", "client"),
         ("code", code),
         ("code_verifier", verifier),
         ("redirect_uri", REDIRECT),
-        ("resource", MCP.as_str()),
+        ("resource", resource.as_str()),
     ]
 }
 

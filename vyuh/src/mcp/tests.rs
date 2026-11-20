@@ -353,6 +353,7 @@ async fn supports_current_protocol_discovery_and_calls() {
     let discover = send_json(
         &site,
         modern_mcp_request(
+            "/mcp",
             "server/discover",
             None,
             r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
@@ -372,6 +373,7 @@ async fn supports_current_protocol_discovery_and_calls() {
     let call = send_json(
         &site,
         modern_mcp_request(
+            "/mcp",
             "tools/call",
             Some("echo"),
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"value":"modern"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
@@ -384,6 +386,144 @@ async fn supports_current_protocol_discovery_and_calls() {
         Some(&json!({"value": "modern"}))
     );
     assert_eq!(call.pointer("/result/resultType"), Some(&json!("complete")));
+}
+
+/// Verifies server identity and instructions are endpoint-local in both revisions.
+#[tokio::test]
+async fn discovers_endpoint_identity() -> Result<(), String> {
+    let cases = [
+        (
+            "/mcp/reader",
+            "reader_echo",
+            Some("Note reader"),
+            Some("reader build 17"),
+            Some("Read \"notes\".\nArchived notes are inactive."),
+        ),
+        ("/mcp/default", "default_echo", None, None, None),
+        (
+            "/mcp/writer",
+            "writer_echo",
+            Some("Note writer"),
+            None,
+            Some("New notes start as drafts."),
+        ),
+        ("/mcp/version", "version_echo", None, Some("local"), None),
+    ];
+    let mut bundle = bundles::bundle([]);
+    for (path, tool, name, version, instructions) in cases {
+        let mut conf = McpConf::new(path).public();
+        if let Some(name) = name {
+            conf = conf.server_name(name);
+        }
+        if let Some(version) = version {
+            conf = conf.server_version(version);
+        }
+        if let Some(instructions) = instructions {
+            conf = conf.instructions(instructions);
+        }
+        let service = bundles::bundle([bundles::mcp_tool(tool, echo, McpToolConf::default())])
+            .with_conf(bundles::conf().mcp(conf));
+        bundle = bundle.merge(service);
+    }
+    let site = Site::build(SiteConf::default().log_init(false), bundle)
+        .await
+        .map_err(|error| error.to_string())?;
+    for (path, _, name, version, instructions) in cases {
+        let identity = json!({
+            "name": name.unwrap_or("vyuh"),
+            "version": version.unwrap_or(env!("CARGO_PKG_VERSION"))
+        });
+        let requests = [
+            mcp_request(
+                path,
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"},"capabilities":{}}}"#,
+            ),
+            modern_mcp_request(
+                path,
+                "server/discover",
+                None,
+                r#"{"jsonrpc":"2.0","id":2,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ),
+        ];
+        for request in requests {
+            let request = request.map_err(|error| error.to_string())?;
+            assert_identity(&site, request, &identity, instructions).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Checks identity at the revision-specific path and distinguishes omission from null.
+async fn assert_identity(
+    site: &Site,
+    request: Request<Body>,
+    identity: &Value,
+    instructions: Option<&str>,
+) -> Result<(), String> {
+    let identity_path = if request.headers().contains_key("mcp-method") {
+        "/result/_meta/io.modelcontextprotocol~1serverInfo"
+    } else {
+        "/result/serverInfo"
+    };
+    let response = match site.router().oneshot(request).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = response_json(response)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(response.pointer(identity_path), Some(identity));
+    let result = response
+        .get("result")
+        .and_then(Value::as_object)
+        .ok_or("discovery result is missing")?;
+    assert_eq!(
+        result.get("instructions"),
+        instructions.map(Value::from).as_ref(),
+    );
+    Ok(())
+}
+
+/// Rejects explicitly blank or control-bearing discovery identity during site construction.
+#[tokio::test]
+async fn rejects_invalid_endpoint_identity() {
+    let conf = McpConf::new("/mcp")
+        .public()
+        .server_name("  ")
+        .server_version("v1\nnew line");
+    let bundle = bundles::bundle! { echo }.with_conf(bundles::conf().mcp(conf));
+    let result = Site::build(SiteConf::default().log_init(false), bundle).await;
+    let error = result
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(error.contains("server name"), "{error}");
+    assert!(error.contains("server version"), "{error}");
+}
+
+/// Rejects mixed endpoints lacking an exact HTTPS resource and an OAuth Bearer provider.
+#[tokio::test]
+async fn rejects_mixed_without_oauth() {
+    for (audience, expected) in [
+        (OTHER_AUDIENCE, "canonical HTTPS audience"),
+        (MCP, "one OAuth audience provider"),
+    ] {
+        let bundle = bundles::bundle! { echo }.with_conf(
+            bundles::conf()
+                .audience(audience)
+                .mcp(McpConf::new("/mcp").mixed_oauth()),
+        );
+        let settings = SiteConf::default()
+            .log_init(false)
+            .auth(crate::auth::AuthConf::development());
+        let error = Site::build(settings, bundle)
+            .await
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(error.contains(expected), "{error}");
+    }
 }
 
 /// Verifies nested MCP services retain independent endpoint catalogs after bundle composition.
@@ -748,13 +888,14 @@ fn authenticated_request(token: &str, body: String) -> Result<Request<Body>, axu
 
 /// Builds a current-revision MCP request with its mirrored method and tool name headers.
 fn modern_mcp_request(
+    path: &str,
     method: &'static str,
     name: Option<&'static str>,
     body: &'static str,
 ) -> Result<Request<Body>, axum::http::Error> {
     let mut request = Request::builder()
         .method("POST")
-        .uri("/mcp")
+        .uri(path)
         .header("content-type", "application/json")
         .header("accept", "application/json")
         .header("mcp-protocol-version", super::protocol::CURRENT_VERSION)

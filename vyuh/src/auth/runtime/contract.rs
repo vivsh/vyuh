@@ -72,6 +72,12 @@ pub(crate) trait ProviderRuntimeContract: Send + Sync {
     ) -> Option<crate::auth::AuthProtectedResource> {
         None
     }
+
+    /// Indicates that application scopes are limited to same-named OAuth grants.
+    #[cfg(feature = "mcp")]
+    fn mcp_same_name_scopes(&self) -> bool {
+        false
+    }
     fn authenticate<'a>(
         &'a self,
         site: &'a crate::Site,

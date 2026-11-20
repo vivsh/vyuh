@@ -2,12 +2,14 @@
 //!
 //! Direct tools execute through [`McpToolContext`] without a route adapter.
 
+mod access;
 mod config;
 mod context;
 mod dispatch;
 mod engine;
 mod error;
 mod future;
+mod profile;
 mod protocol;
 mod registry;
 mod resources;
@@ -20,6 +22,7 @@ pub use config::{McpConf, McpToolConf};
 pub use context::McpToolContext;
 pub use error::McpError;
 pub use future::McpFuture;
+pub use profile::{McpProfile, McpProfileArgs};
 pub use resources::{McpResource, McpUiResourceMeta};
 
 pub(crate) use engine::McpEngine;
