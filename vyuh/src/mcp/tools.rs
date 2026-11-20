@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     OperationId,
@@ -14,6 +14,8 @@ use super::{
     McpError, McpProfile, McpProfileArgs, McpToolConf, McpToolRegistry, McpToolTarget,
     resources::{ResourceDefinition, validate_ui_uri},
 };
+
+const FILE_PARAMS: &str = "openai/fileParams";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,13 +112,18 @@ struct ToolUiMetadata {
 }
 
 impl ToolDefinition {
-    /// Renders optional OAuth metadata and the profile marker alongside existing UI metadata.
+    /// Renders validated extensions alongside framework-owned tool metadata.
     pub(crate) fn descriptor(&self, required: &[String]) -> Value {
         let mut value = json!(self);
         let Some(fields) = value.as_object_mut() else {
             return value;
         };
         let conf = &self.target.conf;
+        let extensions = conf
+            .meta
+            .as_ref()
+            .and_then(Value::as_object)
+            .filter(|meta| !meta.is_empty());
         let schemes = if conf.oauth_security {
             Some(json!([{"type": "oauth2", "scopes": self.oauth_scopes(required)}]))
         } else if conf.allow_anonymous {
@@ -127,7 +134,7 @@ impl ToolDefinition {
         if let Some(schemes) = &schemes {
             fields.insert("securitySchemes".into(), schemes.clone());
         }
-        if schemes.is_some() || conf.openai_profile {
+        if schemes.is_some() || conf.openai_profile || extensions.is_some() {
             let meta = fields.entry("_meta").or_insert_with(|| json!({}));
             if let Some(meta) = meta.as_object_mut() {
                 if let Some(schemes) = schemes {
@@ -135,6 +142,11 @@ impl ToolDefinition {
                 }
                 if conf.openai_profile {
                     meta.insert("openai/profile".into(), Value::Bool(true));
+                }
+                if let Some(extensions) = extensions {
+                    for (key, value) in extensions {
+                        meta.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
                 }
             }
         }
@@ -203,6 +215,7 @@ fn definition(
     validate_target(operation)?;
     let profile = target.conf.openai_profile;
     let (input_schema, authorization) = input_contract(operation, profile)?;
+    validate_meta(operation, target.conf.meta.as_ref(), &input_schema)?;
     let output_schema = output_schema(operation, profile)?;
     let validator = jsonschema::validator_for(&input_schema)
         .map_err(|error| McpError::Config(format!("invalid generated tool schema: {error}")))?;
@@ -217,6 +230,86 @@ fn definition(
         target,
         validator,
     })
+}
+
+/// Validates extension metadata once against the finalized tool input schema.
+fn validate_meta(
+    operation: &Operation,
+    meta: Option<&Value>,
+    input: &Value,
+) -> Result<(), McpError> {
+    let Some(meta) = meta else {
+        return Ok(());
+    };
+    let meta = meta
+        .as_object()
+        .ok_or_else(|| unsupported_error(operation, "tool metadata must be a JSON object"))?;
+    if let Some(key) = meta.keys().find(|key| reserved_meta(key)) {
+        return unsupported(operation, &format!("reserved tool metadata key {key:?}"));
+    }
+    if let Some(files) = meta.get(FILE_PARAMS) {
+        validate_file_params(operation, files, input)?;
+    }
+    Ok(())
+}
+
+/// Reserves MCP protocol metadata and keys produced by Vyuh's typed builders.
+fn reserved_meta(key: &str) -> bool {
+    matches!(
+        key,
+        "ui" | "securitySchemes"
+            | "openai/profile"
+            | "mcp/www_authenticate"
+            | "progressToken"
+            | "traceparent"
+            | "tracestate"
+            | "baggage"
+    ) || key
+        .split_once('/')
+        .and_then(|(prefix, _)| prefix.split('.').nth(1))
+        .is_some_and(|label| matches!(label, "mcp" | "modelcontextprotocol"))
+}
+
+/// Requires each published file argument to name a distinct top-level JSON property.
+fn validate_file_params(
+    operation: &Operation,
+    files: &Value,
+    input: &Value,
+) -> Result<(), McpError> {
+    let files = files.as_array().ok_or_else(|| {
+        unsupported_error(
+            operation,
+            "openai/fileParams must be an array of field names",
+        )
+    })?;
+    let properties = input.get("properties").and_then(Value::as_object);
+    let mut names = BTreeSet::new();
+    for file in files {
+        let name = file
+            .as_str()
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| {
+                unsupported_error(
+                    operation,
+                    "openai/fileParams requires nonblank string field names",
+                )
+            })?;
+        if !names.insert(name) {
+            return unsupported(
+                operation,
+                &format!("duplicate openai/fileParams field {name:?}"),
+            );
+        }
+        if !properties.is_some_and(|properties| properties.contains_key(name)) {
+            return unsupported(
+                operation,
+                &format!(
+                    "openai/fileParams field {name:?} is missing from top-level input properties"
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Resolves one optional MCP Apps UI resource attachment for a tool definition.

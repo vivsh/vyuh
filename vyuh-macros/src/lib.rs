@@ -131,6 +131,7 @@ pub fn beacon(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Set `allow_anonymous = true`, `oauth_security = true`, or
 /// `openai_profile = true` for the corresponding `McpToolConf` opt-in.
 /// A bare opt-in name also enables it. Omission or `false` leaves it disabled.
+/// Use `meta = serde_json::json!({ ... })` to publish tool extension metadata.
 /// Site construction applies the same validation as direct registration.
 ///
 /// ```ignore

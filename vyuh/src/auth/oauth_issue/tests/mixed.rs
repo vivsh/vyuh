@@ -22,8 +22,39 @@ struct Read;
 struct Either;
 struct Unadvertised;
 
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FileReference {
+    download_url: String,
+    file_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    file_name: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+struct UploadInput {
+    #[serde(rename = "file")]
+    image: FileReference,
+}
+
 impl ScopeRule for Read {
     const EXPR: ScopeExpr = ScopeExpr::all(READ_SCOPE);
+}
+
+#[bundles::mcp_tool(
+    oauth_security,
+    ui_resource_uri = "ui://widget/profile.html",
+    meta = serde_json::json!({
+        "openai/fileParams": ["file"],
+        "openai/toolInvocation/invoking": "Uploading image"
+    })
+)]
+async fn upload_image(_: Permit<Read>, input: Data<UploadInput>) -> Data<UploadInput> {
+    input
 }
 
 impl ScopeRule for Either {
@@ -411,6 +442,61 @@ async fn mixed_oauth_registration_parity() -> Result<(), String> {
     Ok(())
 }
 
+/// Verifies file and extension metadata beside UI and OAuth in both wire revisions.
+#[tokio::test]
+async fn tools_list_file_metadata() -> Result<(), String> {
+    let conf = McpToolConf::default()
+        .oauth_security()
+        .ui_resource_uri(WIDGET);
+    let direct = |conf| {
+        bundles::bundle([bundles::mcp_tool("upload_image", upload_image, conf)])
+            .merge(bundles::bundle! { public, profile })
+    };
+    let extensions = json!({
+        "openai/fileParams": ["file"],
+        "openai/toolInvocation/invoking": "Uploading image"
+    });
+    let (_baseline_dir, baseline) = mixed_site(mixed_bundle(direct(conf.clone()))).await?;
+    let (_direct_dir, direct) = mixed_site(mixed_bundle(direct(conf.meta(extensions)))).await?;
+    let attributed = bundles::bundle! { upload_image, public, profile };
+    let (_macro_dir, attributed) = mixed_site(mixed_bundle(attributed)).await?;
+    for modern in [false, true] {
+        let mut expected = list(&baseline, None, modern).await?;
+        assert_eq!(names(&expected), ["profile", "public", "upload_image"]);
+        let upload = expected
+            .iter_mut()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("upload_image"))
+            .ok_or("missing upload tool")?;
+        assert!(upload.pointer("/inputSchema/properties/file").is_some());
+        assert!(upload.pointer("/inputSchema/properties/image").is_none());
+        let security = json!([{"type": "oauth2", "scopes": ["notes:read"]}]);
+        assert_eq!(upload.get("securitySchemes"), Some(&security));
+        assert_eq!(upload.pointer("/_meta/securitySchemes"), Some(&security));
+        assert_eq!(
+            upload.pointer("/_meta/ui/resourceUri"),
+            Some(&json!(WIDGET))
+        );
+        let meta = upload
+            .get_mut("_meta")
+            .and_then(Value::as_object_mut)
+            .ok_or("missing typed tool metadata")?;
+        assert!(
+            meta.insert("openai/fileParams".into(), json!(["file"]))
+                .is_none()
+        );
+        assert!(
+            meta.insert(
+                "openai/toolInvocation/invoking".into(),
+                json!("Uploading image")
+            )
+            .is_none()
+        );
+        assert_eq!(list(&direct, None, modern).await?, expected);
+        assert_eq!(list(&attributed, None, modern).await?, expected);
+    }
+    Ok(())
+}
+
 /// Exercises discovery and authorization in both MCP revisions for one registration path.
 async fn check_mixed_transport(site: &Site) -> Result<(), String> {
     let (status, _, metadata) = request(
@@ -673,6 +759,14 @@ async fn rejects_invalid_tool_configuration() -> Result<(), String> {
         (
             vec![bundles::mcp_tool(PROFILE, wrong_profile, profile_conf())],
             "return Data<McpProfile>",
+        ),
+        (
+            vec![bundles::mcp_tool(
+                PROFILE,
+                profile,
+                profile_conf().meta(json!({"openai/fileParams": ["file"]})),
+            )],
+            "missing from top-level input properties",
         ),
         (
             vec![bundles::mcp_tool(

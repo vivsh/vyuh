@@ -50,6 +50,28 @@ fn omits_disabled_access_options() -> darling::Result<()> {
     Ok(())
 }
 
+/// Emits a metadata expression through the direct builder alongside typed metadata.
+#[test]
+fn emits_metadata_expression() -> darling::Result<()> {
+    let attrs = parse(quote! {
+        oauth_security,
+        meta = serde_json::json!({
+            "openai/fileParams": ["file"],
+            "com.example/display": {"priority": 1}
+        })
+    })?;
+    let expected = quote! {
+        ::vyuh::mcp::McpToolConf::default()
+            .oauth_security()
+            .meta(serde_json::json!({
+                "openai/fileParams": ["file"],
+                "com.example/display": {"priority": 1}
+            }))
+    };
+    assert_eq!(tool_config(&attrs).to_string(), expected.to_string());
+    Ok(())
+}
+
 /// Rejects unknown, non-boolean, and repeated option syntax during macro parsing.
 #[test]
 fn rejects_bad_tool_attributes() {
@@ -61,6 +83,8 @@ fn rejects_bad_tool_attributes() {
         quote! { allow_anonymous, allow_anonymous = false },
         quote! { oauth_security = true, oauth_security = false },
         quote! { openai_profile = false, openai_profile },
+        quote! { meta },
+        quote! { meta = extensions(), meta = extensions() },
     ] {
         assert!(parse(attrs.clone()).is_err(), "accepted {attrs}");
     }

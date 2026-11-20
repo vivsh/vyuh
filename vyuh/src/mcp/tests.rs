@@ -600,6 +600,112 @@ async fn rejects_protected_anonymous_and_unclaimed_registrations() {
     );
 }
 
+/// Publishes arbitrary extension values and omits metadata for an empty object.
+#[tokio::test]
+async fn tools_list_extension_metadata() -> Result<(), String> {
+    let extensions = json!({"com.example/display": {"label": "Echo", "flags": [true, 3]}});
+    let bundle = bundles::bundle([
+        bundles::mcp_tool(
+            "extended",
+            echo,
+            McpToolConf::default().meta(extensions.clone()),
+        ),
+        bundles::mcp_tool("empty", echo, McpToolConf::default().meta(json!({}))),
+        bundles::mcp_tool("ordinary", echo, McpToolConf::default()),
+    ])
+    .with_conf(bundles::conf().mcp(McpConf::new("/mcp").public()));
+    let site = Site::build(SiteConf::default().log_init(false), bundle)
+        .await
+        .map_err(|error| error.to_string())?;
+    let request = mcp_request(
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    )
+    .map_err(|error| error.to_string())?;
+    let response = send_json(&site, request).await;
+    assert_eq!(tool_names(&response), ["empty", "extended", "ordinary"]);
+    assert!(response.pointer("/result/tools/0/_meta").is_none());
+    assert_eq!(response.pointer("/result/tools/1/_meta"), Some(&extensions));
+    assert!(response.pointer("/result/tools/2/_meta").is_none());
+    Ok(())
+}
+
+/// Rejects invalid metadata and file field declarations during real site construction.
+#[tokio::test]
+async fn rejects_invalid_tool_metadata() -> Result<(), String> {
+    for (meta, expected) in [
+        (Value::Null, "must be a JSON object"),
+        (json!({"openai/fileParams": "value"}), "must be an array"),
+        (
+            json!({"openai/fileParams": [1]}),
+            "requires nonblank string field names",
+        ),
+        (
+            json!({"openai/fileParams": [""]}),
+            "requires nonblank string field names",
+        ),
+        (
+            json!({"openai/fileParams": ["  "]}),
+            "requires nonblank string field names",
+        ),
+        (
+            json!({"openai/fileParams": ["value", "value"]}),
+            "duplicate openai/fileParams field",
+        ),
+        (
+            json!({"openai/fileParams": ["Value"]}),
+            "missing from top-level input properties",
+        ),
+        (
+            json!({"openai/fileParams": ["value.file"]}),
+            "missing from top-level input properties",
+        ),
+    ] {
+        let error = metadata_build_error(meta).await?;
+        assert!(error.contains(expected), "{error}");
+    }
+    Ok(())
+}
+
+/// Rejects protocol and framework keys even when the typed metadata is absent.
+#[tokio::test]
+async fn rejects_reserved_tool_metadata() -> Result<(), String> {
+    for key in [
+        "ui",
+        "securitySchemes",
+        "openai/profile",
+        "mcp/www_authenticate",
+        "progressToken",
+        "traceparent",
+        "tracestate",
+        "baggage",
+        "io.modelcontextprotocol/serverInfo",
+        "dev.mcp/example",
+    ] {
+        let error = metadata_build_error(json!({(key): {}})).await?;
+        assert!(
+            error.contains("reserved tool metadata key") && error.contains(key),
+            "{error}"
+        );
+    }
+    Ok(())
+}
+
+/// Runs the direct registration through the normal endpoint construction path.
+async fn metadata_build_error(meta: Value) -> Result<String, String> {
+    let bundle = bundles::bundle([bundles::mcp_tool(
+        "echo",
+        echo,
+        McpToolConf::default().meta(meta),
+    )])
+    .with_conf(bundles::conf().mcp(McpConf::new("/mcp").public()));
+    Site::build(SiteConf::default().log_init(false), bundle)
+        .await
+        .err()
+        .map(|error| error.to_string())
+        .ok_or_else(|| "invalid metadata was accepted".into())
+}
+
 /// Verifies static MCP resources are advertised, read, and attached to only annotated tools.
 #[tokio::test]
 async fn serves_static_resources_and_ui_tool_metadata() -> Result<(), Box<dyn std::error::Error>> {

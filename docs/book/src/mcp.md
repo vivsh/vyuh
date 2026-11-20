@@ -437,6 +437,45 @@ schema. The model never sees paths, headers, cookies, credentials, `AuthUser`,
 or permits. Tools run directly through `McpToolContext`; MCP never reconstructs
 or dispatches an HTTP route.
 
+### Tool extension metadata
+
+Set `meta` on a tool to advertise a JSON object in its `tools/list` descriptor's
+`_meta`. Use the keys documented by the clients that consume the tool.
+Metadata is client-visible. Keep credentials and private data out of it.
+
+For ChatGPT file inputs, supply `openai/fileParams` with the tool's top-level
+JSON argument names. The application defines each file object with required
+string fields `download_url` and `file_id`, and optional string fields
+`mime_type` and `file_name`. An argument can also contain an array of file
+objects. The application handles fetching, validation, and storage. Automatic
+attachment handoff depends on the MCP host.
+
+```rust,ignore
+#[bundles::mcp_tool(meta = serde_json::json!({ "openai/fileParams": ["file"] }))]
+async fn upload_image(input: Data<UploadImageInput>) -> Result<Data<UploadResult>, Error> {
+    store_image(input).await
+}
+
+let images = bundles::bundle! { upload_image };
+```
+
+The equivalent direct registration uses `McpToolConf::meta`.
+
+```rust,ignore
+let images = bundles::bundle([bundles::mcp_tool(
+    "upload_image",
+    upload_image,
+    McpToolConf::default().meta(serde_json::json!({ "openai/fileParams": ["file"] })),
+)]);
+```
+
+Site construction requires a JSON object and rejects MCP-reserved metadata
+and framework-owned keys such as `ui`, `securitySchemes`, and
+`openai/profile`. File argument names must be nonblank and distinct, and must
+exactly match declared top-level input properties, including Serde renames.
+Extension entries are published alongside typed UI, OAuth, and profile
+metadata. An empty extension object adds no descriptor fields.
+
 ## Static resources and MCP Apps UI
 
 An MCP service can also expose immutable registered resources. Resources are

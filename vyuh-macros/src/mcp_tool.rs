@@ -16,6 +16,7 @@ struct McpToolMeta {
     allow_anonymous: Option<bool>,
     oauth_security: Option<bool>,
     openai_profile: Option<bool>,
+    meta: Option<syn::Expr>,
 }
 
 pub(crate) fn parse_mcp_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -41,9 +42,10 @@ fn tool_config(conf: &McpToolMeta) -> proc_macro2::TokenStream {
     let anonymous = (conf.allow_anonymous == Some(true)).then(|| quote! { .allow_anonymous() });
     let oauth = (conf.oauth_security == Some(true)).then(|| quote! { .oauth_security() });
     let profile = (conf.openai_profile == Some(true)).then(|| quote! { .openai_profile() });
+    let meta = conf.meta.as_ref().map(|value| quote! { .meta(#value) });
     quote! {
         ::vyuh::mcp::McpToolConf::default()
-        #ui #read_only #destructive #idempotent #open_world #anonymous #oauth #profile
+        #ui #read_only #destructive #idempotent #open_world #anonymous #oauth #profile #meta
     }
 }
 

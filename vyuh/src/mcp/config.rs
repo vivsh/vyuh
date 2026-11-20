@@ -1,10 +1,12 @@
 //! MCP endpoint and tool configuration.
 
+use serde_json::Value;
+
 use crate::auth::AuthUser;
 
 use super::McpError;
 
-/// Protocol annotations and access options for one direct MCP tool.
+/// Protocol annotations, metadata, and access options for one direct MCP tool.
 #[derive(Clone, Debug, Default)]
 pub struct McpToolConf {
     pub(crate) read_only: Option<bool>,
@@ -15,11 +17,22 @@ pub struct McpToolConf {
     pub(crate) allow_anonymous: bool,
     pub(crate) oauth_security: bool,
     pub(crate) openai_profile: bool,
+    pub(crate) meta: Option<Value>,
 }
 impl McpToolConf {
     /// Declares the MCP Apps UI resource rendered for this tool.
     pub fn ui_resource_uri(mut self, value: impl Into<String>) -> Self {
         self.ui_resource_uri = Some(value.into());
+        self
+    }
+
+    /// Replaces the tool's client-visible extension metadata with a JSON object.
+    ///
+    /// Startup rejects non-object values and keys reserved by MCP or Vyuh.
+    /// Names in `openai/fileParams` must be distinct, nonblank, and match
+    /// declared top-level input fields. Keep secrets out of tool metadata.
+    pub fn meta(mut self, value: Value) -> Self {
+        self.meta = Some(value);
         self
     }
 
