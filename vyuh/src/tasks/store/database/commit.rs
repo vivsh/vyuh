@@ -100,9 +100,28 @@ impl DbTaskStore {
     ) -> Result<crate::tasks::CommitResult, StoreFailure<crate::tasks::CommitResult>> {
         #[cfg(feature = "mysql")]
         if !commits.is_empty() {
-            self.detect_mysql_server().await?;
+            self.detect_mysql_server(None).await?;
         }
         self.commit_admitted_impl(commits, None, &[]).await
+    }
+
+    /// Stages the same cancellation writes without committing or admitting local work.
+    pub(crate) async fn cancel_tx(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        id: TaskId,
+    ) -> Result<(), TaskRuntimeError> {
+        #[cfg(feature = "mysql")]
+        self.detect_mysql_server(Some(tx)).await?;
+        let commits = [TaskCommit::Cancel { task_id: id }];
+        let commands = prepare_commits(
+            &commits,
+            self.commit_batch_size,
+            self.runtime_conf.max_all_children,
+        )?;
+        self.stage_commits(tx, &commits, commands, None, &[])
+            .await?;
+        Ok(())
     }
 
     /// Uses reserved local capacity within the existing atomic outcome transaction.
@@ -119,20 +138,43 @@ impl DbTaskStore {
                 tasks: Vec::new(),
             });
         }
-        let conf = &self.runtime_conf;
-        let commands = prepare_commits(commits, self.commit_batch_size, conf.max_all_children)?;
+        let commands = prepare_commits(
+            commits,
+            self.commit_batch_size,
+            self.runtime_conf.max_all_children,
+        )?;
         let mut transaction = self.pool.begin().await?;
-        let (now, loaded) = self
-            .load_outcomes(&mut transaction, commits, &commands)
+        let prepared = self
+            .stage_commits(&mut transaction, commits, commands, delivery, cached)
             .await?;
+        match transaction.commit().await {
+            Ok(()) => Ok(prepared),
+            Err(error) => Err(StoreFailure::CommitUnknown {
+                error: error.into(),
+                prepared,
+            }),
+        }
+    }
+
+    /// Stages the complete outcome and workflow mutation without owning the commit boundary.
+    async fn stage_commits(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        commits: &[TaskCommit],
+        commands: HashMap<TaskId, &TaskCommit>,
+        delivery: Option<(uuid::Uuid, usize)>,
+        cached: &[std::sync::Arc<TaskRecord>],
+    ) -> Result<crate::tasks::CommitResult, TaskRuntimeError> {
+        let conf = &self.runtime_conf;
+        let (now, loaded) = self.load_outcomes(tx, commits, &commands).await?;
         let (mut children, deliveries, waits, rejected, mut tasks) = self
-            .commit_outcomes_tx(&mut transaction, commits, commands, conf, now, loaded)
+            .commit_outcomes_tx(tx, commits, commands, conf, now, loaded)
             .await?;
         let admitted = self.admit_rows(&mut children, delivery, now)?;
         let delivery = delivery.map(|(node, limit)| (node, limit.saturating_sub(admitted.len())));
         tasks.extend(admitted.into_iter().map(std::sync::Arc::new));
         let wake_lanes = workflow::finalize_admitted(
-            &mut transaction,
+            tx,
             children,
             deliveries,
             &waits,
@@ -144,18 +186,11 @@ impl DbTaskStore {
             &mut tasks,
         )
         .await?;
-        let prepared = crate::tasks::CommitResult {
+        Ok(crate::tasks::CommitResult {
             wake_lanes,
             rejected,
             tasks,
-        };
-        match transaction.commit().await {
-            Ok(()) => Ok(prepared),
-            Err(error) => Err(StoreFailure::CommitUnknown {
-                error: error.into(),
-                prepared,
-            }),
-        }
+        })
     }
 
     /// Preserves existing lane-before-task lock ordering and ordinary clock/read batching.
@@ -245,6 +280,10 @@ impl DbTaskStore {
 #[cfg(all(test, feature = "migrations", feature = "test-support"))]
 #[path = "tests/wake.rs"]
 mod wake_tests;
+
+#[cfg(all(test, feature = "migrations", feature = "test-support"))]
+#[path = "tests/cancel_tx.rs"]
+mod cancel_tx_tests;
 
 fn locked_lane(conf: &crate::tasks::TaskStoreConf, lane_name: &str) -> bool {
     conf.lanes

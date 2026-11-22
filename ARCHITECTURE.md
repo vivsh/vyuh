@@ -125,6 +125,9 @@ PostgreSQL/MySQL use the existing FOR UPDATE reads; SQLite uses its transaction
 semantics; memory uses its existing atomic staging under one mutex. There is no
 intermediate intent-only write. Ordinary outputs retain their owner-filtered
 read and write fields; cancellation batches additionally persist the flag.
+Database `cancel_tx` stages the same writes in the caller's transaction, extending
+only the lock lifetime to its commit or rollback. It does not admit local work
+or send the ordinary post-commit queue-eviction event.
 
 The store alone changes task lifecycle fields. Each output flush atomically
 writes outcomes and workflow changes; each claim independently establishes

@@ -325,17 +325,20 @@ const MARIADB_SERVER: u8 = 2;
 
 #[cfg(feature = "mysql")]
 impl DbTaskStore {
-    /// Resolves server identity for producer-only cancellation before taking task locks.
-    pub(super) async fn detect_mysql_server(&self) -> Result<(), TaskRuntimeError> {
+    /// Resolves server identity before cancellation takes task locks, reusing a caller's connection.
+    pub(super) async fn detect_mysql_server(
+        &self,
+        tx: Option<&mut db::DbTransaction<'_>>,
+    ) -> Result<(), TaskRuntimeError> {
         use db::DbSession as _;
         use std::sync::atomic::Ordering;
 
         if self.mysql_server.load(Ordering::Relaxed) == 0 {
-            let version: String = self
-                .pool
-                .clone()
-                .fetch_scalar(db::Statement::raw("SELECT VERSION()"))
-                .await?;
+            let query = db::Statement::raw("SELECT VERSION()");
+            let version: String = match tx {
+                Some(tx) => tx.fetch_scalar(query).await?,
+                None => self.pool.clone().fetch_scalar(query).await?,
+            };
             self.record_mysql_server(&version);
         }
         Ok(())

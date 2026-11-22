@@ -27,7 +27,7 @@ async fn checks_native_retry_code() -> Result<(), String> {
         task_conf,
     );
     store
-        .detect_mysql_server()
+        .detect_mysql_server(None)
         .await
         .map_err(|e| e.to_string())?;
     assert_eq!(store.uses_mariadb(), expected);

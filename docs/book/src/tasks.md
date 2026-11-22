@@ -1044,6 +1044,15 @@ row. Cancellation cannot undo external effects. Parent execution remains subject
 to ordinary polling, rates, concurrency, batch thresholds, and lane hooks; there
 is no cancellation scan or watcher.
 
+Use `tasks.cancel_tx(&mut tx, task_id)` to cancel a task and update application
+data in the same database transaction. Use the site's task database and schema.
+Cancellation and any parent update commit or roll back together. Vyuh leaves
+commit and rollback to the caller and does not send the local queue-eviction
+notification, so already-claimed work may still execute. If the call errors or
+is dropped, roll back the transaction or a savepoint created before the call.
+Keep the transaction short: the existing cancellation locks are held until it
+ends, alongside any application locks.
+
 Task snapshots held by runners and handlers remain immutable. All authoritative
 mutations, including cancellation resolution, happen inside the store. Existing
 deployments must follow the [coordinated task-store upgrade](#upgrading-existing-task-stores)

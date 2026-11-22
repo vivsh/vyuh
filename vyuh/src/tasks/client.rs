@@ -73,6 +73,23 @@ impl Tasks {
         self.client.cancel(id).await
     }
 
+    /// Stages terminal cancellation, including parent delivery, in the caller's transaction.
+    ///
+    /// The transaction must target this site's task database and schema. Missing or
+    /// terminal tasks are no-ops. This does not interrupt handlers or evict locally
+    /// queued work; already-claimed work may still run.
+    ///
+    /// The caller commits or rolls back. If this call errors or its future is cancelled,
+    /// roll back the transaction or a caller-created savepoint before continuing.
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub async fn cancel_tx(
+        &self,
+        tx: &mut crate::db::DbTransaction<'_>,
+        id: TaskId,
+    ) -> Result<(), TaskRuntimeError> {
+        self.client.store.cancel_tx(tx, id).await
+    }
+
     /// Resolves a returned child request without submitting or waking any work.
     pub(super) fn prepare_child(
         &self,
