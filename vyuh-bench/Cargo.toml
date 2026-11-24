@@ -11,8 +11,8 @@ vyuh-postgres = ["vyuh/postgres"]
 vyuh-sqlite = ["vyuh/sqlite"]
 
 [dependencies]
-# The benchmark driver uses HTTP/1.1; keep Actix defaults except HTTP/2.
-actix-web = { version = "4.11.0", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "compress-zstd", "cookies", "unicode", "compat", "ws"] }
+# The benchmarks use HTTP/1.1 and don't use Actix's cookie API.
+actix-web = { version = "4.11.0", default-features = false, features = ["macros", "compress-brotli", "compress-gzip", "compress-zstd", "unicode", "compat", "ws"] }
 async-stream = "0.3.6"
 axum = { workspace = true }
 axum-extra = { workspace = true }
