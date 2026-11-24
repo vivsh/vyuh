@@ -614,10 +614,12 @@ The `vyuh` crate is organized around these subsystems:
   instead return the locked selection to the shared Rust transition machinery.
   Transaction control, periodic maintenance, and exceptional workflow writes are
   additional statements, not part of a universal one-query guarantee.
-  SQLite retains combined selection/timing reads; coordinated lanes reserve rate
-  permits before task locks. Mool handles projections, sequential queries, and
-  bulk writes. The PostgreSQL atomic claim uses a bound raw statement because
-  Mool's typed API does not express data-modifying CTEs with metadata-only rows.
+  SQLite retains combined selection/timing reads. Its ordinary selected page
+  also provides eligibility evidence, without returning duplicate probe rows.
+  Coordinated lanes reserve rate permits before task locks. Mool handles
+  projections, sequential queries, and bulk writes. The PostgreSQL atomic claim
+  uses a bound raw statement because Mool's typed API does not express
+  data-modifying CTEs with metadata-only rows.
   Claims select ownerless
   ready Pending or abandoned Running rows. Flushes validate each independent entry
   once and borrow a task-ID-to-command map for row selection, fenced acceptance,

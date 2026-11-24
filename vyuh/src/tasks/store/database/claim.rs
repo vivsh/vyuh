@@ -348,8 +348,14 @@ impl DbTaskStore {
             .claim
             .limit
             .min(configured_lane(turn.conf, turn.claim.lane)?.claim_batch_size_value());
-        let saturated = limit > 0 && probe.len() == limit;
-        let permits = runnable_count(&probe, turn.retry)?;
+        // SQLite has no skipped locks here. The selected page is the probe,
+        // and finish_claim filters non-runnable rows before consuming permits.
+        let (count, permits) = if cfg!(feature = "sqlite") {
+            (selected.len(), selected.len())
+        } else {
+            (probe.len(), runnable_count(&probe, turn.retry)?)
+        };
+        let saturated = limit > 0 && count == limit;
         let (tasks, reclaimed) = self
             .finish_claim(tx, &turn, selected, permits, deliveries, waits)
             .await?;
@@ -762,7 +768,7 @@ pub(super) async fn read_after(
     decode(tx.fetch_all::<StoreRow>(statement).await?, claim)
 }
 
-/// Decodes only the discriminated projection; metadata never becomes a fabricated task.
+/// Decodes the discriminated projection; SQLite supplies no separate probes.
 fn decode(
     rows: Vec<StoreRow>,
     claim: &LaneClaim,
@@ -771,7 +777,7 @@ fn decode(
     for row in rows {
         match row {
             StoreRow::Clock(_) => {}
-            StoreRow::Probe(row) => probes.push(row),
+            StoreRow::Probe(row) if !cfg!(feature = "sqlite") => probes.push(row),
             StoreRow::Candidate(row) => selected.push(row.into()),
             StoreRow::Deadline(row) if row.lane_name == claim.lane.as_str() => {
                 deadline = row.deadline
@@ -803,18 +809,17 @@ fn statement(claim: &LaneClaim, batch: usize) -> db::Statement {
 /// Keeps the mixed-row clock wrapper raw: Mool cannot emit a source-free clock row.
 /// Payloads are selected only by the locked branch; contention probes are metadata-only.
 pub(super) fn query(clock: &str, lane: &str, limit: &str, include_clock: bool) -> String {
-    let probe = if cfg!(feature = "sqlite") {
-        format!(
-            "SELECT {} FROM selected",
-            TaskProbeRow::record_column_names().join(", ")
-        )
+    let probes = if cfg!(feature = "sqlite") {
+        String::new()
     } else {
-        candidates(&TaskProbeRow::record_column_names(), lane, limit, false)
+        format!(
+            "probes AS MATERIALIZED ({}), ",
+            candidates(&TaskProbeRow::record_column_names(), lane, limit, false)
+        )
     };
     let selected = candidates(&TaskClaimRow::record_column_names(), lane, limit, true);
     format!(
-        "{clock}, probes AS MATERIALIZED ({probe}), \
-         selected AS MATERIALIZED ({selected}) {} ORDER BY turn_kind, ready_at, created_at, id",
+        "{clock}, {probes}selected AS MATERIALIZED ({selected}) {} ORDER BY turn_kind, ready_at, created_at, id",
         projection(lane, include_clock)
     )
 }
@@ -839,7 +844,14 @@ fn candidates(columns: &[String], lane: &str, limit: &str, locked: bool) -> Stri
 /// Preserves separate row projections without transporting payloads inside JSON envelopes.
 fn projection(lane: &str, include_clock: bool) -> String {
     let columns = TaskClaimRow::record_column_names();
-    let probe_columns = probe_columns(&columns);
+    let probes = if cfg!(feature = "sqlite") {
+        String::new()
+    } else {
+        format!(
+            "UNION ALL SELECT 5, NULL, {}, NULL FROM probes ",
+            probe_columns(&columns)
+        )
+    };
     let nulls = columns
         .iter()
         .map(|name| format!("NULL AS {name}"))
@@ -871,7 +883,7 @@ fn projection(lane: &str, include_clock: bool) -> String {
     format!(
         "{metadata}SELECT 3 AS turn_kind, NULL AS now, \
          selected.*, {null_deadline} AS deadline FROM selected \
-         UNION ALL SELECT 5, NULL, {probe_columns}, NULL FROM probes \
+         {probes}\
          UNION ALL SELECT 4, NULL, {deadline_columns}, {} FROM clock",
         deadline(lane)
     )

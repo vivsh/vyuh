@@ -83,6 +83,8 @@ fn claim_projection_is_payload_once() {
         assert!(!sql.contains("FOR UPDATE"));
         assert_eq!(sql.matches("FROM vyuh_tasks t").count(), 1);
         assert!(sql.contains("FROM selected"));
+        assert!(!sql.contains("probes"));
+        assert!(!sql.contains("SELECT 5,"));
     }
 }
 
@@ -110,7 +112,7 @@ async fn ownerless_order_and_hints() -> Result<(), String> {
         selected.iter().map(|t| t.id.as_u128()).collect::<Vec<_>>(),
         vec![1, 6]
     );
-    assert_eq!(probes.len(), 2);
+    assert!(probes.is_empty());
     assert_eq!(deadline, Some(now + chrono::Duration::hours(2)));
     let (_, selected, _) = read_after(&mut tx, &request(32), now, 32)
         .await
