@@ -81,6 +81,7 @@ async fn error_batch(_input: Data<super::super::Batch<DirectJob>>) -> Result<(),
 fn record<T: Serialize>(name: &str, input: &T) -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(Arc::new(TaskRecord {
+        share_role: Default::default(),
         id: TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,
@@ -310,6 +311,7 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TestError> {
 
     store
         .commit_tasks(&[TaskCommit::Outcome {
+            publisher: false,
             node_id: uuid::Uuid::from_u128(1),
             attempts: store
                 .get_task(task_id)
@@ -724,6 +726,7 @@ async fn external_results_share_envelope() -> Result<(), TestError> {
             .await?;
         store
             .commit_tasks(&[TaskCommit::Outcome {
+                publisher: false,
                 node_id: uuid::Uuid::from_u128(1),
                 attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
                 task_id: id,
@@ -805,6 +808,7 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Test
         .await?;
     store
         .commit_tasks(&[TaskCommit::Outcome {
+            publisher: false,
             node_id: uuid::Uuid::from_u128(1),
             attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
             task_id: id,

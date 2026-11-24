@@ -31,6 +31,8 @@ pub(super) struct TaskRow {
     pub(super) root_id: Option<uuid::Uuid>,
     #[column(default = "0")]
     pub(super) kind: i16,
+    #[column(default = "0", insertable = false, updatable = false)]
+    pub(super) share_role: i16,
     #[column(type = "varchar(191)")]
     pub(super) name: String,
     pub(super) input: String,
@@ -119,6 +121,7 @@ impl From<TaskRecord> for TaskRow {
             parent_id: record.parent_id.map(crate::tasks::TaskId::into_uuid),
             root_id: record.root_id.map(crate::tasks::TaskId::into_uuid),
             kind: record.kind.as_i16(),
+            share_role: record.share_role as i16,
             name: record.name,
             input: record.input,
             state: record.state,
@@ -137,7 +140,7 @@ impl From<TaskRecord> for TaskRow {
             idempotency_fingerprint: record.idempotency_fingerprint,
             idempotency_expires_at: record.idempotency_expires_at,
             #[cfg(any(feature = "postgres", feature = "sqlite"))]
-            idempotency_held: true,
+            idempotency_held: record.share_role != crate::tasks::models::ShareRole::Subscriber,
             node_id: record.node_id,
             ready_at: record.ready_at,
             created_at: record.created_at,
@@ -156,6 +159,7 @@ impl TryFrom<TaskRow> for TaskRecord {
             parent_id: row.parent_id.map(crate::tasks::TaskId::new),
             root_id: row.root_id.map(crate::tasks::TaskId::new),
             kind: crate::tasks::TaskKind::from_i16(row.kind)?,
+            share_role: crate::tasks::models::ShareRole::from_i16(row.share_role)?,
             name: row.name,
             input: row.input,
             state: row.state,

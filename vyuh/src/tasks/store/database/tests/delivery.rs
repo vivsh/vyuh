@@ -279,6 +279,7 @@ async fn ownerless_sleep_and_hints() -> Result<(), String> {
 /// Constructs an execution-fenced outcome from an immutable store snapshot.
 fn output(task: &TaskRecord, outcome: TaskOutcome) -> Result<TaskCommit, String> {
     Ok(TaskCommit::Outcome {
+        publisher: false,
         task_id: task.id,
         node_id: task.node_id.ok_or("missing node")?,
         attempts: task.attempts,

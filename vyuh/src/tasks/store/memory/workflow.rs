@@ -1,5 +1,6 @@
 //! Operation-local staging for the memory store's atomic workflow transitions.
 use super::workflow;
+use crate::tasks::{models::ShareRole, store::sharing};
 
 use crate::tasks::{
     CommitResult, LaneClaim, LaneOwnerPhase, TaskCommit, TaskId, TaskKind, TaskLane, TaskOutcome,
@@ -32,8 +33,9 @@ impl MemoryTaskStore {
         let now = chrono::Utc::now();
         let mut staged = Vec::with_capacity(writes.len());
         let mut receipts = Vec::with_capacity(writes.len());
+        let mut topics = Vec::new();
         for write in writes {
-            receipts.push(stage_write(&state, &mut staged, write, now)?);
+            receipts.push(stage_write(&state, &mut staged, write, now, &mut topics)?);
         }
         let mut tasks = Vec::new();
         if let Some(conf) = &state.conf {
@@ -47,6 +49,7 @@ impl MemoryTaskStore {
             }
         }
         append_tasks(&mut state, staged);
+        install_topics(&mut state, topics);
         Ok((receipts, tasks))
     }
 }
@@ -144,7 +147,7 @@ fn run_turn(
     now: chrono::DateTime<chrono::Utc>,
     undo: &mut Vec<TaskRecord>,
 ) -> Result<(TaskPoll, CommitResult), TaskRuntimeError> {
-    let (children, mut deliveries, waits, topics) =
+    let (mut children, mut deliveries, waits, topics) =
         commit_outcomes_state(state, commits, now, undo)?;
     let phases = state
         .lane_locks
@@ -162,13 +165,8 @@ fn run_turn(
     workflow::materialize(state, &mut poll);
     release_keys(state, undo);
     let mut wake_lanes = workflow::install(state, waits, now);
-    for (id, topic) in topics {
-        if let Some(topic) = topic {
-            state.topic_waits.insert(id, topic);
-        } else {
-            state.topic_waits.remove(&id);
-        }
-    }
+    install_topics(state, topics);
+    complete_followers(state, &mut children, undo, &mut deliveries, now);
     wake_lanes.extend(finalize_workflow(state, children, deliveries, now));
     workflow::clear_terminal(state, undo);
     reconcile_poll(state, &mut poll, &wake_lanes, &phases, now);
@@ -188,6 +186,60 @@ fn run_turn(
     ))
 }
 
+pub(super) fn install_topics(state: &mut MemoryState, topics: Vec<(TaskId, Option<Vec<u8>>)>) {
+    for (id, topic) in topics {
+        if let Some(topic) = topic {
+            state.topic_waits.insert(id, topic);
+        } else {
+            state.topic_waits.remove(&id);
+        }
+    }
+}
+
+/// Includes subscribers staged in the same turn and emits only accepted parent deliveries.
+fn complete_followers(
+    state: &mut MemoryState,
+    children: &mut [TaskRecord],
+    undo: &[TaskRecord],
+    deliveries: &mut Vec<(TaskId, String)>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    for before in undo
+        .iter()
+        .filter(|row| row.share_role == ShareRole::Publisher)
+    {
+        let Some((status, result)) = state
+            .tasks
+            .iter()
+            .find(|row| {
+                row.id == before.id
+                    && matches!(row.status, TaskStatus::Succeeded | TaskStatus::Failed)
+            })
+            .and_then(|row| row.last_result.clone().map(|result| (row.status, result)))
+        else {
+            continue;
+        };
+        let topic = sharing::topic(before.id);
+        for row in state
+            .tasks
+            .iter_mut()
+            .chain(children.iter_mut())
+            .filter(|row| {
+                row.share_role == ShareRole::Subscriber && row.status == TaskStatus::Suspended
+            })
+        {
+            if state.topic_waits.get(&row.id) != Some(&topic) {
+                continue;
+            }
+            state.topic_waits.remove(&row.id);
+            sharing::complete(row, status, &result, now);
+            if let Some(parent) = row.parent_id {
+                deliveries.push((parent, result.clone()));
+            }
+        }
+    }
+}
+
 /// Stages accepted task updates and children before mutating any existing task.
 pub(super) fn stage_outcomes(
     state: &MemoryState,
@@ -199,7 +251,7 @@ pub(super) fn stage_outcomes(
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
         Vec<(TaskId, workflow::TaskWait)>,
-        Vec<(TaskId, Option<String>)>,
+        Vec<(TaskId, Option<Vec<u8>>)>,
     ),
     TaskRuntimeError,
 > {
@@ -222,11 +274,19 @@ pub(super) fn stage_outcomes(
             continue;
         };
         let was_suspended = task.status == TaskStatus::Suspended;
-        let task = staged_task(state, task, commit, now, &mut children, &mut deliveries)?;
+        let task = staged_task(
+            state,
+            task,
+            commit,
+            now,
+            &mut children,
+            &mut deliveries,
+            &mut topics,
+        )?;
         if let Some(TaskOutcome::Wait { topic, .. }) = commit.outcome()
             && task.status == TaskStatus::Suspended
         {
-            topics.push((task.id, Some(topic.clone())));
+            topics.push((task.id, Some(topic.as_bytes().to_vec())));
         } else if was_suspended && task.cancelled {
             topics.push((task.id, None));
         }
@@ -251,7 +311,7 @@ pub(super) fn publish(
     for (&id, _) in state
         .topic_waits
         .iter()
-        .filter(|(_, key)| key.as_str() == topic)
+        .filter(|(_, key)| key.as_slice() == topic.as_bytes())
     {
         ordered.insert(id);
         if ordered.len() > LIMIT + 1 {
@@ -302,6 +362,7 @@ fn staged_task(
     now: chrono::DateTime<chrono::Utc>,
     children: &mut Vec<TaskRecord>,
     deliveries: &mut Vec<(TaskId, String)>,
+    topics: &mut Vec<(TaskId, Option<Vec<u8>>)>,
 ) -> Result<TaskRecord, TaskRuntimeError> {
     let conf = state
         .conf
@@ -320,7 +381,7 @@ fn staged_task(
     {
         TaskOutcome::fail(error)
     } else {
-        prepare_spawn(state, &task, outcome, children, now)?
+        prepare_spawn(state, &task, outcome, children, now, deliveries, topics)?
     };
     let retry = conf
         .lanes
@@ -329,7 +390,9 @@ fn staged_task(
         .map(|lane| lane.retry_policy())
         .ok_or_else(|| TaskRuntimeError::UnknownLane(task.lane.clone()))?;
     apply_outcome(&mut task, outcome, retry, now)?;
-    finalize_idempotency(&mut task, conf, now)?;
+    if task.share_role != ShareRole::Subscriber {
+        finalize_idempotency(&mut task, conf, now)?;
+    }
     queue_delivery(&task, deliveries)?;
     Ok(task)
 }
@@ -341,13 +404,15 @@ fn prepare_spawn(
     outcome: TaskOutcome,
     children: &mut Vec<TaskRecord>,
     now: chrono::DateTime<chrono::Utc>,
+    deliveries: &mut Vec<(TaskId, String)>,
+    topics: &mut Vec<(TaskId, Option<Vec<u8>>)>,
 ) -> Result<TaskOutcome, TaskRuntimeError> {
     if let TaskOutcome::All {
         state: checkpoint,
         children: group,
     } = outcome
     {
-        return workflow::prepare(state, parent, checkpoint, group, children, now);
+        return workflow::prepare(state, parent, checkpoint, group, children, now, topics);
     }
     let TaskOutcome::Spawn {
         state: checkpoint,
@@ -360,8 +425,13 @@ fn prepare_spawn(
     child.record.parent_id = Some(parent.id);
     child.record.root_id = Some(parent.root_id.unwrap_or(parent.id));
     child.record.node_id = None;
-    match stage_write(state, children, child, now) {
-        Ok(TaskReceipt::Queued(_)) => Ok(TaskOutcome::Suspend { state: checkpoint }),
+    match stage_write(state, children, child, now, topics) {
+        Ok(TaskReceipt::Queued(_)) => {
+            if let Some(child) = children.last() {
+                queue_delivery(child, deliveries)?;
+            }
+            Ok(TaskOutcome::Suspend { state: checkpoint })
+        }
         Ok(TaskReceipt::KeyHeld) | Err(TaskRuntimeError::AlreadyExists(_)) => Ok(
             TaskOutcome::fail("Child task identity conflicts with an existing task"),
         ),
@@ -485,13 +555,20 @@ pub(super) struct TaskWait {
 
 /// Records only accepted group identities in submission order before authoritative installation.
 pub(super) fn prepared_wait(parent: TaskId, children: &[TaskRecord]) -> TaskWait {
+    let group = children
+        .iter()
+        .filter(|child| child.parent_id == Some(parent));
+    let remaining_completions = group
+        .clone()
+        .filter(|child| !matches!(child.status, TaskStatus::Succeeded | TaskStatus::Failed))
+        .count() as i32;
     let children = children
         .iter()
         .filter(|child| child.parent_id == Some(parent))
         .map(|child| child.id)
         .collect::<Vec<_>>();
     TaskWait {
-        remaining_completions: children.len() as i32,
+        remaining_completions,
         children,
     }
 }
@@ -504,6 +581,7 @@ pub(super) fn prepare(
     group: Vec<TaskWrite>,
     children: &mut Vec<TaskRecord>,
     now: chrono::DateTime<chrono::Utc>,
+    topics: &mut Vec<(TaskId, Option<Vec<u8>>)>,
 ) -> Result<TaskOutcome, TaskRuntimeError> {
     let conf = state
         .conf
@@ -513,15 +591,17 @@ pub(super) fn prepare(
         return Ok(TaskOutcome::fail(error.to_string()));
     }
     let start = children.len();
+    let first_topic = topics.len();
     for mut child in group {
         child.record.parent_id = Some(parent.id);
         child.record.root_id = Some(parent.root_id.unwrap_or(parent.id));
         child.record.node_id = None;
         if !matches!(
-            stage_write(state, children, child, now),
+            stage_write(state, children, child, now, topics),
             Ok(TaskReceipt::Queued(_))
         ) {
             children.truncate(start);
+            topics.truncate(first_topic);
             return Ok(TaskOutcome::fail(
                 "All child preparation or identity conflict",
             ));
@@ -538,7 +618,7 @@ pub(super) fn install(
 ) -> Vec<TaskLane> {
     let mut wake = Vec::new();
     for (id, wait) in waits {
-        if wait.children.is_empty()
+        if wait.remaining_completions == 0
             && let Some(parent) = state.tasks.iter_mut().find(|task| task.id == id)
         {
             parent.status = TaskStatus::Pending;

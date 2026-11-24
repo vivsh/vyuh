@@ -225,7 +225,7 @@ impl DbTaskStore {
     ) -> Result<
         (
             Vec<TaskRow>,
-            Vec<(TaskId, String)>,
+            workflow::Deliveries,
             Vec<super::workflow::WaitWrite>,
             Vec<TaskId>,
             Vec<std::sync::Arc<TaskRecord>>,
@@ -233,7 +233,13 @@ impl DbTaskStore {
         TaskRuntimeError,
     > {
         if commits.is_empty() {
-            return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+            return Ok((
+                Vec::new(),
+                workflow::Deliveries::default(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
         }
         let allowed = fenced_commits(transaction, commits, conf, now).await?;
         let mut rows = match loaded {
@@ -249,7 +255,11 @@ impl DbTaskStore {
                 .1
             }
         };
-        accept_rows(&mut rows, &commands, &allowed)?;
+        let publishers = accept_rows(&mut rows, &commands, &allowed)?;
+        if publishers > 0 {
+            verify_publisher_budget(publishers, self.commit_batch_size, conf.max_all_children)?;
+        }
+        let mut deliveries = workflow::Deliveries::default();
         let (children, conflicts, waits) = workflow::prepare_children(
             transaction,
             &rows,
@@ -257,11 +267,19 @@ impl DbTaskStore {
             conf,
             now,
             super::queries::WRITE_CHUNK_SIZE,
+            &mut deliveries,
         )
         .await?;
         let mut topics = Vec::new();
-        let deliveries =
-            apply_owned_outcomes(&mut rows, &mut commands, &conflicts, conf, now, &mut topics)?;
+        apply_owned_outcomes(
+            &mut rows,
+            &mut commands,
+            &conflicts,
+            conf,
+            now,
+            &mut topics,
+            &mut deliveries,
+        )?;
         self.update_idempotency_batch(transaction, &mut rows, conf, now)
             .await?;
         batch_update_rows(transaction, &rows, super::queries::WRITE_CHUNK_SIZE).await?;
@@ -275,6 +293,21 @@ impl DbTaskStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((children, deliveries, waits, rejected, tasks))
     }
+}
+
+/// Bounds terminal publication on the cancellation-only bulk entrypoint too.
+fn verify_publisher_budget(
+    publishers: usize,
+    batch: usize,
+    maximum: usize,
+) -> Result<(), TaskRuntimeError> {
+    let weight = crate::tasks::store::sharing::PUBLISH_WEIGHT;
+    if publishers > batch.max(maximum.saturating_add(1)).max(weight) / weight {
+        return Err(TaskRuntimeError::InvalidOptions(
+            "Publisher flush exceeds its fan-out budget".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "migrations", feature = "test-support"))]
@@ -418,8 +451,9 @@ fn accept_rows(
     rows: &mut Vec<TaskRow>,
     commands: &HashMap<TaskId, &TaskCommit>,
     allowed: &HashSet<TaskId>,
-) -> Result<(), TaskRuntimeError> {
+) -> Result<usize, TaskRuntimeError> {
     let mut error = None;
+    let mut publishers = 0;
     rows.retain_mut(|row| {
         let id = TaskId::new(row.id);
         let Some(commit) = commands.get(&id) else {
@@ -438,11 +472,20 @@ fn accept_rows(
                 .is_none_or(|lane| lane.as_str() == row.lane_name)
             && commit.accepts(status, row.node_id, row.attempts);
         if accepted {
+            if row.share_role == crate::tasks::models::ShareRole::Publisher as i16 {
+                if !commit.is_cancel() && !commit.publisher() {
+                    error = Some(TaskRuntimeError::TaskExecutionError(
+                        "Missing shared publisher execution hint".into(),
+                    ));
+                    return false;
+                }
+                publishers += 1;
+            }
             row.cancelled |= commit.is_cancel();
         }
         accepted
     });
-    error.map_or(Ok(()), Err)
+    error.map_or(Ok(publishers), Err)
 }
 
 /// Applies one lifecycle transition using statement time.
@@ -713,11 +756,14 @@ fn retention_for(
 
 #[cfg(feature = "mysql")]
 fn is_terminal_idempotent(row: &TaskRow) -> Result<bool, TaskRuntimeError> {
-    Ok(row.idempotency_key.is_some()
-        && matches!(
-            TaskStatus::from_i16(row.status)?,
-            TaskStatus::Succeeded | TaskStatus::Failed
-        ))
+    Ok(
+        row.share_role != crate::tasks::models::ShareRole::Subscriber as i16
+            && row.idempotency_key.is_some()
+            && matches!(
+                TaskStatus::from_i16(row.status)?,
+                TaskStatus::Succeeded | TaskStatus::Failed
+            ),
+    )
 }
 
 /// Persists lifecycle fields; lifetime attempts are written exclusively when claiming.
@@ -818,8 +864,8 @@ pub(super) fn apply_owned_outcomes(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     topics: &mut Vec<(uuid::Uuid, Option<Vec<u8>>)>,
-) -> Result<Vec<(TaskId, String)>, TaskRuntimeError> {
-    let mut deliveries = Vec::new();
+    deliveries: &mut workflow::Deliveries,
+) -> Result<(), TaskRuntimeError> {
     let cancellation = commands
         .values()
         .any(|commit| commit.is_cancel())
@@ -854,9 +900,9 @@ pub(super) fn apply_owned_outcomes(
         }
         let retry = lane_retry(&conf.lanes, &row.lane_name)?;
         apply_outcome(row, outcome, retry, now)?;
-        queue_delivery(row, &mut deliveries)?;
+        queue_delivery(row, deliveries)?;
     }
-    Ok(deliveries)
+    Ok(())
 }
 
 /// Locks owned tasks in ID order and returns database time, including all-stale batches.

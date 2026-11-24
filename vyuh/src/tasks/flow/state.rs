@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::callables::{DataBox, DataValue};
 
-use crate::tasks::{TaskLane, TaskOptions, TaskOutcome, TaskRuntimeError};
+use crate::tasks::{TaskOptions, TaskOutcome, TaskRuntimeError};
 
 use super::FlowAllIn;
 
@@ -32,7 +32,7 @@ enum FlowValue<T> {
     Complete(T),
     Outcome(TaskOutcome),
     All {
-        inputs: Vec<(DataBox, Option<TaskLane>)>,
+        inputs: Vec<(DataBox, TaskOptions)>,
         state: String,
     },
     Spawn {

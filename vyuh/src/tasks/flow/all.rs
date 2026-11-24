@@ -4,7 +4,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 
 use crate::callables::{DataBox, DataValue};
-use crate::tasks::{TaskFailure, TaskLane, TaskRuntimeError};
+use crate::tasks::{TaskFailure, TaskLane, TaskOptions, TaskRuntimeError};
 
 /// Ordered child inputs for [`super::FlowState::all`], preserving each registration.
 ///
@@ -14,7 +14,7 @@ use crate::tasks::{TaskFailure, TaskLane, TaskRuntimeError};
 /// Vectors and tuples of one through sixteen inputs also convert into this type.
 #[derive(Default)]
 pub struct FlowAllIn {
-    pub(super) inputs: Vec<(DataBox, Option<TaskLane>)>,
+    pub(super) inputs: Vec<(DataBox, TaskOptions)>,
 }
 
 impl FlowAllIn {
@@ -33,7 +33,7 @@ impl FlowAllIn {
     /// Appends one child using its registered lane, without submitting it.
     /// Each call may supply a different input type; nested tuples are not flattened.
     pub fn push<I: DataValue>(&mut self, input: I) {
-        self.inputs.push((DataBox::new_data(input), None));
+        self.push_with_options(input, TaskOptions::new());
     }
 
     /// Appends a child routed to a configured lane and returns the group.
@@ -46,7 +46,18 @@ impl FlowAllIn {
     /// Appends a child with a lane override, without submitting it.
     /// The executing site validates the lane during group preparation.
     pub fn push_in_lane<I: DataValue>(&mut self, input: I, lane: TaskLane) {
-        self.inputs.push((DataBox::new_data(input), Some(lane)));
+        self.push_with_options(input, TaskOptions::new().lane(lane));
+    }
+
+    /// Appends one child with explicit submission options.
+    pub fn with_options<I: DataValue>(mut self, input: I, options: TaskOptions) -> Self {
+        self.push_with_options(input, options);
+        self
+    }
+
+    /// Appends one child with explicit options validated at Flow outcome preparation.
+    pub fn push_with_options<I: DataValue>(&mut self, input: I, options: TaskOptions) {
+        self.inputs.push((DataBox::new_data(input), options));
     }
 
     /// Returns the number of children, including repeated input types.
@@ -65,7 +76,7 @@ impl<I: DataValue> From<Vec<I>> for FlowAllIn {
         Self {
             inputs: inputs
                 .into_iter()
-                .map(|input| (DataBox::new_data(input), None))
+                .map(|input| (DataBox::new_data(input), TaskOptions::new()))
                 .collect(),
         }
     }
@@ -75,7 +86,7 @@ macro_rules! tuple_inputs {
     ($($type:ident : $value:ident),+) => {
         impl<$($type: DataValue),+> From<($($type,)+)> for FlowAllIn {
             fn from(($($value,)+): ($($type,)+)) -> Self {
-                Self { inputs: vec![$((DataBox::new_data($value), None)),+] }
+                Self { inputs: vec![$((DataBox::new_data($value), TaskOptions::new())),+] }
             }
         }
     };

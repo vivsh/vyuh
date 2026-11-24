@@ -1,6 +1,7 @@
 #[cfg(feature = "migrations")]
 use super::super::claim::tests::{fresh_store, insert, row};
 use super::*;
+use crate::tasks::TaskId;
 
 /// Real PostgreSQL verifies atomic ownership, exceptional fallback, rollback and contention.
 #[tokio::test]
@@ -145,7 +146,13 @@ async fn rollback_and_join(store: &DbTaskStore, node: uuid::Uuid) -> Result<(), 
     let conf = &store.runtime_conf;
     let mut tx = store.pool.begin().await.map_err(|e| e.to_string())?;
     let (_, poll) = store
-        .claim_postgres(&mut tx, &node, &request(32), &conf, &mut Vec::new())
+        .claim_postgres(
+            &mut tx,
+            &node,
+            &request(32),
+            &conf,
+            &mut super::super::workflow::Deliveries::default(),
+        )
         .await
         .map_err(|e| e.to_string())?;
     assert_eq!(poll.lanes.first().ok_or("lane")?.tasks.len(), 1);

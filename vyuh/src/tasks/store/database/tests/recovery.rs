@@ -160,6 +160,7 @@ fn commit(poll: &TaskPoll) -> Result<TaskCommit, String> {
         .and_then(|lane| lane.tasks.first())
         .ok_or("missing task")?;
     Ok(TaskCommit::Outcome {
+        publisher: false,
         node_id: task.node_id.ok_or("missing node")?,
         task_id: task.id,
         attempts: task.attempts,

@@ -376,6 +376,7 @@ fn output(
         crate::tasks::DEFAULT_TASK_LANE
     };
     Ok(crate::tasks::TaskCommit::Outcome {
+        publisher: false,
         task_id: task.id,
         node_id: task.node_id.ok_or("owner")?,
         attempts: task.attempts,

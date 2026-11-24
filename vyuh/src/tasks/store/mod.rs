@@ -31,6 +31,7 @@ mod lane;
 #[cfg(test)]
 #[path = "tests/publication.rs"]
 mod publication_tests;
+pub(super) mod sharing;
 pub use contract::*;
 pub use lane::*;
 pub(crate) mod transitions;

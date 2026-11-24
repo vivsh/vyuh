@@ -28,12 +28,6 @@ impl TaskId {
         Self(id)
     }
 
-    #[cfg(any(
-        feature = "postgres",
-        feature = "mysql",
-        feature = "sqlite",
-        feature = "pravah"
-    ))]
     pub(crate) const fn into_uuid(self) -> uuid::Uuid {
         self.0
     }
@@ -82,6 +76,30 @@ impl TaskKind {
             _ => Err(TaskRuntimeError::TaskExecutionError(format!(
                 "invalid task kind value {value}"
             ))),
+        }
+    }
+}
+
+/// Immutable sharing role assigned by the store before a task becomes visible.
+#[repr(i16)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ShareRole {
+    #[default]
+    Unshared = 0,
+    Publisher = 1,
+    Subscriber = 2,
+}
+
+impl ShareRole {
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+    pub(crate) fn from_i16(value: i16) -> Result<Self, TaskRuntimeError> {
+        match value {
+            0 => Ok(Self::Unshared),
+            1 => Ok(Self::Publisher),
+            2 => Ok(Self::Subscriber),
+            _ => Err(TaskRuntimeError::TaskExecutionError(
+                "invalid task share role".into(),
+            )),
         }
     }
 }
@@ -419,6 +437,7 @@ impl Default for TaskFilter {
 #[derive(Debug, Clone)]
 /// Persisted task state exposed through task inspection APIs.
 pub struct TaskRecord {
+    pub(crate) share_role: ShareRole,
     pub id: TaskId,
     pub parent_id: Option<TaskId>,
     pub root_id: Option<TaskId>,
@@ -583,7 +602,8 @@ impl TaskInfo {
         self.idempotency_key.as_deref()
     }
 
-    /// Returns when a retained terminal idempotency key becomes reusable.
+    /// Returns the original automatic retention deadline, not whether the key is still held.
+    /// Manual release may free the key before this timestamp.
     pub const fn idempotency_expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         self.idempotency_expires_at
     }

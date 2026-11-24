@@ -43,6 +43,63 @@ async fn independent_claim_and_ingress() -> Result<(), TaskRuntimeError> {
     Ok(())
 }
 
+/// Admission preserves FIFO, leaves large publisher groups intact, and keeps ordinary capacity.
+#[tokio::test]
+async fn shared_flush_byte_budget() -> Result<(), TaskRuntimeError> {
+    use crate::tasks::{TaskOutcome, result::RESULT_LIMIT, store::transitions::validate_turn};
+
+    let registry = Arc::new(TaskRegistry::new());
+    let store = Arc::new(MemoryTaskStore::new(1024, registry.store_conf()?));
+    let mut runner = TaskRunner::new(registry.client(store, Vec::new()))?;
+    let node_id = uuid::Uuid::now_v7();
+    let outcome = |publisher: bool, size: usize| TaskCommit::Outcome {
+        publisher,
+        node_id,
+        task_id: crate::tasks::TaskId::new(uuid::Uuid::now_v7()),
+        attempts: 1,
+        lane: DEFAULT_TASK_LANE,
+        outcome: TaskOutcome::CompleteWith {
+            output: format!("\"{}\"", "x".repeat(size - 9)),
+        },
+        owner_token: None,
+    };
+    let queued = [
+        outcome(true, RESULT_LIMIT),
+        outcome(false, RESULT_LIMIT),
+        outcome(true, RESULT_LIMIT),
+        outcome(true, RESULT_LIMIT),
+        outcome(false, RESULT_LIMIT),
+    ];
+    let ids: Vec<_> = queued.iter().map(TaskCommit::task_id).collect();
+    assert!(validate_turn(&queued, 1024, 256).is_err());
+    runner.output_buffer.extend(queued);
+    for expected in [ids.get(..3), ids.get(3..)] {
+        let Some(DbRequest::Commit { commits, .. }) = runner.flush_request() else {
+            return Err(TaskRuntimeError::TaskExecutionError("missing flush".into()));
+        };
+        assert!(
+            commits
+                .iter()
+                .map(TaskCommit::task_id)
+                .eq(expected.into_iter().flatten().copied())
+        );
+        validate_turn(&commits, 1024, 256)?;
+        assert!(runner.flush_request().is_none());
+        runner.flush_after = tokio::time::Instant::now();
+    }
+    assert!(runner.output_buffer.is_empty());
+    runner
+        .output_buffer
+        .extend((0..8).map(|_| outcome(true, 128)));
+    let Some(DbRequest::Commit { commits, .. }) = runner.flush_request() else {
+        return Err(TaskRuntimeError::TaskExecutionError(
+            "missing small flush".into(),
+        ));
+    };
+    assert_eq!(commits.len(), 8);
+    Ok(())
+}
+
 /// Admission reuses capacity within a pass but re-derives it after each reserved claim.
 #[tokio::test]
 async fn claim_capacity_between_admissions() -> Result<(), String> {
@@ -112,6 +169,7 @@ async fn panic_lane_hook() -> Result<(), crate::Error> {
 fn panic_record() -> Result<Arc<TaskRecord>, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(Arc::new(TaskRecord {
+        share_role: Default::default(),
         id: crate::tasks::TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,

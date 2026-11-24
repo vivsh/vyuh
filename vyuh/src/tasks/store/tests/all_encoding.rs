@@ -46,6 +46,25 @@ fn expanded_flush_budget() {
     assert!(validate_turn(&[group(), group()], 32, 32).is_err());
 }
 
+/// The fan-out estimate covers escaped diagnostics and never exceeds one full publisher group.
+#[test]
+fn shared_flush_error_cost() {
+    use crate::tasks::{result, store::sharing};
+
+    let id = TaskId::new(uuid::Uuid::now_v7());
+    for message in ["ordinary failure".into(), "\u{0}é".repeat(8192)] {
+        let actual = result::failure(id, message.clone()).len() * sharing::FOLLOWER_LIMIT;
+        for outcome in [
+            TaskOutcome::fail(message.clone()),
+            TaskOutcome::retry(message),
+        ] {
+            let estimated = sharing::fanout_bytes(&outcome);
+            assert!(actual <= estimated);
+            assert!(estimated <= result::RESULT_LIMIT * sharing::FOLLOWER_LIMIT);
+        }
+    }
+}
+
 /// Geometric scratch growth never allocates a parent aggregate beyond its fixed result budget.
 #[test]
 fn bounded_buffer_capacity() {

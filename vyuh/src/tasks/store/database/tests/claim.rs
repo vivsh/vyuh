@@ -315,7 +315,12 @@ async fn rate_probe_preserves_permit_accounting() -> Result<(), String> {
             now,
         };
         let lane = store
-            .claim_sequential(&mut tx, turn, &mut Vec::new(), &mut Vec::new())
+            .claim_sequential(
+                &mut tx,
+                turn,
+                &mut super::super::workflow::Deliveries::default(),
+                &mut Vec::new(),
+            )
             .await
             .map_err(|e| e.to_string())?;
         assert_eq!(lane.tasks.len(), expected);
@@ -491,6 +496,7 @@ pub(in crate::tasks::store::database) fn row(
     ready_at: Option<DateTime<Utc>>,
 ) -> TaskRow {
     TaskRow {
+        share_role: 0,
         #[cfg(any(feature = "postgres", feature = "sqlite"))]
         wait_topic: None,
         id: uuid::Uuid::from_u128(id),

@@ -53,10 +53,10 @@ impl DbTaskStore {
         validate_write_lanes(self, &writes)?;
         let mut transaction = self.pool.begin().await?;
         let now = statement_now(&mut transaction).await?;
-        let (receipts, _) = self
+        let result = self
             .store_writes_tx(&mut transaction, writes, now, None)
-            .await?;
-        transaction.commit().await?;
+            .await;
+        let (receipts, _) = finish_submission(transaction, result).await?;
         Ok(receipts)
     }
     /// Executes an independent submission or control transaction.
@@ -103,9 +103,43 @@ impl DbTaskStore {
         let now = statement_now(&mut transaction).await?;
         let result = self
             .store_writes_tx(&mut transaction, writes, now, Some((*node, limit)))
+            .await;
+        finish_submission(transaction, result).await
+    }
+
+    /// Persists subscribers without admitting them, and reuses ordinary publisher placement.
+    async fn store_shared(
+        &self,
+        tx: &mut db::DbTransaction<'_>,
+        writes: Vec<TaskWrite>,
+        now: DateTime<Utc>,
+        delivery: Option<(uuid::Uuid, usize)>,
+    ) -> Result<(Vec<TaskReceipt>, Vec<TaskRecord>), TaskRuntimeError> {
+        let super::shared::Resolved {
+            mut rows,
+            receipts,
+            topics,
+            ..
+        } = super::shared::resolve(tx, writes, now).await?;
+        let tasks = self.admit_rows(&mut rows, delivery, now)?;
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        let rows = {
+            super::held::promote(
+                tx,
+                tasks.iter().map(|record| record.id.into_uuid()).collect(),
+                delivery.map(|value| value.0).unwrap_or_default(),
+                now,
+            )
             .await?;
-        transaction.commit().await?;
-        Ok(result)
+            #[cfg(feature = "postgres")]
+            super::notify::pending(tx, &rows).await?;
+            rows.into_iter()
+                .filter(|row| row.share_role == 2 || row.idempotency_key.is_none())
+                .collect::<Vec<_>>()
+        };
+        super::shared::insert(tx, &rows, false).await?;
+        super::publication::store_changes(tx, topics).await?;
+        Ok((receipts, tasks))
     }
     /// Executes an independent submission or control transaction.
     pub(super) async fn schedule_snapshot_impl(
@@ -138,6 +172,20 @@ impl DbTaskStore {
     }
 }
 
+/// A known shared conflict must release reservation locks before it is reported retryable.
+async fn finish_submission<T>(
+    tx: db::DbTransaction<'_>,
+    result: Result<T, TaskRuntimeError>,
+) -> Result<T, TaskRuntimeError> {
+    if result.as_ref().is_err_and(super::shared::is_contention) {
+        tx.rollback().await?;
+        return result;
+    }
+    let result = result?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 impl DbTaskStore {
     /// Resolves idempotency and inserts task rows inside an existing transaction.
     async fn store_writes_tx(
@@ -147,6 +195,11 @@ impl DbTaskStore {
         now: DateTime<Utc>,
         delivery: Option<(uuid::Uuid, usize)>,
     ) -> Result<(Vec<TaskReceipt>, Vec<TaskRecord>), TaskRuntimeError> {
+        if writes.first().is_some_and(|write| {
+            write.record.share_role == crate::tasks::models::ShareRole::Publisher
+        }) {
+            return self.store_shared(transaction, writes, now, delivery).await;
+        }
         #[cfg(any(feature = "postgres", feature = "sqlite"))]
         if writes
             .iter()

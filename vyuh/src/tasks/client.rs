@@ -46,7 +46,7 @@ impl Tasks {
     /// Prepares an ordered child group without writing to the task store.
     pub(super) fn prepare_all(
         &self,
-        inputs: &[(DataBox, Option<TaskLane>)],
+        inputs: &[(DataBox, TaskOptions)],
         state: &str,
     ) -> Result<super::TaskOutcome, TaskRuntimeError> {
         let client = &self.client;
@@ -58,7 +58,7 @@ impl Tasks {
         validate_payload(state, client.registry.config.payload_limit())?;
         let children = inputs
             .iter()
-            .map(|(input, lane)| client.prepare_box_write(input, *lane))
+            .map(|(input, options)| client.prepare_box_write(input, options))
             .collect::<Result<Vec<_>, TaskRuntimeError>>()?;
         Ok(super::TaskOutcome::All {
             state: state.to_owned(),
@@ -207,6 +207,15 @@ impl Tasks {
         self.client.wake(id).await
     }
 
+    /// Releases retained idempotency holds owned by terminal tasks, returning the count.
+    ///
+    /// This overrides retention without changing task history or waking work. Missing,
+    /// duplicate, nonterminal and no-longer-owning IDs are harmless. An empty slice
+    /// returns zero; more than 10,000 IDs is an error before any write.
+    pub async fn release_idempotency(&self, task_ids: &[TaskId]) -> Result<u64, TaskRuntimeError> {
+        self.client.release_idempotency(task_ids).await
+    }
+
     /// Delivers a payload to at most 128 currently suspended topic waiters.
     /// Invalid topics and oversized resume envelopes are rejected before writing.
     /// No replay is retained; a subsequent publication can see different waiters.
@@ -314,10 +323,8 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
         state: &str,
         options: &TaskOptions,
     ) -> Result<super::TaskOutcome, TaskRuntimeError> {
-        validate_options(options)?;
         validate_payload(state, self.registry.config.payload_limit())?;
-        let mut child = self.prepare_box_write(input, options.lane)?;
-        child.initial_delay = options.initial_delay;
+        let child = self.prepare_box_write(input, options)?;
         Ok(super::TaskOutcome::Spawn {
             state: state.to_owned(),
             child,
@@ -441,6 +448,21 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
         Ok(changed)
     }
 
+    pub(super) async fn release_idempotency(
+        &self,
+        task_ids: &[TaskId],
+    ) -> Result<u64, TaskRuntimeError> {
+        if task_ids.is_empty() {
+            return Ok(0);
+        }
+        if task_ids.len() > super::config::MAX_BATCH_SIZE {
+            return Err(TaskRuntimeError::InvalidOptions(
+                "idempotency release exceeds the 10,000-task safety limit".into(),
+            ));
+        }
+        self.store.release_idempotency(task_ids).await
+    }
+
     /// Uses the existing successful resume envelope and acknowledged wake path.
     async fn publish<T: Serialize>(
         &self,
@@ -534,11 +556,12 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
     fn prepare_box_write(
         &self,
         input: &DataBox,
-        lane: Option<TaskLane>,
+        options: &TaskOptions,
     ) -> Result<TaskWrite, TaskRuntimeError> {
         let service = self.task_for_payload(input)?;
-        let lane = self.submission_lane(service, lane)?;
-        build_box_write(service, input, lane, &self.registry.config)
+        validate_options(options)?;
+        let lane = self.submission_lane(service, options.lane)?;
+        build_box_write(service, input, lane, &self.registry.config, options)
     }
 
     fn submission_lane(
@@ -585,6 +608,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskClient<S> {
             &payload,
             service.effective_lane(),
             &self.registry.config,
+            &TaskOptions::new(),
         )?;
         let result = self
             .store

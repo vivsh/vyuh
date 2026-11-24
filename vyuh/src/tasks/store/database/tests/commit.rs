@@ -62,17 +62,17 @@ fn prepared_acceptance_preserves_outcomes() -> Result<(), TaskRuntimeError> {
     let conf = crate::tasks::TaskRegistry::new()
         .with_config(crate::tasks::TaskConf::default())?
         .store_conf()?;
-    assert!(
-        apply_owned_outcomes(
-            &mut rows,
-            &mut commands,
-            &HashSet::new(),
-            &conf,
-            now,
-            &mut Vec::new()
-        )?
-        .is_empty()
-    );
+    let mut deliveries = workflow::Deliveries::default();
+    apply_owned_outcomes(
+        &mut rows,
+        &mut commands,
+        &HashSet::new(),
+        &conf,
+        now,
+        &mut Vec::new(),
+        &mut deliveries,
+    )?;
+    assert!(deliveries.parents.is_empty());
     assert_eq!(
         commands.keys().copied().collect::<Vec<_>>(),
         vec![commits.get(2).ok_or_else(missing)?.task_id()]
@@ -107,6 +107,7 @@ fn missing() -> TaskRuntimeError {
 
 fn command(id: u128, outcome: TaskOutcome) -> TaskCommit {
     TaskCommit::Outcome {
+        publisher: false,
         node_id: uuid::Uuid::from_u128(100),
         attempts: 1,
         task_id: TaskId::new(uuid::Uuid::from_u128(id)),

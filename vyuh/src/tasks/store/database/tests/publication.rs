@@ -6,6 +6,12 @@ use std::time::{Duration, Instant};
 
 /// Applies the real desired schema to a disposable database or SQLite file.
 async fn store() -> Result<(DbTaskStore, tempfile::TempDir), String> {
+    store_for(fixture::configuration().map_err(error)?).await
+}
+
+async fn store_for(
+    conf: crate::tasks::TaskStoreConf,
+) -> Result<(DbTaskStore, tempfile::TempDir), String> {
     let dir = tempfile::tempdir().map_err(error)?;
     let pool = test_pool(&dir).await?;
     #[cfg(feature = "sqlite")]
@@ -28,13 +34,221 @@ async fn store() -> Result<(DbTaskStore, tempfile::TempDir), String> {
             .map_err(|cause| format!("{cause}: {sql}"))?;
     }
     drop(setup);
-    let store = DbTaskStore::new(
-        pool,
-        1024,
-        Duration::from_secs(300),
-        fixture::configuration().map_err(error)?,
-    );
+    let store = DbTaskStore::new(pool, 1024, Duration::from_secs(300), conf);
     Ok((store, dir))
+}
+
+/// Shared Work uses the actual schema and ordinary store/claim/commit entrypoints.
+#[tokio::test]
+#[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable backend URL")]
+async fn shared_result_contract() -> Result<(), String> {
+    let conf = fixture::shared_conf()?;
+    let (store, _db) = store_for(conf).await?;
+    fixture::shared_contract(&store).await?;
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    shared_nowait(&store).await?;
+    Ok(())
+}
+
+/// Manual release uses the real hold schema and preserves fencing under concurrent writers.
+#[tokio::test]
+#[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable backend URL")]
+async fn database_release_idempotency() -> Result<(), String> {
+    let (store, _db) = store_for(fixture::shared_conf()?).await?;
+    fixture::release_idempotency_contract(&store).await
+}
+
+/// A packed flush preserves separate success/failure groups and leaves unrelated waits alone.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires a disposable backend URL"]
+async fn packed_shared_results() -> Result<(), String> {
+    use crate::tasks::{DEFAULT_TASK_LANE, TaskCommit, TaskStatus};
+    let (store, _db) = store_for(fixture::shared_conf()?).await?;
+    let node = Uuid::now_v7();
+    store.initialize().await.map_err(error)?;
+    store.register_node(&node).await.map_err(error)?;
+    let [ok, failed, _, ok0, err0, wait0, ok1, err1, wait1] = seed_shared_groups(&store).await?;
+    let claims = store
+        .claim_tasks(&node, &[fixture::request(DEFAULT_TASK_LANE, 8)])
+        .await
+        .map_err(error)?;
+    let publisher = claims
+        .lanes
+        .into_iter()
+        .flat_map(|lane| lane.tasks)
+        .find(|task| task.id == ok)
+        .ok_or("success publisher was not claimed")?;
+    let output = format!(
+        "\"{}\"",
+        "é".repeat((crate::tasks::result::RESULT_LIMIT - 9) / 2) + "x"
+    );
+    let commits = [
+        fixture::output(
+            &publisher,
+            DEFAULT_TASK_LANE,
+            TaskOutcome::CompleteWith { output },
+        )?,
+        TaskCommit::Cancel { task_id: failed },
+    ];
+    blocked_shared_flush(&store, ok0, &commits).await?;
+    assert_eq!(stored(&store, ok).await?.status, TaskStatus::Running);
+    assert_eq!(stored(&store, err0).await?.status, TaskStatus::Suspended);
+    let committed = store.commit_tasks(&commits).await.map_err(error)?;
+    assert!(committed.rejected.is_empty());
+    let success = stored(&store, ok).await?;
+    let failure = stored(&store, failed).await?;
+    assert_eq!(
+        success.last_result.as_ref().map(String::len),
+        Some(crate::tasks::result::RESULT_LIMIT)
+    );
+    check_shared_results(&store, [ok0, ok1], &success, TaskStatus::Succeeded).await?;
+    check_shared_results(&store, [err0, err1], &failure, TaskStatus::Failed).await?;
+    remaining_waits(&store, [wait0, wait1]).await
+}
+
+/// Subscribers receive the matching publisher's result without ever running.
+#[cfg(feature = "postgres")]
+async fn check_shared_results(
+    store: &DbTaskStore,
+    subscribers: [crate::tasks::TaskId; 2],
+    publisher: &crate::tasks::TaskRecord,
+    status: crate::tasks::TaskStatus,
+) -> Result<(), String> {
+    assert_eq!(publisher.status, status);
+    for id in subscribers {
+        let row = stored(store, id).await?;
+        assert_eq!((row.status, row.attempts), (status, 0));
+        assert_eq!(row.last_result, publisher.last_result);
+    }
+    Ok(())
+}
+
+/// Only the unrelated topic remains after both terminal groups are delivered.
+#[cfg(feature = "postgres")]
+async fn remaining_waits(
+    store: &DbTaskStore,
+    unrelated: [crate::tasks::TaskId; 2],
+) -> Result<(), String> {
+    for id in unrelated {
+        assert_eq!(
+            stored(store, id).await?.status,
+            crate::tasks::TaskStatus::Suspended
+        );
+    }
+    let mut pool = store.pool.clone();
+    let remaining: i64 = pool
+        .fetch_scalar(db::Statement::raw(
+            "SELECT COUNT(*) FROM vyuh_tasks WHERE share_role=2 AND wait_topic IS NOT NULL",
+        ))
+        .await
+        .map_err(error)?;
+    assert_eq!(remaining, 2);
+    Ok(())
+}
+
+/// Interleaves three publishers' subscriber rows in one submission.
+#[cfg(feature = "postgres")]
+async fn seed_shared_groups(store: &DbTaskStore) -> Result<[crate::tasks::TaskId; 9], String> {
+    let writes = ["success", "failure", "unrelated"]
+        .into_iter()
+        .cycle()
+        .take(9)
+        .map(fixture::shared)
+        .collect::<Result<Vec<_>, _>>()?;
+    store
+        .store_tasks(writes)
+        .await
+        .map_err(error)?
+        .into_iter()
+        .map(|receipt| receipt.queued_id().map_err(error))
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| "missing shared receipts".into())
+}
+
+/// Retains the existing NOWAIT subscriber selection and rolls back the entire mutation.
+#[cfg(feature = "postgres")]
+async fn blocked_shared_flush(
+    store: &DbTaskStore,
+    subscriber: crate::tasks::TaskId,
+    commits: &[crate::tasks::TaskCommit],
+) -> Result<(), String> {
+    let mut lock = store.pool.begin().await.map_err(error)?;
+    let id: Uuid = lock
+        .fetch_scalar(
+            db::Statement::raw("SELECT id FROM vyuh_tasks WHERE id = $1 FOR UPDATE")
+                .bind(subscriber.into_uuid()),
+        )
+        .await
+        .map_err(error)?;
+    assert_eq!(id, subscriber.into_uuid());
+    let attempt = tokio::time::timeout(Duration::from_secs(2), store.commit_tasks(commits))
+        .await
+        .map_err(error)?;
+    assert!(
+        matches!(attempt, Err(crate::tasks::store::StoreFailure::BeforeCommit(ref error))
+        if super::super::shared::is_contention(error))
+    );
+    lock.rollback().await.map_err(error)
+}
+
+#[cfg(feature = "postgres")]
+async fn stored(
+    store: &DbTaskStore,
+    id: crate::tasks::TaskId,
+) -> Result<crate::tasks::TaskRecord, String> {
+    store
+        .get_task(id)
+        .await
+        .map_err(error)?
+        .ok_or("missing task".into())
+}
+
+/// Holds the publisher independently; the shared attempt must roll back instead of waiting.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn shared_nowait(store: &DbTaskStore) -> Result<(), String> {
+    let winner = store
+        .store_tasks(vec![fixture::shared("nowait")?])
+        .await
+        .map_err(error)?
+        .first()
+        .ok_or("missing winner receipt")?
+        .queued_id()
+        .map_err(error)?;
+    let mut lock = store.pool.begin().await.map_err(error)?;
+    #[cfg(feature = "postgres")]
+    let sql = "SELECT id FROM vyuh_tasks WHERE id = $1 FOR UPDATE";
+    #[cfg(feature = "mysql")]
+    let sql = "SELECT id FROM vyuh_tasks WHERE id = ? FOR UPDATE";
+    let locked: Uuid = lock
+        .fetch_scalar(db::Statement::raw(sql).bind(winner.into_uuid()))
+        .await
+        .map_err(error)?;
+    assert_eq!(locked, winner.into_uuid());
+    let follower = fixture::shared("nowait")?;
+    let id = follower.record.id;
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        store.store_tasks(vec![follower.clone()]),
+    )
+    .await
+    .map_err(error)?
+    .err()
+    .ok_or("shared attempt unexpectedly succeeded")?;
+    assert!(super::super::shared::is_contention(&error), "{error}");
+    lock.rollback().await.map_err(fixture::error)?;
+    assert!(store.get_task(id).await.map_err(fixture::error)?.is_none());
+    assert_eq!(
+        store
+            .store_tasks(vec![follower])
+            .await
+            .map_err(fixture::error)?
+            .first()
+            .and_then(|receipt| receipt.id()),
+        Some(id)
+    );
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]

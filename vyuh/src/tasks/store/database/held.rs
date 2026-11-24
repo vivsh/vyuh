@@ -203,7 +203,7 @@ pub(super) async fn children(
 }
 
 /// Restores atomic group rejection without touching prior key owners or emitting wakes.
-async fn delete_provisional(
+pub(super) async fn delete_provisional(
     tx: &mut db::DbTransaction<'_>,
     mut ids: Vec<Uuid>,
     batch: usize,
@@ -321,7 +321,10 @@ pub(super) fn finish(
     now: DateTime<Utc>,
 ) -> Result<(), TaskRuntimeError> {
     for row in rows {
-        if row.idempotency_key.is_none() || !matches!(row.status, 3 | 4) {
+        if row.idempotency_key.is_none()
+            || !matches!(row.status, 3 | 4)
+            || row.share_role == crate::tasks::models::ShareRole::Subscriber as i16
+        {
             continue;
         }
         match conf.idempotency_retention(&row.name, &row.lane_name)? {

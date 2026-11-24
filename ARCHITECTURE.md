@@ -44,6 +44,8 @@ implementation files does not alter that boundary.
 The task runtime uses independent claim, commit, and lane-coordination
 transactions. Cancellation intentionally does not interrupt running handlers.
 Poll-paced recovery reconciles uncertain claim and commit acknowledgements.
+On SQLite, a stale WAL snapshot (`SQLITE_BUSY_SNAPSHOT`) follows the same retry
+path in a fresh transaction rather than faulting the runner.
 Clustered heartbeats retire stale nodes; ordinary claims reclaim their abandoned
 running tasks. Standalone startup returns prior running claims under the
 deployment-enforced singleton contract. There is no runtime fingerprint
@@ -97,6 +99,11 @@ provisionals and publishes nothing. Final admission and hints use the accepted
 rows without rereading them. MySQL/MariaDB retain batched owner-table
 arbitration with the same public receipt and release semantics. Only explicit
 administrative reassignment moves unfinished tasks between lanes.
+Manual idempotency release is a separate bounded write by terminal task ID,
+not by key. PostgreSQL and SQLite clear the hold flag; MySQL/MariaDB delete
+only indexed owner rows with a terminal retention expiry. Memory removes
+matching holds under its existing mutex. Task history and the ordinary
+claim, submission, flush, and sweep paths are unchanged.
 An explicit task wake advances only future `ready_at` on an eligible ownerless
 Pending row. The store commits a single conditional write and reuses the
 existing wake hints. This changes neither the claim predicate nor suspension
@@ -128,6 +135,20 @@ read and write fields; cancellation batches additionally persist the flag.
 Database `cancel_tx` stages the same writes in the caller's transaction, extending
 only the lock lifetime to its commit or rollback. It does not admit local work
 or send the ordinary post-commit queue-eviction event.
+
+Shared keyed Work has an immutable store-owned role. Publishers run normally;
+subscriber rows never enter a queue and hold no idempotency reservation. The
+same private UUID topic is kept in existing wait storage until the publisher
+atomically completes its subscribers and delivers their workflow results. A
+late join copies a retained terminal result without a topic. Only the opt-in
+conflict and terminal publication paths use the added `NOWAIT` locking reads.
+Runner flush admission bounds subscriber and parent work by count and
+estimates shared result-copy bytes without reading subscriber rows. Any
+deferred publisher group stays intact in the existing FIFO output buffer.
+On PostgreSQL, terminal shared delivery binds one result per publisher and
+sets the subscriber result, status, and cleared topic in one update over
+the already-locked subscriber IDs. Parent delivery remains in the same
+transaction; ordinary outcomes issue no shared-delivery SQL.
 
 The store alone changes task lifecycle fields. Each output flush atomically
 writes outcomes and workflow changes; each claim independently establishes

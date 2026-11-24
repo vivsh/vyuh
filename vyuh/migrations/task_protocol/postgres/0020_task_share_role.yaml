@@ -1,0 +1,7 @@
+# Apply offline before any worker accepts shared Work.
+dependencies: [0019_task_topic_waits]
+atomic: true
+operations:
+  - type: add_column
+    table_name: vyuh_tasks
+    column: {name: share_role, type: smallint, nullable: false, default: "0"}

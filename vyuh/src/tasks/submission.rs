@@ -12,6 +12,7 @@ use crate::callables::DataBox;
 /// Submission policy evaluated before one or more task records are stored.
 #[derive(Default)]
 pub struct TaskOptions {
+    pub(crate) shared: bool,
     pub(crate) initial_delay: Option<Duration>,
     pub(crate) lane: Option<TaskLane>,
 }
@@ -34,6 +35,13 @@ impl TaskOptions {
     /// Delays the first execution attempt.
     pub const fn delay(mut self, delay: Duration) -> Self {
         self.initial_delay = Some(delay);
+        self
+    }
+
+    /// Shares the result of matching keyed Work instead of running it again.
+    /// A matching held publisher yields a new non-executing subscriber task.
+    pub const fn shared(mut self) -> Self {
+        self.shared = true;
         self
     }
 }
@@ -71,6 +79,7 @@ fn canonical_value(value: serde_json::Value) -> serde_json::Value {
 impl Clone for TaskOptions {
     fn clone(&self) -> Self {
         Self {
+            shared: self.shared,
             initial_delay: self.initial_delay,
             lane: self.lane,
         }
@@ -83,6 +92,7 @@ impl fmt::Debug for TaskOptions {
             .debug_struct("TaskOptions")
             .field("initial_delay", &self.initial_delay)
             .field("lane", &self.lane)
+            .field("shared", &self.shared)
             .finish_non_exhaustive()
     }
 }
@@ -156,10 +166,8 @@ pub(super) fn build_writes<T: Serialize + 'static>(
             .as_ref()
             .map(|_| fingerprint(name, &serialized, service))
             .transpose()?;
-        writes.push(TaskWrite {
-            record: build_record(name, serialized, key, fingerprint, lane, service.kind())?,
-            initial_delay: options.initial_delay,
-        });
+        let record = build_record(name, serialized, key, fingerprint, lane, service.kind())?;
+        writes.push(apply_options(record, options)?);
     }
     Ok(writes)
 }
@@ -170,6 +178,7 @@ pub(super) fn build_box_write(
     input: &DataBox,
     lane: TaskLane,
     config: &super::TaskConf,
+    options: &TaskOptions,
 ) -> Result<TaskWrite, TaskRuntimeError> {
     service.validate_box(input)?;
     let value = input
@@ -190,8 +199,8 @@ pub(super) fn build_box_write(
         .as_ref()
         .map(|_| fingerprint(service.name(), &serialized, service))
         .transpose()?;
-    Ok(TaskWrite {
-        record: build_record(
+    apply_options(
+        build_record(
             service.name(),
             serialized,
             key,
@@ -199,7 +208,25 @@ pub(super) fn build_box_write(
             lane,
             service.kind(),
         )?,
-        initial_delay: None,
+        options,
+    )
+}
+
+fn apply_options(
+    mut record: TaskRecord,
+    options: &TaskOptions,
+) -> Result<TaskWrite, TaskRuntimeError> {
+    if options.shared {
+        if record.kind != super::TaskKind::Work || record.idempotency_key.is_none() {
+            return Err(TaskRuntimeError::InvalidOptions(
+                "sharing requires keyed Work".into(),
+            ));
+        }
+        record.share_role = super::models::ShareRole::Publisher;
+    }
+    Ok(TaskWrite {
+        record,
+        initial_delay: options.initial_delay,
     })
 }
 
@@ -228,6 +255,7 @@ pub(super) fn build_record(
 ) -> Result<TaskRecord, TaskRuntimeError> {
     let now = chrono::Utc::now();
     Ok(TaskRecord {
+        share_role: Default::default(),
         id: TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,

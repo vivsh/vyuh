@@ -1168,6 +1168,55 @@ terminal. With no positive retention, that same commit releases the key. Positiv
 retention is a minimum: periodic maintenance releases the hold after the deadline.
 Submitting again does not release an overdue hold or delete task history.
 
+### Release retained keys early
+
+`tasks.release_idempotency(&task_ids).await?` explicitly overrides retention
+for terminal tasks. It returns the number of holds removed, up to 10,000 input
+IDs per call. Missing IDs, duplicates, nonterminal tasks, and tasks that no
+longer hold a key do not affect the count. An empty slice returns zero.
+
+Release keeps the task, its result, and its original retention deadline for
+inspection. Reusing a released key creates a new task; repeating release by the
+old task ID cannot affect the new owner. For shared Work, existing subscribers
+keep their results, but future submissions no longer join the released publisher.
+
+### Share the result of keyed Work
+
+Use `TaskOptions::new().shared()` with `submit_with`, `submit_many_with`,
+or `FlowState::spawn_with`. In an ordered `all`, opt in separately for each child:
+
+```rust,ignore
+FlowState::all(
+    FlowAllIn::new()
+        .with_options(render, TaskOptions::new().shared())
+        .with(load_preferences),
+    checkpoint,
+)?
+```
+
+The first shared request for a free key executes normally. A matching request
+gets a separate durable task ID and the same persisted result, without another
+handler invocation. It waits while the publisher is live, or is written
+terminal immediately if the publisher has finished and still holds its key.
+The publisher's lane and schedule are not changed. Same-key different inputs,
+an ordinary key holder, and a full sharing group do not accept a subscriber.
+At most 32 active subscribers may wait on one publisher. A contended shared
+submission can return a serialization conflict; that attempt rolled back and can be
+retried, unlike an unknown commit acknowledgement.
+
+Sharing uses private task-ID topics. Public `wait`, `publish`, and `resume`
+cannot resolve these subscribers. Cancelling a subscriber leaves the publisher
+and its other subscribers alone. Cancelling the publisher gives all remaining
+subscribers its terminal failure. Output delivery and child/all readiness are
+atomic with the terminal write. Large results can spread separate publisher
+groups across several poll intervals; each publisher and its subscribers still
+commit together. On SQLite, these writes can also delay work in other lanes.
+For large artifacts, return a small reference to the stored artifact instead
+of copying the artifact into every task result.
+
+Sharing does not make external effects exactly once: the publisher follows the
+normal retry and recovery rules.
+
 A single-item Work handler can opt in to `IdempotencyKey` before its `Data<T>`
 argument. The extractor works with `#[bundles::work]` and direct `bundles::work`
 registration:

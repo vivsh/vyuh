@@ -88,6 +88,7 @@ fn retirement_cutoff() {
 
 fn commit(task: &TaskRecord) -> Result<TaskCommit, TaskRuntimeError> {
     Ok(TaskCommit::Outcome {
+        publisher: false,
         node_id: task.node_id.ok_or_else(missing)?,
         task_id: task.id,
         attempts: task.attempts,
@@ -332,6 +333,7 @@ fn missing() -> TaskRuntimeError {
 fn record(node: uuid::Uuid) -> TaskRecord {
     let now = chrono::Utc::now();
     TaskRecord {
+        share_role: Default::default(),
         id: TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,

@@ -49,7 +49,7 @@ fn mixed_inputs_preserve_identity() -> Result<(), TaskRuntimeError> {
         children
             .inputs
             .iter()
-            .map(|(_, lane)| *lane)
+            .map(|(_, options)| options.lane)
             .collect::<Vec<_>>(),
         [None, Some(alternate), Some(alternate)]
     );
@@ -65,7 +65,7 @@ fn tuple_arities_preserve_order() {
             let children = FlowAllIn::from(($(Image($value),)+));
             let actual: Vec<_> = children.inputs.iter()
                 .filter_map(|(input, _)| input.downcast_ref::<Image>()).map(|item| item.0).collect();
-            assert!(children.inputs.iter().all(|(_, lane)| lane.is_none()));
+            assert!(children.inputs.iter().all(|(_, options)| options.lane.is_none()));
             assert_eq!(actual, vec![$($value),+]);
         }};
     }

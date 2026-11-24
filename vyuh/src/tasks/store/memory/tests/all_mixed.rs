@@ -70,6 +70,7 @@ async fn next(store: &impl TaskStore, node: uuid::Uuid) -> Result<Vec<TaskRecord
 /// Derives fenced outputs from the committed immutable snapshot, including its original lane.
 fn output(task: &TaskRecord, outcome: TaskOutcome) -> Result<TaskCommit, TaskRuntimeError> {
     Ok(TaskCommit::Outcome {
+        publisher: false,
         node_id: task.node_id.ok_or_else(missing)?,
         task_id: task.id,
         attempts: task.attempts,

@@ -260,6 +260,7 @@ async fn flow_rate_exemption() -> Result<(), TestError> {
 /// Creates the normal fenced output without exposing a task mutation handle.
 fn outcome(task: &TaskRecord, outcome: TaskOutcome) -> Result<TaskCommit, TaskRuntimeError> {
     Ok(TaskCommit::Outcome {
+        publisher: false,
         task_id: task.id,
         node_id: task.node_id.ok_or_else(missing)?,
         attempts: task.attempts,

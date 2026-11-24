@@ -49,10 +49,15 @@ impl DbTaskStore {
     ) -> Result<TaskPoll, StoreFailure<TaskPoll>> {
         let mut transaction = self.pool.begin().await?;
         let conf = &self.runtime_conf;
-        let mut deliveries = Vec::new();
+        let mut deliveries = super::workflow::Deliveries::default();
         let (now, mut poll, new_idle) = self
             .poll_claims(&mut transaction, runner_id, claims, conf, &mut deliveries)
             .await?;
+        for lane in &mut poll.lanes {
+            if deliveries.deferred.contains(&lane.lane) {
+                lane.saturated = true;
+            }
+        }
         let wake = super::workflow::finalize_workflow(
             &mut transaction,
             Vec::new(),
@@ -82,7 +87,7 @@ impl DbTaskStore {
         node: &uuid::Uuid,
         claims: &[LaneClaim],
         conf: &TaskStoreConf,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
     ) -> Result<(DateTime<Utc>, TaskPoll, Vec<crate::tasks::TaskLane>), TaskRuntimeError> {
         #[cfg(feature = "postgres")]
         if let Some(claim) = eligible(conf, claims) {
@@ -116,7 +121,7 @@ impl DbTaskStore {
         claims: &[LaneClaim],
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         mut preloaded: Option<(Vec<TaskProbeRow>, Vec<TaskRow>, Option<DateTime<Utc>>)>,
     ) -> Result<(TaskPoll, Vec<crate::tasks::TaskLane>), TaskRuntimeError> {
         let mut new_idle = Vec::new();
@@ -188,7 +193,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         if eligible(turn.conf, std::slice::from_ref(turn.claim)).is_some() {
@@ -220,7 +225,7 @@ impl DbTaskStore {
         &self,
         transaction: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let limit = turn
@@ -278,10 +283,30 @@ impl DbTaskStore {
         turn: &ClaimTurn<'_>,
         selected: Vec<TaskRow>,
         permits: usize,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<(Vec<TaskRecord>, usize), TaskRuntimeError> {
         let (mut exhausted, mut candidates) = split_exhausted(selected, turn.retry)?;
+        let weight = crate::tasks::store::sharing::PUBLISH_WEIGHT;
+        let mut available = (self
+            .commit_batch_size
+            .max(turn.conf.max_all_children.saturating_add(1))
+            .max(weight)
+            / weight)
+            .saturating_sub(deliveries.publishers.len());
+        exhausted.retain(|row| {
+            if row.share_role != crate::tasks::models::ShareRole::Publisher as i16 {
+                return true;
+            }
+            if available == 0 {
+                if !deliveries.deferred.contains(&turn.claim.lane) {
+                    deliveries.deferred.push(turn.claim.lane);
+                }
+                return false;
+            }
+            available -= 1;
+            true
+        });
         self.fail_exhausted(tx, &mut exhausted, turn.conf, turn.now)
             .await?;
         for row in &exhausted {
@@ -316,7 +341,7 @@ impl DbTaskStore {
         probe: Vec<TaskProbeRow>,
         selected: Vec<TaskRow>,
         deadline: Option<DateTime<Utc>>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let limit = turn

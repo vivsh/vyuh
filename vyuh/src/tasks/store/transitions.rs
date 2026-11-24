@@ -109,18 +109,26 @@ pub(crate) fn validate_turn(
     batch: usize,
     maximum: usize,
 ) -> Result<(), TaskRuntimeError> {
-    if !commits
-        .iter()
-        .any(|commit| matches!(commit.outcome(), Some(TaskOutcome::All { .. })))
-    {
+    if !commits.iter().any(|commit| {
+        commit.publisher() || matches!(commit.outcome(), Some(TaskOutcome::All { .. }))
+    }) {
         return Ok(());
     }
-    let total = commits
-        .iter()
-        .try_fold(0usize, |sum, commit| sum.checked_add(commit.weight()));
-    if commits.len() > batch || total.is_none_or(|sum| sum > batch.max(maximum.saturating_add(1))) {
+    let (weight, fanout_bytes) =
+        commits
+            .iter()
+            .fold((0usize, 0usize), |(weight, bytes), commit| {
+                let (cost, fanout) = commit.flush_cost();
+                (weight.saturating_add(cost), bytes.saturating_add(fanout))
+            });
+    let mut budget = batch.max(maximum.saturating_add(1));
+    if commits.first().is_some_and(TaskCommit::publisher) {
+        budget = budget.max(super::sharing::PUBLISH_WEIGHT);
+    }
+    if commits.len() > batch || weight > budget || fanout_bytes > super::sharing::FLUSH_FANOUT_BYTES
+    {
         return Err(TaskRuntimeError::InvalidOptions(
-            "Expanded all flush exceeds its budget".into(),
+            "Expanded task flush exceeds its budget".into(),
         ));
     }
     Ok(())

@@ -37,7 +37,7 @@ impl DbTaskStore {
         lane: &TaskLaneConf,
         conf: &crate::tasks::TaskStoreConf,
         now: DateTime<Utc>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         new_idle: &mut Vec<crate::tasks::TaskLane>,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
@@ -170,7 +170,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         mut row: TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let phase = LaneOwnerPhase::from_i16(row.phase)?;
@@ -201,7 +201,7 @@ impl DbTaskStore {
         row: &mut TaskLaneLockRow,
         candidates: Vec<TaskProbeRow>,
         turn: &OwnerTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let mut phase = LaneOwnerPhase::from_i16(row.phase)?;
@@ -313,7 +313,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         row: &mut TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         if row.hook_retry_at.is_some_and(|retry| retry > turn.now) {
@@ -351,7 +351,7 @@ impl DbTaskStore {
         transaction: &mut db::DbTransaction<'_>,
         row: &TaskLaneLockRow,
         turn: &OwnerTurn<'_>,
-        deliveries: &mut Vec<(crate::tasks::TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
         waits: &mut Vec<(crate::tasks::TaskId, String, i32)>,
     ) -> Result<LanePoll, TaskRuntimeError> {
         let lock = turn

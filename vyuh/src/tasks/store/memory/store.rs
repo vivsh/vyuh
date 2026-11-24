@@ -15,6 +15,7 @@ use crate::tasks::{
     TaskId, TaskKind, TaskOutcome, TaskPoll, TaskReceipt, TaskRecord, TaskRetry, TaskRuntimeError,
     TaskScheduleSnapshot, TaskStatus, TaskStore, TaskStoreConf, TaskWrite,
 };
+use crate::tasks::{models::ShareRole, store::sharing};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 #[derive(Clone)]
@@ -34,7 +35,7 @@ pub(super) struct MemoryState {
     pub(super) schedules: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub(super) lane_locks: HashMap<String, MemoryLaneLock>,
     pub(super) waits: HashMap<TaskId, workflow::TaskWait>,
-    pub(super) topic_waits: HashMap<TaskId, String>,
+    pub(super) topic_waits: HashMap<TaskId, Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -311,11 +312,13 @@ impl TaskStore for MemoryTaskStore {
         let now = chrono::Utc::now();
         let mut staged = Vec::with_capacity(writes.len());
         let mut receipts = Vec::with_capacity(writes.len());
+        let mut topics = Vec::new();
         for write in writes {
-            let receipt = stage_write(&state, &mut staged, write, now)?;
+            let receipt = stage_write(&state, &mut staged, write, now, &mut topics)?;
             receipts.push(receipt);
         }
         append_tasks(&mut state, staged);
+        workflow::install_topics(&mut state, topics);
         Ok(receipts)
     }
 
@@ -363,7 +366,7 @@ impl TaskStore for MemoryTaskStore {
         validate_write_lanes(&state, std::slice::from_ref(&scheduled.write))?;
         let now = chrono::Utc::now();
         let mut staged = Vec::with_capacity(1);
-        let receipt = stage_write(&state, &mut staged, scheduled.write, now)?;
+        let receipt = stage_write(&state, &mut staged, scheduled.write, now, &mut Vec::new())?;
         append_tasks(&mut state, staged);
         state
             .schedules
@@ -408,6 +411,29 @@ impl TaskStore for MemoryTaskStore {
         }
         task.ready_at = Some(now);
         Ok(true)
+    }
+
+    async fn release_idempotency(&self, ids: &[TaskId]) -> Result<u64, TaskRuntimeError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let ids: std::collections::HashSet<_> = ids.iter().copied().collect();
+        let mut state = self.state.lock().await;
+        let MemoryState {
+            tasks, key_holds, ..
+        } = &mut *state;
+        let mut released = 0;
+        for task in tasks {
+            if ids.contains(&task.id)
+                && matches!(task.status, TaskStatus::Succeeded | TaskStatus::Failed)
+                && let Some(key) = record_key(task)
+                && key_holds.get(&key) == Some(&task.id)
+            {
+                key_holds.remove(&key);
+                released += 1;
+            }
+        }
+        Ok(released)
     }
 
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
@@ -558,7 +584,7 @@ pub(super) fn commit_outcomes_state(
         Vec<TaskRecord>,
         Vec<(TaskId, String)>,
         Vec<(TaskId, workflow::TaskWait)>,
-        Vec<(TaskId, Option<String>)>,
+        Vec<(TaskId, Option<Vec<u8>>)>,
     ),
     TaskRuntimeError,
 > {
@@ -866,6 +892,7 @@ pub(super) fn stage_write(
     staged: &mut Vec<TaskRecord>,
     mut write: TaskWrite,
     now: chrono::DateTime<chrono::Utc>,
+    topics: &mut Vec<(TaskId, Option<Vec<u8>>)>,
 ) -> Result<TaskReceipt, TaskRuntimeError> {
     write.record.created_at = now;
     write.record.updated_at = now;
@@ -881,12 +908,54 @@ pub(super) fn stage_write(
     {
         return Err(TaskRuntimeError::AlreadyExists(write.record.id.to_string()));
     }
-    if key_held(state, staged, &write.record) {
+    if key_held(state, staged, &write.record)
+        && (write.record.share_role != ShareRole::Publisher
+            || !join_publisher(state, staged, &mut write.record, now, topics)?)
+    {
         return Ok(TaskReceipt::KeyHeld);
     }
     let id = write.record.id;
     staged.push(write.record);
     Ok(TaskReceipt::Queued(id))
+}
+
+/// Resolves a held publisher and certifies the fan-out bound under the store mutex.
+fn join_publisher(
+    state: &MemoryState,
+    staged: &[TaskRecord],
+    record: &mut TaskRecord,
+    now: chrono::DateTime<chrono::Utc>,
+    topics: &mut Vec<(TaskId, Option<Vec<u8>>)>,
+) -> Result<bool, TaskRuntimeError> {
+    let Some(key) = record_key(record) else {
+        return Ok(false);
+    };
+    let owner = if let Some(id) = state.key_holds.get(&key) {
+        state.tasks.iter().find(|task| &task.id == id)
+    } else {
+        staged
+            .iter()
+            .find(|task| record_key(task).as_ref() == Some(&key))
+    };
+    let Some(owner) = owner.filter(|owner| sharing::compatible(record, owner)) else {
+        return Ok(false);
+    };
+    if let Some(topic) = sharing::subscribe(record, owner, now)? {
+        let live = state
+            .topic_waits
+            .values()
+            .filter(|value| **value == topic)
+            .count();
+        let pending = topics
+            .iter()
+            .filter(|(_, value)| value.as_ref() == Some(&topic))
+            .count();
+        if live + pending >= sharing::FOLLOWER_LIMIT {
+            return Ok(false);
+        }
+        topics.push((record.id, Some(topic)));
+    }
+    Ok(true)
 }
 
 /// Checks store-owned holds and earlier successful inputs in the uncommitted batch.
@@ -895,12 +964,17 @@ pub(super) fn key_held(state: &MemoryState, staged: &[TaskRecord], record: &Task
         return false;
     };
     state.key_holds.contains_key(&key)
-        || staged
-            .iter()
-            .any(|task| task.name == key.0 && task.idempotency_key.as_ref() == Some(&key.1))
+        || staged.iter().any(|task| {
+            task.share_role != ShareRole::Subscriber
+                && task.name == key.0
+                && task.idempotency_key.as_ref() == Some(&key.1)
+        })
 }
 
 fn record_key(task: &TaskRecord) -> Option<(String, String)> {
+    if task.share_role == ShareRole::Subscriber {
+        return None;
+    }
     task.idempotency_key
         .as_ref()
         .map(|key| (task.name.clone(), key.clone()))

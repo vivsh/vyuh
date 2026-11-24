@@ -8,6 +8,10 @@ use futures::FutureExt;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 
+#[cfg(all(test, feature = "sqlite"))]
+#[path = "tests/sqlite_retry.rs"]
+mod sqlite_retry_tests;
+
 pub(super) struct InFlight {
     pub(super) request: Arc<DbRequest>,
     pub(super) phase: DbPhase,
@@ -311,7 +315,7 @@ fn retryable(_store: &impl TaskStore, error: &TaskRuntimeError) -> bool {
             | "cancelled"
             | "database_busy"
             | "database_locked" => true,
-            #[cfg(feature = "mysql")]
+            #[cfg(any(feature = "mysql", feature = "sqlite"))]
             "database_error" => _store.retryable_conflict(error),
             _ => false,
         },

@@ -1,5 +1,12 @@
 # Coordinated task upgrades
 
+## Shared keyed Work
+
+Apply `0020_task_share_role` after `0019_task_topic_waits` with task workers
+and writers stopped. Existing rows default to ordinary Work/Flow behavior.
+No index is rebuilt and waits stay in their existing layout. Do not run old
+workers after enabling sharing: they cannot deliver a publisher's subscribers.
+
 ## Topic waits
 
 Stop task workers and writers, then append `0019_task_topic_waits` to the

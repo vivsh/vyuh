@@ -69,6 +69,7 @@ async fn returned_claim_rejects_stale() -> Result<(), TestError> {
         .claim_tasks(&runner.node_id, &claims)
         .await?;
     let commits = [TaskCommit::Outcome {
+        publisher: false,
         node_id: runner.node_id,
         attempts: 1,
         task_id: id,
@@ -396,6 +397,7 @@ impl TaskStore for Store {
     forward!(store_scheduled(write: ScheduledTaskWrite) -> Option<TaskReceipt>);
     forward!(reassign_lane(from: &str, to: &str) -> u64);
     forward!(wake(id: TaskId) -> bool);
+    forward!(release_idempotency(ids: &[TaskId]) -> u64);
     forward!(resume(id: TaskId, input: String) -> bool);
     forward!(list_tasks(filter: TaskFilter) -> crate::routes::Page<TaskRecord>);
     forward!(get_task(id: TaskId) -> Option<TaskRecord>);

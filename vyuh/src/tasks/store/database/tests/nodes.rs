@@ -94,6 +94,7 @@ async fn fenced_outputs(
     task: &crate::tasks::TaskRecord,
 ) -> Result<(), String> {
     let mut commit = crate::tasks::TaskCommit::Outcome {
+        publisher: false,
         node_id: old,
         task_id: original.id,
         lane: crate::tasks::DEFAULT_TASK_LANE,
@@ -321,6 +322,7 @@ async fn measured_cycle(
         .and_then(|lane| lane.tasks.first())
         .ok_or("missing claim")?;
     let commit = crate::tasks::TaskCommit::Outcome {
+        publisher: false,
         node_id: node,
         task_id: task.id,
         attempts: task.attempts,

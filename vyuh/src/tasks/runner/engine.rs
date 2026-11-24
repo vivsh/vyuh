@@ -448,7 +448,17 @@ impl<S: TaskStore + Send + Sync + 'static> TaskRunner<S> {
         let budget = self
             .commit_batch_size
             .max(self.registry.config.all_limit().saturating_add(1));
+        let budget = if self
+            .output_buffer
+            .front()
+            .is_some_and(TaskCommit::publisher)
+        {
+            budget.max(crate::tasks::store::sharing::PUBLISH_WEIGHT)
+        } else {
+            budget
+        };
         let mut weight = 0usize;
+        let mut fanout_bytes = 0usize;
         let count = self
             .output_buffer
             .iter()
@@ -460,8 +470,10 @@ impl<S: TaskStore + Send + Sync + 'static> TaskRunner<S> {
                 {
                     return false;
                 }
-                weight = weight.saturating_add(commit.weight());
-                weight <= budget
+                let (cost, bytes) = commit.flush_cost();
+                weight = weight.saturating_add(cost);
+                fanout_bytes += bytes;
+                weight <= budget && fanout_bytes <= crate::tasks::store::sharing::FLUSH_FANOUT_BYTES
             })
             .count();
         if count == 0 {

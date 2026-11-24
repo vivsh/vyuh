@@ -30,6 +30,7 @@ async fn next(store: &MemoryTaskStore, node: uuid::Uuid) -> Result<TaskRecord, T
 
 fn output(task: &TaskRecord, outcome: TaskOutcome) -> Result<TaskCommit, TaskRuntimeError> {
     Ok(TaskCommit::Outcome {
+        publisher: false,
         node_id: task.node_id.ok_or_else(missing)?,
         attempts: task.attempts,
         task_id: task.id,

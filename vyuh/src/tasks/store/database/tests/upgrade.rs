@@ -136,7 +136,9 @@ pub(super) fn before_topics() -> Result<db::Schema, String> {
     let mut schema = task_schema().map_err(|e| e.to_string())?;
     schema.tables.remove("vyuh_task_waits");
     let tasks = schema.tables.get_mut("vyuh_tasks").ok_or("missing tasks")?;
-    tasks.columns.retain(|column| column.name != "wait_topic");
+    tasks
+        .columns
+        .retain(|column| !matches!(column.name.as_str(), "wait_topic" | "share_role"));
     tasks
         .indexes
         .retain(|index| index.name != "idx_vyuh_tasks_wait_topic");
@@ -168,11 +170,27 @@ fn topic_migration() -> Result<(Migration, Migration), String> {
     Ok((previous, next))
 }
 
-/// Ensures the new ledger entry replays exactly to the desired schema.
+fn sharing_migration() -> Result<Migration, String> {
+    #[cfg(feature = "postgres")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/postgres/0020_task_share_role.yaml");
+    #[cfg(feature = "mysql")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/mysql/0020_task_share_role.yaml");
+    #[cfg(feature = "sqlite")]
+    let yaml =
+        include_str!("../../../../../migrations/task_protocol/sqlite/0020_task_share_role.yaml");
+    let mut migration = Migration::from_yaml_str(yaml).map_err(|e| e.to_string())?;
+    migration.id = "0020_task_share_role".into();
+    Ok(migration)
+}
+
+/// Ensures topic and share-role entries replay exactly to the desired schema.
 #[test]
 fn publication_upgrade() -> Result<(), String> {
     let (previous, next) = topic_migration()?;
-    let planner = OfflinePlanner::new(dialect()).from_migrations(vec![previous, next]);
+    let planner =
+        OfflinePlanner::new(dialect()).from_migrations(vec![previous, next, sharing_migration()?]);
     let desired = task_schema().map_err(|e| e.to_string())?;
     if let Some(diff) = planner
         .make_migration(desired, &[])
@@ -199,13 +217,14 @@ async fn publication_upgrade_keeps_suspension() -> Result<(), String> {
     .execute(&pool)
     .await
     .map_err(|e| e.to_string())?;
-    apply(&pool, &[old], &next).await?;
-    let actual: (i16, String, Option<Vec<u8>>) =
-        db::sqlx::query_as("SELECT status, state, wait_topic FROM vyuh_tasks")
+    apply(&pool, std::slice::from_ref(&old), &next).await?;
+    apply(&pool, &[old, next], &sharing_migration()?).await?;
+    let actual: (i16, String, Option<Vec<u8>>, i16) =
+        db::sqlx::query_as("SELECT status, state, wait_topic, share_role FROM vyuh_tasks")
             .fetch_one(&pool)
             .await
             .map_err(|e| e.to_string())?;
-    assert_eq!(actual, (2, "42".into(), None));
+    assert_eq!(actual, (2, "42".into(), None, 0));
     Ok(())
 }
 

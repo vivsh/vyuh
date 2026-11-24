@@ -34,17 +34,20 @@ async fn due_key_requires_sweep() -> Result<(), String> {
         .ok_or("missing retained expiry")?;
     let mut staged = Vec::new();
     assert_eq!(
-        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        stage_write(&state, &mut staged, make(), expiry, &mut Vec::new())
+            .map_err(|e| e.to_string())?,
         TaskReceipt::KeyHeld
     );
     sweep_keys(&mut state, expiry - chrono::Duration::milliseconds(1));
     assert_eq!(
-        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        stage_write(&state, &mut staged, make(), expiry, &mut Vec::new())
+            .map_err(|e| e.to_string())?,
         TaskReceipt::KeyHeld
     );
     sweep_keys(&mut state, expiry);
     assert!(matches!(
-        stage_write(&state, &mut staged, make(), expiry).map_err(|e| e.to_string())?,
+        stage_write(&state, &mut staged, make(), expiry, &mut Vec::new())
+            .map_err(|e| e.to_string())?,
         TaskReceipt::Queued(_)
     ));
     assert_eq!(
@@ -109,6 +112,7 @@ pub(crate) mod delivery;
 pub(crate) fn record() -> TaskRecord {
     let now = chrono::Utc::now();
     TaskRecord {
+        share_role: Default::default(),
         id: TaskId::new(uuid::Uuid::now_v7()),
         parent_id: None,
         root_id: None,
@@ -176,6 +180,7 @@ pub(crate) fn claim() -> LaneClaim {
 
 pub(crate) fn commit(id: TaskId, outcome: TaskOutcome) -> TaskCommit {
     TaskCommit::Outcome {
+        publisher: false,
         node_id: uuid::Uuid::from_u128(1),
         attempts: 1,
         task_id: id,

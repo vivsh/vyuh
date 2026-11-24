@@ -155,6 +155,8 @@ impl TaskPoll {
 pub enum TaskCommit {
     /// An execution output requires its original node, attempt and lane fencing.
     Outcome {
+        /// Immutable admission hint; the store verifies authoritative role before publishing.
+        publisher: bool,
         /// Node which owns the claimed execution.
         node_id: uuid::Uuid,
         /// Lifetime attempt identifying the immutable claimed execution.
@@ -235,8 +237,30 @@ impl TaskCommit {
         }
     }
 
-    pub(crate) fn weight(&self) -> usize {
-        self.outcome().map_or(1, super::transitions::weight)
+    /// Returns expanded work and estimated subscriber result bytes for flush admission.
+    pub(crate) fn flush_cost(&self) -> (usize, usize) {
+        match self {
+            Self::Outcome {
+                publisher: true,
+                outcome,
+                ..
+            } => (
+                super::sharing::PUBLISH_WEIGHT,
+                super::sharing::fanout_bytes(outcome),
+            ),
+            Self::Outcome { outcome, .. } => (super::transitions::weight(outcome), 0),
+            Self::Cancel { .. } => (1, 0),
+        }
+    }
+
+    pub(crate) fn publisher(&self) -> bool {
+        matches!(
+            self,
+            Self::Outcome {
+                publisher: true,
+                ..
+            }
+        )
     }
 }
 
@@ -332,7 +356,7 @@ impl TaskStoreConf {
 #[allow(dead_code)]
 pub(crate) trait TaskStore {
     /// Recognizes a native conflict not covered by the shared database error categories.
-    #[cfg(feature = "mysql")]
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
     fn retryable_conflict(&self, _error: &crate::db::DbError) -> bool {
         false
     }
@@ -461,6 +485,12 @@ pub(crate) trait TaskStore {
     /// Advances only the readiness of a future, ownerless Pending task.
     fn wake(&self, id: TaskId) -> impl Future<Output = Result<bool, TaskRuntimeError>> + Send + '_;
 
+    /// Releases holds still owned by the requested terminal tasks.
+    fn release_idempotency<'a>(
+        &'a self,
+        ids: &'a [TaskId],
+    ) -> impl Future<Output = Result<u64, TaskRuntimeError>> + Send + 'a;
+
     /// Consumes one bounded set of active topic waits atomically.
     fn publish<'a>(
         &'a self,
@@ -496,7 +526,7 @@ pub(crate) trait TaskStore {
 }
 
 impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
-    #[cfg(feature = "mysql")]
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
     fn retryable_conflict(&self, error: &crate::db::DbError) -> bool {
         (**self).retryable_conflict(error)
     }
@@ -617,6 +647,10 @@ impl<T: TaskStore + Send + Sync + ?Sized> TaskStore for Arc<T> {
 
     async fn wake(&self, id: TaskId) -> Result<bool, TaskRuntimeError> {
         (**self).wake(id).await
+    }
+
+    async fn release_idempotency(&self, ids: &[TaskId]) -> Result<u64, TaskRuntimeError> {
+        (**self).release_idempotency(ids).await
     }
 
     async fn publish(

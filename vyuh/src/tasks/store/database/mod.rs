@@ -16,6 +16,7 @@ mod queries;
 mod recovery;
 #[cfg(any(feature = "migrations", all(test, feature = "sqlite")))]
 pub(crate) mod schema;
+mod shared;
 mod store;
 mod submit;
 mod workflow;

@@ -17,6 +17,7 @@ use super::model::TaskRow;
 use crate::tasks::TaskReceipt;
 
 use super::commit::lane_retry;
+use super::shared;
 #[cfg(feature = "mysql")]
 use super::submit::{
     PreparedWrite, load_key_owners, prepare_writes, resolve_owner, upsert_key_owners,
@@ -54,6 +55,7 @@ pub(super) async fn prepare_children(
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
     batch_size: usize,
+    deliveries: &mut Deliveries,
 ) -> Result<(Vec<TaskRow>, HashSet<TaskId>, Vec<self::WaitWrite>), TaskRuntimeError> {
     if !commands.values().any(|commit| {
         matches!(
@@ -66,6 +68,14 @@ pub(super) async fn prepare_children(
     let (writes, mut conflicts, mut waits) = prepare_groups(rows, commands, conf, now)?;
     if writes.is_empty() {
         return Ok((Vec::new(), conflicts, waits));
+    }
+    if shared::requested(&writes) {
+        let resolved = shared::resolve(tx, writes, now).await?;
+        conflicts.extend(resolved.rejected);
+        waits.retain(|wait| !conflicts.contains(&TaskId::new(wait.id)));
+        stage_subscribers(tx, &resolved.rows, &mut waits, deliveries, now).await?;
+        deliveries.topics = resolved.topics;
+        return Ok((resolved.rows, conflicts, waits));
     }
     #[cfg(feature = "mysql")]
     let (mut children, found) =
@@ -225,18 +235,72 @@ fn resolve_children(
     Ok((children, conflicts))
 }
 
+/// Operation-local accepted terminal outcomes and private memberships awaiting installation.
+#[derive(Default)]
+pub(super) struct Deliveries {
+    pub(super) parents: Vec<(TaskId, String)>,
+    pub(super) publishers: Vec<(TaskId, i16, String)>,
+    pub(super) deferred: Vec<crate::tasks::TaskLane>,
+    topics: shared::Topics,
+}
+
+/// A late terminal subscriber occupies an all slot without increasing its unfinished count.
+async fn stage_subscribers(
+    tx: &mut db::DbTransaction<'_>,
+    children: &[TaskRow],
+    waits: &mut [WaitWrite],
+    deliveries: &mut Deliveries,
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
+    let mut subscribers = Vec::new();
+    let waiting: HashMap<_, _> = waits
+        .iter()
+        .enumerate()
+        .map(|(index, wait)| (wait.id, index))
+        .collect();
+    for child in children.iter().filter(|child| child.share_role == 2) {
+        subscribers.push(child.clone());
+        if matches!(child.status, 3 | 4) {
+            if let Some(index) = child.parent_id.and_then(|id| waiting.get(&id))
+                && let Some(wait) = waits.get_mut(*index)
+            {
+                wait.remaining_completions -= 1;
+                if wait.remaining_completions == 0 {
+                    wait.status = TaskStatus::Pending.as_i16();
+                    wait.ready_at = Some(now);
+                }
+            } else {
+                queue_delivery(child, deliveries)?;
+            }
+        }
+    }
+    shared::insert(tx, &subscribers, false).await?;
+    Ok(())
+}
+
 /// Encodes a terminal accepted child transition for delivery after claim selection.
 pub(super) fn queue_delivery(
     row: &TaskRow,
-    deliveries: &mut Vec<(TaskId, String)>,
+    deliveries: &mut Deliveries,
 ) -> Result<(), TaskRuntimeError> {
+    if row.share_role == 1 && matches!(row.status, 3 | 4) {
+        let result = row
+            .last_result
+            .clone()
+            .ok_or_else(|| TaskRuntimeError::TaskExecutionError("Shared result missing".into()))?;
+        deliveries
+            .publishers
+            .push((TaskId::new(row.id), row.status, result));
+    }
     if let Some(parent) = row.parent_id
         && let Some(result) = crate::tasks::store::transitions::terminal_result(
             TaskStatus::from_i16(row.status)?,
             row.last_result.as_deref(),
         )?
     {
-        deliveries.push((TaskId::new(parent), result.to_owned()));
+        deliveries
+            .parents
+            .push((TaskId::new(parent), result.to_owned()));
     }
     Ok(())
 }
@@ -245,7 +309,7 @@ pub(super) fn queue_delivery(
 pub(super) async fn finalize_workflow(
     tx: &mut db::DbTransaction<'_>,
     children: Vec<TaskRow>,
-    deliveries: Vec<(TaskId, String)>,
+    deliveries: Deliveries,
     waits: &[self::WaitWrite],
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
@@ -271,7 +335,7 @@ pub(super) async fn finalize_workflow(
 pub(super) async fn finalize_admitted(
     tx: &mut db::DbTransaction<'_>,
     children: Vec<TaskRow>,
-    deliveries: Vec<(TaskId, String)>,
+    mut deliveries: Deliveries,
     waits: &[self::WaitWrite],
     conf: &crate::tasks::TaskStoreConf,
     now: DateTime<Utc>,
@@ -287,19 +351,34 @@ pub(super) async fn finalize_admitted(
     self::install(tx, waits, batch_size, &mut lanes).await?;
     #[cfg(any(feature = "postgres", feature = "sqlite"))]
     let children = super::held::finish_children(tx, children, delivery, now).await?;
+    #[cfg(feature = "mysql")]
+    let children = {
+        let mut children = children;
+        children.retain(|child| child.share_role != 2);
+        children
+    };
     if !children.is_empty() {
         #[cfg(feature = "postgres")]
         super::notify::insert(tx, &children, batch_size, delivery.map(|(node, _)| node)).await?;
         #[cfg(not(feature = "postgres"))]
-        db::from(DbTaskStore::table())
-            .insert_many(&children)
-            .batch_size(batch_size)
-            .exec(&mut *tx)
-            .await?;
+        {
+            if children.iter().any(|child| child.share_role != 0) {
+                shared::insert(tx, &children, false).await?;
+            } else {
+                db::from(DbTaskStore::table())
+                    .insert_many(&children)
+                    .batch_size(batch_size)
+                    .exec(&mut *tx)
+                    .await?;
+            }
+        }
     }
+    let topics = std::mem::take(&mut deliveries.topics);
+    super::publication::store_changes(tx, topics).await?;
+    shared::publish(tx, &mut deliveries, now).await?;
     resume_parents(
         tx,
-        deliveries,
+        deliveries.parents,
         now,
         batch_size,
         &mut lanes,

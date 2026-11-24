@@ -408,6 +408,7 @@ pub(super) fn task_commits(
             );
             execution.metrics.outcome(result.record.name(), &outcome);
             TaskCommit::Outcome {
+                publisher: result.record.share_role == crate::tasks::models::ShareRole::Publisher,
                 node_id: execution.node_id,
                 attempts: result.record.attempts,
                 task_id: result.record.id(),

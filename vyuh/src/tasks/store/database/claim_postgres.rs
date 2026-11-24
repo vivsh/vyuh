@@ -9,7 +9,7 @@ use super::{
 use crate::db::{DbSession as _, Record as _};
 use crate::{
     db,
-    tasks::{LaneClaim, LanePoll, TaskId, TaskPoll, TaskRuntimeError, TaskStoreConf},
+    tasks::{LaneClaim, LanePoll, TaskPoll, TaskRuntimeError, TaskStoreConf},
 };
 use chrono::{DateTime, Utc};
 
@@ -65,7 +65,7 @@ impl DbTaskStore {
         node: &uuid::Uuid,
         claim: &LaneClaim,
         conf: &TaskStoreConf,
-        deliveries: &mut Vec<(TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
     ) -> Result<(DateTime<Utc>, TaskPoll), TaskRuntimeError> {
         let lane = configured_lane(conf, claim.lane)?;
         let limit = claim.limit.min(lane.claim_batch_size_value());
@@ -95,7 +95,7 @@ impl DbTaskStore {
         tx: &mut db::DbTransaction<'_>,
         turn: ClaimTurn<'_>,
         rows: Vec<PgClaimRow>,
-        deliveries: &mut Vec<(TaskId, String)>,
+        deliveries: &mut super::workflow::Deliveries,
     ) -> Result<(DateTime<Utc>, TaskPoll), TaskRuntimeError> {
         let (now, next, remaining, fast) = hints(&rows)?;
         let claim = turn.claim;

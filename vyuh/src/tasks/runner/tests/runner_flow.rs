@@ -449,6 +449,7 @@ async fn synchronous_panic_is_contained() -> Result<(), String> {
 fn delivery_spawn(node: uuid::Uuid) -> Result<TaskCommit, String> {
     let record = (*panic_record().map_err(|error| error.to_string())?).clone();
     Ok(TaskCommit::Outcome {
+        publisher: false,
         task_id: record.id,
         node_id: node,
         attempts: 1,

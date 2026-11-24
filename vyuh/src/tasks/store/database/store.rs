@@ -112,6 +112,21 @@ impl DbTaskStore {
 }
 
 impl TaskStore for DbTaskStore {
+    #[cfg(feature = "sqlite")]
+    fn retryable_conflict(&self, error: &db::DbError) -> bool {
+        // SQLITE_BUSY_SNAPSHOT requires a fresh transaction; waiting on the old one cannot help.
+        const BUSY_SNAPSHOT: &str = "517";
+        let db::DbError::Database { code, source, .. } = error else {
+            return false;
+        };
+        code.as_deref() == Some(BUSY_SNAPSHOT)
+            && source.as_database_error().is_some_and(|error| {
+                error
+                    .try_downcast_ref::<db::sqlx::sqlite::SqliteError>()
+                    .is_some()
+            })
+    }
+
     #[cfg(feature = "mysql")]
     fn retryable_conflict(&self, error: &db::DbError) -> bool {
         // SQLSTATE HY000 is generic; only MariaDB's native ER_CHECKREAD is retryable.
@@ -266,6 +281,20 @@ impl TaskStore for DbTaskStore {
         self.wake_impl(id).await
     }
 
+    /// Issues one atomic write with no clock read or preliminary row locks.
+    async fn release_idempotency(&self, ids: &[TaskId]) -> Result<u64, TaskRuntimeError> {
+        use db::DbSession as _;
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut ids: Vec<_> = ids.iter().map(|id| id.into_uuid()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut pool = self.pool.clone();
+        Ok(pool.execute(release_keys_statement(ids)).await?)
+    }
+
     async fn resume(&self, id: TaskId, input: String) -> Result<bool, TaskRuntimeError> {
         self.resume_impl(id, input).await
     }
@@ -294,6 +323,41 @@ impl TaskStore for DbTaskStore {
 }
 
 const TOKEN_SCALE: i64 = 1_000_000;
+
+#[cfg(feature = "postgres")]
+fn release_keys_statement(ids: Vec<uuid::Uuid>) -> db::Statement {
+    db::Statement::raw(
+        "UPDATE vyuh_tasks SET idempotency_held = FALSE WHERE id = ANY($1::uuid[])
+         AND status IN (3,4) AND idempotency_held = TRUE AND idempotency_key IS NOT NULL",
+    )
+    .bind(ids)
+}
+
+/// The task input cap fits either backend's parameter limit.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn release_keys_statement(ids: Vec<uuid::Uuid>) -> db::Statement {
+    #[cfg(feature = "sqlite")]
+    let sql = format!(
+        "UPDATE vyuh_tasks SET idempotency_held = FALSE WHERE id IN ({})
+         AND status IN (3,4) AND idempotency_held = TRUE AND idempotency_key IS NOT NULL",
+        std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    // Only accepted terminal commits give an owner a non-null retention expiry.
+    #[cfg(feature = "mysql")]
+    let sql = format!(
+        "DELETE owner FROM vyuh_task_idempotency AS owner
+         FORCE INDEX (idx_vyuh_task_idempotency_task)
+         WHERE owner.task_id IN ({}) AND owner.expires_at IS NOT NULL",
+        std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    ids.into_iter()
+        .fold(db::Statement::raw(&sql), db::Statement::bind)
+}
+
 impl DbTaskStore {
     /// Validates registered task targets and creates missing rate and lane-owner rows.
     pub(super) async fn initialize_impl(&self) -> Result<(), TaskRuntimeError> {
