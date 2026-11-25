@@ -69,7 +69,7 @@ async fn returned_claim_rejects_stale() -> Result<(), TestError> {
         .claim_tasks(&runner.node_id, &claims)
         .await?;
     let commits = [TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         node_id: runner.node_id,
         attempts: 1,
         task_id: id,

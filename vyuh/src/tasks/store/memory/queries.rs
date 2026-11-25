@@ -179,10 +179,11 @@ pub(super) fn reject_orphaned_tasks(
         .iter()
         .map(|(name, _)| name.as_str())
         .collect::<std::collections::HashSet<_>>();
-    if let Some(task) = tasks
-        .iter()
-        .find(|task| is_active(task.status) && !handlers.contains(task.name.as_str()))
-    {
+    if let Some(task) = tasks.iter().find(|task| {
+        is_active(task.status)
+            && task.share_role != crate::tasks::models::ShareRole::Drainer
+            && !handlers.contains(task.name.as_str())
+    }) {
         return Err(TaskRuntimeError::TaskNotFound(task.name.clone()));
     }
     Ok(())

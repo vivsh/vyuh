@@ -88,6 +88,7 @@ pub(crate) enum ShareRole {
     Unshared = 0,
     Publisher = 1,
     Subscriber = 2,
+    Drainer = 3,
 }
 
 impl ShareRole {
@@ -97,6 +98,7 @@ impl ShareRole {
             0 => Ok(Self::Unshared),
             1 => Ok(Self::Publisher),
             2 => Ok(Self::Subscriber),
+            3 => Ok(Self::Drainer),
             _ => Err(TaskRuntimeError::TaskExecutionError(
                 "invalid task share role".into(),
             )),

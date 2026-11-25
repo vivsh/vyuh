@@ -11,8 +11,8 @@ use super::{
 use crate::{
     db,
     tasks::{
-        TaskId, TaskReceipt, TaskRecord, TaskRuntimeError, TaskStatus, TaskWrite,
-        models::ShareRole, store::sharing,
+        TaskId, TaskReceipt, TaskRecord, TaskRuntimeError, TaskWrite, models::ShareRole,
+        store::sharing,
     },
 };
 use chrono::{DateTime, Utc};
@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 pub(super) type Topics = Vec<(Uuid, Option<Vec<u8>>)>;
 type PublisherResults = HashMap<Vec<u8>, (i16, String)>;
+type PageOwners = HashMap<Vec<u8>, (TaskId, String, Option<Uuid>)>;
 type Subscriber = (Vec<u8>, Uuid, Option<Uuid>);
 
 /// Operation-local records and waits; nothing is published until group validation succeeds.
@@ -63,7 +64,6 @@ pub(super) async fn resolve(
         .map(|row| row.id.into_uuid())
         .filter(|id| ids.contains(id))
         .collect();
-    let mut used = capacity(tx, &holders, &wanted, &ids).await?;
     let mut result = Resolved {
         rows: Vec::new(),
         receipts: Vec::with_capacity(prepared.len()),
@@ -80,7 +80,6 @@ pub(super) async fn resolve(
         let record = entry.write.record;
         resolve_one(
             &mut result,
-            &mut used,
             &mut dependencies,
             record,
             owner,
@@ -96,7 +95,6 @@ pub(super) async fn resolve(
 /// A held incompatible key leaves no subscriber or waiter behind.
 fn resolve_one(
     result: &mut Resolved,
-    used: &mut HashMap<Uuid, usize>,
     dependencies: &mut HashMap<TaskId, Vec<TaskId>>,
     mut record: TaskRecord,
     owner: Option<&TaskRecord>,
@@ -105,12 +103,7 @@ fn resolve_one(
 ) -> Result<(), TaskRuntimeError> {
     let id = record.id;
     if let Some(owner) = owner.filter(|owner| owner.id != id) {
-        let count = used.entry(owner.id.into_uuid()).or_default();
-        let terminal = matches!(owner.status, TaskStatus::Succeeded | TaskStatus::Failed);
-        if record.share_role != ShareRole::Publisher
-            || !sharing::compatible(&record, owner)
-            || (!terminal && *count >= sharing::FOLLOWER_LIMIT)
-        {
+        if record.share_role != ShareRole::Publisher || owner.share_role != ShareRole::Publisher {
             result.receipts.push(TaskReceipt::KeyHeld);
             if let Some(parent) = record.parent_id {
                 result.rejected.insert(parent);
@@ -118,7 +111,6 @@ fn resolve_one(
             return Ok(());
         }
         if let Some(topic) = sharing::subscribe(&mut record, owner, now)? {
-            *count += 1;
             result.topics.push((id.into_uuid(), Some(topic)));
         }
         if provisional
@@ -468,53 +460,71 @@ fn lock_error(error: db::DbError) -> TaskRuntimeError {
     error.into()
 }
 
-/// Counts only existing waits, under the already-held publisher lock.
-async fn capacity(
-    tx: &mut db::DbTransaction<'_>,
-    holders: &HashMap<OwnerKey, TaskRecord>,
-    wanted: &HashSet<OwnerKey>,
-    fresh: &HashSet<Uuid>,
-) -> Result<HashMap<Uuid, usize>, TaskRuntimeError> {
-    let topics: HashMap<_, _> = holders
-        .iter()
-        .filter(|(key, owner)| {
-            wanted.contains(*key)
-                && owner.share_role == ShareRole::Publisher
-                && !fresh.contains(&owner.id.into_uuid())
-                && !matches!(owner.status, TaskStatus::Succeeded | TaskStatus::Failed)
-        })
-        .map(|(_, owner)| (sharing::topic(owner.id), owner.id.into_uuid()))
-        .collect();
-    let mut used = HashMap::new();
-    for (topic, _, _) in waiters(tx, topics.keys().cloned().collect()).await? {
-        if let Some(id) = topics.get(&topic) {
-            *used.entry(*id).or_default() += 1;
-        }
-    }
-    Ok(used)
+/// A shared terminal outcome supplies a result; a drainer refers to that immutable generation.
+pub(super) enum PageSource {
+    Publisher {
+        id: TaskId,
+        status: i16,
+        result: String,
+        lane: String,
+    },
+    Drainer {
+        id: Uuid,
+        publisher: TaskId,
+        lane: String,
+    },
 }
 
-/// Uses the existing sparse topic index; locking reads avoid old repeatable-read snapshots.
+/// Reads terminal envelopes once per bounded group, without re-locking published generations.
+async fn retained_results(
+    tx: &mut db::DbTransaction<'_>,
+    sources: &[PageSource],
+) -> Result<PublisherResults, TaskRuntimeError> {
+    let ids: Vec<_> = sources
+        .iter()
+        .filter_map(|source| match source {
+            PageSource::Drainer { publisher, .. } => Some(publisher.into_uuid()),
+            _ => None,
+        })
+        .collect();
+    let mut results = HashMap::new();
+    for chunk in ids.chunks(256) {
+        let sql = format!(
+            "SELECT id,status,last_result FROM vyuh_tasks WHERE id IN ({}) AND share_role=1 AND status IN (3,4)",
+            slots(1, chunk.len())
+        );
+        let mut statement = db::Statement::raw(&sql);
+        for id in chunk {
+            statement = statement.bind(*id);
+        }
+        for (id, status, result) in tx.fetch_all::<(Uuid, i16, String)>(statement).await? {
+            results.insert(sharing::topic(TaskId::new(id)), (status, result));
+        }
+    }
+    Ok(results)
+}
+
+/// Performs independent bounded index seeks per publisher, including one overflow sentinel.
 async fn waiters(
     tx: &mut db::DbTransaction<'_>,
-    mut topics: Vec<Vec<u8>>,
+    results: &PublisherResults,
 ) -> Result<Vec<Subscriber>, TaskRuntimeError> {
-    topics.sort_unstable();
+    let mut topics: Vec<_> = results.iter().collect();
+    topics.sort_unstable_by_key(|(topic, _)| *topic);
     let mut rows = Vec::new();
-    for chunk in topics.chunks(256) {
-        #[cfg(feature = "mysql")]
-        let sql = format!(
-            "SELECT topic,task_id,NULL FROM vyuh_task_waits WHERE topic IN ({}) ORDER BY topic,task_id {LOCK}",
-            slots(1, chunk.len())
-        );
-        #[cfg(any(feature = "postgres", feature = "sqlite"))]
-        let sql = format!(
-            "SELECT wait_topic,id,parent_id FROM vyuh_tasks WHERE wait_topic IN ({}) AND status=2 AND NOT cancelled AND share_role=2 ORDER BY id {LOCK}",
-            slots(1, chunk.len())
-        );
+    for chunk in topics.chunks(128) {
+        let sql = chunk.iter().enumerate().map(|(i, (_, (_, result)))| {
+            let limit = sharing::page_size(result.len()) + 1;
+            let key = param(i+1);
+            #[cfg(feature="mysql")]
+            let select = format!("SELECT topic,task_id,NULL AS parent_id FROM vyuh_task_waits WHERE topic={key} ORDER BY task_id LIMIT {limit} {LOCK}");
+            #[cfg(any(feature="sqlite", feature="postgres"))]
+            let select = format!("SELECT wait_topic,id,parent_id FROM vyuh_tasks WHERE wait_topic={key} AND status=2 AND NOT cancelled AND share_role=2 ORDER BY id LIMIT {limit} {LOCK}");
+            format!("SELECT * FROM ({select}) AS w{i}")
+        }).collect::<Vec<_>>().join(" UNION ALL ");
         let mut stmt = db::Statement::raw(&sql);
-        for topic in chunk {
-            stmt = stmt.bind(topic.clone());
+        for (topic, _) in chunk {
+            stmt = stmt.bind((*topic).clone());
         }
         rows.extend(tx.fetch_all(stmt).await.map_err(lock_error)?);
     }
@@ -533,21 +543,19 @@ struct SubscriberWrite {
     completed_at: DateTime<Utc>,
 }
 
-/// Completes every active subscriber and queues ordinary parent delivery in this transaction.
+/// Commits one bounded page per generation and schedules only the remaining private waits.
 pub(super) async fn publish(
     tx: &mut db::DbTransaction<'_>,
     deliveries: &mut Deliveries,
+    lanes: &mut HashSet<String>,
     now: DateTime<Utc>,
 ) -> Result<(), TaskRuntimeError> {
     if deliveries.publishers.is_empty() {
         return Ok(());
     }
-    let results: PublisherResults = deliveries
-        .publishers
-        .drain(..)
-        .map(|(id, status, result)| (sharing::topic(id), (status, result)))
-        .collect();
-    let members = waiters(tx, results.keys().cloned().collect()).await?;
+    let (results, sources) = page_sources(tx, &mut deliveries.publishers).await?;
+    let mut members = waiters(tx, &results).await?;
+    let overflow = page_overflow(&mut members, &results);
     #[cfg(feature = "mysql")]
     let members = {
         let tasks = lock_ids(tx, members.iter().map(|member| member.1).collect(), true).await?;
@@ -564,10 +572,112 @@ pub(super) async fn publish(
             })
             .collect::<Vec<_>>()
     };
+    schedule_pages(tx, sources, overflow, lanes, now).await?;
     #[cfg(feature = "postgres")]
     return publish_postgres(tx, results, members, &mut deliveries.parents, now).await;
     #[cfg(not(feature = "postgres"))]
     publish_rows(tx, results, members, &mut deliveries.parents, now).await
+}
+
+/// Maps each private generation to its persisted result and its continuation, if any.
+async fn page_sources(
+    tx: &mut db::DbTransaction<'_>,
+    pending: &mut Vec<PageSource>,
+) -> Result<(PublisherResults, PageOwners), TaskRuntimeError> {
+    let mut results = retained_results(tx, pending).await?;
+    let mut sources = HashMap::new();
+    for source in pending.drain(..) {
+        let (publisher, lane, drainer) = match source {
+            PageSource::Publisher {
+                id,
+                status,
+                result,
+                lane,
+            } => {
+                results.insert(sharing::topic(id), (status, result));
+                (id, lane, None)
+            }
+            PageSource::Drainer {
+                id,
+                publisher,
+                lane,
+            } => (publisher, lane, Some(id)),
+        };
+        let topic = sharing::topic(publisher);
+        if !results.contains_key(&topic) {
+            return Err(invariant("Shared drainer publisher result missing"));
+        }
+        sources.insert(topic, (publisher, lane, drainer));
+    }
+    Ok((results, sources))
+}
+
+/// Separates one overflow sentinel per topic; the sentinel remains a waiting subscriber.
+fn page_overflow(members: &mut Vec<Subscriber>, results: &PublisherResults) -> Vec<Vec<u8>> {
+    let mut seen = HashMap::new();
+    let mut overflow = Vec::new();
+    members.retain(|member| {
+        let count = seen.entry(member.0.clone()).or_insert(0);
+        *count += 1;
+        let more = results
+            .get(&member.0)
+            .is_some_and(|(_, result)| *count > sharing::page_size(result.len()));
+        if more {
+            overflow.push(member.0.clone());
+        }
+        !more
+    });
+    overflow
+}
+
+/// Inserts or checkpoints exactly one overflow drainer per generation in this transaction.
+async fn schedule_pages(
+    tx: &mut db::DbTransaction<'_>,
+    mut sources: PageOwners,
+    overflow: Vec<Vec<u8>>,
+    lanes: &mut HashSet<String>,
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
+    let mut inserts = Vec::new();
+    let mut sleeps = Vec::new();
+    for topic in overflow {
+        let (publisher, lane, drainer) = sources
+            .remove(&topic)
+            .ok_or_else(|| invariant("Shared page lost its publisher"))?;
+        lanes.insert(lane.clone());
+        if let Some(id) = drainer {
+            sleeps.push(id);
+        } else {
+            inserts.push(TaskRow::from(sharing::drainer(publisher, lane, now)));
+        }
+    }
+    if !inserts.is_empty() {
+        insert(tx, &inserts, false).await?;
+    }
+    rearm(tx, &sleeps, now).await
+}
+
+/// Re-arms precisely the already-fenced drainer rows, in the subscriber transaction.
+async fn rearm(
+    tx: &mut db::DbTransaction<'_>,
+    ids: &[Uuid],
+    now: DateTime<Utc>,
+) -> Result<(), TaskRuntimeError> {
+    for chunk in ids.chunks(256) {
+        let sql = format!(
+            "UPDATE vyuh_tasks SET status=0, step_attempts=0, state='null', ready_at={}, completed_at=NULL,last_result=NULL WHERE id IN ({})",
+            param(1),
+            slots(2, chunk.len())
+        );
+        let mut stmt = db::Statement::raw(&sql).bind(now);
+        for id in chunk {
+            stmt = stmt.bind(*id);
+        }
+        if tx.execute(stmt).await? != chunk.len() as u64 {
+            return Err(invariant("Shared checkpoint missed a fenced drainer"));
+        }
+    }
+    Ok(())
 }
 
 /// Updates only the subscriber IDs already locked by the membership read.
@@ -599,7 +709,7 @@ fn packed_subscribers(
     now: DateTime<Utc>,
 ) -> Result<db::Statement, TaskRuntimeError> {
     // The existing publication budget bounds the number of publishers and each group
-    // has at most FOLLOWER_LIMIT members. UNNEST uses a constant number of parameters.
+    // has at most PAGE_SIZE members. UNNEST uses a constant number of parameters.
     let mut ids = Vec::with_capacity(members.len());
     let mut member_slots = Vec::with_capacity(members.len());
     let publishers = results.len().min(members.len());

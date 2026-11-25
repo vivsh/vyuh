@@ -83,6 +83,7 @@ pub(super) fn admit_committed(
                 && task.updated_at == now
                 && !state.waits.contains_key(&task.id));
         if candidate
+            && task.share_role != ShareRole::Drainer
             && limit > 0
             && task.node_id.is_none()
             && crate::tasks::store::transitions::sticky(task, conf)
@@ -166,7 +167,14 @@ fn run_turn(
     release_keys(state, undo);
     let mut wake_lanes = workflow::install(state, waits, now);
     install_topics(state, topics);
-    complete_followers(state, &mut children, undo, &mut deliveries, now);
+    complete_followers(
+        state,
+        &mut children,
+        undo,
+        &mut deliveries,
+        &mut wake_lanes,
+        now,
+    );
     wake_lanes.extend(finalize_workflow(state, children, deliveries, now));
     workflow::clear_terminal(state, undo);
     reconcile_poll(state, &mut poll, &wake_lanes, &phases, now);
@@ -199,45 +207,112 @@ pub(super) fn install_topics(state: &mut MemoryState, topics: Vec<(TaskId, Optio
 /// Includes subscribers staged in the same turn and emits only accepted parent deliveries.
 fn complete_followers(
     state: &mut MemoryState,
-    children: &mut [TaskRecord],
+    children: &mut Vec<TaskRecord>,
     undo: &[TaskRecord],
     deliveries: &mut Vec<(TaskId, String)>,
+    wake_lanes: &mut Vec<TaskLane>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     for before in undo
         .iter()
-        .filter(|row| row.share_role == ShareRole::Publisher)
+        .filter(|row| matches!(row.share_role, ShareRole::Publisher | ShareRole::Drainer))
     {
+        let drainer = before.share_role == ShareRole::Drainer;
+        let publisher = if drainer {
+            if !state
+                .tasks
+                .iter()
+                .any(|r| r.id == before.id && r.status == TaskStatus::Succeeded)
+            {
+                continue;
+            }
+            let Ok(id) = serde_json::from_str(&before.input) else {
+                continue;
+            };
+            id
+        } else {
+            before.id
+        };
         let Some((status, result)) = state
             .tasks
             .iter()
             .find(|row| {
-                row.id == before.id
+                row.id == publisher
                     && matches!(row.status, TaskStatus::Succeeded | TaskStatus::Failed)
             })
             .and_then(|row| row.last_result.clone().map(|result| (row.status, result)))
         else {
             continue;
         };
-        let topic = sharing::topic(before.id);
-        for row in state
-            .tasks
-            .iter_mut()
-            .chain(children.iter_mut())
-            .filter(|row| {
-                row.share_role == ShareRole::Subscriber && row.status == TaskStatus::Suspended
-            })
-        {
-            if state.topic_waits.get(&row.id) != Some(&topic) {
-                continue;
-            }
-            state.topic_waits.remove(&row.id);
-            sharing::complete(row, status, &result, now);
-            if let Some(parent) = row.parent_id {
-                deliveries.push((parent, result.clone()));
+        if deliver_page(state, children, publisher, status, &result, deliveries, now) {
+            if drainer {
+                checkpoint_drainer(state, before.id, wake_lanes, now);
+            } else {
+                children.push(sharing::drainer(publisher, before.lane.clone(), now));
             }
         }
     }
+}
+
+/// Makes a committed continuation eligible and supplies the ordinary poll hint for its lane.
+fn checkpoint_drainer(
+    state: &mut MemoryState,
+    id: TaskId,
+    wakes: &mut Vec<TaskLane>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if let Some(row) = state.tasks.iter_mut().find(|row| row.id == id) {
+        row.status = TaskStatus::Pending;
+        row.step_attempts = 0;
+        row.state = Some("null".into());
+        row.ready_at = Some(now);
+        row.completed_at = None;
+        row.last_result = None;
+        if let Some(lane) = state.conf.as_ref().and_then(|conf| {
+            conf.lanes
+                .iter()
+                .find(|lane| lane.lane().as_str() == row.lane)
+        }) {
+            crate::tasks::store::merge_wakes(wakes, [lane.lane()]);
+        }
+    }
+}
+
+/// Clears only delivered private waits; a remaining candidate requests another step.
+fn deliver_page(
+    state: &mut MemoryState,
+    children: &mut [TaskRecord],
+    publisher: TaskId,
+    status: TaskStatus,
+    result: &str,
+    deliveries: &mut Vec<(TaskId, String)>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let topic = sharing::topic(publisher);
+    let page = sharing::page_size(result.len());
+    let mut count = 0;
+    for row in state
+        .tasks
+        .iter_mut()
+        .chain(children.iter_mut())
+        .filter(|row| {
+            row.share_role == ShareRole::Subscriber && row.status == TaskStatus::Suspended
+        })
+    {
+        if state.topic_waits.get(&row.id) != Some(&topic) {
+            continue;
+        }
+        count += 1;
+        if count > page {
+            break;
+        }
+        state.topic_waits.remove(&row.id);
+        sharing::complete(row, status, result, now);
+        if let Some(parent) = row.parent_id {
+            deliveries.push((parent, result.to_owned()));
+        }
+    }
+    count > page
 }
 
 /// Stages accepted task updates and children before mutating any existing task.
@@ -376,6 +451,18 @@ fn staged_task(
         .unwrap_or_else(crate::tasks::store::transitions::cancellation);
     let outcome = if task.cancelled {
         crate::tasks::store::transitions::cancellation()
+    } else if task.share_role == ShareRole::Drainer
+        && matches!(outcome, TaskOutcome::Complete)
+        && !serde_json::from_str::<TaskId>(&task.input).is_ok_and(|id| {
+            state.tasks.iter().any(|r| {
+                r.id == id
+                    && r.share_role == ShareRole::Publisher
+                    && matches!(r.status, TaskStatus::Succeeded | TaskStatus::Failed)
+                    && r.last_result.is_some()
+            })
+        })
+    {
+        TaskOutcome::fail("Shared drainer publisher result missing")
     } else if let Some(error) =
         crate::tasks::store::transitions::capability_error(task.kind, &outcome, &conf.handlers)
     {

@@ -53,7 +53,7 @@ async fn shared_flush_byte_budget() -> Result<(), TaskRuntimeError> {
     let mut runner = TaskRunner::new(registry.client(store, Vec::new()))?;
     let node_id = uuid::Uuid::now_v7();
     let outcome = |publisher: bool, size: usize| TaskCommit::Outcome {
-        publisher,
+        fanout_bytes: publisher.then_some(size * crate::tasks::store::sharing::PAGE_SIZE),
         node_id,
         task_id: crate::tasks::TaskId::new(uuid::Uuid::now_v7()),
         attempts: 1,

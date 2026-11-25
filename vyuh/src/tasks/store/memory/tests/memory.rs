@@ -180,7 +180,7 @@ pub(crate) fn claim() -> LaneClaim {
 
 pub(crate) fn commit(id: TaskId, outcome: TaskOutcome) -> TaskCommit {
     TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         node_id: uuid::Uuid::from_u128(1),
         attempts: 1,
         task_id: id,

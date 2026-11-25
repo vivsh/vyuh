@@ -107,7 +107,7 @@ fn missing() -> TaskRuntimeError {
 
 fn command(id: u128, outcome: TaskOutcome) -> TaskCommit {
     TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         node_id: uuid::Uuid::from_u128(100),
         attempts: 1,
         task_id: TaskId::new(uuid::Uuid::from_u128(id)),

@@ -469,6 +469,18 @@ impl TaskRegistry {
         let Some(name) = records.first().map(|record| record.name().to_owned()) else {
             return Vec::new();
         };
+        if records
+            .first()
+            .is_some_and(|record| record.share_role == super::models::ShareRole::Drainer)
+        {
+            return records
+                .into_iter()
+                .map(|record| TaskExecutionResult {
+                    record,
+                    outcome: TaskOutcome::Complete,
+                })
+                .collect();
+        }
         let Some(task) = self.tasks.get(&name) else {
             return missing_results(records, &name);
         };

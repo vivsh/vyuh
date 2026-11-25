@@ -303,7 +303,7 @@ fn all_commit(
     children: Vec<TaskWrite>,
 ) -> TaskCommit {
     TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         node_id: node,
         attempts: parent.attempts,
         task_id: parent.id,

@@ -323,7 +323,10 @@ pub(super) fn collect_invocation(
     limit: usize,
     registry: &TaskRegistry,
 ) -> Vec<Arc<TaskRecord>> {
-    if limit <= 1 || !registry.is_batch(first.name()) {
+    if limit <= 1
+        || !registry.is_batch(first.name())
+        || first.share_role == crate::tasks::models::ShareRole::Drainer
+    {
         return vec![first];
     }
     let name = first.name().to_owned();
@@ -331,7 +334,10 @@ pub(super) fn collect_invocation(
     let mut remaining = VecDeque::with_capacity(lane.tasks.len());
     records.push(first);
     while let Some(record) = lane.tasks.pop_front() {
-        if records.len() < limit && record.name() == name {
+        if records.len() < limit
+            && record.name() == name
+            && record.share_role != crate::tasks::models::ShareRole::Drainer
+        {
             records.push(record);
         } else {
             remaining.push_back(record);
@@ -408,7 +414,10 @@ pub(super) fn task_commits(
             );
             execution.metrics.outcome(result.record.name(), &outcome);
             TaskCommit::Outcome {
-                publisher: result.record.share_role == crate::tasks::models::ShareRole::Publisher,
+                fanout_bytes: crate::tasks::store::sharing::estimate(
+                    result.record.share_role,
+                    &outcome,
+                ),
                 node_id: execution.node_id,
                 attempts: result.record.attempts,
                 task_id: result.record.id(),

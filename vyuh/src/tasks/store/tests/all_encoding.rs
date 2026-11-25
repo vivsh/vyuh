@@ -53,14 +53,14 @@ fn shared_flush_error_cost() {
 
     let id = TaskId::new(uuid::Uuid::now_v7());
     for message in ["ordinary failure".into(), "\u{0}é".repeat(8192)] {
-        let actual = result::failure(id, message.clone()).len() * sharing::FOLLOWER_LIMIT;
+        let actual = result::failure(id, message.clone()).len() * sharing::PAGE_SIZE;
         for outcome in [
             TaskOutcome::fail(message.clone()),
             TaskOutcome::retry(message),
         ] {
             let estimated = sharing::fanout_bytes(&outcome);
             assert!(actual <= estimated);
-            assert!(estimated <= result::RESULT_LIMIT * sharing::FOLLOWER_LIMIT);
+            assert!(estimated <= result::RESULT_LIMIT * sharing::PAGE_SIZE);
         }
     }
 }

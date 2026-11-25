@@ -311,7 +311,7 @@ async fn direct_registration_supports_typed_submit() -> Result<(), TestError> {
 
     store
         .commit_tasks(&[TaskCommit::Outcome {
-            publisher: false,
+            fanout_bytes: None,
             node_id: uuid::Uuid::from_u128(1),
             attempts: store
                 .get_task(task_id)
@@ -726,7 +726,7 @@ async fn external_results_share_envelope() -> Result<(), TestError> {
             .await?;
         store
             .commit_tasks(&[TaskCommit::Outcome {
-                publisher: false,
+                fanout_bytes: None,
                 node_id: uuid::Uuid::from_u128(1),
                 attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
                 task_id: id,
@@ -808,7 +808,7 @@ async fn suspend_fixture(store: &MemoryTaskStore, id: TaskId) -> Result<(), Test
         .await?;
     store
         .commit_tasks(&[TaskCommit::Outcome {
-            publisher: false,
+            fanout_bytes: None,
             node_id: uuid::Uuid::from_u128(1),
             attempts: store.get_task(id).await?.map_or(0, |task| task.attempts),
             task_id: id,

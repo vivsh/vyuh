@@ -472,8 +472,22 @@ fn accept_rows(
                 .is_none_or(|lane| lane.as_str() == row.lane_name)
             && commit.accepts(status, row.node_id, row.attempts);
         if accepted {
-            if row.share_role == crate::tasks::models::ShareRole::Publisher as i16 {
-                if !commit.is_cancel() && !commit.publisher() {
+            if row.share_role == crate::tasks::models::ShareRole::Publisher as i16
+                || (row.share_role == crate::tasks::models::ShareRole::Drainer as i16
+                    && !commit.is_cancel())
+            {
+                if let Some(outcome) = commit.outcome()
+                    && commit.flush_cost().1
+                        < crate::tasks::store::sharing::estimate(
+                            if row.share_role == crate::tasks::models::ShareRole::Drainer as i16 {
+                                crate::tasks::models::ShareRole::Drainer
+                            } else {
+                                crate::tasks::models::ShareRole::Publisher
+                            },
+                            outcome,
+                        )
+                        .unwrap_or(0)
+                {
                     error = Some(TaskRuntimeError::TaskExecutionError(
                         "Missing shared publisher execution hint".into(),
                     ));

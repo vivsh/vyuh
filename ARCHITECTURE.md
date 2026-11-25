@@ -138,8 +138,15 @@ or send the ordinary post-commit queue-eviction event.
 
 Shared keyed Work has an immutable store-owned role. Publishers run normally;
 subscriber rows never enter a queue and hold no idempotency reservation. The
-same private UUID topic is kept in existing wait storage until the publisher
-atomically completes its subscribers and delivers their workflow results. A
+handler and held key (not a payload digest) identify the publisher. Each private
+wait uses that publisher's UUID. A terminal commit completes up to 32 waiters and
+atomically inserts one ownerless Work drainer in the publisher's lane on overflow.
+Drainers use the existing task row (share_role=3, input=publisher UUID), normal
+claims and the shared output buffer. Only the fenced store commit delivers a page
+and its parent updates, then sleeps the same drainer or completes it. A drainer
+has no workflow lineage or key; cancellation or exhausted crash attempts can
+leave remaining subscribers suspended. No marker table or idle probe is needed.
+Old workers cannot decode role 3; stop old workers/writers before upgrading. A
 late join copies a retained terminal result without a topic. Only the opt-in
 conflict and terminal publication paths use the added `NOWAIT` locking reads.
 Runner flush admission bounds subscriber and parent work by count and

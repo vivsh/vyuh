@@ -3,11 +3,11 @@
 use crate::tasks::{TaskId, TaskRecord, TaskRuntimeError, TaskStatus, models::ShareRole};
 use chrono::{DateTime, Utc};
 
-pub(crate) const FOLLOWER_LIMIT: usize = 32;
-pub(crate) const PUBLISH_WEIGHT: usize = 1 + 2 * FOLLOWER_LIMIT;
-// A maximum-sized result uses one MiB across 32 subscribers. Never split a group.
-pub(crate) const FLUSH_FANOUT_BYTES: usize =
-    2 * FOLLOWER_LIMIT * crate::tasks::result::RESULT_LIMIT;
+pub(crate) const PAGE_SIZE: usize = 32;
+pub(crate) const DRAIN_NAME: &str = "vyuh.shared-drain";
+pub(crate) const PUBLISH_WEIGHT: usize = 1 + 2 * PAGE_SIZE;
+// Keep the transaction budget independent of the page-size policy.
+pub(crate) const FLUSH_FANOUT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Estimates subscriber result copies without loading subscribers or re-encoding outcomes.
 pub(super) fn fanout_bytes(outcome: &crate::tasks::TaskOutcome) -> usize {
@@ -26,7 +26,18 @@ pub(super) fn fanout_bytes(outcome: &crate::tasks::TaskOutcome) -> usize {
             .saturating_add(DIAGNOSTIC_BYTES),
         _ => DIAGNOSTIC_BYTES,
     };
-    FOLLOWER_LIMIT * bytes.min(crate::tasks::result::RESULT_LIMIT)
+    (PAGE_SIZE * bytes.min(crate::tasks::result::RESULT_LIMIT)).min(FLUSH_FANOUT_BYTES)
+}
+
+/// Only opted-in page producers reserve additional flush capacity.
+pub(crate) fn estimate(role: ShareRole, outcome: &crate::tasks::TaskOutcome) -> Option<usize> {
+    match role {
+        ShareRole::Publisher => Some(fanout_bytes(outcome)),
+        ShareRole::Drainer => {
+            Some(page_size(crate::tasks::result::RESULT_LIMIT) * crate::tasks::result::RESULT_LIMIT)
+        }
+        _ => None,
+    }
 }
 
 /// Public topics reject NUL, and a task UUID identifies one generation of a key.
@@ -37,10 +48,37 @@ pub(super) fn topic(id: TaskId) -> Vec<u8> {
     topic
 }
 
-pub(super) fn compatible(input: &TaskRecord, owner: &TaskRecord) -> bool {
-    owner.share_role == ShareRole::Publisher
-        && input.idempotency_fingerprint.is_some()
-        && input.idempotency_fingerprint == owner.idempotency_fingerprint
+pub(crate) fn page_size(bytes: usize) -> usize {
+    PAGE_SIZE.min(FLUSH_FANOUT_BYTES / bytes.clamp(1, crate::tasks::result::RESULT_LIMIT))
+}
+
+/// Creates the sole continuation for this publisher generation, without inheriting lineage or ownership.
+pub(crate) fn drainer(publisher: TaskId, lane: String, now: DateTime<Utc>) -> TaskRecord {
+    TaskRecord {
+        id: TaskId::new(uuid::Uuid::now_v7()),
+        share_role: ShareRole::Drainer,
+        name: DRAIN_NAME.into(),
+        kind: crate::tasks::TaskKind::Work,
+        input: format!("\"{publisher}\""),
+        lane,
+        status: TaskStatus::Pending,
+        parent_id: None,
+        root_id: None,
+        state: None,
+        resume_input: None,
+        last_result: None,
+        cancelled: false,
+        attempts: 0,
+        step_attempts: 0,
+        idempotency_key: None,
+        idempotency_fingerprint: None,
+        idempotency_expires_at: None,
+        node_id: None,
+        ready_at: Some(now),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    }
 }
 
 /// Creates a suspended subscriber, or a terminal one when the result already exists.

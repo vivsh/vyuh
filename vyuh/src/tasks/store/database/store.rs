@@ -486,6 +486,11 @@ async fn reject_orphaned_tasks(
     let orphan = db::from(&table)
         .filter(table.status.in_values(active))
         .filter(table.name.not_in_values(handlers))
+        .filter(
+            table
+                .share_role
+                .ne(db::val(crate::tasks::models::ShareRole::Drainer as i16)),
+        )
         .first::<TaskRow>()
         .exec(transaction)
         .await?;

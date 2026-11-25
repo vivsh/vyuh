@@ -937,22 +937,10 @@ fn join_publisher(
             .iter()
             .find(|task| record_key(task).as_ref() == Some(&key))
     };
-    let Some(owner) = owner.filter(|owner| sharing::compatible(record, owner)) else {
+    let Some(owner) = owner.filter(|owner| owner.share_role == ShareRole::Publisher) else {
         return Ok(false);
     };
     if let Some(topic) = sharing::subscribe(record, owner, now)? {
-        let live = state
-            .topic_waits
-            .values()
-            .filter(|value| **value == topic)
-            .count();
-        let pending = topics
-            .iter()
-            .filter(|(_, value)| value.as_ref() == Some(&topic))
-            .count();
-        if live + pending >= sharing::FOLLOWER_LIMIT {
-            return Ok(false);
-        }
         topics.push((record.id, Some(topic)));
     }
     Ok(true)

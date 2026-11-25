@@ -110,7 +110,7 @@ pub(crate) fn validate_turn(
     maximum: usize,
 ) -> Result<(), TaskRuntimeError> {
     if !commits.iter().any(|commit| {
-        commit.publisher() || matches!(commit.outcome(), Some(TaskOutcome::All { .. }))
+        commit.has_fanout() || matches!(commit.outcome(), Some(TaskOutcome::All { .. }))
     }) {
         return Ok(());
     }
@@ -122,7 +122,7 @@ pub(crate) fn validate_turn(
                 (weight.saturating_add(cost), bytes.saturating_add(fanout))
             });
     let mut budget = batch.max(maximum.saturating_add(1));
-    if commits.first().is_some_and(TaskCommit::publisher) {
+    if commits.first().is_some_and(TaskCommit::has_fanout) {
         budget = budget.max(super::sharing::PUBLISH_WEIGHT);
     }
     if commits.len() > batch || weight > budget || fanout_bytes > super::sharing::FLUSH_FANOUT_BYTES

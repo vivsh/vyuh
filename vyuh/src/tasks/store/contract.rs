@@ -156,7 +156,7 @@ pub enum TaskCommit {
     /// An execution output requires its original node, attempt and lane fencing.
     Outcome {
         /// Immutable admission hint; the store verifies authoritative role before publishing.
-        publisher: bool,
+        fanout_bytes: Option<usize>,
         /// Node which owns the claimed execution.
         node_id: uuid::Uuid,
         /// Lifetime attempt identifying the immutable claimed execution.
@@ -241,23 +241,19 @@ impl TaskCommit {
     pub(crate) fn flush_cost(&self) -> (usize, usize) {
         match self {
             Self::Outcome {
-                publisher: true,
-                outcome,
+                fanout_bytes: Some(bytes),
                 ..
-            } => (
-                super::sharing::PUBLISH_WEIGHT,
-                super::sharing::fanout_bytes(outcome),
-            ),
+            } => (super::sharing::PUBLISH_WEIGHT, *bytes),
             Self::Outcome { outcome, .. } => (super::transitions::weight(outcome), 0),
             Self::Cancel { .. } => (1, 0),
         }
     }
 
-    pub(crate) fn publisher(&self) -> bool {
+    pub(crate) fn has_fanout(&self) -> bool {
         matches!(
             self,
             Self::Outcome {
-                publisher: true,
+                fanout_bytes: Some(_),
                 ..
             }
         )

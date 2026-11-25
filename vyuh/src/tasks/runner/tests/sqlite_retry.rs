@@ -99,7 +99,7 @@ async fn snapshot_retry_preserves_flush() -> Result<(), String> {
     let mut runner = sqlite_runner(&pool).await?;
     let (parent, child, publisher) = suspend_parent(&runner).await?;
     let commit = TaskCommit::Outcome {
-        publisher: true,
+        fanout_bytes: Some(crate::tasks::store::sharing::FLUSH_FANOUT_BYTES),
         node_id: runner.node_id,
         attempts: 1,
         task_id: publisher,
@@ -212,7 +212,7 @@ async fn suspend_parent(runner: &Runner) -> Result<(TaskId, TaskId, TaskId), Str
     let child_id = child.record.id;
     let parent = claim_parent(runner).await?;
     let checkpoint = TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         node_id: runner.node_id,
         attempts: parent.attempts,
         task_id: parent.id,

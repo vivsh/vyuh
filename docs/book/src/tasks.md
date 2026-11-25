@@ -1198,19 +1198,28 @@ The first shared request for a free key executes normally. A matching request
 gets a separate durable task ID and the same persisted result, without another
 handler invocation. It waits while the publisher is live, or is written
 terminal immediately if the publisher has finished and still holds its key.
-The publisher's lane and schedule are not changed. Same-key different inputs,
-an ordinary key holder, and a full sharing group do not accept a subscriber.
-At most 32 active subscribers may wait on one publisher. A contended shared
+Sharing matches only the handler and idempotency key. If inputs differ, the first
+publisher's input, lane and schedule win. Encode tenant or execution-affecting
+options in the key if they must not share. An ordinary key holder still rejects
+a subscriber. There is no 32-subscriber admission cap. A contended shared
 submission can return a serialization conflict; that attempt rolled back and can be
 retried, unlike an unknown commit acknowledgement.
 
 Sharing uses private task-ID topics. Public `wait`, `publish`, and `resume`
 cannot resolve these subscribers. Cancelling a subscriber leaves the publisher
-and its other subscribers alone. Cancelling the publisher gives all remaining
-subscribers its terminal failure. Output delivery and child/all readiness are
-atomic with the terminal write. Large results can spread separate publisher
-groups across several poll intervals; each publisher and its subscribers still
-commit together. On SQLite, these writes can also delay work in other lanes.
+and its other subscribers alone. A cancelled publisher delivers its terminal
+failure by the same mechanism as success. Up to 32 waiting subscribers finish
+with the publisher. On overflow Vyuh creates one internal Work task in the
+publisher's lane. It delivers subsequent pages of up to 32; each page, its
+parent updates and its checkpoint or completion commit atomically. The
+publisher can be terminal while an earlier subscriber is still waiting.
+
+The drainer is visible in the task list, but its ID is never a submission
+receipt or workflow child. It uses normal lane limits and retry rules. If an
+operator cancels it, or crashes exhaust its attempts before the next page
+commits, already-delivered results stand and remaining waits can stay suspended.
+Releasing the key does not redirect old waits to a newer publisher.
+On SQLite, large writes can also delay work in other lanes.
 For large artifacts, return a small reference to the stored artifact instead
 of copying the artifact into every task result.
 

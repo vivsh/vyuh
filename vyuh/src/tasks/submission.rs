@@ -38,7 +38,7 @@ impl TaskOptions {
         self
     }
 
-    /// Shares the result of matching keyed Work instead of running it again.
+    /// Shares keyed Work by handler and key, regardless of payload; the first publisher's input runs.
     /// A matching held publisher yields a new non-executing subscriber task.
     pub const fn shared(mut self) -> Self {
         self.shared = true;

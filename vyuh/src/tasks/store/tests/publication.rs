@@ -56,7 +56,7 @@ pub(super) fn output(
     outcome: TaskOutcome,
 ) -> Result<TaskCommit, String> {
     Ok(TaskCommit::Outcome {
-        publisher: row.share_role == crate::tasks::models::ShareRole::Publisher,
+        fanout_bytes: super::sharing::estimate(row.share_role, &outcome),
         node_id: row.node_id.ok_or("fixture was not claimed")?,
         task_id: row.id,
         attempts: row.attempts,
@@ -156,7 +156,10 @@ pub(super) async fn shared_contract(store: &impl TaskStore) -> Result<(), String
     mixed_shared_all(store, node).await?;
     same_turn_spawn(store, node).await?;
     late_shared_spawn(store, node).await?;
-    shared_bulk_cap(store, node).await
+    paged_join(store, node).await?;
+    shared_pages(store, node).await?;
+    stopped_drainer(store, node, false).await?;
+    stopped_drainer(store, node, true).await
 }
 
 /// A spawn joining an already-terminal publisher delivers without a wait or claim.
@@ -188,11 +191,103 @@ async fn late_shared_spawn(store: &impl TaskStore, node: Uuid) -> Result<(), Str
     Ok(())
 }
 
-/// One bulk reservation creates one publisher and no more than the configured private bound.
-async fn shared_bulk_cap(store: &impl TaskStore, node: Uuid) -> Result<(), String> {
-    use super::sharing::FOLLOWER_LIMIT;
-    let inputs = (0..FOLLOWER_LIMIT + 2)
-        .map(|_| shared("bulk-cap"))
+/// A shared child in the second page decrements its mixed all parent once, even after replay.
+async fn paged_join(store: &impl TaskStore, node: Uuid) -> Result<(), String> {
+    let (parent, winner) = stage_paged_join(store, node).await?;
+    let ordinary = next_page(store, node, 8)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("missing ordinary child")?;
+    let value = TaskOutcome::CompleteWith {
+        output: "91".into(),
+    };
+    store
+        .commit_tasks(&[
+            output(&ordinary, DEFAULT_TASK_LANE, TaskOutcome::Complete)?,
+            output(&winner, DEFAULT_TASK_LANE, value)?,
+        ])
+        .await
+        .map_err(error)?;
+    assert_eq!(record(store, parent).await?.status, TaskStatus::Suspended);
+    let drain = next_page(store, node, 8)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("missing drainer")?;
+    let commit = output(&drain, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+    store
+        .commit_tasks(std::slice::from_ref(&commit))
+        .await
+        .map_err(error)?;
+    assert_eq!(
+        store.commit_tasks(&[commit]).await.map_err(error)?.rejected,
+        vec![drain.id]
+    );
+    let ready = next_page(store, node, 8)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or("missing resumed parent")?;
+    assert_eq!(ready.id, parent);
+    assert_eq!(
+        ready.resume_input.as_deref(),
+        Some(r#"{"Ok":[{"Ok":null},{"Ok":91}]}"#)
+    );
+    store
+        .commit_tasks(&[output(&ready, DEFAULT_TASK_LANE, TaskOutcome::Complete)?])
+        .await
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Fills the inline page and installs a shared child as the overflow member of a mixed join.
+async fn stage_paged_join(
+    store: &impl TaskStore,
+    node: Uuid,
+) -> Result<(TaskId, TaskRecord), String> {
+    let key = "paged-all";
+    let writes = (0..=super::sharing::PAGE_SIZE)
+        .map(|_| shared(key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let publisher = store
+        .store_tasks(writes)
+        .await
+        .map_err(error)?
+        .first()
+        .and_then(|r| r.id())
+        .ok_or("publisher missing")?;
+    let parent = one(store, write(DEFAULT_TASK_LANE, 1).map_err(error)?).await?;
+    let claims = next_page(store, node, 8).await?;
+    let flow = claims
+        .iter()
+        .find(|row| row.id == parent)
+        .ok_or("missing flow")?;
+    let winner = claims
+        .iter()
+        .find(|row| row.id == publisher)
+        .ok_or("missing publisher")?;
+    let group = TaskOutcome::All {
+        state: "42".into(),
+        children: vec![write(DEFAULT_TASK_LANE, 0).map_err(error)?, shared(key)?],
+    };
+    store
+        .commit_tasks(&[output(flow, DEFAULT_TASK_LANE, group)?])
+        .await
+        .map_err(error)?;
+    Ok((parent, winner.clone()))
+}
+
+/// Each subscriber gets a receipt, and each fenced drainer step completes only one page.
+async fn shared_pages(store: &impl TaskStore, node: Uuid) -> Result<(), String> {
+    let page = super::sharing::PAGE_SIZE;
+    let inputs = (0..2 * page + 2)
+        .map(|i| {
+            let mut write = shared("bulk-cap")?;
+            write.record.input = i.to_string();
+            write.record.idempotency_fingerprint = Some(i.to_string());
+            Ok::<_, String>(write)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let winner = inputs.first().ok_or("missing winner")?.record.id;
     let receipts = store.store_tasks(inputs).await.map_err(error)?;
@@ -201,10 +296,9 @@ async fn shared_bulk_cap(store: &impl TaskStore, node: Uuid) -> Result<(), Strin
             .iter()
             .filter(|receipt| receipt.id().is_some())
             .count(),
-        FOLLOWER_LIMIT + 1
+        2 * page + 2
     );
-    assert_eq!(receipts.last(), Some(&crate::tasks::TaskReceipt::KeyHeld));
-    let claims = next_page(store, node, FOLLOWER_LIMIT + 2).await?;
+    let claims = next_page(store, node, page + 2).await?;
     let publisher = claims
         .iter()
         .find(|row| row.id == winner)
@@ -218,6 +312,8 @@ async fn shared_bulk_cap(store: &impl TaskStore, node: Uuid) -> Result<(), Strin
         .commit_tasks(&[output(publisher, DEFAULT_TASK_LANE, TaskOutcome::Complete)?])
         .await
         .map_err(error)?;
+    replace_generation(store, winner).await?;
+    replay_pages(store, node, &receipts, page).await?;
     for id in receipts
         .into_iter()
         .filter_map(crate::tasks::TaskReceipt::id)
@@ -227,6 +323,102 @@ async fn shared_bulk_cap(store: &impl TaskStore, node: Uuid) -> Result<(), Strin
         assert_eq!((row.status, row.attempts), (TaskStatus::Succeeded, 0));
     }
     Ok(())
+}
+
+/// Verifies exact pending counts, one drainer identity and rejection of every duplicate output.
+async fn replay_pages(
+    store: &impl TaskStore,
+    node: Uuid,
+    receipts: &[TaskReceipt],
+    page: usize,
+) -> Result<(), String> {
+    let mut drainer_id = None;
+    for remaining in [page + 1, 1] {
+        let mut suspended = 0;
+        for id in receipts.iter().filter_map(|receipt| receipt.id()) {
+            suspended += usize::from(record(store, id).await?.status == TaskStatus::Suspended);
+        }
+        assert_eq!(suspended, remaining);
+        let tasks = next_page(store, node, 8).await?;
+        let drain = tasks
+            .iter()
+            .find(|r| r.share_role == crate::tasks::models::ShareRole::Drainer)
+            .ok_or("missing drainer")?;
+        assert_eq!(drain.step_attempts, 1);
+        assert_eq!(*drainer_id.get_or_insert(drain.id), drain.id);
+        let commit = output(drain, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+        let ack = store
+            .commit_tasks(std::slice::from_ref(&commit))
+            .await
+            .map_err(error)?;
+        if remaining > page {
+            assert!(ack.wake_lanes.contains(&DEFAULT_TASK_LANE));
+        }
+        assert_eq!(
+            store.commit_tasks(&[commit]).await.map_err(error)?.rejected,
+            vec![drain.id]
+        );
+    }
+    Ok(())
+}
+
+/// Releasing a terminal key during an active drain starts an independent publisher generation.
+async fn replace_generation(store: &impl TaskStore, winner: TaskId) -> Result<(), String> {
+    let late = one(store, shared("bulk-cap")?).await?;
+    assert_eq!(
+        record(store, late).await?.last_result,
+        record(store, winner).await?.last_result
+    );
+    assert_eq!(
+        store.release_idempotency(&[winner]).await.map_err(error)?,
+        1
+    );
+    let fresh = one(store, shared("bulk-cap")?).await?;
+    assert_eq!(record(store, fresh).await?.status, TaskStatus::Pending);
+    store
+        .commit_tasks(&[TaskCommit::Cancel { task_id: fresh }])
+        .await
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Explicit cancellation or crash exhaustion stops only uncommitted pages, even after node takeover.
+async fn stopped_drainer(store: &impl TaskStore, node: Uuid, exhaust: bool) -> Result<(), String> {
+    let key = if exhaust {
+        "drain-exhaust"
+    } else {
+        "drain-cancel"
+    };
+    let page = super::sharing::PAGE_SIZE;
+    let writes = (0..page + 2)
+        .map(|_| shared(key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let receipts = store.store_tasks(writes).await.map_err(error)?;
+    let winner = receipts
+        .first()
+        .and_then(|r| r.id())
+        .ok_or("missing publisher")?;
+    store
+        .commit_tasks(&[TaskCommit::Cancel { task_id: winner }])
+        .await
+        .map_err(error)?;
+    // Initialization must accept the internal name without registering an application handler.
+    store.initialize().await.map_err(error)?;
+    let peer = Uuid::now_v7();
+    store.register_node(&peer).await.map_err(error)?;
+    let drainer = next_page(store, peer, 8)
+        .await?
+        .into_iter()
+        .find(|r| r.share_role == crate::tasks::models::ShareRole::Drainer)
+        .ok_or("missing drainer")?;
+    let stale = output(&drainer, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+    stop_page(store, peer, drainer.id, exhaust).await?;
+    assert_eq!(
+        store.commit_tasks(&[stale]).await.map_err(error)?.rejected,
+        vec![drainer.id]
+    );
+    assert_eq!(record(store, drainer.id).await?.status, TaskStatus::Failed);
+    check_stopped_waits(store, node, receipts, winner).await
 }
 
 /// A new wait is installed before a publisher in the same flush delivers it.
@@ -264,6 +456,69 @@ async fn same_turn_spawn(store: &impl TaskStore, node: Uuid) -> Result<(), Strin
     let actual = record(store, parent).await?;
     assert_eq!(actual.status, TaskStatus::Pending);
     assert_eq!(actual.resume_input.as_deref(), Some(r#"{"Ok":34}"#));
+    Ok(())
+}
+
+/// Stops the claimed page using operator cancellation or actual claim exhaustion.
+async fn stop_page(
+    store: &impl TaskStore,
+    peer: Uuid,
+    id: TaskId,
+    exhaust: bool,
+) -> Result<(), String> {
+    if exhaust {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+        while record(store, id).await?.status != TaskStatus::Failed {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("drainer did not exhaust before deadline".into());
+            }
+            store.return_claims(Some(peer)).await.map_err(error)?;
+            store
+                .claim_tasks(&peer, &[request(DEFAULT_TASK_LANE, 1)])
+                .await
+                .map_err(error)?;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    } else {
+        store
+            .commit_tasks(&[TaskCommit::Cancel { task_id: id }])
+            .await
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
+/// The first page was atomically committed and exactly one waiter is left behind.
+async fn check_stopped_waits(
+    store: &impl TaskStore,
+    node: Uuid,
+    receipts: Vec<TaskReceipt>,
+    winner: TaskId,
+) -> Result<(), String> {
+    let mut waiting = 0;
+    for id in receipts
+        .into_iter()
+        .filter_map(TaskReceipt::id)
+        .filter(|id| *id != winner)
+    {
+        let row = record(store, id).await?;
+        if row.status == TaskStatus::Suspended {
+            waiting += 1;
+        } else {
+            assert_eq!(row.status, TaskStatus::Failed);
+        }
+        assert_eq!(row.attempts, 0);
+    }
+    assert_eq!(waiting, 1);
+    assert!(
+        store
+            .claim_tasks(&node, &[request(DEFAULT_TASK_LANE, 8)])
+            .await
+            .map_err(error)?
+            .lanes
+            .into_iter()
+            .all(|l| l.tasks.is_empty())
+    );
     Ok(())
 }
 
@@ -326,6 +581,63 @@ async fn mixed_shared_all(store: &impl TaskStore, node: Uuid) -> Result<(), Stri
         Some(r#"{"Ok":[{"Ok":21},{"Ok":22},{"Ok":23}]}"#)
     );
     Ok(())
+}
+
+/// Exact page multiples finish without a spare drainer step, even beyond the IPC batch size.
+pub(super) async fn boundary_contract(store: &impl TaskStore) -> Result<(), String> {
+    store.initialize().await.map_err(error)?;
+    let node = Uuid::now_v7();
+    store.register_node(&node).await.map_err(error)?;
+    for n in [0usize, 1, 31, 32, 33, 64, 127, 128, 129, 512, 1024] {
+        let key = format!("boundary-{n}");
+        let publisher = one(store, shared(&key)?).await?;
+        let subscribers = (0..n)
+            .map(|_| shared(&key))
+            .collect::<Result<Vec<_>, _>>()?;
+        if n > 0 {
+            let receipts = store.store_tasks(subscribers).await.map_err(error)?;
+            assert!(receipts.iter().all(|r| r.id().is_some()));
+        }
+        let mut drainer = None;
+        let pages = n.div_ceil(super::sharing::PAGE_SIZE).max(1);
+        for page in 0..pages {
+            let rows = next_page(store, node, 2).await?;
+            let [row] = rows.as_slice() else {
+                return Err("expected exactly one runnable task".into());
+            };
+            if page == 0 {
+                assert_eq!(row.id, publisher);
+            } else {
+                assert_eq!(*drainer.get_or_insert(row.id), row.id);
+                assert_eq!(row.share_role, crate::tasks::models::ShareRole::Drainer);
+                assert_eq!((row.step_attempts, row.attempts as usize), (1, page));
+            }
+            store
+                .commit_tasks(&[output(row, DEFAULT_TASK_LANE, TaskOutcome::Complete)?])
+                .await
+                .map_err(error)?;
+            let waiting = crate::tasks::TaskFilter::new()
+                .idempotency_key(&key)
+                .status(TaskStatus::Suspended);
+            let waiting = store.list_tasks(waiting).await.map_err(error)?;
+            assert_eq!(
+                waiting.total as usize,
+                n.saturating_sub((page + 1) * super::sharing::PAGE_SIZE)
+            );
+        }
+        let poll = store
+            .claim_tasks(&node, &[request(DEFAULT_TASK_LANE, 2)])
+            .await
+            .map_err(error)?;
+        assert!(poll.lanes.iter().all(|l| l.tasks.is_empty()));
+    }
+    Ok(())
+}
+
+/// Exercises all overflow boundaries without database-specific plumbing.
+#[tokio::test]
+async fn memory_shared_page_boundaries() -> Result<(), String> {
+    boundary_contract(&super::MemoryTaskStore::new(1024, shared_conf()?)).await
 }
 
 /// Exercises the same shared contract without database-specific plumbing.

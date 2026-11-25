@@ -239,7 +239,7 @@ fn resolve_children(
 #[derive(Default)]
 pub(super) struct Deliveries {
     pub(super) parents: Vec<(TaskId, String)>,
-    pub(super) publishers: Vec<(TaskId, i16, String)>,
+    pub(super) publishers: Vec<shared::PageSource>,
     pub(super) deferred: Vec<crate::tasks::TaskLane>,
     topics: shared::Topics,
 }
@@ -288,9 +288,20 @@ pub(super) fn queue_delivery(
             .last_result
             .clone()
             .ok_or_else(|| TaskRuntimeError::TaskExecutionError("Shared result missing".into()))?;
-        deliveries
-            .publishers
-            .push((TaskId::new(row.id), row.status, result));
+        deliveries.publishers.push(shared::PageSource::Publisher {
+            id: TaskId::new(row.id),
+            status: row.status,
+            result,
+            lane: row.lane_name.clone(),
+        });
+    } else if row.share_role == crate::tasks::models::ShareRole::Drainer as i16
+        && row.status == TaskStatus::Succeeded.as_i16()
+    {
+        deliveries.publishers.push(shared::PageSource::Drainer {
+            id: row.id,
+            publisher: serde_json::from_str(&row.input)?,
+            lane: row.lane_name.clone(),
+        });
     }
     if let Some(parent) = row.parent_id
         && let Some(result) = crate::tasks::store::transitions::terminal_result(
@@ -375,7 +386,7 @@ pub(super) async fn finalize_admitted(
     }
     let topics = std::mem::take(&mut deliveries.topics);
     super::publication::store_changes(tx, topics).await?;
-    shared::publish(tx, &mut deliveries, now).await?;
+    shared::publish(tx, &mut deliveries, &mut lanes, now).await?;
     resume_parents(
         tx,
         deliveries.parents,

@@ -140,7 +140,11 @@ impl From<TaskRecord> for TaskRow {
             idempotency_fingerprint: record.idempotency_fingerprint,
             idempotency_expires_at: record.idempotency_expires_at,
             #[cfg(any(feature = "postgres", feature = "sqlite"))]
-            idempotency_held: record.share_role != crate::tasks::models::ShareRole::Subscriber,
+            idempotency_held: matches!(
+                record.share_role,
+                crate::tasks::models::ShareRole::Unshared
+                    | crate::tasks::models::ShareRole::Publisher
+            ),
             node_id: record.node_id,
             ready_at: record.ready_at,
             created_at: record.created_at,

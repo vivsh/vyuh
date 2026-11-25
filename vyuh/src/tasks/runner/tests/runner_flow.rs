@@ -1,5 +1,50 @@
 use super::*;
 
+/// The internal drainer uses a normal Work permit and FIFO completion without application registration.
+#[tokio::test]
+async fn drainer_execution() -> Result<(), String> {
+    let (mut runner, _, _) = delivery_fixture().await?;
+    let site = crate::Site::build(
+        crate::SiteConf::default().log_init(false),
+        crate::bundles::bundle([]),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut record = crate::tasks::store::sharing::drainer(
+        crate::tasks::TaskId::new(uuid::Uuid::now_v7()),
+        DEFAULT_TASK_LANE.to_string(),
+        chrono::Utc::now(),
+    );
+    crate::tasks::store::transitions::admit(&mut record, runner.node_id, chrono::Utc::now())
+        .map_err(|e| e.to_string())?;
+    runner.accept_input(Arc::new(record));
+    let (sender, mut receiver) = mpsc::channel(1);
+    runner.dispatch_ready(&site, &sender);
+    let completion = receiver.recv().await.ok_or("missing drainer completion")?;
+    assert_eq!(
+        runner.execution_slots.available_permits() + 1,
+        runner.concurrency
+    );
+    runner.accept_completion(completion);
+    let commit = runner
+        .output_buffer
+        .front()
+        .ok_or("drainer never reached output buffer")?;
+    assert!(matches!(
+        commit.outcome(),
+        Some(crate::tasks::TaskOutcome::Complete)
+    ));
+    assert_eq!(
+        commit.flush_cost().1,
+        crate::tasks::store::sharing::PAGE_SIZE * crate::tasks::result::RESULT_LIMIT
+    );
+    assert_eq!(
+        runner.execution_slots.available_permits(),
+        runner.concurrency
+    );
+    Ok(())
+}
+
 /// Full ingress suppresses local flush delivery even when execution capacity remains free.
 #[tokio::test]
 async fn flush_respects_ingress_space() -> Result<(), String> {
@@ -449,7 +494,7 @@ async fn synchronous_panic_is_contained() -> Result<(), String> {
 fn delivery_spawn(node: uuid::Uuid) -> Result<TaskCommit, String> {
     let record = (*panic_record().map_err(|error| error.to_string())?).clone();
     Ok(TaskCommit::Outcome {
-        publisher: false,
+        fanout_bytes: None,
         task_id: record.id,
         node_id: node,
         attempts: 1,

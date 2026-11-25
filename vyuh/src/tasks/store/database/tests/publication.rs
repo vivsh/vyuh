@@ -45,8 +45,183 @@ async fn shared_result_contract() -> Result<(), String> {
     let conf = fixture::shared_conf()?;
     let (store, _db) = store_for(conf).await?;
     fixture::shared_contract(&store).await?;
+    rollback_overflow(&store).await?;
     #[cfg(any(feature = "postgres", feature = "mysql"))]
     shared_nowait(&store).await?;
+    Ok(())
+}
+
+/// Verifies bounded delivery and visibility at the exact private page boundaries.
+#[tokio::test]
+#[cfg_attr(not(feature = "sqlite"), ignore = "requires a disposable backend URL")]
+async fn shared_page_boundaries() -> Result<(), String> {
+    let (store, _dir) = store_for(fixture::shared_conf()?).await?;
+    fixture::boundary_contract(&store).await
+}
+
+/// Caller rollback must undo publisher failure, inline deliveries and drainer insertion together.
+async fn rollback_overflow(store: &DbTaskStore) -> Result<(), String> {
+    let count = crate::tasks::store::sharing::PAGE_SIZE + 2;
+    let writes = (0..count)
+        .map(|_| fixture::shared("cancel-rollback"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let receipts = store.store_tasks(writes).await.map_err(error)?;
+    let winner = receipts
+        .first()
+        .and_then(|r| r.id())
+        .ok_or("missing winner")?;
+    let query = "SELECT COUNT(*) FROM vyuh_tasks WHERE share_role=3";
+    let before: i64 = store
+        .pool
+        .clone()
+        .fetch_scalar(db::Statement::raw(query))
+        .await
+        .map_err(error)?;
+    for rollback in [true, false] {
+        let mut tx = store.pool.begin().await.map_err(error)?;
+        store.cancel_tx(&mut tx, winner).await.map_err(error)?;
+        let staged: i64 = tx
+            .fetch_scalar(db::Statement::raw(query))
+            .await
+            .map_err(error)?;
+        assert_eq!(staged, before + 1);
+        if rollback {
+            tx.rollback().await.map_err(error)?;
+            for receipt in &receipts {
+                let row = store
+                    .get_task(receipt.id().ok_or("missing id")?)
+                    .await
+                    .map_err(error)?
+                    .ok_or("missing row")?;
+                assert_eq!(
+                    row.status,
+                    if row.id == winner {
+                        crate::tasks::TaskStatus::Pending
+                    } else {
+                        crate::tasks::TaskStatus::Suspended
+                    }
+                );
+            }
+        } else {
+            tx.commit().await.map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Commits the inline page and claims the single durable drainer, without invoking an application handler.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn stage_drainer(
+    store: &DbTaskStore,
+    node: Uuid,
+    key: &str,
+    subscribers: usize,
+) -> Result<crate::tasks::TaskRecord, String> {
+    use crate::tasks::DEFAULT_TASK_LANE;
+    store.initialize().await.map_err(error)?;
+    store.register_node(&node).await.map_err(error)?;
+    let writes = (0..=subscribers)
+        .map(|_| fixture::shared(key))
+        .collect::<Result<Vec<_>, _>>()?;
+    store.store_tasks(writes).await.map_err(error)?;
+    let request = [fixture::request(DEFAULT_TASK_LANE, 1)];
+    let publisher = claim_ready(store, node, &request).await?;
+    let done = fixture::output(&publisher, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+    store.commit_tasks(&[done]).await.map_err(error)?;
+    let drainer = claim_ready(store, node, &request).await?;
+    assert_eq!(drainer.share_role, crate::tasks::models::ShareRole::Drainer);
+    Ok(drainer)
+}
+
+/// An aborted overflow transaction neither advances the drainer nor consumes a subscriber wait.
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn rollback_drainer_page() -> Result<(), String> {
+    use crate::tasks::{DEFAULT_TASK_LANE, TaskStatus};
+    let (store, _dir) = store_for(fixture::shared_conf()?).await?;
+    let node = Uuid::now_v7();
+    let n = 2 * crate::tasks::store::sharing::PAGE_SIZE + 1;
+    let drainer = stage_drainer(&store, node, "page-rollback", n).await?;
+    let request = [fixture::request(DEFAULT_TASK_LANE, 1)];
+    let output = fixture::output(&drainer, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+    let waiting = crate::tasks::TaskFilter::new()
+        .idempotency_key("page-rollback")
+        .status(TaskStatus::Suspended);
+    let mut pool = store.pool.clone();
+    pool.execute(db::Statement::raw("CREATE TRIGGER reject_page AFTER UPDATE OF last_result ON vyuh_tasks WHEN OLD.share_role=2 BEGIN SELECT RAISE(ABORT, 'page rollback fixture'); END")).await.map_err(error)?;
+    let failure = store
+        .commit_tasks(std::slice::from_ref(&output))
+        .await
+        .err()
+        .ok_or("page unexpectedly committed")?;
+    assert!(failure.to_string().contains("page rollback fixture"));
+    let state = store
+        .get_task(drainer.id)
+        .await
+        .map_err(error)?
+        .ok_or("missing drainer")?;
+    assert_eq!(
+        (state.status, state.attempts, state.node_id),
+        (TaskStatus::Running, drainer.attempts, Some(node))
+    );
+    let outstanding = store.list_tasks(waiting.clone()).await.map_err(error)?;
+    assert_eq!(
+        outstanding.total as usize,
+        n - crate::tasks::store::sharing::PAGE_SIZE
+    );
+    pool.execute(db::Statement::raw("DROP TRIGGER reject_page"))
+        .await
+        .map_err(error)?;
+    let ack = store.commit_tasks(&[output]).await.map_err(error)?;
+    assert!(ack.rejected.is_empty());
+    assert_eq!(store.list_tasks(waiting).await.map_err(error)?.total, 1);
+    let next = claim_ready(&store, node, &request).await?;
+    assert_eq!(
+        (next.id, next.attempts, next.step_attempts),
+        (drainer.id, drainer.attempts + 1, 1)
+    );
+    Ok(())
+}
+
+/// A locked last waiter is contention, never an empty final page or an acknowledged completion.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires a disposable backend URL"]
+async fn contended_drainer_page() -> Result<(), String> {
+    use crate::tasks::{DEFAULT_TASK_LANE, TaskStatus};
+    let (store, _dir) = store_for(fixture::shared_conf()?).await?;
+    let node = Uuid::now_v7();
+    let drainer = stage_drainer(
+        &store,
+        node,
+        "blocked-last-page",
+        crate::tasks::store::sharing::PAGE_SIZE + 1,
+    )
+    .await?;
+    let last = store
+        .list_tasks(
+            crate::tasks::TaskFilter::new()
+                .idempotency_key("blocked-last-page")
+                .status(TaskStatus::Suspended),
+        )
+        .await
+        .map_err(error)?;
+    let [last] = last.items.as_slice() else {
+        return Err("expected one remaining subscriber".into());
+    };
+    let page = fixture::output(&drainer, DEFAULT_TASK_LANE, TaskOutcome::Complete)?;
+    blocked_shared_flush(&store, last.id, std::slice::from_ref(&page)).await?;
+    assert_eq!(
+        stored(&store, drainer.id).await?.status,
+        TaskStatus::Running
+    );
+    assert_eq!(stored(&store, last.id).await?.status, TaskStatus::Suspended);
+    store.commit_tasks(&[page]).await.map_err(error)?;
+    assert_eq!(
+        stored(&store, drainer.id).await?.status,
+        TaskStatus::Succeeded
+    );
+    assert_eq!(stored(&store, last.id).await?.status, TaskStatus::Succeeded);
     Ok(())
 }
 

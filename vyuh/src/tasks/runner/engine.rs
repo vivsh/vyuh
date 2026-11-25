@@ -451,7 +451,7 @@ impl<S: TaskStore + Send + Sync + 'static> TaskRunner<S> {
         let budget = if self
             .output_buffer
             .front()
-            .is_some_and(TaskCommit::publisher)
+            .is_some_and(TaskCommit::has_fanout)
         {
             budget.max(crate::tasks::store::sharing::PUBLISH_WEIGHT)
         } else {
