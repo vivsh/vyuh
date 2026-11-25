@@ -200,20 +200,22 @@ async fn assert_routed_result(
 
 async fn await_response(
     key: IdempotencyKey,
+    StepAttempt(attempt): StepAttempt,
     continuation: Continuation<u32, u32>,
     _: Data<AwaitResponse>,
 ) -> Result<WorkState<u32>, WorkError> {
     if key.as_deref() != Some("response:✓") {
         return Err(WorkError::fail("Work did not receive its persisted key"));
     }
-    match continuation.into_parts() {
-        (None, _) => Ok(WorkState::suspend(7u32)?),
-        (Some(checkpoint), Some(response)) => Ok(WorkState::complete(checkpoint + response?)),
-        _ => Err(WorkError::fail("Missing response")),
+    match (attempt, continuation.into_parts()) {
+        (1, (None, None)) => Err(WorkError::retry("retry before checkpoint")),
+        (2, (None, None)) => Ok(WorkState::suspend(7u32)?),
+        (1, (Some(checkpoint), Some(response))) => Ok(WorkState::complete(checkpoint + response?)),
+        _ => Err(WorkError::fail("Unexpected step attempt or continuation")),
     }
 }
 
-/// Verifies typed Work returns and persisted key extraction before and after resumption.
+/// Proves a Work handler sees attempts 1, 2, then 1 across retry, checkpoint, and resume.
 #[tokio::test]
 async fn direct_output_and_external_resume() -> Result<(), TestError> {
     let site = vyuh::Site::build(
@@ -256,14 +258,13 @@ async fn direct_output_and_external_resume() -> Result<(), TestError> {
     );
     assert!(site.tasks().resume(suspended, 8u32).await?);
     wait_status(&site, suspended, TaskStatus::Succeeded).await?;
-    assert_eq!(
-        site.tasks()
-            .get(suspended)
-            .await?
-            .ok_or(TestError::Missing)?
-            .last_result::<u32>()?,
-        Some(Ok(15))
-    );
+    let task = site
+        .tasks()
+        .get(suspended)
+        .await?
+        .ok_or(TestError::Missing)?;
+    assert_eq!((task.attempts(), task.step_attempts()), (3, 1));
+    assert_eq!(task.last_result::<u32>()?, Some(Ok(15)));
     client.shutdown_and_wait().await;
     Ok(())
 }

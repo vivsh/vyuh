@@ -94,3 +94,20 @@ impl callables::IntoArgPart for IdempotencyKey {
         callables::ArgPart::Ignore
     }
 }
+
+/// One-based attempt of the current checkpoint step, from a single Work task's claim.
+/// A retry or reclaim advances it; the first claim after a committed checkpoint sees one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepAttempt(pub i32);
+
+impl callables::FromContextParts<WorkContext> for StepAttempt {
+    fn from_context_parts(context: &WorkContext) -> Result<Self, callables::CallError> {
+        Ok(Self(context.record.step_attempts))
+    }
+}
+
+impl callables::IntoArgPart for StepAttempt {
+    fn into_arg_part() -> callables::ArgPart {
+        callables::ArgPart::Ignore
+    }
+}

@@ -75,6 +75,11 @@ impl<S, R> Continuation<S, R> {
         self.record.idempotency_key.as_deref()
     }
 
+    /// Returns the one-based claimed attempt of this step, not the task's lifetime attempts.
+    pub fn step_attempts(&self) -> i32 {
+        self.record.step_attempts
+    }
+
     /// Consumes the extractor into its optional state and resume input.
     pub fn into_parts(self) -> (Option<S>, Option<Result<R, super::TaskFailure>>) {
         (self.state, self.resume)

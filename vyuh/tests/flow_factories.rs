@@ -64,6 +64,9 @@ impl Flow for Manual {
         if continuation.idempotency_key() != Some(expected.as_str()) {
             return Err(FlowError::fail("Flow did not receive its persisted key"));
         }
+        if continuation.step_attempts() != 1 {
+            return Err(FlowError::fail("Expected first attempt of each Flow step"));
+        }
         match continuation.into_parts() {
             (None, None) => Ok(FlowState::spawn(Child(input.0.0), ())?),
             (Some(()), Some(result)) => Ok(FlowState::complete(result? + 1)),

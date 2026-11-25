@@ -1397,9 +1397,12 @@ Each lane also owns its retry limit and exponential backoff. The default is
 five handler attempts per continuation step, beginning at one second and capped at five
 minutes. A retry after attempt `n` waits `initial_delay * 2^(n - 1)`, bounded
 by `max_delay`. This policy cannot be overridden by a submission or handler.
-`attempts()` reports lifetime invocations; `step_attempts()` reports the current
-step's retry budget. A committed `suspend`, `sleep`, `spawn`, or `all` resets the step
-counter. Retries and abandoned-task reclaims do not reset it.
+`TaskInfo::attempts()` counts lifetime attempts; `step_attempts()` counts attempts
+on the current step, not attempts remaining. Single-item Work handlers can request
+`StepAttempt(n): StepAttempt` before `Data<T>` to decide whether to retry or fail.
+Flows read the same value with `continuation.step_attempts()`. The first claim
+of each step sees 1; retries and abandoned-task reclaims advance it. A committed
+`suspend`, `sleep`, `spawn`, or `all` resets it for the next step.
 Both rate controls apply to Work, not Flow advancement. `rate_limit` is an
 inexpensive in-memory token bucket owned by the local site runner.
 `global_rate_limit` coordinates Work starts across workers sharing a durable
